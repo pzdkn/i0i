@@ -10,8 +10,16 @@
   import ReaderView from "$lib/features/reader/ReaderView.svelte";
   import VaultExplorer from "$lib/features/vault/VaultExplorer.svelte";
   import VaultHome from "$lib/features/vault/VaultHome.svelte";
-  import { discoverCandidateToPaper, getDiscoverWorkspace } from "$lib/mock/discover";
-  import { getPaperById, getPaperTitle, getVaultWorkspace } from "$lib/mock/vault-workspaces";
+  import {
+    addCandidateToVaults,
+    getCandidateVaultTargets,
+    getDiscoverWorkspace,
+    getPaperById,
+    getPaperTitle,
+    getVaultWorkspace,
+    getVaultWorkspaces,
+    paperFromDiscoverCandidate,
+  } from "$lib/state/library-state.svelte";
 
   let vaultStatus = $state<VaultStatus | null>(null);
   let bridgeError = $state("");
@@ -30,6 +38,7 @@
 
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
+  const vaultWorkspaces = $derived(getVaultWorkspaces());
   const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "ssl-dino"));
   const activePaper = $derived(selectedReaderPaper);
   const currentPath = $derived(activeTab?.title ?? "no workspace");
@@ -87,7 +96,7 @@
   }
 
   function openCandidate(candidateId: string) {
-    const paper = discoverCandidateToPaper(candidateId);
+    const paper = paperFromDiscoverCandidate(candidateId);
     selectedPaperId = paper.id;
     selectedReaderPaper = paper;
 
@@ -100,6 +109,10 @@
 
     tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
     activeTabId = readerTab.id;
+  }
+
+  function addCandidate(candidateId: string, vaultIds: string[]) {
+    addCandidateToVaults(candidateId, vaultIds);
   }
 
   function closeTab(tabId: string) {
@@ -163,7 +176,13 @@
     {#if activeTab?.kind === "reader"}
       <ReaderView paper={activePaper} />
     {:else if activeTab?.kind === "discover"}
-      <DiscoverView workspace={activeDiscoverWorkspace} onOpenCandidate={openCandidate} />
+      <DiscoverView
+        workspace={activeDiscoverWorkspace}
+        vaults={vaultWorkspaces}
+        onOpenCandidate={openCandidate}
+        onAddCandidate={addCandidate}
+        {getCandidateVaultTargets}
+      />
     {:else if activeTab?.kind === "vault"}
       <VaultHome workspace={activeVaultWorkspace} onOpenPaper={openPaper} />
     {:else}

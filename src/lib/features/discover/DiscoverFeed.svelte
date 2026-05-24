@@ -1,13 +1,23 @@
 <script lang="ts">
   import type { DiscoverWorkspace } from "$lib/domain/discover";
+  import type { VaultWorkspace } from "$lib/mock/vault-workspaces";
+  import DiscoverTargetEditor from "$lib/features/discover/DiscoverTargetEditor.svelte";
 
   let {
     workspace,
+    vaults,
     onOpenCandidate,
+    onAddCandidate,
+    getCandidateVaultTargets,
   }: {
     workspace: DiscoverWorkspace;
+    vaults: VaultWorkspace[];
     onOpenCandidate: (candidateId: string) => void;
+    onAddCandidate: (candidateId: string, vaultIds: string[]) => void;
+    getCandidateVaultTargets: (candidateId: string) => VaultWorkspace[];
   } = $props();
+
+  let editingCandidateId = $state("");
 
   function formatCitations(citations: number) {
     if (citations >= 1000) {
@@ -29,11 +39,15 @@
 
   <div class="feed-body">
     {#each workspace.candidates as candidate, index}
-      <button
+      {@const targets = getCandidateVaultTargets(candidate.id)}
+      <article
         class:owned={candidate.owned}
         class="candidate-row"
-        type="button"
-        ondblclick={() => onOpenCandidate(candidate.id)}
+        ondblclick={() => {
+          if (editingCandidateId !== candidate.id) {
+            onOpenCandidate(candidate.id);
+          }
+        }}
       >
         <span class="rank">#{index + 1}</span>
         <span class="score">
@@ -63,14 +77,56 @@
           <span>{formatCitations(candidate.citations)} cites</span>
         </span>
         <span class="row-actions row">
-          <span>Add</span>
-          <span>Preview</span>
-          <span>Graph</span>
           {#if candidate.owned}
-            <span>Open</span>
+            <span class="target-summary row">
+              <span class="owned-label">In Vault</span>
+              {#each targets.slice(0, 2) as vault}
+                <span class="target-chip">{vault.path}</span>
+              {/each}
+              {#if targets.length > 2}
+                <span class="target-chip">+{targets.length - 2}</span>
+              {/if}
+            </span>
+            <button
+              class="action"
+              type="button"
+              onclick={(event) => {
+                event.stopPropagation();
+                editingCandidateId = candidate.id;
+              }}
+            >
+              Add target
+            </button>
+          {:else}
+            <button
+              class="action"
+              type="button"
+              onclick={(event) => {
+                event.stopPropagation();
+                editingCandidateId = candidate.id;
+              }}
+            >
+              Add
+            </button>
+          {/if}
+          <button class="action" type="button">Preview</button>
+          <button class="action" type="button">Graph</button>
+          {#if candidate.owned}
+            <button class="action" type="button" onclick={() => onOpenCandidate(candidate.id)}>Open</button>
+          {/if}
+          {#if editingCandidateId === candidate.id}
+            <DiscoverTargetEditor
+              {vaults}
+              initialVaultIds={targets.map((vault) => vault.id)}
+              onCancel={() => (editingCandidateId = "")}
+              onConfirm={(vaultIds) => {
+                onAddCandidate(candidate.id, vaultIds);
+                editingCandidateId = "";
+              }}
+            />
           {/if}
         </span>
-      </button>
+      </article>
     {/each}
   </div>
 </section>
@@ -222,11 +278,38 @@
     flex-wrap: wrap;
   }
 
-  .row-actions span {
+  .action {
     height: 18px;
     border: 1px solid var(--border-2);
+    background: transparent;
     padding: 1px 6px;
     color: var(--fg-2);
     font-size: 9px;
+    cursor: pointer;
+  }
+
+  .action:hover {
+    border-color: var(--amber-dim);
+    color: var(--amber);
+  }
+
+  .target-summary {
+    width: 100%;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .owned-label,
+  .target-chip {
+    height: 18px;
+    border: 1px solid var(--border-2);
+    padding: 1px 5px;
+    color: var(--fg-2);
+    font-size: 9px;
+  }
+
+  .owned-label {
+    border-color: var(--green);
+    color: var(--green);
   }
 </style>
