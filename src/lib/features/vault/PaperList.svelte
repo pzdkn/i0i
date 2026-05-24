@@ -53,9 +53,6 @@
         <span class="metric">{paper.noteCount ? `#${paper.noteCount}` : "-"}</span>
         <span class="metric">{paper.annotationCount || "-"}</span>
         <span class="status">{paper.status}</span>
-        {#if paper.id === selectedPaperId}
-          <span class="open-hint"><span class="key">dbl</span> read</span>
-        {/if}
       </button>
     {/each}
   </div>
@@ -160,19 +157,4 @@
     text-align: right;
   }
 
-  .open-hint {
-    position: absolute;
-    right: 8px;
-    height: 18px;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 0 6px;
-    border: 1px solid var(--amber-dim);
-    background: var(--bg);
-    color: var(--amber);
-    font-size: 9px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
 </style>

@@ -1,5 +1,11 @@
 <script lang="ts">
-  let { active = "V" }: { active?: string } = $props();
+  let {
+    active = "V",
+    onSelectMode = () => {},
+  }: {
+    active?: string;
+    onSelectMode?: (mode: string) => void;
+  } = $props();
 
   const modes = [
     { key: "V", label: "VAULT" },
@@ -20,6 +26,7 @@
       type="button"
       title={mode.label}
       aria-pressed={mode.key === active}
+      onclick={() => onSelectMode(mode.key)}
     >
       <span class="vertical">{mode.label}</span>
       <span class="key">{mode.key}</span>

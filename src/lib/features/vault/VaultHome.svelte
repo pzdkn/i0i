@@ -1,39 +1,39 @@
 <script lang="ts">
   import PaperList from "$lib/features/vault/PaperList.svelte";
   import VaultInspector from "$lib/features/vault/VaultInspector.svelte";
-  import { papers } from "$lib/mock/papers";
+  import type { VaultWorkspace } from "$lib/mock/vault-workspaces";
 
-  let { onOpenPaper }: { onOpenPaper: (paperId: string) => void } = $props();
+  let {
+    workspace,
+    onOpenPaper,
+  }: {
+    workspace: VaultWorkspace;
+    onOpenPaper: (paperId: string) => void;
+  } = $props();
 
-  let selectedPaperId = $state(papers[0]?.id ?? "");
+  let selectedPaperId = $state("");
+  let localFilter = $state("");
   const selectedPaper = $derived(
-    papers.find((paper) => paper.id === selectedPaperId) ?? papers[0],
+    workspace.papers.find((paper) => paper.id === selectedPaperId) ?? workspace.papers[0],
   );
+
+  $effect(() => {
+    if (!workspace.papers.some((paper) => paper.id === selectedPaperId)) {
+      selectedPaperId = workspace.papers[0]?.id ?? "";
+    }
+  });
 </script>
 
 <section class="workspace col">
-  <div class="tab-strip row hair-b">
-    <div class="tab active row">
-      <span>#</span>
-      <span>/transformers/attention</span>
-      <span class="dirty">*</span>
-    </div>
-    <div class="flex1"></div>
-    <div class="tab-actions row">
-      <span>split</span>
-      <span>layout</span>
-    </div>
-  </div>
-
   <div class="vault-home row">
     <main class="vault-main col">
       <header class="folder-header hair-b">
         <div class="row heading-line">
           <div>
             <div class="label">Folder</div>
-            <h1>attention</h1>
+            <h1>{workspace.title}</h1>
           </div>
-          <span class="mono-dim">22 papers / 3 unread / last add 2d</span>
+          <span class="mono-dim">{workspace.summary}</span>
           <div class="flex1"></div>
           <div class="actions row">
             <button class="btn" type="button">+ Add</button>
@@ -43,28 +43,31 @@
         </div>
 
         <div class="row chip-row">
-          <span class="chip hot">foundational x8</span>
-          <span class="chip">transformer x22</span>
-          <span class="chip">attention x22</span>
-          <span class="chip">NeurIPS x6</span>
-          <span class="chip">ICLR x4</span>
-          <span class="chip">2017-2024</span>
+          {#each workspace.chips as chip, index}
+            <span class:hot={index === 0} class="chip">{chip}</span>
+          {/each}
           <div class="flex1"></div>
-          <span class="mono-dim">filter [/]</span>
+          <label class="inline-filter row">
+            <span>filter</span>
+            <input bind:value={localFilter} aria-label="Paper filter" placeholder="type..." />
+          </label>
           <span class="mono-dim">sort recent</span>
         </div>
       </header>
 
       <nav class="view-tabs row hair-b">
-        <span class="active">Papers <strong>22</strong></span>
-        <span>Notes <strong>14</strong></span>
-        <span>Annotations <strong>87</strong></span>
-        <span>Graph</span>
-        <span>Q&A</span>
+        {#each workspace.tabs as tab, index}
+          <span class:active={index === 0}>
+            {tab.label}
+            {#if tab.count !== undefined}
+              <strong>{tab.count}</strong>
+            {/if}
+          </span>
+        {/each}
       </nav>
 
       <PaperList
-        {papers}
+        papers={workspace.papers}
         {selectedPaperId}
         onSelect={(paperId) => (selectedPaperId = paperId)}
         onOpen={(paperId) => {
@@ -74,7 +77,7 @@
       />
     </main>
 
-    <VaultInspector {papers} {selectedPaper} />
+    <VaultInspector papers={workspace.papers} {selectedPaper} />
   </div>
 </section>
 
@@ -84,38 +87,6 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
-  }
-
-  .tab-strip {
-    height: 26px;
-    flex-shrink: 0;
-    background: var(--bg-1);
-  }
-
-  .tab {
-    height: 100%;
-    gap: 8px;
-    padding: 0 12px;
-    border-right: 1px solid var(--border);
-    color: var(--fg-2);
-    font-size: 11px;
-  }
-
-  .tab.active {
-    border-top: 1px solid var(--amber);
-    background: var(--bg);
-    color: var(--amber);
-  }
-
-  .dirty {
-    color: var(--amber);
-  }
-
-  .tab-actions {
-    gap: 12px;
-    padding: 0 10px;
-    color: var(--fg-3);
-    font-size: 10px;
   }
 
   .vault-home {
@@ -160,6 +131,22 @@
     color: var(--fg-3);
     font-size: 10px;
     white-space: nowrap;
+  }
+
+  .inline-filter {
+    gap: 6px;
+    height: 20px;
+    color: var(--fg-3);
+  }
+
+  .inline-filter input {
+    width: 80px;
+    border: 1px solid var(--border-2);
+    outline: none;
+    background: var(--bg);
+    color: var(--fg-2);
+    font: inherit;
+    font-size: 10px;
   }
 
   .view-tabs {

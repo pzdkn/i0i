@@ -1,112 +1,97 @@
-import type { ReaderDocument } from "$lib/domain/reader";
+import type { Paper } from "$lib/domain/paper";
+import type { ReaderDocument, ReaderMark, ReaderParagraph } from "$lib/domain/reader";
 
-export const readerDocuments: Record<string, ReaderDocument> = {
-  vaswani2017: {
-    paperId: "vaswani2017",
-    title: "Attention Is All You Need",
-    authors: [
-      "A. Vaswani",
-      "N. Shazeer",
-      "N. Parmar",
-      "J. Uszkoreit",
-      "L. Jones",
-      "A. Gomez",
-      "L. Kaiser",
-      "I. Polosukhin",
-    ],
-    venue: "NeurIPS",
-    year: 2017,
-    identifier: "arXiv:1706.03762",
-    citationKey: "vaswani2017attention",
-    tags: ["foundational", "transformer", "attention"],
-    paragraphs: [
-      {
-        id: "h1",
-        kind: "heading",
-        text: "Abstract",
-      },
-      {
-        id: "p1",
-        kind: "paragraph",
-        text: "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism.",
-      },
-      {
-        id: "p2",
-        kind: "paragraph",
-        text: "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely.",
-        highlight: "soft",
-      },
-      {
-        id: "h2",
-        kind: "heading",
-        text: "1 Introduction",
-      },
-      {
-        id: "p3",
-        kind: "paragraph",
-        text: "Recurrent neural networks, long short-term memory and gated recurrent neural networks in particular, have been firmly established as state of the art approaches in sequence modeling and transduction problems such as language modeling and machine translation.",
-      },
-      {
-        id: "p4",
-        kind: "paragraph",
-        text: "Recurrent models typically factor computation along the symbol positions of the input and output sequences. Aligning the positions to steps in computation time, they generate a sequence of hidden states as a function of the previous hidden state and the input for position t.",
-        highlight: "strong",
-      },
-      {
-        id: "p5",
-        kind: "paragraph",
-        text: "This inherently sequential nature precludes parallelization within training examples, which becomes critical at longer sequence lengths, as memory constraints limit batching across examples.",
-        highlight: "soft",
-      },
-      {
-        id: "p6",
-        kind: "paragraph",
-        text: "Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks, allowing modeling of dependencies without regard to their distance in the input or output sequences.",
-      },
-      {
-        id: "p7",
-        kind: "paragraph",
-        text: "In this work we propose the Transformer, a model architecture eschewing recurrence and instead relying entirely on an attention mechanism to draw global dependencies between input and output.",
-        highlight: "strong",
-      },
-      {
-        id: "h3",
-        kind: "heading",
-        text: "2 Background",
-      },
-      {
-        id: "p8",
-        kind: "paragraph",
-        text: "The goal of reducing sequential computation also forms the foundation of the Extended Neural GPU, ByteNet and ConvS2S, all of which use convolutional neural networks as basic building block.",
-      },
-      {
-        id: "p9",
-        kind: "paragraph",
-        text: "Self-attention, sometimes called intra-attention, is an attention mechanism relating different positions of a single sequence in order to compute a representation of the sequence.",
-      },
-    ],
-    marks: [
-      {
-        id: "m1",
-        paragraphId: "p4",
-        kind: "note",
-        body: "Key motivation: RNN parallelism wall. This is the cleanest bridge from older sequence models to attention-only architecture.",
-        createdLabel: "me / 2d",
-      },
-      {
-        id: "m2",
-        paragraphId: "p7",
-        kind: "question",
-        body: "How does this compare to ByteNet and ConvS2S in section 2?",
-        createdLabel: "me / 2d",
-      },
-      {
-        id: "m3",
-        paragraphId: "p9",
-        kind: "highlight",
-        body: "Self-attention definition. Link this to DINO attention maps later.",
-        createdLabel: "me / today",
-      },
-    ],
+const sharedParagraphs: ReaderParagraph[] = [
+  {
+    id: "h1",
+    kind: "heading",
+    text: "Abstract",
   },
-};
+  {
+    id: "p1",
+    kind: "paragraph",
+    text: "This mocked reader body stands in for extracted paper text. It lets us shape the reading workspace before committing to PDF rendering, text extraction, or annotation persistence.",
+  },
+  {
+    id: "p2",
+    kind: "paragraph",
+    text: "The important product behavior is not the exact paper content yet. The important behavior is that a vault item opens into a stable reading surface with paragraph anchors, margin marks, metadata, and future study affordances.",
+    highlight: "soft",
+  },
+  {
+    id: "h2",
+    kind: "heading",
+    text: "1 Introduction",
+  },
+  {
+    id: "p3",
+    kind: "paragraph",
+    text: "Researchers rarely read papers in isolation. They compare methods, trace lineages, collect uncertainties, and transform fragments into durable knowledge. i0i treats reading as a workspace inside a broader research vault.",
+  },
+  {
+    id: "p4",
+    kind: "paragraph",
+    text: "A paragraph-level model is useful even in a mock because it gives notes, questions, highlights, and future citations something stable to attach to without coupling the UI to a specific PDF renderer.",
+    highlight: "strong",
+  },
+  {
+    id: "p5",
+    kind: "paragraph",
+    text: "Later, these paragraphs can be produced by a text extraction service. For now, frontend mock data is enough to validate the layout, interaction model, and visual hierarchy.",
+    highlight: "soft",
+  },
+  {
+    id: "h3",
+    kind: "heading",
+    text: "2 Reading Model",
+  },
+  {
+    id: "p6",
+    kind: "paragraph",
+    text: "The reader should support clean text, original PDF, and a split mode. In this skeleton only text mode is active, while PDF and split remain visible as future affordances.",
+  },
+  {
+    id: "p7",
+    kind: "paragraph",
+    text: "The surrounding panes are part of the reading experience: the left explorer anchors the paper in the vault, the margin records local marks, and the inspector exposes lineage, metadata, and question workflows.",
+  },
+];
+
+const sharedMarks: ReaderMark[] = [
+  {
+    id: "m1",
+    paragraphId: "p4",
+    kind: "note",
+    body: "Model marks by paragraph ID for now. Avoid page coordinates until PDF rendering is real.",
+    createdLabel: "me / 2d",
+  },
+  {
+    id: "m2",
+    paragraphId: "p6",
+    kind: "question",
+    body: "When should split mode become real: before or after annotation persistence?",
+    createdLabel: "me / 2d",
+  },
+  {
+    id: "m3",
+    paragraphId: "p7",
+    kind: "highlight",
+    body: "Reader is a workspace inside the vault, not a separate app.",
+    createdLabel: "me / today",
+  },
+];
+
+export function createReaderDocument(paper: Paper): ReaderDocument {
+  return {
+    paperId: paper.id,
+    title: paper.title,
+    authors: paper.authors,
+    venue: paper.venue,
+    year: paper.year,
+    identifier: paper.id === "vaswani2017" ? "arXiv:1706.03762" : `mock:${paper.id}`,
+    citationKey: paper.id,
+    tags: paper.tags,
+    paragraphs: sharedParagraphs,
+    marks: sharedMarks,
+  };
+}

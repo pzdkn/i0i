@@ -1,5 +1,30 @@
 <script lang="ts">
   import { vaultTree } from "$lib/mock/vault-tree";
+
+  let {
+    activeVaultId,
+    onOpenVault,
+  }: {
+    activeVaultId: string;
+    onOpenVault: (vaultId: string) => void;
+  } = $props();
+
+  let filterText = $state("");
+
+  function vaultIdForNode(id: string) {
+    const supported: Record<string, string> = {
+      transformers: "attention",
+      attention: "attention",
+      scaling: "scaling",
+      ssl: "self-supervised",
+      "self-supervised": "self-supervised",
+      dino: "self-supervised",
+      vit: "vision-transformers",
+      interp: "interpretability",
+    };
+
+    return supported[id];
+  }
 </script>
 
 <aside class="explorer hair-r">
@@ -10,18 +35,18 @@
     <span class="mono-dim">import</span>
   </header>
 
-  <div class="filter row">
+  <label class="filter row">
     <span>/</span>
-    <span class="truncate">filter vault...</span>
+    <input bind:value={filterText} aria-label="Filter vault" placeholder="filter vault..." />
     <span class="key">/</span>
-  </div>
+  </label>
 
   <div class="tree">
     {#each vaultTree as node}
       {#if node.kind === "section"}
         <div class="section label">{node.label}</div>
       {:else if node.kind === "item"}
-        <div class:item-muted={node.muted} class="tree-row">
+        <button class:item-muted={node.muted} class="tree-row" type="button">
           <span class="glyph">-</span>
           <span class="truncate">{node.label}</span>
           {#if node.count !== undefined}
@@ -30,23 +55,44 @@
           {#if node.key}
             <span class="key">{node.key}</span>
           {/if}
-        </div>
+        </button>
       {:else}
-        <div class:item-muted={node.muted} class:active={node.active} class="tree-row folder">
+        <button
+          class:item-muted={node.muted}
+          class:active={activeVaultId === vaultIdForNode(node.id)}
+          class="tree-row folder"
+          type="button"
+          onclick={() => {
+            const vaultId = vaultIdForNode(node.id);
+            if (vaultId) {
+              onOpenVault(vaultId);
+            }
+          }}
+        >
           <span class="glyph">{node.open ? "v" : ">"}</span>
           <span class="folder-dot"></span>
           <span class="truncate">{node.label}</span>
           <span class="count">{node.count}</span>
-        </div>
+        </button>
         {#if node.open && node.children}
           {#each node.children as child}
-            <div class:active={child.active} class="tree-row child">
+            <button
+              class:active={activeVaultId === vaultIdForNode(child.id)}
+              class="tree-row child"
+              type="button"
+              onclick={() => {
+                const vaultId = vaultIdForNode(child.id);
+                if (vaultId) {
+                  onOpenVault(vaultId);
+                }
+              }}
+            >
               <span class="folder-dot small"></span>
               <span class="truncate">{child.label}</span>
               {#if child.count !== undefined}
                 <span class="count">{child.count}</span>
               {/if}
-            </div>
+            </button>
           {/each}
         {/if}
       {/if}
@@ -87,6 +133,21 @@
     color: var(--amber);
   }
 
+  input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--fg-2);
+    font: inherit;
+    font-size: 11px;
+  }
+
+  input::placeholder {
+    color: var(--fg-3);
+  }
+
   .tree {
     flex: 1;
     min-height: 0;
@@ -103,13 +164,20 @@
   }
 
   .tree-row {
+    width: 100%;
     height: 20px;
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 0 12px;
     color: var(--fg-1);
+    border: 0;
+    border-left: 2px solid transparent;
+    background: transparent;
     font-size: 11px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
   }
 
   .tree-row.active {

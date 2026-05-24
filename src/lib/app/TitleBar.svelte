@@ -1,29 +1,27 @@
 <script lang="ts">
   import type { VaultStatus } from "$lib/domain/vault";
 
-  let { vaultStatus = null }: { vaultStatus?: VaultStatus | null } = $props();
+  let {
+    vaultStatus = null,
+    currentPath = "/transformers/attention",
+  }: {
+    vaultStatus?: VaultStatus | null;
+    currentPath?: string;
+  } = $props();
+
+  let commandText = $state("");
 </script>
 
 <header class="titlebar row hair-b">
-  <div class="window-controls row">
-    <span class="close"></span>
-    <span class="minimize"></span>
-    <span class="zoom"></span>
-  </div>
-
   <div class="path row">
     <span class="brand">i0i</span>
     <span class="sep">/</span>
-    <span>vault</span>
-    <span class="sep">/</span>
-    <span>transformers</span>
-    <span class="sep">/</span>
-    <strong>attention</strong>
+    <strong>{currentPath}</strong>
   </div>
 
   <div class="command row">
     <span class="prompt">:</span>
-    <span class="placeholder">search vault, run command, ask...</span>
+    <input bind:value={commandText} aria-label="Command palette" placeholder="search vault, run command, ask..." />
     <span class="key">cmd+k</span>
   </div>
 
@@ -47,31 +45,8 @@
     background: var(--bg-1);
   }
 
-  .window-controls {
-    gap: 6px;
-    flex-shrink: 0;
-  }
-
-  .window-controls span {
-    width: 8px;
-    height: 8px;
-    display: block;
-  }
-
-  .close {
-    background: var(--red);
-  }
-
-  .minimize {
-    background: var(--amber-mid);
-  }
-
-  .zoom {
-    background: var(--green);
-  }
-
   .path {
-    min-width: 280px;
+    min-width: 240px;
     gap: 6px;
     color: var(--fg-2);
     font-size: 11px;
@@ -103,14 +78,18 @@
     color: var(--amber);
   }
 
-  .placeholder {
+  input {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
+    border: 0;
+    outline: none;
+    background: transparent;
     color: var(--fg-3);
     font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+
+  input::placeholder {
+    color: var(--fg-3);
   }
 
   .readout {

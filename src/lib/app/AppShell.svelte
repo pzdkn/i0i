@@ -7,21 +7,25 @@
 
   let {
     activeMode = "V",
+    currentPath = "/transformers/attention",
     vaultStatus = null,
     bridgeError = "",
+    onSelectMode = () => {},
     children,
   }: {
     activeMode?: string;
+    currentPath?: string;
     vaultStatus?: VaultStatus | null;
     bridgeError?: string;
+    onSelectMode?: (mode: string) => void;
     children: Snippet;
   } = $props();
 </script>
 
 <div class="crt app-shell">
-  <TitleBar {vaultStatus} />
+  <TitleBar {vaultStatus} {currentPath} />
   <div class="app-body row">
-    <ActivityRail active={activeMode} />
+    <ActivityRail active={activeMode} {onSelectMode} />
     {@render children()}
   </div>
   <StatusBar {vaultStatus} {bridgeError} />

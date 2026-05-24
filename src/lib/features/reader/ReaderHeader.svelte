@@ -4,11 +4,11 @@
   let {
     document,
     mode,
-    onBack,
+    onModeChange,
   }: {
     document: ReaderDocument;
     mode: ReaderMode;
-    onBack: () => void;
+    onModeChange: (mode: ReaderMode) => void;
   } = $props();
 
   const viewModes: ReaderMode[] = ["TEXT", "PDF", "SPLIT"];
@@ -22,7 +22,6 @@
       <span class="chip">{tag}</span>
     {/each}
     <div class="flex1"></div>
-    <button class="btn ghost" type="button" onclick={onBack}>Back to vault</button>
   </div>
 
   <div class="row title-line">
@@ -35,10 +34,9 @@
       {#each viewModes as viewMode}
         <button
           class:active={mode === viewMode}
-          class:disabled={viewMode !== "TEXT"}
           type="button"
-          disabled={viewMode !== "TEXT"}
-          title={viewMode === "TEXT" ? "Text view" : `${viewMode} view will come later`}
+          title={viewMode === "TEXT" ? "Text view" : `${viewMode} view placeholder`}
+          onclick={() => onModeChange(viewMode)}
         >
           {viewMode}
           <span class="key">{viewMode[0]}</span>
@@ -119,11 +117,6 @@
   .view-toggle button.active {
     background: var(--amber);
     color: var(--bg);
-  }
-
-  .view-toggle button.disabled {
-    cursor: not-allowed;
-    opacity: 0.45;
   }
 
   .view-toggle button.active .key {
