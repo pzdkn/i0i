@@ -49,6 +49,11 @@ impl LibraryStore {
         })
     }
 
+    #[cfg(test)]
+    fn for_test(db_path: PathBuf) -> Self {
+        Self { db_path }
+    }
+
     pub fn init(&self) -> StoreResult<()> {
         let mut conn = self.open_connection()?;
         self.create_schema(&conn)?;
@@ -762,4 +767,258 @@ fn default_memberships() -> Vec<(&'static str, &'static str)> {
         ("scaling", "tay2022"),
         ("scaling", "vaswani2017"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    struct TestDb {
+        store: LibraryStore,
+        dir: PathBuf,
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn test_db() -> StoreResult<TestDb> {
+        let unique_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("i0i-store-test-{}-{unique_id}", std::process::id()));
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+
+        let store = LibraryStore::for_test(dir.join("library.sqlite"));
+        store.init()?;
+
+        Ok(TestDb { store, dir })
+    }
+
+    fn paper_draft(id: &str) -> PaperDraft {
+        PaperDraft {
+            id: id.to_string(),
+            title: format!("Test Paper {id}"),
+            authors: vec!["A. Tester".to_string()],
+            venue: "TEST".to_string(),
+            year: 2026,
+            citations: 0,
+            tags: vec!["test".to_string()],
+            status: "UNREAD".to_string(),
+            abstract_text: Some("Test abstract".to_string()),
+        }
+    }
+
+    fn has_vault(snapshot: &LibrarySnapshot, vault_id: &str) -> bool {
+        snapshot.vaults.iter().any(|vault| vault.id == vault_id)
+    }
+
+    fn has_paper(snapshot: &LibrarySnapshot, paper_id: &str) -> bool {
+        snapshot.papers.iter().any(|paper| paper.id == paper_id)
+    }
+
+    fn paper_count(snapshot: &LibrarySnapshot, paper_id: &str) -> usize {
+        snapshot
+            .papers
+            .iter()
+            .filter(|paper| paper.id == paper_id)
+            .count()
+    }
+
+    fn has_membership(snapshot: &LibrarySnapshot, vault_id: &str, paper_id: &str) -> bool {
+        snapshot
+            .vault_papers
+            .iter()
+            .any(|link| link.vault_id == vault_id && link.paper_id == paper_id)
+    }
+
+    fn paper_membership_count(snapshot: &LibrarySnapshot, paper_id: &str) -> usize {
+        snapshot
+            .vault_papers
+            .iter()
+            .filter(|link| link.paper_id == paper_id)
+            .count()
+    }
+
+    #[test]
+    fn init_seeds_default_library_when_empty() -> StoreResult<()> {
+        let db = test_db()?;
+        let snapshot = db.store.get_library()?;
+
+        assert_eq!(snapshot.vaults.len(), default_vaults().len());
+        assert_eq!(snapshot.papers.len(), default_papers().len());
+        assert_eq!(snapshot.vault_papers.len(), default_memberships().len());
+        assert!(has_vault(&snapshot, "attention"));
+        assert!(has_paper(&snapshot, "vaswani2017"));
+        assert!(has_membership(&snapshot, "attention", "vaswani2017"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_vault_normalizes_path_and_persists_it() -> StoreResult<()> {
+        let db = test_db()?;
+        let snapshot = db.store.create_vault(&VaultDraft {
+            path: "  new / topic  ".to_string(),
+        })?;
+        let vault = snapshot
+            .vaults
+            .iter()
+            .find(|vault| vault.id == "new-topic")
+            .expect("created Vault should exist");
+
+        assert_eq!(vault.path, "/new/topic");
+        assert_eq!(vault.title, "topic");
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_vault_rejects_duplicate_paths() -> StoreResult<()> {
+        let db = test_db()?;
+        let initial_count = db.store.get_library()?.vaults.len();
+
+        db.store.create_vault(&VaultDraft {
+            path: "/new/topic".to_string(),
+        })?;
+
+        let error = db
+            .store
+            .create_vault(&VaultDraft {
+                path: "new/topic".to_string(),
+            })
+            .expect_err("duplicate Vault path should fail");
+        let snapshot = db.store.get_library()?;
+
+        assert!(error.contains("Vault path already exists"));
+        assert_eq!(snapshot.vaults.len(), initial_count + 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn rename_vault_changes_path_and_title_but_keeps_id() -> StoreResult<()> {
+        let db = test_db()?;
+        let snapshot = db.store.rename_vault(&VaultRenameDraft {
+            id: "attention".to_string(),
+            path: "/transformers/core-attention".to_string(),
+        })?;
+        let vault = snapshot
+            .vaults
+            .iter()
+            .find(|vault| vault.id == "attention")
+            .expect("renamed Vault should keep its id");
+
+        assert_eq!(vault.path, "/transformers/core-attention");
+        assert_eq!(vault.title, "core-attention");
+        assert!(has_membership(&snapshot, "attention", "vaswani2017"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_paper_to_multiple_vaults_does_not_duplicate_memberships() -> StoreResult<()> {
+        let db = test_db()?;
+        let paper = paper_draft("multi-vault-paper");
+        let vault_ids = vec!["attention".to_string(), "scaling".to_string()];
+
+        db.store.add_paper_to_vaults(&paper, &vault_ids)?;
+        let snapshot = db.store.add_paper_to_vaults(&paper, &vault_ids)?;
+
+        assert_eq!(paper_count(&snapshot, "multi-vault-paper"), 1);
+        assert!(has_membership(&snapshot, "attention", "multi-vault-paper"));
+        assert!(has_membership(&snapshot, "scaling", "multi-vault-paper"));
+        assert_eq!(paper_membership_count(&snapshot, "multi-vault-paper"), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_paper_from_one_vault_keeps_shared_paper() -> StoreResult<()> {
+        let db = test_db()?;
+        let snapshot = db
+            .store
+            .remove_paper_from_vault("self-supervised", "caron2021")?;
+
+        assert!(!has_membership(&snapshot, "self-supervised", "caron2021"));
+        assert!(has_membership(&snapshot, "attention", "caron2021"));
+        assert!(has_paper(&snapshot, "caron2021"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_paper_from_final_vault_deletes_paper() -> StoreResult<()> {
+        let db = test_db()?;
+        let paper = paper_draft("single-vault-paper");
+
+        db.store
+            .add_paper_to_vaults(&paper, &["attention".to_string()])?;
+        let snapshot = db
+            .store
+            .remove_paper_from_vault("attention", "single-vault-paper")?;
+
+        assert!(!has_membership(
+            &snapshot,
+            "attention",
+            "single-vault-paper"
+        ));
+        assert!(!has_paper(&snapshot, "single-vault-paper"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_paper_globally_removes_paper_and_memberships() -> StoreResult<()> {
+        let db = test_db()?;
+        let snapshot = db.store.delete_paper_globally("caron2021")?;
+
+        assert!(!has_paper(&snapshot, "caron2021"));
+        assert_eq!(paper_membership_count(&snapshot, "caron2021"), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_vault_preserves_shared_papers() -> StoreResult<()> {
+        let db = test_db()?;
+        let snapshot = db.store.delete_vault("self-supervised")?;
+
+        assert!(!has_vault(&snapshot, "self-supervised"));
+        assert!(!snapshot
+            .vault_papers
+            .iter()
+            .any(|link| link.vault_id == "self-supervised"));
+        assert!(has_paper(&snapshot, "caron2021"));
+        assert!(has_membership(&snapshot, "attention", "caron2021"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_vault_deletes_papers_that_lose_final_membership() -> StoreResult<()> {
+        let db = test_db()?;
+        let paper = paper_draft("unique-vault-paper");
+
+        let snapshot = db.store.create_vault(&VaultDraft {
+            path: "/unique".to_string(),
+        })?;
+        assert!(has_vault(&snapshot, "unique"));
+
+        db.store
+            .add_paper_to_vaults(&paper, &["unique".to_string()])?;
+        let snapshot = db.store.delete_vault("unique")?;
+
+        assert!(!has_vault(&snapshot, "unique"));
+        assert!(!has_paper(&snapshot, "unique-vault-paper"));
+        assert!(has_paper(&snapshot, "vaswani2017"));
+
+        Ok(())
+    }
 }
