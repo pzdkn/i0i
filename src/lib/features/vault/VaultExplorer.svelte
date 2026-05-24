@@ -8,14 +8,14 @@
     onOpenVault,
     onCreateVault,
     onRenameVault,
-    onDeleteVault,
+    onRemoveVault,
   }: {
     activeVaultId: string;
     vaults: VaultWorkspace[];
     onOpenVault: (vaultId: string) => void;
     onCreateVault: (path: string) => Promise<void>;
     onRenameVault: (vaultId: string, path: string) => Promise<void>;
-    onDeleteVault: (vaultId: string) => Promise<void>;
+    onRemoveVault: (vaultId: string) => Promise<void>;
   } = $props();
 
   let filterText = $state("");
@@ -97,9 +97,9 @@
     cancelRename();
   }
 
-  async function deleteVault(vaultId: string) {
+  async function removeVault(vaultId: string) {
     closeContextMenu();
-    await onDeleteVault(vaultId);
+    await onRemoveVault(vaultId);
   }
 
   function handleCreateKeydown(event: KeyboardEvent) {
@@ -211,13 +211,13 @@
       onkeydown={(event) => event.stopPropagation()}
       tabindex="-1"
     >
-      <button role="menuitem" type="button" onclick={() => void startCreate()}>create vault</button>
+      <button role="menuitem" type="button" onclick={() => void startCreate()}>Create vault</button>
       {#if contextMenu.vaultId}
         {@const vault = vaults.find((candidate) => candidate.id === contextMenu?.vaultId)}
         {#if vault}
-          <button role="menuitem" type="button" onclick={() => void startRename(vault)}>rename vault</button>
-          <button role="menuitem" class="danger" type="button" onclick={() => void deleteVault(vault.id)}>
-            remove vault
+          <button role="menuitem" type="button" onclick={() => void startRename(vault)}>Rename vault</button>
+          <button role="menuitem" class="danger" type="button" onclick={() => void removeVault(vault.id)}>
+            Remove vault
           </button>
         {/if}
       {/if}
@@ -386,7 +386,7 @@
     min-width: 144px;
     padding: 5px;
     border: 1px solid var(--border-2);
-    border-radius: 6px;
+    border-radius: 3px;
     background: var(--bg-1);
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
   }
@@ -396,7 +396,7 @@
     height: 26px;
     padding: 0 9px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 2px;
     background: transparent;
     color: var(--fg-1);
     font: inherit;
@@ -413,7 +413,7 @@
   .context-menu .danger {
     margin-top: 4px;
     border-top: 1px solid var(--border);
-    border-radius: 0 0 4px 4px;
+    border-radius: 0 0 2px 2px;
     color: var(--red);
   }
 </style>

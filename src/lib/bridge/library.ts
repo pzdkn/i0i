@@ -28,7 +28,7 @@ export async function renameVault(id: string, path: string): Promise<LibrarySnap
   });
 }
 
-export async function deleteVault(vaultId: string): Promise<LibrarySnapshot> {
+export async function removeVault(vaultId: string): Promise<LibrarySnapshot> {
   return invoke<LibrarySnapshot>("delete_vault", {
     vaultId,
   });
@@ -41,7 +41,7 @@ export async function removePaperFromVault(vaultId: string, paperId: string): Pr
   });
 }
 
-export async function deletePaperGlobally(paperId: string): Promise<LibrarySnapshot> {
+export async function removePaperFromLibrary(paperId: string): Promise<LibrarySnapshot> {
   return invoke<LibrarySnapshot>("delete_paper_globally", {
     paperId,
   });

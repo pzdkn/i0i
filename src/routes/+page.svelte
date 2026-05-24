@@ -5,9 +5,9 @@
   import {
     addPaperToVaults,
     createVault,
-    deleteVault,
-    deletePaperGlobally,
     getLibrary,
+    removeVault,
+    removePaperFromLibrary as removePaperFromLibraryCommand,
     removePaperFromVault,
     renameVault,
   } from "$lib/bridge/library";
@@ -166,9 +166,9 @@
     }
   }
 
-  async function deleteVaultFromExplorer(vaultId: string) {
+  async function removeVaultFromExplorer(vaultId: string) {
     try {
-      const snapshot = await deleteVault(vaultId);
+      const snapshot = await removeVault(vaultId);
       hydrateLibrary(snapshot);
       reconcileDeletedVault(snapshot, vaultId);
     } catch (error) {
@@ -222,7 +222,7 @@
 
   async function removePaperFromLibrary(paperId: string) {
     try {
-      const snapshot = await deletePaperGlobally(paperId);
+      const snapshot = await removePaperFromLibraryCommand(paperId);
       hydrateLibrary(snapshot);
     } catch (error) {
       bridgeError = String(error);
@@ -289,7 +289,7 @@
     onOpenVault={openVault}
     onCreateVault={createVaultFromExplorer}
     onRenameVault={renameVaultFromExplorer}
-    onDeleteVault={deleteVaultFromExplorer}
+    onRemoveVault={removeVaultFromExplorer}
   />
   <section class="workspace col">
     <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />

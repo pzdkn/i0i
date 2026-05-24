@@ -194,6 +194,8 @@ impl LibraryStore {
             return Err(format!("Vault not found: {vault_id}"));
         }
 
+        // Deleting a Vault cascades its membership rows. Papers are shared
+        // entities, so remove only the ones that lost their final membership.
         tx.execute(
             "
             delete from papers

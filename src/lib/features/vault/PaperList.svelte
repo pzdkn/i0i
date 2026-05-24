@@ -107,10 +107,10 @@
       onkeydown={(event) => event.stopPropagation()}
     >
       <button role="menuitem" type="button" onclick={() => removeFromVault(menuPaperId)}>
-        remove from vault
+        Remove from vault
       </button>
       <button role="menuitem" class="danger" type="button" onclick={() => removeFromLibrary(menuPaperId)}>
-        remove from library
+        Remove from library
       </button>
     </div>
   {/if}
@@ -221,7 +221,7 @@
     min-width: 168px;
     padding: 5px;
     border: 1px solid var(--border-2);
-    border-radius: 6px;
+    border-radius: 3px;
     background: var(--bg-1);
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
   }
@@ -231,7 +231,7 @@
     width: 100%;
     padding: 0 9px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 2px;
     background: transparent;
     color: var(--fg-1);
     font: inherit;
@@ -248,7 +248,7 @@
   .context-menu .danger {
     margin-top: 4px;
     border-top: 1px solid var(--border);
-    border-radius: 0 0 4px 4px;
+    border-radius: 0 0 2px 2px;
     color: var(--red);
   }
 </style>

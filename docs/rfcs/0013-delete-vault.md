@@ -41,15 +41,15 @@ Deleting a Vault is not just deleting one `vaults` row. It also removes relation
 Add a Vault context-menu action:
 
 ```text
-remove vault
+Remove vault
 ```
 
-Use lowercase action labels in the Explorer context menu for consistency with the paper context menu.
+Use sentence-case action labels in the Explorer context menu for consistency with the paper context menu.
 
 First increment behavior:
 
 ```text
-remove vault
+Remove vault
   -> delete the selected vault
   -> cascade-delete that vault's vault_papers rows
   -> delete papers that now have zero vault_papers rows
@@ -58,7 +58,7 @@ remove vault
 
 ## Goals
 
-- Add `remove vault` to the Vault row context menu.
+- Add `Remove vault` to the Vault row context menu.
 - Persist Vault deletion through Rust/SQLite.
 - Keep deletion transactional.
 - Preserve papers that still belong to other Vaults.
@@ -86,10 +86,10 @@ Build this:
 
 - Right-click a Vault row in `VaultExplorer`.
 - Show context menu with:
-  - `create vault`
-  - `rename vault`
-  - `remove vault`
-- `remove vault` calls `deleteVault(vaultId)`.
+  - `Create vault`
+  - `Rename vault`
+  - `Remove vault`
+- `Remove vault` calls `removeVault(vaultId)`.
 - Rust deletes the Vault inside a transaction.
 - Rust cleans up orphaned papers inside the same transaction.
 - Frontend hydrates the returned snapshot.
@@ -102,7 +102,7 @@ Delete a Vault that shares papers with another Vault:
 
 ```text
 User right-clicks /transformers/attention
-  -> clicks remove vault
+  -> clicks Remove vault
   -> /transformers/attention disappears
   -> shared papers remain in other Vaults
 ```
@@ -111,7 +111,7 @@ Delete a Vault containing unique papers:
 
 ```text
 User right-clicks /vision-transformers
-  -> clicks remove vault
+  -> clicks Remove vault
   -> /vision-transformers disappears
   -> papers that only lived there are removed from the library
   -> Discover no longer shows those papers as In Vault
@@ -178,20 +178,20 @@ pub fn delete_vault(
 ## Proposed Frontend Bridge
 
 ```ts
-export async function deleteVault(vaultId: string): Promise<LibrarySnapshot>;
+export async function removeVault(vaultId: string): Promise<LibrarySnapshot>;
 ```
 
 ## Proposed Frontend Interaction
 
 `VaultExplorer.svelte`
 
-- Add `onDeleteVault`.
-- Add `remove vault` to Vault row context menu.
-- Use lower-case labels:
-  - `create vault`
-  - `rename vault`
-  - `remove vault`
-- Make `remove vault` visually dangerous but not visually loud.
+- Add `onRemoveVault`.
+- Add `Remove vault` to Vault row context menu.
+- Use sentence-case labels:
+  - `Create vault`
+  - `Rename vault`
+  - `Remove vault`
+- Make `Remove vault` visually dangerous but not visually loud.
 
 `+page.svelte`
 
@@ -228,15 +228,15 @@ What can go wrong:
 
 ## Open Questions
 
-- Should `remove vault` ask for confirmation once real user data exists?
+- Should `Remove vault` ask for confirmation once real user data exists?
 - Should the UI show how many papers will be affected before removal?
 - Should Vault deletion eventually move papers to a trash area instead of deleting orphaned papers?
 
 ## Acceptance Criteria
 
 - Right-clicking a Vault row opens a context menu.
-- Context menu includes `remove vault`.
-- `remove vault` deletes the selected Vault.
+- Context menu includes `Remove vault`.
+- `Remove vault` deletes the selected Vault.
 - Deleting a Vault preserves papers that still belong to another Vault.
 - Deleting a Vault removes papers that no longer belong to any Vault.
 - The operation is transactional.

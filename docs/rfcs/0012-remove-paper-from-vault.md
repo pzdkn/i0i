@@ -12,7 +12,7 @@ Add the first persisted paper-removal operations.
 The user should be able to:
 
 - Remove a paper from one specific Vault.
-- Delete a paper globally from the entire library.
+- Remove a paper from the entire library.
 
 This RFC keeps the lifecycle rule:
 
@@ -40,19 +40,19 @@ These should be two separate actions.
 
 ## Product Decision
 
-`Remove from Vault` removes one Vault membership and then performs reference-count cleanup.
+`Remove from vault` removes one Vault membership and then performs reference-count cleanup.
 
 ```text
-Remove from Vault
+Remove from vault
   -> delete one vault_papers row
   -> count remaining memberships for that paper
   -> if count == 0, delete the paper
 ```
 
-`Delete Globally` deletes the paper entity directly.
+`Remove from library` deletes the paper entity directly.
 
 ```text
-Delete Globally
+Remove from library
   -> delete paper row
   -> let vault_papers cascade-delete all memberships
 ```
@@ -62,8 +62,8 @@ This avoids invisible orphan papers while still giving the user a convenience ac
 ## Goals
 
 - Add a paper-row context menu in Vault paper lists.
-- Add `Remove from Vault`.
-- Add `Delete Globally`.
+- Add `Remove from vault`.
+- Add `Remove from library`.
 - Persist both operations through Rust/SQLite.
 - Keep `Remove from Vault` transactional:
   - delete selected membership
@@ -91,11 +91,10 @@ Build this:
 
 - Right-click a paper row in `PaperList`.
 - Show context menu with:
-  - `Remove from Vault`
-  - `Delete Globally`
+  - `Remove from vault`
+  - `Remove from library`
 - `Remove from Vault` calls `removePaperFromVault(vaultId, paperId)`.
-- `Delete Globally` asks for lightweight confirmation.
-- Confirmed global delete calls `deletePaperGlobally(paperId)`.
+- `Remove from library` calls `removePaperFromLibrary(paperId)`.
 - Rust returns updated `LibrarySnapshot`.
 - Frontend hydrates cache.
 
@@ -106,7 +105,7 @@ Remove from one Vault:
 ```text
 User opens /self-supervised
   -> right-clicks a paper
-  -> clicks Remove from Vault
+  -> clicks Remove from vault
   -> paper disappears from /self-supervised
   -> count decreases by 1
 ```
@@ -130,8 +129,7 @@ Delete globally:
 
 ```text
 User right-clicks a paper
-  -> clicks Delete Globally
-  -> confirms
+  -> clicks Remove from library
   -> paper disappears from every Vault
   -> Discover row no longer shows In Vault
 ```
@@ -157,7 +155,7 @@ where id = ?;
 
 The operation should commit only after both the membership removal and possible paper deletion succeed.
 
-### Delete Globally
+### Remove From Library
 
 ```sql
 delete from papers
@@ -231,7 +229,7 @@ export async function removePaperFromVault(
   paperId: string,
 ): Promise<LibrarySnapshot>;
 
-export async function deletePaperGlobally(
+export async function removePaperFromLibrary(
   paperId: string,
 ): Promise<LibrarySnapshot>;
 ```
@@ -243,10 +241,10 @@ export async function deletePaperGlobally(
 - Add row context menu state.
 - Right-click paper row opens compact menu.
 - Menu items:
-  - `Remove from Vault`
-  - `Delete Globally`
+  - `Remove from vault`
+  - `Remove from library`
 - Emits `onRemoveFromVault(paperId)`.
-- Emits `onDeleteGlobally(paperId)`.
+- Emits `onRemoveFromLibrary(paperId)`.
 
 `VaultHome.svelte`
 
@@ -284,7 +282,7 @@ delete object when reference count reaches zero
 
 `Remove from Vault` follows the reference-count rule.
 
-`Delete Globally` bypasses reference counting because the user explicitly chose to remove the paper entity from the whole library.
+`Remove from library` bypasses reference counting because the user explicitly chose to remove the paper entity from the whole library.
 
 ## Teaching Notes
 
@@ -309,18 +307,18 @@ What can go wrong:
 ## Open Questions
 
 - Should `Remove from Vault` need confirmation later when it deletes the final membership?
-- Should global delete use a custom confirmation UI instead of browser confirmation?
+- Should removing from the library need confirmation once the app holds real user data?
 - Should future notes/annotations block deletion, cascade deletion, or move to trash?
 - Should Reader show a stale/deleted state if open while the paper is deleted?
 
 ## Acceptance Criteria
 
 - Right-clicking a paper row opens a context menu.
-- Context menu includes `Remove from Vault`.
-- Context menu includes `Delete Globally`.
+- Context menu includes `Remove from vault`.
+- Context menu includes `Remove from library`.
 - `Remove from Vault` deletes only the selected Vault membership first.
 - If remaining membership count is zero, `Remove from Vault` deletes the paper row.
-- `Delete Globally` deletes the paper row.
+- `Remove from library` deletes the paper row.
 - Global delete removes all Vault memberships through FK cascade.
 - Operations are transactional or single backend writes.
 - Vault counts update after removal/deletion.
