@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 use tauri::{AppHandle, Manager};
 
-use crate::domain::library::{LibrarySnapshot, Paper, PaperDraft, Vault, VaultPaper};
+use crate::domain::library::{LibrarySnapshot, Paper, PaperDraft, Vault, VaultDraft, VaultPaper};
 
 type StoreResult<T> = Result<T, String>;
 
@@ -118,6 +118,33 @@ impl LibraryStore {
         }
 
         tx.commit().map_err(|error| error.to_string())?;
+        self.get_library()
+    }
+
+    pub fn create_vault(&self, draft: &VaultDraft) -> StoreResult<LibrarySnapshot> {
+        let normalized = normalize_vault_path(&draft.path)?;
+        let title = vault_title_from_path(&normalized)?;
+        let id = vault_id_from_path(&normalized)?;
+        let conn = self.open_connection()?;
+
+        conn.execute(
+            "
+            insert into vaults (id, title, path, created_at, updated_at)
+            values (?1, ?2, ?3, datetime('now'), datetime('now'))
+            ",
+            params![id, title, normalized],
+        )
+        .map_err(|error| {
+            let message = error.to_string();
+            if message.contains("UNIQUE constraint failed: vaults.path") {
+                format!("Vault path already exists: {normalized}")
+            } else if message.contains("UNIQUE constraint failed: vaults.id") {
+                format!("Vault id already exists: {id}")
+            } else {
+                message
+            }
+        })?;
+
         self.get_library()
     }
 
@@ -331,6 +358,54 @@ fn to_json_slice(values: &[&str]) -> StoreResult<String> {
 
 fn from_json(value: &str) -> Vec<String> {
     serde_json::from_str(value).unwrap_or_default()
+}
+
+fn normalize_vault_path(input: &str) -> StoreResult<String> {
+    let mut parts = Vec::new();
+
+    for part in input.trim().split('/') {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed);
+        }
+    }
+
+    if parts.is_empty() {
+        return Err("Vault path cannot be empty".to_string());
+    }
+
+    Ok(format!("/{}", parts.join("/")))
+}
+
+fn vault_title_from_path(path: &str) -> StoreResult<String> {
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| "Vault path must include a name".to_string())
+}
+
+fn vault_id_from_path(path: &str) -> StoreResult<String> {
+    let slug = path
+        .trim_matches('/')
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if slug.is_empty() {
+        return Err("Vault path must include a usable name".to_string());
+    }
+
+    Ok(slug)
 }
 
 fn default_vaults() -> Vec<SeedVault> {

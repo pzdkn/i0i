@@ -1,17 +1,23 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { VaultWorkspace } from "$lib/domain/library";
 
   let {
     activeVaultId,
     vaults,
     onOpenVault,
+    onCreateVault,
   }: {
     activeVaultId: string;
     vaults: VaultWorkspace[];
     onOpenVault: (vaultId: string) => void;
+    onCreateVault: (path: string) => Promise<void>;
   } = $props();
 
   let filterText = $state("");
+  let createText = $state("");
+  let isCreating = $state(false);
+  let createInput = $state<HTMLInputElement | null>(null);
   const visibleVaults = $derived(
     vaults.filter((vault) => {
       const query = filterText.trim().toLowerCase();
@@ -26,13 +32,42 @@
       );
     }),
   );
+
+  async function submitCreate() {
+    const path = createText.trim();
+    if (!path) {
+      return;
+    }
+
+    await onCreateVault(path);
+    createText = "";
+    isCreating = false;
+  }
+
+  async function startCreate() {
+    isCreating = true;
+    await tick();
+    createInput?.focus();
+  }
+
+  function handleCreateKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      createText = "";
+      isCreating = false;
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void submitCreate();
+    }
+  }
 </script>
 
 <aside class="explorer hair-r">
   <header class="row hair-b">
     <span class="label hot">Explorer</span>
     <div class="flex1"></div>
-    <span class="mono-dim">+</span>
     <span class="mono-dim">import</span>
   </header>
 
@@ -43,7 +78,24 @@
   </label>
 
   <div class="tree">
-    <div class="section label">Vaults</div>
+    <div class="section section-row row">
+      <span class="label">Vaults</span>
+      <div class="flex1"></div>
+      <button class="section-action" type="button" title="Create Vault" onclick={() => void startCreate()}>+</button>
+    </div>
+
+    {#if isCreating}
+      <div class="tree-row create-item">
+        <span class="glyph">=</span>
+        <input
+          bind:this={createInput}
+          bind:value={createText}
+          aria-label="New Vault path"
+          onkeydown={handleCreateKeydown}
+          placeholder="new vault..."
+        />
+      </div>
+    {/if}
 
     {#if visibleVaults.length}
       {#each visibleVaults as vault}
@@ -129,6 +181,28 @@
     border-bottom: 1px solid var(--border);
   }
 
+  .section-row {
+    align-items: center;
+    padding-bottom: 0;
+  }
+
+  .section-action {
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--border-2);
+    background: transparent;
+    color: var(--amber-mid);
+    font: inherit;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .section-action:hover {
+    border-color: var(--amber);
+    color: var(--amber);
+  }
+
   .tree-row {
     width: 100%;
     height: 20px;
@@ -150,6 +224,19 @@
     border-left: 2px solid var(--amber);
     background: rgba(242, 169, 59, 0.1);
     color: var(--amber);
+  }
+
+  .create-item {
+    height: 24px;
+    cursor: text;
+  }
+
+  .create-item input {
+    height: 18px;
+    padding: 0 4px;
+    border: 1px solid var(--cyan);
+    background: var(--bg);
+    color: var(--fg);
   }
 
   .glyph {

@@ -19,6 +19,7 @@ pub fn run() {
             commands::vault::get_vault_status,
             commands::library::get_library,
             commands::library::add_paper_to_vaults,
+            commands::library::create_vault,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

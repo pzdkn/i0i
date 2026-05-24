@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
-  import { addPaperToVaults, getLibrary } from "$lib/bridge/library";
+  import { addPaperToVaults, createVault, getLibrary } from "$lib/bridge/library";
   import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
   import type { VaultStatus } from "$lib/domain/vault";
@@ -124,6 +124,15 @@
     }
   }
 
+  async function createVaultFromExplorer(path: string) {
+    try {
+      const snapshot = await createVault(path);
+      hydrateLibrary(snapshot);
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
   function closeTab(tabId: string) {
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     tabs = nextTabs;
@@ -178,7 +187,12 @@
 </script>
 
 <AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} onSelectMode={handleModeSelect}>
-  <VaultExplorer {activeVaultId} vaults={vaultWorkspaces} onOpenVault={openVault} />
+  <VaultExplorer
+    {activeVaultId}
+    vaults={vaultWorkspaces}
+    onOpenVault={openVault}
+    onCreateVault={createVaultFromExplorer}
+  />
   <section class="workspace col">
     <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
 

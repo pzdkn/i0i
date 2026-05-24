@@ -6,6 +6,10 @@ export type Vault = {
   path: string;
 };
 
+export type VaultDraft = {
+  path: string;
+};
+
 export type VaultPaper = {
   vaultId: string;
   paperId: string;

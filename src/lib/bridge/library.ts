@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LibrarySnapshot, PaperDraft } from "$lib/domain/library";
+import type { LibrarySnapshot, PaperDraft, VaultDraft } from "$lib/domain/library";
 
 export async function getLibrary(): Promise<LibrarySnapshot> {
   return invoke<LibrarySnapshot>("get_library");
@@ -9,5 +9,13 @@ export async function addPaperToVaults(paper: PaperDraft, vaultIds: string[]): P
   return invoke<LibrarySnapshot>("add_paper_to_vaults", {
     paper,
     vaultIds,
+  });
+}
+
+export async function createVault(path: string): Promise<LibrarySnapshot> {
+  const draft: VaultDraft = { path };
+
+  return invoke<LibrarySnapshot>("create_vault", {
+    draft,
   });
 }
