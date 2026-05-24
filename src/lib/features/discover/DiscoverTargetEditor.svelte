@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { VaultWorkspace } from "$lib/mock/vault-workspaces";
+  import type { VaultWorkspace } from "$lib/domain/library";
 
   let {
     vaults,

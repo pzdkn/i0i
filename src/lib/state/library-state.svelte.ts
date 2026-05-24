@@ -1,14 +1,14 @@
 import type { Paper } from "$lib/domain/paper";
 import type { DiscoverWorkspace } from "$lib/domain/discover";
+import type { LibrarySnapshot, PaperDraft, VaultPaper, VaultWorkspace } from "$lib/domain/library";
 import { discoverWorkspaces as discoverSeeds } from "$lib/mock/discover";
-import { vaultWorkspaces as vaultSeeds, type VaultWorkspace } from "$lib/mock/vault-workspaces";
+import { vaultWorkspaces as vaultSeeds } from "$lib/mock/vault-workspaces";
 
 type LibraryState = {
   vaults: VaultWorkspace[];
+  vaultPapers: VaultPaper[];
   discoverWorkspaces: DiscoverWorkspace[];
 };
-
-const fallbackVaultId = "self-supervised";
 
 const initialVaults = vaultSeeds.map(cloneVaultWorkspace);
 const initialPaperIds = new Set(initialVaults.flatMap((workspace) => workspace.papers.map((paper) => paper.id)));
@@ -22,6 +22,12 @@ for (const workspace of initialDiscoverWorkspaces) {
 
 const library = $state<LibraryState>({
   vaults: initialVaults,
+  vaultPapers: initialVaults.flatMap((workspace) =>
+    workspace.papers.map((paper) => ({
+      vaultId: workspace.id,
+      paperId: paper.id,
+    })),
+  ),
   discoverWorkspaces: initialDiscoverWorkspaces,
 });
 
@@ -54,15 +60,6 @@ function cloneDiscoverWorkspace(workspace: DiscoverWorkspace): DiscoverWorkspace
   };
 }
 
-function updateVaultPaperCount(workspace: VaultWorkspace) {
-  const paperTab = workspace.tabs.find((tab) => tab.label === "Papers");
-  if (paperTab?.count !== undefined) {
-    paperTab.count += 1;
-  }
-
-  workspace.summary = workspace.summary.replace(/^\d+ papers/, `${paperTab?.count ?? workspace.papers.length} papers`);
-}
-
 function findCandidate(candidateId: string) {
   for (const workspace of library.discoverWorkspaces) {
     const candidate = workspace.candidates.find((item) => item.id === candidateId);
@@ -72,6 +69,55 @@ function findCandidate(candidateId: string) {
   }
 
   return undefined;
+}
+
+function makeVaultWorkspace(snapshot: LibrarySnapshot, vaultId: string): VaultWorkspace {
+  const vault = snapshot.vaults.find((item) => item.id === vaultId) ?? snapshot.vaults[0];
+  const papers = snapshot.vaultPapers
+    .filter((vaultPaper) => vaultPaper.vaultId === vault.id)
+    .map((vaultPaper) => snapshot.papers.find((paper) => paper.id === vaultPaper.paperId))
+    .filter((paper): paper is Paper => Boolean(paper));
+  const tagCounts = new Map<string, number>();
+
+  for (const paper of papers) {
+    for (const tag of paper.tags) {
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+
+  const chips = [...tagCounts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6)
+    .map(([tag, count]) => `${tag} x${count}`);
+  const noteCount = papers.reduce((sum, paper) => sum + paper.noteCount, 0);
+  const annotationCount = papers.reduce((sum, paper) => sum + paper.annotationCount, 0);
+  const unreadCount = papers.filter((paper) => paper.status === "UNREAD").length;
+
+  return {
+    id: vault.id,
+    title: vault.title,
+    path: vault.path,
+    summary: `${papers.length} papers / ${unreadCount} unread / local`,
+    tabs: [
+      { label: "Papers", count: papers.length },
+      { label: "Notes", count: noteCount },
+      { label: "Annotations", count: annotationCount },
+      { label: "Graph" },
+      { label: "Q&A" },
+    ],
+    chips,
+    papers,
+  };
+}
+
+function markDiscoverOwnership() {
+  const paperIds = new Set(library.vaults.flatMap((workspace) => workspace.papers.map((paper) => paper.id)));
+
+  for (const workspace of library.discoverWorkspaces) {
+    for (const candidate of workspace.candidates) {
+      candidate.owned = paperIds.has(candidate.id);
+    }
+  }
 }
 
 function candidateToPaper(candidateId: string): Paper {
@@ -130,32 +176,28 @@ export function getCandidateVaultTargets(candidateId: string) {
   return library.vaults.filter((workspace) => workspace.papers.some((paper) => paper.id === candidateId));
 }
 
-export function addCandidateToVault(candidateId: string, vaultId = fallbackVaultId) {
-  return addCandidateToVaults(candidateId, [vaultId]);
-}
-
-export function addCandidateToVaults(candidateId: string, vaultIds: string[]) {
-  const candidate = findCandidate(candidateId);
-  const paper = candidateToPaper(candidateId);
-  const targetIds = vaultIds.length ? vaultIds : [fallbackVaultId];
-
-  for (const vaultId of targetIds) {
-    const targetVault =
-      library.vaults.find((workspace) => workspace.id === vaultId) ?? getVaultWorkspace(fallbackVaultId);
-
-    if (!targetVault.papers.some((existingPaper) => existingPaper.id === candidateId)) {
-      targetVault.papers = [clonePaper(paper), ...targetVault.papers];
-      updateVaultPaperCount(targetVault);
-    }
-  }
-
-  if (candidate) {
-    candidate.owned = true;
-  }
-
-  return paper;
-}
-
 export function paperFromDiscoverCandidate(candidateId: string) {
   return candidateToPaper(candidateId);
+}
+
+export function paperDraftFromDiscoverCandidate(candidateId: string): PaperDraft {
+  const paper = candidateToPaper(candidateId);
+
+  return {
+    id: paper.id,
+    title: paper.title,
+    authors: [...paper.authors],
+    venue: paper.venue,
+    year: paper.year,
+    citations: paper.citations,
+    tags: [...paper.tags],
+    status: paper.status,
+    abstract: paper.abstract,
+  };
+}
+
+export function hydrateLibrary(snapshot: LibrarySnapshot) {
+  library.vaultPapers = snapshot.vaultPapers;
+  library.vaults = snapshot.vaults.map((vault) => makeVaultWorkspace(snapshot, vault.id));
+  markDiscoverOwnership();
 }

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
+  import { addPaperToVaults, getLibrary } from "$lib/bridge/library";
   import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
   import type { VaultStatus } from "$lib/domain/vault";
@@ -11,13 +12,14 @@
   import VaultExplorer from "$lib/features/vault/VaultExplorer.svelte";
   import VaultHome from "$lib/features/vault/VaultHome.svelte";
   import {
-    addCandidateToVaults,
     getCandidateVaultTargets,
     getDiscoverWorkspace,
     getPaperById,
     getPaperTitle,
     getVaultWorkspace,
     getVaultWorkspaces,
+    hydrateLibrary,
+    paperDraftFromDiscoverCandidate,
     paperFromDiscoverCandidate,
   } from "$lib/state/library-state.svelte";
 
@@ -46,7 +48,9 @@
 
   onMount(async () => {
     try {
-      vaultStatus = await getVaultStatus();
+      const [nextVaultStatus, librarySnapshot] = await Promise.all([getVaultStatus(), getLibrary()]);
+      vaultStatus = nextVaultStatus;
+      hydrateLibrary(librarySnapshot);
     } catch (error) {
       bridgeError = String(error);
     }
@@ -111,8 +115,13 @@
     activeTabId = readerTab.id;
   }
 
-  function addCandidate(candidateId: string, vaultIds: string[]) {
-    addCandidateToVaults(candidateId, vaultIds);
+  async function addCandidate(candidateId: string, vaultIds: string[]) {
+    try {
+      const snapshot = await addPaperToVaults(paperDraftFromDiscoverCandidate(candidateId), vaultIds);
+      hydrateLibrary(snapshot);
+    } catch (error) {
+      bridgeError = String(error);
+    }
   }
 
   function closeTab(tabId: string) {
@@ -169,7 +178,7 @@
 </script>
 
 <AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} onSelectMode={handleModeSelect}>
-  <VaultExplorer {activeVaultId} onOpenVault={openVault} />
+  <VaultExplorer {activeVaultId} vaults={vaultWorkspaces} onOpenVault={openVault} />
   <section class="workspace col">
     <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
 

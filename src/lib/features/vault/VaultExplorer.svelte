@@ -1,30 +1,31 @@
 <script lang="ts">
-  import { vaultTree } from "$lib/mock/vault-tree";
+  import type { VaultWorkspace } from "$lib/domain/library";
 
   let {
     activeVaultId,
+    vaults,
     onOpenVault,
   }: {
     activeVaultId: string;
+    vaults: VaultWorkspace[];
     onOpenVault: (vaultId: string) => void;
   } = $props();
 
   let filterText = $state("");
+  const visibleVaults = $derived(
+    vaults.filter((vault) => {
+      const query = filterText.trim().toLowerCase();
+      if (!query) {
+        return true;
+      }
 
-  function vaultIdForNode(id: string) {
-    const supported: Record<string, string> = {
-      transformers: "attention",
-      attention: "attention",
-      scaling: "scaling",
-      ssl: "self-supervised",
-      "self-supervised": "self-supervised",
-      dino: "self-supervised",
-      vit: "vision-transformers",
-      interp: "interpretability",
-    };
-
-    return supported[id];
-  }
+      return (
+        vault.id.toLowerCase().includes(query) ||
+        vault.title.toLowerCase().includes(query) ||
+        vault.path.toLowerCase().includes(query)
+      );
+    }),
+  );
 </script>
 
 <aside class="explorer hair-r">
@@ -42,61 +43,26 @@
   </label>
 
   <div class="tree">
-    {#each vaultTree as node}
-      {#if node.kind === "section"}
-        <div class="section label">{node.label}</div>
-      {:else if node.kind === "item"}
-        <button class:item-muted={node.muted} class="tree-row" type="button">
-          <span class="glyph">-</span>
-          <span class="truncate">{node.label}</span>
-          {#if node.count !== undefined}
-            <span class="count">{node.count}</span>
-          {/if}
-          {#if node.key}
-            <span class="key">{node.key}</span>
-          {/if}
-        </button>
-      {:else}
+    <div class="section label">Vaults</div>
+
+    {#if visibleVaults.length}
+      {#each visibleVaults as vault}
         <button
-          class:item-muted={node.muted}
-          class:active={activeVaultId === vaultIdForNode(node.id)}
+          class:active={activeVaultId === vault.id}
           class="tree-row folder"
           type="button"
-          onclick={() => {
-            const vaultId = vaultIdForNode(node.id);
-            if (vaultId) {
-              onOpenVault(vaultId);
-            }
-          }}
+          onclick={() => onOpenVault(vault.id)}
+          title={vault.path}
         >
-          <span class="glyph">{node.open ? "v" : ">"}</span>
+          <span class="glyph">#</span>
           <span class="folder-dot"></span>
-          <span class="truncate">{node.label}</span>
-          <span class="count">{node.count}</span>
+          <span class="truncate">{vault.path}</span>
+          <span class="count">{vault.papers.length}</span>
         </button>
-        {#if node.open && node.children}
-          {#each node.children as child}
-            <button
-              class:active={activeVaultId === vaultIdForNode(child.id)}
-              class="tree-row child"
-              type="button"
-              onclick={() => {
-                const vaultId = vaultIdForNode(child.id);
-                if (vaultId) {
-                  onOpenVault(vaultId);
-                }
-              }}
-            >
-              <span class="folder-dot small"></span>
-              <span class="truncate">{child.label}</span>
-              {#if child.count !== undefined}
-                <span class="count">{child.count}</span>
-              {/if}
-            </button>
-          {/each}
-        {/if}
-      {/if}
-    {/each}
+      {/each}
+    {:else}
+      <div class="empty-row">No Vaults</div>
+    {/if}
   </div>
 </aside>
 
@@ -186,14 +152,6 @@
     color: var(--amber);
   }
 
-  .tree-row.child {
-    padding-left: 31px;
-  }
-
-  .item-muted {
-    color: var(--fg-3);
-  }
-
   .glyph {
     width: 10px;
     color: var(--fg-3);
@@ -206,15 +164,18 @@
     background: var(--amber-mid);
   }
 
-  .folder-dot.small {
-    width: 5px;
-    height: 5px;
-    background: var(--amber-dim);
-  }
-
   .count {
     margin-left: auto;
     color: var(--fg-3);
     font-size: 10px;
+  }
+
+  .empty-row {
+    height: 24px;
+    display: flex;
+    align-items: center;
+    padding: 0 12px 0 24px;
+    color: var(--fg-3);
+    font-size: 11px;
   }
 </style>

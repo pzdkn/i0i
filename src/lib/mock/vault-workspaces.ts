@@ -1,15 +1,5 @@
-import type { Paper } from "$lib/domain/paper";
+import type { VaultWorkspace } from "$lib/domain/library";
 import { papers } from "$lib/mock/papers";
-
-export type VaultWorkspace = {
-  id: string;
-  title: string;
-  path: string;
-  summary: string;
-  tabs: Array<{ label: string; count?: number }>;
-  chips: string[];
-  papers: Paper[];
-};
 
 const byId = Object.fromEntries(papers.map((paper) => [paper.id, paper]));
 
@@ -94,15 +84,3 @@ export const vaultWorkspaces: VaultWorkspace[] = [
     papers: pick(["kaplan2020", "radford2019", "devlin2018", "tay2022", "vaswani2017"]),
   },
 ];
-
-export function getVaultWorkspace(vaultId: string) {
-  return vaultWorkspaces.find((workspace) => workspace.id === vaultId) ?? vaultWorkspaces[0];
-}
-
-export function getPaperTitle(paperId: string) {
-  return papers.find((paper) => paper.id === paperId)?.title ?? "Reader";
-}
-
-export function getPaperById(paperId: string) {
-  return papers.find((paper) => paper.id === paperId) ?? papers[0];
-}

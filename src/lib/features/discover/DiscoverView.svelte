@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DiscoverWorkspace } from "$lib/domain/discover";
-  import type { VaultWorkspace } from "$lib/mock/vault-workspaces";
+  import type { VaultWorkspace } from "$lib/domain/library";
   import DiscoverFeed from "$lib/features/discover/DiscoverFeed.svelte";
   import DiscoverInspector from "$lib/features/discover/DiscoverInspector.svelte";
   import DiscoverSeedBar from "$lib/features/discover/DiscoverSeedBar.svelte";

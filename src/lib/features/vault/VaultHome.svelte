@@ -1,7 +1,7 @@
 <script lang="ts">
   import PaperList from "$lib/features/vault/PaperList.svelte";
   import VaultInspector from "$lib/features/vault/VaultInspector.svelte";
-  import type { VaultWorkspace } from "$lib/mock/vault-workspaces";
+  import type { VaultWorkspace } from "$lib/domain/library";
 
   let {
     workspace,
