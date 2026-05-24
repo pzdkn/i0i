@@ -1,0 +1,213 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap");
+
+:root {
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  color: #f0d9a8;
+  background: #0d0b07;
+  font-synthesis: none;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --bg: #0d0b07;
+  --bg-1: #14110a;
+  --bg-2: #1a1610;
+  --bg-3: #221d13;
+  --panel: #100d08;
+  --border: #2a2418;
+  --border-2: #3d3320;
+  --border-hot: #5a4420;
+
+  --amber: #f2a93b;
+  --amber-bright: #ffc452;
+  --amber-mid: #c98a32;
+  --amber-dim: #8c6620;
+  --amber-faint: #5a4420;
+
+  --fg: #f0d9a8;
+  --fg-1: #d9bd82;
+  --fg-2: #a88b50;
+  --fg-3: #6e5a38;
+  --fg-4: #4a3d28;
+
+  --red: #d4633a;
+  --green: #8aa84a;
+  --cyan: #6ba0a8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#svelte {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+.crt {
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--bg);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.crt ::selection {
+  color: var(--bg);
+  background: var(--amber);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+}
+
+.flex1 {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.hair-b {
+  border-bottom: 1px solid var(--border);
+}
+
+.hair-t {
+  border-top: 1px solid var(--border);
+}
+
+.hair-r {
+  border-right: 1px solid var(--border);
+}
+
+.hair-l {
+  border-left: 1px solid var(--border);
+}
+
+.label {
+  color: var(--fg-3);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.label.hot {
+  color: var(--amber);
+}
+
+.mono-dim {
+  color: var(--fg-3);
+}
+
+.mono-mid {
+  color: var(--fg-2);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key {
+  display: inline-flex;
+  min-width: 16px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border: 1px solid var(--border-2);
+  color: var(--amber-mid);
+  background: rgba(242, 169, 59, 0.04);
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex;
+  height: 18px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border-2);
+  color: var(--fg-2);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.chip.hot {
+  border-color: var(--amber-dim);
+  color: var(--amber);
+}
+
+.chip.solid {
+  border-color: var(--amber);
+  background: var(--amber);
+  color: var(--bg);
+}
+
+.btn {
+  display: inline-flex;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border-2);
+  background: transparent;
+  color: var(--fg-1);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  border-color: var(--amber-dim);
+  color: var(--amber);
+}
+
+.btn.primary {
+  border-color: var(--amber);
+  background: var(--amber);
+  color: var(--bg);
+}
+
+.btn.ghost {
+  border-color: transparent;
+}
+
+.gauge {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.gauge > i {
+  display: block;
+  height: 100%;
+  background: var(--amber);
+}
