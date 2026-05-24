@@ -1,0 +1,168 @@
+/* 1O1 — Research Utilities · amber CRT theme
+   IBM Plex Mono everywhere. Sharp rectangles. Hairline rules. */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap');
+
+:root {
+  /* Palette — amber-on-black phosphor */
+  --bg:           #0d0b07;
+  --bg-1:         #14110a;
+  --bg-2:         #1a1610;
+  --bg-3:         #221d13;
+  --panel:        #100d08;
+  --border:       #2a2418;
+  --border-2:     #3d3320;
+  --border-hot:   #5a4420;
+
+  --amber:        #f2a93b;
+  --amber-bright: #ffc452;
+  --amber-mid:    #c98a32;
+  --amber-dim:    #8c6620;
+  --amber-faint:  #5a4420;
+
+  --fg:           #f0d9a8;   /* parchment */
+  --fg-1:         #d9bd82;
+  --fg-2:         #a88b50;
+  --fg-3:         #6e5a38;
+  --fg-4:         #4a3d28;
+
+  --red:          #d4633a;
+  --green:        #8aa84a;
+  --cyan:         #6ba0a8;
+
+  --row-h: 22px;
+  --pad: 8px;
+  --hair: 1px solid var(--border);
+  --hair-2: 1px solid var(--border-2);
+}
+
+* { box-sizing: border-box; }
+
+.crt {
+  font-family: 'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+  text-rendering: geometricPrecision;
+  letter-spacing: 0;
+  overflow: hidden;
+}
+
+.crt ::selection { background: var(--amber); color: var(--bg); }
+
+/* Subtle scanline + vignette overlay — kept very light so it reads scientific, not gimmick */
+.crt-scanlines {
+  position: absolute; inset: 0; pointer-events: none; z-index: 50;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(255, 196, 82, 0) 0px,
+    rgba(255, 196, 82, 0) 2px,
+    rgba(0, 0, 0, 0.06) 3px,
+    rgba(0, 0, 0, 0.06) 3px
+  );
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+}
+.crt-vignette {
+  position: absolute; inset: 0; pointer-events: none; z-index: 51;
+  background: radial-gradient(120% 80% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
+}
+
+/* Hairline grid bg for empty zones */
+.crt-grid-bg {
+  background-image:
+    linear-gradient(rgba(242,169,59,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(242,169,59,0.04) 1px, transparent 1px);
+  background-size: 8px 8px;
+}
+
+/* Generic chrome */
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.hair-b { border-bottom: var(--hair); }
+.hair-t { border-top: var(--hair); }
+.hair-r { border-right: var(--hair); }
+.hair-l { border-left: var(--hair); }
+
+.k {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 14px; padding: 0 4px; height: 14px;
+  font-size: 9px; font-weight: 600;
+  color: var(--amber); border: 1px solid var(--amber-dim);
+  background: rgba(242,169,59,0.06);
+  letter-spacing: 0.02em;
+}
+.k.dim { color: var(--fg-2); border-color: var(--border-2); background: transparent; }
+
+.label { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-3); }
+.label.amber { color: var(--amber-dim); }
+.label.hot   { color: var(--amber); }
+
+.mono-dim { color: var(--fg-3); }
+.mono-mid { color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px;
+  background: transparent; color: var(--fg-1);
+  border: 1px solid var(--border-2);
+  font: inherit; font-size: 11px;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--amber-dim); color: var(--amber); }
+.btn.primary { background: var(--amber); color: var(--bg); border-color: var(--amber); }
+.btn.primary:hover { background: var(--amber-bright); border-color: var(--amber-bright); color: var(--bg); }
+.btn.ghost { border-color: transparent; }
+.btn.ghost:hover { border-color: var(--border-2); }
+
+/* Inputs */
+.input {
+  background: var(--bg-1); color: var(--fg);
+  border: 1px solid var(--border-2);
+  height: 22px; padding: 0 8px;
+  font: inherit; font-size: 11px;
+  white-space: nowrap;
+}
+
+.btn { white-space: nowrap; flex-shrink: 0; }
+.k { white-space: nowrap; flex-shrink: 0; }
+.input:focus { outline: none; border-color: var(--amber); }
+
+/* Chips */
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 18px; padding: 0 6px;
+  border: 1px solid var(--border-2);
+  font-size: 10px; color: var(--fg-2);
+  white-space: nowrap; flex-shrink: 0;
+}
+.chip.hot { color: var(--amber); border-color: var(--amber-dim); }
+.chip.solid { background: var(--amber); color: var(--bg); border-color: var(--amber); }
+
+/* Scrollbar-ish hairline track stub (decorative) */
+.gauge {
+  height: 4px; background: var(--bg-2); border: 1px solid var(--border);
+  position: relative; overflow: hidden;
+}
+.gauge > i {
+  display: block; height: 100%; background: var(--amber);
+}
+
+/* ASCII corners — used sparingly */
+.boxcorners { position: relative; }
+.boxcorners::before, .boxcorners::after,
+.boxcorners > .tl, .boxcorners > .tr {
+  position: absolute; width: 6px; height: 6px; color: var(--amber-dim);
+  font-size: 11px; line-height: 1;
+}
+
+/* utility */
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nowrap { white-space: nowrap; }
+.flex1 { flex: 1; min-width: 0; min-height: 0; }
+.gap-4 { gap: 4px; } .gap-6 { gap: 6px; } .gap-8 { gap: 8px; } .gap-12 { gap: 12px; } .gap-16 { gap: 16px; }
