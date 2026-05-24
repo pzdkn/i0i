@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 use tauri::{AppHandle, Manager};
 
-use crate::domain::library::{LibrarySnapshot, Paper, PaperDraft, Vault, VaultDraft, VaultPaper};
+use crate::domain::library::{
+    LibrarySnapshot, Paper, PaperDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
+};
 
 type StoreResult<T> = Result<T, String>;
 
@@ -144,6 +146,35 @@ impl LibraryStore {
                 message
             }
         })?;
+
+        self.get_library()
+    }
+
+    pub fn rename_vault(&self, draft: &VaultRenameDraft) -> StoreResult<LibrarySnapshot> {
+        let normalized = normalize_vault_path(&draft.path)?;
+        let title = vault_title_from_path(&normalized)?;
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "
+                update vaults
+                set title = ?1, path = ?2, updated_at = datetime('now')
+                where id = ?3
+                ",
+                params![title, normalized, draft.id],
+            )
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.contains("UNIQUE constraint failed: vaults.path") {
+                    format!("Vault path already exists: {normalized}")
+                } else {
+                    message
+                }
+            })?;
+
+        if updated == 0 {
+            return Err(format!("Vault not found: {}", draft.id));
+        }
 
         self.get_library()
     }

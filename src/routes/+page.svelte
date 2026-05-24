@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
-  import { addPaperToVaults, createVault, getLibrary } from "$lib/bridge/library";
+  import { addPaperToVaults, createVault, getLibrary, renameVault } from "$lib/bridge/library";
   import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
   import type { VaultStatus } from "$lib/domain/vault";
@@ -133,6 +133,20 @@
     }
   }
 
+  async function renameVaultFromExplorer(vaultId: string, path: string) {
+    try {
+      const snapshot = await renameVault(vaultId, path);
+      hydrateLibrary(snapshot);
+
+      const renamedVault = snapshot.vaults.find((vault) => vault.id === vaultId);
+      if (renamedVault) {
+        tabs = tabs.map((tab) => (tab.vaultId === vaultId ? { ...tab, title: renamedVault.path } : tab));
+      }
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
   function closeTab(tabId: string) {
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     tabs = nextTabs;
@@ -192,6 +206,7 @@
     vaults={vaultWorkspaces}
     onOpenVault={openVault}
     onCreateVault={createVaultFromExplorer}
+    onRenameVault={renameVaultFromExplorer}
   />
   <section class="workspace col">
     <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />

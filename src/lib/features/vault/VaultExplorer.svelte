@@ -7,17 +7,23 @@
     vaults,
     onOpenVault,
     onCreateVault,
+    onRenameVault,
   }: {
     activeVaultId: string;
     vaults: VaultWorkspace[];
     onOpenVault: (vaultId: string) => void;
     onCreateVault: (path: string) => Promise<void>;
+    onRenameVault: (vaultId: string, path: string) => Promise<void>;
   } = $props();
 
   let filterText = $state("");
   let createText = $state("");
   let isCreating = $state(false);
   let createInput = $state<HTMLInputElement | null>(null);
+  let contextMenu = $state<{ x: number; y: number; vaultId?: string } | null>(null);
+  let renamingVaultId = $state("");
+  let renameText = $state("");
+  let renameInput = $state<HTMLInputElement | null>(null);
   const visibleVaults = $derived(
     vaults.filter((vault) => {
       const query = filterText.trim().toLowerCase();
@@ -45,9 +51,48 @@
   }
 
   async function startCreate() {
+    closeContextMenu();
     isCreating = true;
     await tick();
     createInput?.focus();
+  }
+
+  function showContextMenu(event: MouseEvent, vaultId?: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    contextMenu = {
+      x: event.clientX,
+      y: event.clientY,
+      vaultId,
+    };
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
+
+  async function startRename(vault: VaultWorkspace) {
+    closeContextMenu();
+    renamingVaultId = vault.id;
+    renameText = vault.path;
+    await tick();
+    renameInput?.focus();
+    renameInput?.select();
+  }
+
+  function cancelRename() {
+    renamingVaultId = "";
+    renameText = "";
+  }
+
+  async function submitRename(vaultId: string) {
+    const path = renameText.trim();
+    if (!path) {
+      return;
+    }
+
+    await onRenameVault(vaultId, path);
+    cancelRename();
   }
 
   function handleCreateKeydown(event: KeyboardEvent) {
@@ -62,7 +107,27 @@
       void submitCreate();
     }
   }
+
+  function handleRenameKeydown(event: KeyboardEvent, vaultId: string) {
+    if (event.key === "Escape") {
+      cancelRename();
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void submitRename(vaultId);
+    }
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      closeContextMenu();
+    }
+  }
 </script>
+
+<svelte:window onclick={closeContextMenu} onkeydown={handleWindowKeydown} />
 
 <aside class="explorer hair-r">
   <header class="row hair-b">
@@ -78,7 +143,7 @@
   </label>
 
   <div class="tree">
-    <div class="section section-row row">
+    <div class="section section-row row" role="presentation" oncontextmenu={(event) => showContextMenu(event)}>
       <span class="label">Vaults</span>
       <div class="flex1"></div>
       <button class="section-action" type="button" title="Create Vault" onclick={() => void startCreate()}>+</button>
@@ -99,23 +164,55 @@
 
     {#if visibleVaults.length}
       {#each visibleVaults as vault}
-        <button
-          class:active={activeVaultId === vault.id}
-          class="tree-row folder"
-          type="button"
-          onclick={() => onOpenVault(vault.id)}
-          title={vault.path}
-        >
-          <span class="glyph">#</span>
-          <span class="folder-dot"></span>
-          <span class="truncate">{vault.path}</span>
-          <span class="count">{vault.papers.length}</span>
-        </button>
+        {#if renamingVaultId === vault.id}
+          <div class="tree-row rename-item">
+            <span class="glyph">=</span>
+            <input
+              bind:this={renameInput}
+              bind:value={renameText}
+              aria-label={`Rename ${vault.path}`}
+              onkeydown={(event) => handleRenameKeydown(event, vault.id)}
+            />
+          </div>
+        {:else}
+          <button
+            class:active={activeVaultId === vault.id}
+            class="tree-row folder"
+            type="button"
+            onclick={() => onOpenVault(vault.id)}
+            oncontextmenu={(event) => showContextMenu(event, vault.id)}
+            title={vault.path}
+          >
+            <span class="glyph">#</span>
+            <span class="folder-dot"></span>
+            <span class="truncate">{vault.path}</span>
+            <span class="count">{vault.papers.length}</span>
+          </button>
+        {/if}
       {/each}
     {:else}
-      <div class="empty-row">No Vaults</div>
+      <div class="empty-row" role="presentation" oncontextmenu={(event) => showContextMenu(event)}>No Vaults</div>
     {/if}
   </div>
+
+  {#if contextMenu}
+    <div
+      class="context-menu col"
+      role="menu"
+      style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`}
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => event.stopPropagation()}
+      tabindex="-1"
+    >
+      <button role="menuitem" type="button" onclick={() => void startCreate()}>+ Create Vault</button>
+      {#if contextMenu.vaultId}
+        {@const vault = vaults.find((candidate) => candidate.id === contextMenu?.vaultId)}
+        {#if vault}
+          <button role="menuitem" type="button" onclick={() => void startRename(vault)}>Rename</button>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 </aside>
 
 <style>
@@ -231,12 +328,19 @@
     cursor: text;
   }
 
-  .create-item input {
+  .create-item input,
+  .rename-item input {
     height: 18px;
     padding: 0 4px;
     border: 1px solid var(--cyan);
     background: var(--bg);
     color: var(--fg);
+  }
+
+  .rename-item {
+    height: 24px;
+    background: rgba(107, 160, 168, 0.05);
+    cursor: text;
   }
 
   .glyph {
@@ -264,5 +368,31 @@
     padding: 0 12px 0 24px;
     color: var(--fg-3);
     font-size: 11px;
+  }
+
+  .context-menu {
+    position: fixed;
+    z-index: 20;
+    min-width: 132px;
+    padding: 4px;
+    border: 1px solid var(--border-2);
+    background: var(--bg-1);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  }
+
+  .context-menu button {
+    height: 24px;
+    border: 0;
+    background: transparent;
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 10px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .context-menu button:hover {
+    background: rgba(242, 169, 59, 0.08);
+    color: var(--amber);
   }
 </style>

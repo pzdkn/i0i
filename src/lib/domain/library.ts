@@ -10,6 +10,11 @@ export type VaultDraft = {
   path: string;
 };
 
+export type VaultRenameDraft = {
+  id: string;
+  path: string;
+};
+
 export type VaultPaper = {
   vaultId: string;
   paperId: string;

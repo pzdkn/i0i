@@ -1,4 +1,4 @@
-use crate::domain::library::{LibrarySnapshot, PaperDraft, VaultDraft};
+use crate::domain::library::{LibrarySnapshot, PaperDraft, VaultDraft, VaultRenameDraft};
 use crate::storage::library_store::LibraryStore;
 
 #[tauri::command]
@@ -21,4 +21,12 @@ pub fn create_vault(
     draft: VaultDraft,
 ) -> Result<LibrarySnapshot, String> {
     store.create_vault(&draft)
+}
+
+#[tauri::command]
+pub fn rename_vault(
+    store: tauri::State<'_, LibraryStore>,
+    draft: VaultRenameDraft,
+) -> Result<LibrarySnapshot, String> {
+    store.rename_vault(&draft)
 }
