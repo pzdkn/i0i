@@ -1,4 +1,4 @@
-export type WorkspaceKind = "vault" | "reader";
+export type WorkspaceKind = "vault" | "reader" | "discover";
 
 export type WorkspaceTab = {
   id: string;
@@ -6,4 +6,5 @@ export type WorkspaceTab = {
   title: string;
   vaultId?: string;
   paperId?: string;
+  discoverId?: string;
 };

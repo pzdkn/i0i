@@ -3,17 +3,21 @@
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
   import { getVaultStatus } from "$lib/bridge/tauri";
+  import type { Paper } from "$lib/domain/paper";
   import type { VaultStatus } from "$lib/domain/vault";
   import type { WorkspaceTab } from "$lib/domain/workspace";
+  import DiscoverView from "$lib/features/discover/DiscoverView.svelte";
   import ReaderView from "$lib/features/reader/ReaderView.svelte";
   import VaultExplorer from "$lib/features/vault/VaultExplorer.svelte";
   import VaultHome from "$lib/features/vault/VaultHome.svelte";
+  import { discoverCandidateToPaper, getDiscoverWorkspace } from "$lib/mock/discover";
   import { getPaperById, getPaperTitle, getVaultWorkspace } from "$lib/mock/vault-workspaces";
 
   let vaultStatus = $state<VaultStatus | null>(null);
   let bridgeError = $state("");
   let activeVaultId = $state("attention");
   let selectedPaperId = $state("vaswani2017");
+  let selectedReaderPaper = $state<Paper>(getPaperById("vaswani2017"));
   let activeTabId = $state("vault:attention");
   let tabs = $state<WorkspaceTab[]>([
     {
@@ -26,9 +30,10 @@
 
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
-  const activePaper = $derived(getPaperById(activeTab?.paperId ?? selectedPaperId));
+  const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "ssl-dino"));
+  const activePaper = $derived(selectedReaderPaper);
   const currentPath = $derived(activeTab?.title ?? "no workspace");
-  const activeMode = $derived(activeTab?.kind === "reader" ? "R" : "V");
+  const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "V");
 
   onMount(async () => {
     try {
@@ -53,13 +58,44 @@
   }
 
   function openPaper(paperId: string) {
-    selectedPaperId = paperId;
+    const paper = getPaperById(paperId);
+    selectedPaperId = paper.id;
+    selectedReaderPaper = paper;
 
     const readerTab: WorkspaceTab = {
-      id: `reader:${paperId}`,
+      id: `reader:${paper.id}`,
       kind: "reader",
-      title: getPaperTitle(paperId),
-      paperId,
+      title: getPaperTitle(paper.id),
+      paperId: paper.id,
+    };
+
+    tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
+    activeTabId = readerTab.id;
+  }
+
+  function openDiscover(discoverId = "ssl-dino") {
+    const workspace = getDiscoverWorkspace(discoverId);
+    const discoverTab: WorkspaceTab = {
+      id: `discover:${workspace.id}`,
+      kind: "discover",
+      title: workspace.title,
+      discoverId: workspace.id,
+    };
+
+    tabs = [...tabs.filter((tab) => tab.id !== discoverTab.id), discoverTab];
+    activeTabId = discoverTab.id;
+  }
+
+  function openCandidate(candidateId: string) {
+    const paper = discoverCandidateToPaper(candidateId);
+    selectedPaperId = paper.id;
+    selectedReaderPaper = paper;
+
+    const readerTab: WorkspaceTab = {
+      id: `reader:${paper.id}`,
+      kind: "reader",
+      title: paper.title,
+      paperId: paper.id,
     };
 
     tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
@@ -93,6 +129,9 @@
 
     if (tab.paperId) {
       selectedPaperId = tab.paperId;
+      if (!selectedReaderPaper || selectedReaderPaper.id !== tab.paperId) {
+        selectedReaderPaper = getPaperById(tab.paperId);
+      }
     }
   }
 
@@ -107,6 +146,11 @@
       if (readerTab) {
         activateTab(readerTab.id);
       }
+      return;
+    }
+
+    if (mode === "F") {
+      openDiscover();
     }
   }
 </script>
@@ -118,6 +162,8 @@
 
     {#if activeTab?.kind === "reader"}
       <ReaderView paper={activePaper} />
+    {:else if activeTab?.kind === "discover"}
+      <DiscoverView workspace={activeDiscoverWorkspace} onOpenCandidate={openCandidate} />
     {:else if activeTab?.kind === "vault"}
       <VaultHome workspace={activeVaultWorkspace} onOpenPaper={openPaper} />
     {:else}

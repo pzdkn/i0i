@@ -12,6 +12,18 @@
     onActivate: (tabId: string) => void;
     onClose: (tabId: string) => void;
   } = $props();
+
+  function tabIcon(kind: WorkspaceTab["kind"]) {
+    if (kind === "vault") {
+      return "#";
+    }
+
+    if (kind === "discover") {
+      return "find";
+    }
+
+    return "read";
+  }
 </script>
 
 <div class="workspace-tabs row hair-b">
@@ -23,7 +35,7 @@
       onclick={() => onActivate(tab.id)}
       title={tab.title}
     >
-      <span class="icon">{tab.kind === "vault" ? "#" : "read"}</span>
+      <span class="icon">{tabIcon(tab.kind)}</span>
       <span class="title truncate">{tab.title}</span>
       <span
         class="close"
