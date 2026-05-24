@@ -21,7 +21,7 @@
     hydrateLibrary,
     paperDraftFromDiscoverCandidate,
     paperFromDiscoverCandidate,
-  } from "$lib/state/library-state.svelte";
+  } from "$lib/state/library-cache.svelte";
 
   let vaultStatus = $state<VaultStatus | null>(null);
   let bridgeError = $state("");

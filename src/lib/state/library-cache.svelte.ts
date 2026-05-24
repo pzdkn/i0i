@@ -1,16 +1,17 @@
 import type { Paper } from "$lib/domain/paper";
 import type { DiscoverWorkspace } from "$lib/domain/discover";
-import type { LibrarySnapshot, PaperDraft, VaultPaper, VaultWorkspace } from "$lib/domain/library";
+import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
 import { discoverWorkspaces as discoverSeeds } from "$lib/mock/discover";
-import { vaultWorkspaces as vaultSeeds } from "$lib/mock/vault-workspaces";
+import { librarySeedWorkspaces } from "$lib/mock/library-seed";
 
 type LibraryState = {
   vaults: VaultWorkspace[];
-  vaultPapers: VaultPaper[];
   discoverWorkspaces: DiscoverWorkspace[];
 };
 
-const initialVaults = vaultSeeds.map(cloneVaultWorkspace);
+// Saved library data comes from Rust/SQLite. This module caches the latest
+// LibrarySnapshot for Svelte views and uses seed data only before hydration.
+const initialVaults = librarySeedWorkspaces.map(cloneVaultWorkspace);
 const initialPaperIds = new Set(initialVaults.flatMap((workspace) => workspace.papers.map((paper) => paper.id)));
 const initialDiscoverWorkspaces = discoverSeeds.map(cloneDiscoverWorkspace);
 
@@ -22,12 +23,6 @@ for (const workspace of initialDiscoverWorkspaces) {
 
 const library = $state<LibraryState>({
   vaults: initialVaults,
-  vaultPapers: initialVaults.flatMap((workspace) =>
-    workspace.papers.map((paper) => ({
-      vaultId: workspace.id,
-      paperId: paper.id,
-    })),
-  ),
   discoverWorkspaces: initialDiscoverWorkspaces,
 });
 
@@ -197,7 +192,6 @@ export function paperDraftFromDiscoverCandidate(candidateId: string): PaperDraft
 }
 
 export function hydrateLibrary(snapshot: LibrarySnapshot) {
-  library.vaultPapers = snapshot.vaultPapers;
   library.vaults = snapshot.vaults.map((vault) => makeVaultWorkspace(snapshot, vault.id));
   markDiscoverOwnership();
 }

@@ -1,13 +1,14 @@
 import type { VaultWorkspace } from "$lib/domain/library";
 import { papers } from "$lib/mock/papers";
 
+// Frontend bootstrap only. Rust/SQLite owns saved library data after hydration.
 const byId = Object.fromEntries(papers.map((paper) => [paper.id, paper]));
 
 function pick(ids: string[]) {
   return ids.map((id) => byId[id]).filter(Boolean);
 }
 
-export const vaultWorkspaces: VaultWorkspace[] = [
+export const librarySeedWorkspaces: VaultWorkspace[] = [
   {
     id: "attention",
     title: "attention",

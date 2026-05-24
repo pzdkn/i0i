@@ -1,6 +1,6 @@
 import type { DiscoverWorkspace } from "$lib/domain/discover";
-import type { Paper } from "$lib/domain/paper";
 
+// Discover candidates are transient proposals until the user adds them to Vault.
 export const discoverWorkspaces: DiscoverWorkspace[] = [
   {
     id: "ssl-dino",
@@ -89,26 +89,3 @@ export const discoverWorkspaces: DiscoverWorkspace[] = [
     ],
   },
 ];
-
-export function getDiscoverWorkspace(discoverId: string) {
-  return discoverWorkspaces.find((workspace) => workspace.id === discoverId) ?? discoverWorkspaces[0];
-}
-
-export function discoverCandidateToPaper(candidateId: string): Paper {
-  const workspace = discoverWorkspaces[0];
-  const candidate = workspace.candidates.find((item) => item.id === candidateId) ?? workspace.candidates[0];
-
-  return {
-    id: candidate.id,
-    title: candidate.title,
-    authors: candidate.authors,
-    venue: candidate.venue,
-    year: candidate.year,
-    citations: candidate.citations,
-    tags: candidate.tags,
-    noteCount: 0,
-    annotationCount: 0,
-    status: candidate.owned ? "READ" : "UNREAD",
-    abstract: candidate.why,
-  };
-}
