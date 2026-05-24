@@ -179,6 +179,99 @@ impl LibraryStore {
         self.get_library()
     }
 
+    pub fn delete_vault(&self, vault_id: &str) -> StoreResult<LibrarySnapshot> {
+        if vault_id.trim().is_empty() {
+            return Err("Vault id cannot be empty".to_string());
+        }
+
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let deleted = tx
+            .execute("delete from vaults where id = ?1", params![vault_id])
+            .map_err(|error| error.to_string())?;
+
+        if deleted == 0 {
+            return Err(format!("Vault not found: {vault_id}"));
+        }
+
+        tx.execute(
+            "
+            delete from papers
+            where not exists (
+              select 1 from vault_papers
+              where vault_papers.paper_id = papers.id
+            )
+            ",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_library()
+    }
+
+    pub fn remove_paper_from_vault(
+        &self,
+        vault_id: &str,
+        paper_id: &str,
+    ) -> StoreResult<LibrarySnapshot> {
+        if vault_id.trim().is_empty() {
+            return Err("Vault id cannot be empty".to_string());
+        }
+
+        if paper_id.trim().is_empty() {
+            return Err("Paper id cannot be empty".to_string());
+        }
+
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let deleted = tx
+            .execute(
+                "delete from vault_papers where vault_id = ?1 and paper_id = ?2",
+                params![vault_id, paper_id],
+            )
+            .map_err(|error| error.to_string())?;
+
+        if deleted == 0 {
+            return Err(format!(
+                "Paper {paper_id} is not linked to Vault {vault_id}"
+            ));
+        }
+
+        let remaining_memberships: i64 = tx
+            .query_row(
+                "select count(*) from vault_papers where paper_id = ?1",
+                params![paper_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+
+        if remaining_memberships == 0 {
+            tx.execute("delete from papers where id = ?1", params![paper_id])
+                .map_err(|error| error.to_string())?;
+        }
+
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_library()
+    }
+
+    pub fn delete_paper_globally(&self, paper_id: &str) -> StoreResult<LibrarySnapshot> {
+        if paper_id.trim().is_empty() {
+            return Err("Paper id cannot be empty".to_string());
+        }
+
+        let conn = self.open_connection()?;
+        let deleted = conn
+            .execute("delete from papers where id = ?1", params![paper_id])
+            .map_err(|error| error.to_string())?;
+
+        if deleted == 0 {
+            return Err(format!("Paper not found: {paper_id}"));
+        }
+
+        self.get_library()
+    }
+
     fn open_connection(&self) -> StoreResult<Connection> {
         let conn = Connection::open(&self.db_path).map_err(|error| error.to_string())?;
         conn.execute_batch("pragma foreign_keys = on;")

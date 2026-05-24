@@ -6,9 +6,13 @@
   let {
     workspace,
     onOpenPaper,
+    onRemovePaperFromVault,
+    onRemovePaperFromLibrary,
   }: {
     workspace: VaultWorkspace;
     onOpenPaper: (paperId: string) => void;
+    onRemovePaperFromVault: (vaultId: string, paperId: string) => void;
+    onRemovePaperFromLibrary: (paperId: string) => void;
   } = $props();
 
   let selectedPaperId = $state("");
@@ -74,6 +78,8 @@
           selectedPaperId = paperId;
           onOpenPaper(paperId);
         }}
+        onRemoveFromVault={(paperId) => onRemovePaperFromVault(workspace.id, paperId)}
+        onRemoveFromLibrary={onRemovePaperFromLibrary}
       />
     </main>
 

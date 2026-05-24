@@ -2,7 +2,16 @@
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
-  import { addPaperToVaults, createVault, getLibrary, renameVault } from "$lib/bridge/library";
+  import {
+    addPaperToVaults,
+    createVault,
+    deleteVault,
+    deletePaperGlobally,
+    getLibrary,
+    removePaperFromVault,
+    renameVault,
+  } from "$lib/bridge/library";
+  import type { LibrarySnapshot, Vault } from "$lib/domain/library";
   import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
   import type { VaultStatus } from "$lib/domain/vault";
@@ -46,6 +55,15 @@
   const currentPath = $derived(activeTab?.title ?? "no workspace");
   const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "V");
 
+  function makeVaultTab(vault: Pick<Vault, "id" | "path">): WorkspaceTab {
+    return {
+      id: `vault:${vault.id}`,
+      kind: "vault",
+      title: vault.path,
+      vaultId: vault.id,
+    };
+  }
+
   onMount(async () => {
     try {
       const [nextVaultStatus, librarySnapshot] = await Promise.all([getVaultStatus(), getLibrary()]);
@@ -58,12 +76,13 @@
 
   function openVault(vaultId = activeVaultId) {
     const workspace = getVaultWorkspace(vaultId);
-    const vaultTab: WorkspaceTab = {
-      id: `vault:${workspace.id}`,
-      kind: "vault",
-      title: workspace.path,
-      vaultId: workspace.id,
-    };
+    if (!workspace) {
+      activeVaultId = "";
+      activeTabId = "";
+      return;
+    }
+
+    const vaultTab = makeVaultTab(workspace);
 
     activeVaultId = workspace.id;
     tabs = [vaultTab, ...tabs.filter((tab) => tab.kind !== "vault")];
@@ -147,6 +166,69 @@
     }
   }
 
+  async function deleteVaultFromExplorer(vaultId: string) {
+    try {
+      const snapshot = await deleteVault(vaultId);
+      hydrateLibrary(snapshot);
+      reconcileDeletedVault(snapshot, vaultId);
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
+  function reconcileDeletedVault(snapshot: LibrarySnapshot, deletedVaultId: string) {
+    const wasActiveTabDeleted = tabs.some((tab) => tab.id === activeTabId && tab.vaultId === deletedVaultId);
+    const nextTabs = tabs.filter((tab) => tab.vaultId !== deletedVaultId);
+    tabs = nextTabs;
+
+    if (activeVaultId === deletedVaultId) {
+      activeVaultId = snapshot.vaults[0]?.id ?? "";
+    }
+
+    if (!wasActiveTabDeleted && nextTabs.some((tab) => tab.id === activeTabId)) {
+      return;
+    }
+
+    const nextTab = nextTabs[0];
+    if (nextTab) {
+      activeTabId = nextTab.id;
+      if (nextTab.vaultId) {
+        activeVaultId = nextTab.vaultId;
+      }
+      return;
+    }
+
+    const nextVault = snapshot.vaults[0];
+    if (nextVault) {
+      const vaultTab = makeVaultTab(nextVault);
+      tabs = [vaultTab];
+      activeVaultId = nextVault.id;
+      activeTabId = vaultTab.id;
+      return;
+    }
+
+    activeVaultId = "";
+    activeTabId = "";
+  }
+
+  async function removePaperFromActiveVault(vaultId: string, paperId: string) {
+    try {
+      const snapshot = await removePaperFromVault(vaultId, paperId);
+      hydrateLibrary(snapshot);
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
+  async function removePaperFromLibrary(paperId: string) {
+    try {
+      const snapshot = await deletePaperGlobally(paperId);
+      hydrateLibrary(snapshot);
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
   function closeTab(tabId: string) {
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     tabs = nextTabs;
@@ -207,6 +289,7 @@
     onOpenVault={openVault}
     onCreateVault={createVaultFromExplorer}
     onRenameVault={renameVaultFromExplorer}
+    onDeleteVault={deleteVaultFromExplorer}
   />
   <section class="workspace col">
     <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
@@ -222,7 +305,12 @@
         {getCandidateVaultTargets}
       />
     {:else if activeTab?.kind === "vault"}
-      <VaultHome workspace={activeVaultWorkspace} onOpenPaper={openPaper} />
+      <VaultHome
+        workspace={activeVaultWorkspace}
+        onOpenPaper={openPaper}
+        onRemovePaperFromVault={removePaperFromActiveVault}
+        onRemovePaperFromLibrary={removePaperFromLibrary}
+      />
     {:else}
       <div class="empty-workspace col">
         <div class="label hot">No workspace open</div>

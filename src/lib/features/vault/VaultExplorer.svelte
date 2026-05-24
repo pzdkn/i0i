@@ -8,12 +8,14 @@
     onOpenVault,
     onCreateVault,
     onRenameVault,
+    onDeleteVault,
   }: {
     activeVaultId: string;
     vaults: VaultWorkspace[];
     onOpenVault: (vaultId: string) => void;
     onCreateVault: (path: string) => Promise<void>;
     onRenameVault: (vaultId: string, path: string) => Promise<void>;
+    onDeleteVault: (vaultId: string) => Promise<void>;
   } = $props();
 
   let filterText = $state("");
@@ -93,6 +95,11 @@
 
     await onRenameVault(vaultId, path);
     cancelRename();
+  }
+
+  async function deleteVault(vaultId: string) {
+    closeContextMenu();
+    await onDeleteVault(vaultId);
   }
 
   function handleCreateKeydown(event: KeyboardEvent) {
@@ -204,11 +211,14 @@
       onkeydown={(event) => event.stopPropagation()}
       tabindex="-1"
     >
-      <button role="menuitem" type="button" onclick={() => void startCreate()}>+ Create Vault</button>
+      <button role="menuitem" type="button" onclick={() => void startCreate()}>create vault</button>
       {#if contextMenu.vaultId}
         {@const vault = vaults.find((candidate) => candidate.id === contextMenu?.vaultId)}
         {#if vault}
-          <button role="menuitem" type="button" onclick={() => void startRename(vault)}>Rename</button>
+          <button role="menuitem" type="button" onclick={() => void startRename(vault)}>rename vault</button>
+          <button role="menuitem" class="danger" type="button" onclick={() => void deleteVault(vault.id)}>
+            remove vault
+          </button>
         {/if}
       {/if}
     </div>
@@ -373,20 +383,24 @@
   .context-menu {
     position: fixed;
     z-index: 20;
-    min-width: 132px;
-    padding: 4px;
+    min-width: 144px;
+    padding: 5px;
     border: 1px solid var(--border-2);
+    border-radius: 6px;
     background: var(--bg-1);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
   }
 
   .context-menu button {
-    height: 24px;
+    width: 100%;
+    height: 26px;
+    padding: 0 9px;
     border: 0;
+    border-radius: 4px;
     background: transparent;
     color: var(--fg-1);
     font: inherit;
-    font-size: 10px;
+    font-size: 11px;
     text-align: left;
     cursor: pointer;
   }
@@ -394,5 +408,12 @@
   .context-menu button:hover {
     background: rgba(242, 169, 59, 0.08);
     color: var(--amber);
+  }
+
+  .context-menu .danger {
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 4px 4px;
+    color: var(--red);
   }
 </style>

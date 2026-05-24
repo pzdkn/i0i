@@ -6,12 +6,18 @@
     selectedPaperId,
     onSelect,
     onOpen,
+    onRemoveFromVault,
+    onRemoveFromLibrary,
   }: {
     papers: Paper[];
     selectedPaperId: string;
     onSelect: (paperId: string) => void;
     onOpen: (paperId: string) => void;
+    onRemoveFromVault: (paperId: string) => void;
+    onRemoveFromLibrary: (paperId: string) => void;
   } = $props();
+
+  let contextMenu = $state<{ x: number; y: number; paperId: string } | null>(null);
 
   function formatCitations(citations: number) {
     if (citations >= 1000) {
@@ -20,7 +26,39 @@
 
     return String(citations);
   }
+
+  function showContextMenu(event: MouseEvent, paperId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    contextMenu = {
+      x: event.clientX,
+      y: event.clientY,
+      paperId,
+    };
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      closeContextMenu();
+    }
+  }
+
+  function removeFromVault(paperId: string) {
+    closeContextMenu();
+    onRemoveFromVault(paperId);
+  }
+
+  function removeFromLibrary(paperId: string) {
+    closeContextMenu();
+    onRemoveFromLibrary(paperId);
+  }
 </script>
+
+<svelte:window onclick={closeContextMenu} onkeydown={handleWindowKeydown} />
 
 <div class="paper-list">
   <div class="paper-header row">
@@ -42,6 +80,7 @@
         type="button"
         onclick={() => onSelect(paper.id)}
         ondblclick={() => onOpen(paper.id)}
+        oncontextmenu={(event) => showContextMenu(event, paper.id)}
       >
         <span class="year">{paper.year}</span>
         <span class="venue">{paper.venue}</span>
@@ -56,6 +95,25 @@
       </button>
     {/each}
   </div>
+
+  {#if contextMenu}
+    {@const menuPaperId = contextMenu.paperId}
+    <div
+      class="context-menu col"
+      role="menu"
+      tabindex="-1"
+      style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`}
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => event.stopPropagation()}
+    >
+      <button role="menuitem" type="button" onclick={() => removeFromVault(menuPaperId)}>
+        remove from vault
+      </button>
+      <button role="menuitem" class="danger" type="button" onclick={() => removeFromLibrary(menuPaperId)}>
+        remove from library
+      </button>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -157,4 +215,40 @@
     text-align: right;
   }
 
+  .context-menu {
+    position: fixed;
+    z-index: 20;
+    min-width: 168px;
+    padding: 5px;
+    border: 1px solid var(--border-2);
+    border-radius: 6px;
+    background: var(--bg-1);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
+  }
+
+  .context-menu button {
+    height: 26px;
+    width: 100%;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .context-menu button:hover {
+    background: rgba(242, 169, 59, 0.08);
+    color: var(--amber);
+  }
+
+  .context-menu .danger {
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 4px 4px;
+    color: var(--red);
+  }
 </style>

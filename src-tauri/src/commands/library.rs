@@ -30,3 +30,28 @@ pub fn rename_vault(
 ) -> Result<LibrarySnapshot, String> {
     store.rename_vault(&draft)
 }
+
+#[tauri::command]
+pub fn delete_vault(
+    store: tauri::State<'_, LibraryStore>,
+    vault_id: String,
+) -> Result<LibrarySnapshot, String> {
+    store.delete_vault(&vault_id)
+}
+
+#[tauri::command]
+pub fn remove_paper_from_vault(
+    store: tauri::State<'_, LibraryStore>,
+    vault_id: String,
+    paper_id: String,
+) -> Result<LibrarySnapshot, String> {
+    store.remove_paper_from_vault(&vault_id, &paper_id)
+}
+
+#[tauri::command]
+pub fn delete_paper_globally(
+    store: tauri::State<'_, LibraryStore>,
+    paper_id: String,
+) -> Result<LibrarySnapshot, String> {
+    store.delete_paper_globally(&paper_id)
+}
