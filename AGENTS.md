@@ -26,6 +26,13 @@ Use two modes together:
    - Do not dump a Rust tutorial upfront.
    - When the user pastes errors, diagnose them from first principles.
 
+## Implementation Flow
+
+- Before any implementation, start with a minimal RFC.
+- The RFC should state the proposed change, files likely affected, risks, and validation plan.
+- Only begin implementation after the RFC is validated.
+- Never start implementing straight away.
+
 ## Current Learning Goal
 
 Use modern Tauri v2 conventions to build a minimal Svelte + Tauri app where:
