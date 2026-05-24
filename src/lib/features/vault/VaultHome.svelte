@@ -3,6 +3,8 @@
   import VaultInspector from "$lib/features/vault/VaultInspector.svelte";
   import { papers } from "$lib/mock/papers";
 
+  let { onOpenPaper }: { onOpenPaper: (paperId: string) => void } = $props();
+
   let selectedPaperId = $state(papers[0]?.id ?? "");
   const selectedPaper = $derived(
     papers.find((paper) => paper.id === selectedPaperId) ?? papers[0],
@@ -61,7 +63,15 @@
         <span>Q&A</span>
       </nav>
 
-      <PaperList {papers} {selectedPaperId} onSelect={(paperId) => (selectedPaperId = paperId)} />
+      <PaperList
+        {papers}
+        {selectedPaperId}
+        onSelect={(paperId) => (selectedPaperId = paperId)}
+        onOpen={(paperId) => {
+          selectedPaperId = paperId;
+          onOpenPaper(paperId);
+        }}
+      />
     </main>
 
     <VaultInspector {papers} {selectedPaper} />

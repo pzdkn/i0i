@@ -6,10 +6,12 @@
   import type { VaultStatus } from "$lib/domain/vault";
 
   let {
+    activeMode = "V",
     vaultStatus = null,
     bridgeError = "",
     children,
   }: {
+    activeMode?: string;
     vaultStatus?: VaultStatus | null;
     bridgeError?: string;
     children: Snippet;
@@ -19,7 +21,7 @@
 <div class="crt app-shell">
   <TitleBar {vaultStatus} />
   <div class="app-body row">
-    <ActivityRail active="V" />
+    <ActivityRail active={activeMode} />
     {@render children()}
   </div>
   <StatusBar {vaultStatus} {bridgeError} />

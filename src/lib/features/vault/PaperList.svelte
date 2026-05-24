@@ -5,10 +5,12 @@
     papers,
     selectedPaperId,
     onSelect,
+    onOpen,
   }: {
     papers: Paper[];
     selectedPaperId: string;
     onSelect: (paperId: string) => void;
+    onOpen: (paperId: string) => void;
   } = $props();
 
   function formatCitations(citations: number) {
@@ -39,6 +41,7 @@
         class="paper-row"
         type="button"
         onclick={() => onSelect(paper.id)}
+        ondblclick={() => onOpen(paper.id)}
       >
         <span class="year">{paper.year}</span>
         <span class="venue">{paper.venue}</span>
@@ -50,6 +53,9 @@
         <span class="metric">{paper.noteCount ? `#${paper.noteCount}` : "-"}</span>
         <span class="metric">{paper.annotationCount || "-"}</span>
         <span class="status">{paper.status}</span>
+        {#if paper.id === selectedPaperId}
+          <span class="open-hint"><span class="key">dbl</span> read</span>
+        {/if}
       </button>
     {/each}
   </div>
@@ -83,6 +89,7 @@
   }
 
   .paper-row {
+    position: relative;
     width: 100%;
     height: 30px;
     display: flex;
@@ -151,5 +158,21 @@
     font-size: 9px;
     letter-spacing: 0.08em;
     text-align: right;
+  }
+
+  .open-hint {
+    position: absolute;
+    right: 8px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 6px;
+    border: 1px solid var(--amber-dim);
+    background: var(--bg);
+    color: var(--amber);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 </style>
