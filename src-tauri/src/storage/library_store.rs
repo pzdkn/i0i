@@ -1,11 +1,13 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 use tauri::{AppHandle, Manager};
 
 use crate::domain::library::{
-    LibrarySnapshot, Paper, PaperDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
+    LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, Vault, VaultDraft, VaultPaper,
+    VaultRenameDraft,
 };
 
 type StoreResult<T> = Result<T, String>;
@@ -279,6 +281,77 @@ impl LibraryStore {
         self.get_library()
     }
 
+    pub fn get_paper_notes(&self, paper_id: &str) -> StoreResult<Vec<PaperNote>> {
+        if paper_id.trim().is_empty() {
+            return Err("Paper id cannot be empty".to_string());
+        }
+
+        let conn = self.open_connection()?;
+        read_paper_notes(&conn, paper_id)
+    }
+
+    pub fn create_paper_note(&self, draft: &PaperNoteDraft) -> StoreResult<Vec<PaperNote>> {
+        let body = draft.body.trim();
+
+        if draft.paper_id.trim().is_empty() {
+            return Err("Paper id cannot be empty".to_string());
+        }
+
+        if draft.source_id.trim().is_empty() {
+            return Err("Source id cannot be empty".to_string());
+        }
+
+        if draft.selected_text.trim().is_empty() {
+            return Err("Selected text cannot be empty".to_string());
+        }
+
+        if body.is_empty() {
+            return Err("Note body cannot be empty".to_string());
+        }
+
+        if draft.start_offset < 0 || draft.end_offset <= draft.start_offset {
+            return Err("Note offsets must define a non-empty range".to_string());
+        }
+
+        let note_id = generate_note_id()?;
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+
+        tx.execute(
+            "
+            insert into paper_notes (
+              id, paper_id, source_id, start_offset, end_offset,
+              selected_text, body, created_at, updated_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))
+            ",
+            params![
+                note_id,
+                draft.paper_id,
+                draft.source_id,
+                draft.start_offset,
+                draft.end_offset,
+                draft.selected_text,
+                body,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.execute(
+            "
+            update papers
+            set note_count = note_count + 1,
+                updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![draft.paper_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_paper_notes(&draft.paper_id)
+    }
+
     fn open_connection(&self) -> StoreResult<Connection> {
         let conn = Connection::open(&self.db_path).map_err(|error| error.to_string())?;
         conn.execute_batch("pragma foreign_keys = on;")
@@ -319,6 +392,19 @@ impl LibraryStore {
               added_at text not null,
               primary key (vault_id, paper_id),
               foreign key (vault_id) references vaults(id) on delete cascade,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create table if not exists paper_notes (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              start_offset integer not null,
+              end_offset integer not null,
+              selected_text text not null,
+              body text not null,
+              created_at text not null,
+              updated_at text not null,
               foreign key (paper_id) references papers(id) on delete cascade
             );
             ",
@@ -469,6 +555,38 @@ fn read_vault_papers(conn: &Connection) -> StoreResult<Vec<VaultPaper>> {
     collect_rows(rows)
 }
 
+fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperNote>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, start_offset, end_offset,
+                   selected_text, body, created_at, updated_at
+            from paper_notes
+            where paper_id = ?1
+            order by updated_at desc, id desc
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![paper_id], |row| {
+            Ok(PaperNote {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                start_offset: row.get(3)?,
+                end_offset: row.get(4)?,
+                selected_text: row.get(5)?,
+                body: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
 fn collect_rows<T>(
     rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
 ) -> StoreResult<Vec<T>> {
@@ -489,6 +607,15 @@ fn to_json_slice(values: &[&str]) -> StoreResult<String> {
 
 fn from_json(value: &str) -> Vec<String> {
     serde_json::from_str(value).unwrap_or_default()
+}
+
+fn generate_note_id() -> StoreResult<String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+
+    Ok(format!("note_{nanos}"))
 }
 
 fn normalize_vault_path(input: &str) -> StoreResult<String> {
@@ -815,8 +942,27 @@ mod tests {
         }
     }
 
+    fn note_draft(paper_id: &str, body: &str) -> PaperNoteDraft {
+        PaperNoteDraft {
+            paper_id: paper_id.to_string(),
+            source_id: format!("reader-text-v1:{paper_id}"),
+            start_offset: 4,
+            end_offset: 16,
+            selected_text: "selected text".to_string(),
+            body: body.to_string(),
+        }
+    }
+
     fn has_vault(snapshot: &LibrarySnapshot, vault_id: &str) -> bool {
         snapshot.vaults.iter().any(|vault| vault.id == vault_id)
+    }
+
+    fn paper<'a>(snapshot: &'a LibrarySnapshot, paper_id: &str) -> &'a Paper {
+        snapshot
+            .papers
+            .iter()
+            .find(|paper| paper.id == paper_id)
+            .expect("paper should exist")
     }
 
     fn has_paper(snapshot: &LibrarySnapshot, paper_id: &str) -> bool {
@@ -1018,6 +1164,82 @@ mod tests {
         assert!(!has_vault(&snapshot, "unique"));
         assert!(!has_paper(&snapshot, "unique-vault-paper"));
         assert!(has_paper(&snapshot, "vaswani2017"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_paper_note_persists_note_and_increments_note_count() -> StoreResult<()> {
+        let db = test_db()?;
+        let before = db.store.get_library()?;
+        let initial_note_count = paper(&before, "vaswani2017").note_count;
+        let notes = db
+            .store
+            .create_paper_note(&note_draft("vaswani2017", "This is worth revisiting."))?;
+        let after = db.store.get_library()?;
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].paper_id, "vaswani2017");
+        assert_eq!(notes[0].source_id, "reader-text-v1:vaswani2017");
+        assert_eq!(notes[0].start_offset, 4);
+        assert_eq!(notes[0].end_offset, 16);
+        assert_eq!(notes[0].selected_text, "selected text");
+        assert_eq!(notes[0].body, "This is worth revisiting.");
+        assert_eq!(
+            paper(&after, "vaswani2017").note_count,
+            initial_note_count + 1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn get_paper_notes_returns_newest_notes_first() -> StoreResult<()> {
+        let db = test_db()?;
+
+        db.store
+            .create_paper_note(&note_draft("vaswani2017", "First note"))?;
+        let notes = db
+            .store
+            .create_paper_note(&note_draft("vaswani2017", "Second note"))?;
+
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].body, "Second note");
+        assert_eq!(notes[1].body, "First note");
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_paper_note_rejects_empty_body_and_invalid_offsets() -> StoreResult<()> {
+        let db = test_db()?;
+        let empty_body_error = db
+            .store
+            .create_paper_note(&note_draft("vaswani2017", "   "))
+            .expect_err("empty note body should fail");
+        let mut invalid_offsets = note_draft("vaswani2017", "Body");
+        invalid_offsets.end_offset = invalid_offsets.start_offset;
+        let offset_error = db
+            .store
+            .create_paper_note(&invalid_offsets)
+            .expect_err("empty offset range should fail");
+
+        assert_eq!(empty_body_error, "Note body cannot be empty");
+        assert_eq!(offset_error, "Note offsets must define a non-empty range");
+
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_paper_deletes_its_notes() -> StoreResult<()> {
+        let db = test_db()?;
+
+        db.store
+            .create_paper_note(&note_draft("caron2021", "Remove with paper"))?;
+        db.store.delete_paper_globally("caron2021")?;
+        let notes = db.store.get_paper_notes("caron2021")?;
+
+        assert!(notes.is_empty());
 
         Ok(())
     }

@@ -32,6 +32,27 @@ export type PaperDraft = {
   abstract?: string;
 };
 
+export type PaperNote = {
+  id: string;
+  paperId: string;
+  sourceId: string;
+  startOffset: number;
+  endOffset: number;
+  selectedText: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PaperNoteDraft = {
+  paperId: string;
+  sourceId: string;
+  startOffset: number;
+  endOffset: number;
+  selectedText: string;
+  body: string;
+};
+
 export type LibrarySnapshot = {
   vaults: Vault[];
   papers: Paper[];

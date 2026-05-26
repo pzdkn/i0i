@@ -167,8 +167,21 @@ export function isCandidateInVault(candidateId: string) {
   return library.vaults.some((workspace) => workspace.papers.some((paper) => paper.id === candidateId));
 }
 
+export function isPaperInLibrary(paperId: string) {
+  return library.vaults.some((workspace) => workspace.papers.some((paper) => paper.id === paperId));
+}
+
 export function getCandidateVaultTargets(candidateId: string) {
   return library.vaults.filter((workspace) => workspace.papers.some((paper) => paper.id === candidateId));
+}
+
+export function incrementPaperNoteCount(paperId: string) {
+  for (const workspace of library.vaults) {
+    const paper = workspace.papers.find((item) => item.id === paperId);
+    if (paper) {
+      paper.noteCount += 1;
+    }
+  }
 }
 
 export function paperFromDiscoverCandidate(candidateId: string) {

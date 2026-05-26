@@ -1,12 +1,14 @@
 <script lang="ts">
+  import { createPaperNote, getPaperNotes } from "$lib/bridge/library";
+  import type { PaperNote } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
-  import type { ReaderMode } from "$lib/domain/reader";
+  import type { ReaderMode, ReaderTextSelection } from "$lib/domain/reader";
   import { createReaderDocument } from "$lib/mock/reader";
   import ReaderFooter from "$lib/features/reader/ReaderFooter.svelte";
   import ReaderHeader from "$lib/features/reader/ReaderHeader.svelte";
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
-  import ReaderMargin from "$lib/features/reader/ReaderMargin.svelte";
   import TextPage from "$lib/features/reader/TextPage.svelte";
+  import { incrementPaperNoteCount, isPaperInLibrary } from "$lib/state/library-cache.svelte";
 
   let {
     paper,
@@ -15,7 +17,70 @@
   } = $props();
 
   let mode = $state<ReaderMode>("TEXT");
+  let notes = $state<PaperNote[]>([]);
+  let noteDraft = $state<ReaderTextSelection | null>(null);
+  let noteError = $state("");
+  let isLoadingNotes = $state(false);
   const document = $derived(createReaderDocument(paper));
+  const notesEnabled = $derived(isPaperInLibrary(paper.id));
+
+  $effect(() => {
+    const paperId = paper.id;
+    noteDraft = null;
+    noteError = "";
+
+    if (!notesEnabled) {
+      notes = [];
+      isLoadingNotes = false;
+      return;
+    }
+
+    isLoadingNotes = true;
+    getPaperNotes(paperId)
+      .then((nextNotes) => {
+        if (paper.id === paperId) {
+          notes = nextNotes;
+        }
+      })
+      .catch((error) => {
+        if (paper.id === paperId) {
+          noteError = String(error);
+          notes = [];
+        }
+      })
+      .finally(() => {
+        if (paper.id === paperId) {
+          isLoadingNotes = false;
+        }
+      });
+  });
+
+  function createNoteDraft(selection: ReaderTextSelection) {
+    noteDraft = selection;
+    noteError = "";
+  }
+
+  async function saveNote(body: string) {
+    if (!noteDraft || !notesEnabled) {
+      return;
+    }
+
+    try {
+      notes = await createPaperNote({
+        paperId: paper.id,
+        sourceId: noteDraft.sourceId,
+        startOffset: noteDraft.startOffset,
+        endOffset: noteDraft.endOffset,
+        selectedText: noteDraft.selectedText,
+        body,
+      });
+      noteDraft = null;
+      noteError = "";
+      incrementPaperNoteCount(paper.id);
+    } catch (error) {
+      noteError = String(error);
+    }
+  }
 </script>
 
 <section class="reader-workspace col">
@@ -25,15 +90,14 @@
 
       <div class="reading-surface row">
         <div class="page-wrap">
-          <TextPage {document} />
+          <TextPage {document} {notesEnabled} onCreateNoteFromSelection={createNoteDraft} />
         </div>
-        <ReaderMargin {document} />
       </div>
 
       <ReaderFooter {mode} />
     </main>
 
-    <ReaderInspector {document} />
+    <ReaderInspector {document} {notes} {noteDraft} {notesEnabled} {noteError} {isLoadingNotes} onSaveNote={saveNote} />
   </div>
 </section>
 

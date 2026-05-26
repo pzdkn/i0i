@@ -7,6 +7,21 @@ export type ReaderParagraph = {
   highlight?: "soft" | "strong";
 };
 
+export type ReaderTextBlock = {
+  id: string;
+  kind: "title" | "authors" | "heading" | "paragraph";
+  text: string;
+  sourceStart: number;
+  highlight?: "soft" | "strong";
+};
+
+export type ReaderTextSelection = {
+  sourceId: string;
+  startOffset: number;
+  endOffset: number;
+  selectedText: string;
+};
+
 export type ReaderMark = {
   id: string;
   paragraphId: string;
@@ -17,6 +32,8 @@ export type ReaderMark = {
 
 export type ReaderDocument = {
   paperId: string;
+  sourceId: string;
+  sourceText: string;
   title: string;
   authors: string[];
   venue: string;
@@ -24,6 +41,7 @@ export type ReaderDocument = {
   identifier: string;
   citationKey: string;
   tags: string[];
+  textBlocks: ReaderTextBlock[];
   paragraphs: ReaderParagraph[];
   marks: ReaderMark[];
 };

@@ -1,7 +1,68 @@
 <script lang="ts">
-  import type { ReaderDocument } from "$lib/domain/reader";
+  import type { PaperNote } from "$lib/domain/library";
+  import type { ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
 
-  let { document }: { document: ReaderDocument } = $props();
+  type InspectorTab = "notes" | "lineage" | "ask" | "meta";
+
+  let {
+    document,
+    notes,
+    noteDraft,
+    notesEnabled,
+    noteError,
+    isLoadingNotes,
+    onSaveNote,
+  }: {
+    document: ReaderDocument;
+    notes: PaperNote[];
+    noteDraft: ReaderTextSelection | null;
+    notesEnabled: boolean;
+    noteError: string;
+    isLoadingNotes: boolean;
+    onSaveNote: (body: string) => Promise<void>;
+  } = $props();
+
+  let noteBody = $state("");
+  let isSaving = $state(false);
+  let activeTab = $state<InspectorTab>("notes");
+  const canSave = $derived(Boolean(noteDraft && noteBody.trim() && !isSaving));
+
+  $effect(() => {
+    if (noteDraft) {
+      activeTab = "notes";
+    }
+
+    noteBody = "";
+  });
+
+  async function saveNote() {
+    if (!canSave) {
+      return;
+    }
+
+    isSaving = true;
+    try {
+      await onSaveNote(noteBody);
+    } finally {
+      isSaving = false;
+    }
+  }
+
+  function handleNoteKeydown(event: KeyboardEvent) {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+
+    event.preventDefault();
+    void saveNote();
+  }
+
+  const tabs: Array<{ id: InspectorTab; label: string }> = [
+    { id: "notes", label: "Notes" },
+    { id: "lineage", label: "Lineage" },
+    { id: "ask", label: "Ask" },
+    { id: "meta", label: "Meta" },
+  ];
 </script>
 
 <aside class="reader-inspector hair-l">
@@ -10,54 +71,118 @@
     <div class="mono-dim">paper / selected / reader</div>
   </header>
 
-  <section>
-    <div class="row section-title">
-      <span class="label hot">Lineage</span>
-      <div class="flex1"></div>
-      <span class="mono-dim">3 &lt;- / -&gt; 5</span>
-    </div>
+  <nav class="inspector-tabs row hair-b" aria-label="Reader Inspector">
+    {#each tabs as tab}
+      <button class:active={activeTab === tab.id} type="button" onclick={() => (activeTab = tab.id)}>
+        {tab.label}
+      </button>
+    {/each}
+  </nav>
 
-    <div class="lineage">
-      <div class="label">Cites</div>
-      <p><span>●</span> Bahdanau 2014 <em>soft alignment seed</em></p>
-      <p><span>○</span> Luong 2015 <em>dot-product variant</em></p>
-      <p><span>○</span> Cheng 2016 <em>intra-attention</em></p>
+  <div class="tab-panel">
+    {#if activeTab === "notes"}
+      <section>
+        <div class="row section-title">
+          <span class="label hot">Notes</span>
+          <div class="flex1"></div>
+          <span class="mono-dim">{notes.length}</span>
+        </div>
 
-      <div class="label cited">Cited by</div>
-      <p><span>●</span> Devlin 2019 <em>BERT</em></p>
-      <p><span>●</span> Dosovitskiy 2021 <em>ViT</em></p>
-      <p><span>○</span> Touvron 2023 <em>LLaMA</em></p>
-    </div>
+        {#if notesEnabled}
+          {#if noteDraft}
+            <div class="note-draft">
+              <div class="label">Selected quote</div>
+              <blockquote>{noteDraft.selectedText}</blockquote>
+              <textarea
+                bind:value={noteBody}
+                aria-label="Note body"
+                placeholder="Write a note..."
+                rows="5"
+                onkeydown={handleNoteKeydown}
+              ></textarea>
+              <div class="row note-actions">
+                <button class="btn primary" type="button" disabled={!canSave} onclick={() => void saveNote()}>
+                  {isSaving ? "Saving" : "Save"}
+                </button>
+              </div>
+            </div>
+          {:else}
+            <p class="empty-note">Select text in the Reader to add a note.</p>
+          {/if}
 
-    <button class="btn ghost wide" type="button">Open graph</button>
-  </section>
+          {#if noteError}
+            <p class="note-error">{noteError}</p>
+          {/if}
 
-  <section>
-    <div class="label hot">Ask this paper</div>
-    <div class="ask-box">
-      <div class="label">You</div>
-      <p>Explain scaled dot-product attention vs additive attention.</p>
-      <div class="answer">
-        i0i will cite paragraph anchors here. For now this is a static Reader mock.
-      </div>
-      <div class="row ask-actions">
-        <button class="btn primary" type="button">Run</button>
-        <button class="btn ghost" type="button">Follow-up</button>
-      </div>
-    </div>
-  </section>
+          <div class="saved-notes">
+            <div class="label">Saved notes</div>
+            {#if isLoadingNotes}
+              <p class="empty-note">Loading notes...</p>
+            {:else if notes.length}
+              {#each notes as note}
+                <article class="saved-note">
+                  <blockquote>{note.selectedText}</blockquote>
+                  <p>{note.body}</p>
+                  <div class="mono-dim">{note.updatedAt}</div>
+                </article>
+              {/each}
+            {:else}
+              <p class="empty-note">No saved notes yet.</p>
+            {/if}
+          </div>
+        {:else}
+          <p class="empty-note">Add this paper to a Vault before saving notes.</p>
+        {/if}
+      </section>
+    {:else if activeTab === "lineage"}
+      <section>
+        <div class="row section-title">
+          <span class="label hot">Lineage</span>
+          <div class="flex1"></div>
+          <span class="mono-dim">3 &lt;- / -&gt; 5</span>
+        </div>
 
-  <div class="flex1"></div>
+        <div class="lineage">
+          <div class="label">Cites</div>
+          <p><span>●</span> Bahdanau 2014 <em>soft alignment seed</em></p>
+          <p><span>○</span> Luong 2015 <em>dot-product variant</em></p>
+          <p><span>○</span> Cheng 2016 <em>intra-attention</em></p>
 
-  <section class="metadata hair-t">
-    <div class="label">Metadata</div>
-    <div class="meta-grid">
-      <span>id</span><strong>{document.identifier}</strong>
-      <span>venue</span><strong>{document.venue} {document.year}</strong>
-      <span>cite</span><strong>{document.citationKey}</strong>
-      <span>marks</span><strong>{document.marks.length}</strong>
-    </div>
-  </section>
+          <div class="label cited">Cited by</div>
+          <p><span>●</span> Devlin 2019 <em>BERT</em></p>
+          <p><span>●</span> Dosovitskiy 2021 <em>ViT</em></p>
+          <p><span>○</span> Touvron 2023 <em>LLaMA</em></p>
+        </div>
+
+        <button class="btn ghost wide" type="button">Open graph</button>
+      </section>
+    {:else if activeTab === "ask"}
+      <section>
+        <div class="label hot">Ask this paper</div>
+        <div class="ask-box">
+          <div class="label">You</div>
+          <p>Explain scaled dot-product attention vs additive attention.</p>
+          <div class="answer">
+            i0i will cite paragraph anchors here. For now this is a static Reader mock.
+          </div>
+          <div class="row ask-actions">
+            <button class="btn primary" type="button">Run</button>
+            <button class="btn ghost" type="button">Follow-up</button>
+          </div>
+        </div>
+      </section>
+    {:else}
+      <section class="metadata">
+        <div class="label hot">Metadata</div>
+        <div class="meta-grid">
+          <span>id</span><strong>{document.identifier}</strong>
+          <span>venue</span><strong>{document.venue} {document.year}</strong>
+          <span>cite</span><strong>{document.citationKey}</strong>
+          <span>marks</span><strong>{document.marks.length}</strong>
+        </div>
+      </section>
+    {/if}
+  </div>
 </aside>
 
 <style>
@@ -81,6 +206,44 @@
     margin-bottom: 2px;
     color: var(--amber);
     font-size: 11px;
+  }
+
+  .inspector-tabs {
+    height: 30px;
+    flex-shrink: 0;
+    background: var(--bg);
+  }
+
+  .inspector-tabs button {
+    flex: 1;
+    border: 0;
+    border-right: 1px solid var(--border);
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--fg-3);
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .inspector-tabs button:last-child {
+    border-right: 0;
+  }
+
+  .inspector-tabs button:hover {
+    color: var(--fg-1);
+  }
+
+  .inspector-tabs button.active {
+    border-bottom-color: var(--amber);
+    background: rgba(242, 169, 59, 0.06);
+    color: var(--amber);
+  }
+
+  .tab-panel {
+    min-height: 0;
+    flex: 1;
+    overflow: auto;
   }
 
   section {
@@ -121,6 +284,80 @@
     margin-top: 8px;
   }
 
+  .note-draft {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--border-2);
+    background: rgba(107, 160, 168, 0.04);
+  }
+
+  blockquote {
+    margin: 6px 0;
+    padding: 0 0 0 8px;
+    border-left: 2px solid var(--amber-mid);
+    color: var(--fg-2);
+    font-size: 10.5px;
+    line-height: 1.45;
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 86px;
+    resize: vertical;
+    padding: 7px;
+    border: 1px solid var(--border-2);
+    outline: none;
+    background: var(--bg);
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  textarea:focus {
+    border-color: var(--cyan);
+  }
+
+  .note-actions {
+    justify-content: flex-end;
+    margin-top: 8px;
+  }
+
+  button:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+
+  .saved-notes {
+    margin-top: 10px;
+  }
+
+  .saved-note {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.015);
+  }
+
+  .saved-note p {
+    margin: 6px 0;
+    color: var(--fg-1);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .empty-note,
+  .note-error {
+    margin: 8px 0 0;
+    color: var(--fg-3);
+    font-size: 10.5px;
+    line-height: 1.45;
+  }
+
+  .note-error {
+    color: var(--red);
+  }
+
   .ask-box {
     margin-top: 8px;
     padding: 8px;
@@ -148,8 +385,7 @@
   }
 
   .metadata {
-    padding: 10px 14px;
-    background: var(--bg-1);
+    padding-bottom: 14px;
   }
 
   .meta-grid {

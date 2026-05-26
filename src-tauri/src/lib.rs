@@ -24,6 +24,8 @@ pub fn run() {
             commands::library::delete_vault,
             commands::library::remove_paper_from_vault,
             commands::library::delete_paper_globally,
+            commands::library::get_paper_notes,
+            commands::library::create_paper_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

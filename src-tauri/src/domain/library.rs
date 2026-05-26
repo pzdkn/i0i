@@ -55,6 +55,31 @@ pub struct PaperDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PaperNote {
+    pub id: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub start_offset: i64,
+    pub end_offset: i64,
+    pub selected_text: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaperNoteDraft {
+    pub paper_id: String,
+    pub source_id: String,
+    pub start_offset: i64,
+    pub end_offset: i64,
+    pub selected_text: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VaultPaper {
     pub vault_id: String,
     pub paper_id: String,

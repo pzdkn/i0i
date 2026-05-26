@@ -1,4 +1,6 @@
-use crate::domain::library::{LibrarySnapshot, PaperDraft, VaultDraft, VaultRenameDraft};
+use crate::domain::library::{
+    LibrarySnapshot, PaperDraft, PaperNote, PaperNoteDraft, VaultDraft, VaultRenameDraft,
+};
 use crate::storage::library_store::LibraryStore;
 
 #[tauri::command]
@@ -54,4 +56,20 @@ pub fn delete_paper_globally(
     paper_id: String,
 ) -> Result<LibrarySnapshot, String> {
     store.delete_paper_globally(&paper_id)
+}
+
+#[tauri::command]
+pub fn get_paper_notes(
+    store: tauri::State<'_, LibraryStore>,
+    paper_id: String,
+) -> Result<Vec<PaperNote>, String> {
+    store.get_paper_notes(&paper_id)
+}
+
+#[tauri::command]
+pub fn create_paper_note(
+    store: tauri::State<'_, LibraryStore>,
+    draft: PaperNoteDraft,
+) -> Result<Vec<PaperNote>, String> {
+    store.create_paper_note(&draft)
 }

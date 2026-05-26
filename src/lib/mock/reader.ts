@@ -1,5 +1,5 @@
 import type { Paper } from "$lib/domain/paper";
-import type { ReaderDocument, ReaderMark, ReaderParagraph } from "$lib/domain/reader";
+import type { ReaderDocument, ReaderMark, ReaderParagraph, ReaderTextBlock } from "$lib/domain/reader";
 
 const sharedParagraphs: ReaderParagraph[] = [
   {
@@ -81,9 +81,47 @@ const sharedMarks: ReaderMark[] = [
   },
 ];
 
+function withSourceOffsets(blocks: Array<Omit<ReaderTextBlock, "sourceStart">>) {
+  let cursor = 0;
+
+  return blocks.map((block, index) => {
+    const sourceStart = cursor;
+    cursor += block.text.length;
+    if (index < blocks.length - 1) {
+      cursor += 2;
+    }
+
+    return {
+      ...block,
+      sourceStart,
+    };
+  });
+}
+
 export function createReaderDocument(paper: Paper): ReaderDocument {
+  const textBlocks = withSourceOffsets([
+    {
+      id: "title",
+      kind: "title",
+      text: paper.title,
+    },
+    {
+      id: "authors",
+      kind: "authors",
+      text: paper.authors.join(" / "),
+    },
+    ...sharedParagraphs.map((paragraph) => ({
+      id: paragraph.id,
+      kind: paragraph.kind,
+      text: paragraph.text,
+      highlight: paragraph.highlight,
+    })),
+  ]);
+
   return {
     paperId: paper.id,
+    sourceId: `reader-text-v1:${paper.id}`,
+    sourceText: textBlocks.map((block) => block.text).join("\n\n"),
     title: paper.title,
     authors: paper.authors,
     venue: paper.venue,
@@ -91,6 +129,7 @@ export function createReaderDocument(paper: Paper): ReaderDocument {
     identifier: paper.id === "vaswani2017" ? "arXiv:1706.03762" : `mock:${paper.id}`,
     citationKey: paper.id,
     tags: paper.tags,
+    textBlocks,
     paragraphs: sharedParagraphs,
     marks: sharedMarks,
   };
