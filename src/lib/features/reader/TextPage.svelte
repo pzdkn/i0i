@@ -1,18 +1,50 @@
 <script lang="ts">
+  import { tick } from "svelte";
+  import type { PaperNote } from "$lib/domain/library";
   import type { ReaderDocument, ReaderTextBlock, ReaderTextSelection } from "$lib/domain/reader";
+
+  type TextSegment = {
+    text: string;
+    noteId?: string;
+    active?: boolean;
+  };
 
   let {
     document,
+    notes,
+    activeNoteId,
     notesEnabled,
     onCreateNoteFromSelection,
   }: {
     document: ReaderDocument;
+    notes: PaperNote[];
+    activeNoteId: string | null;
     notesEnabled: boolean;
     onCreateNoteFromSelection: (selection: ReaderTextSelection) => void;
   } = $props();
 
   let pageElement = $state<HTMLElement | null>(null);
   let commentButton = $state<(ReaderTextSelection & { x: number; y: number }) | null>(null);
+  const visibleAnchors = $derived(noteAnchors(notes, document));
+
+  $effect(() => {
+    const noteId = activeNoteId;
+    const root = pageElement;
+    if (!noteId || !root) {
+      return;
+    }
+
+    tick().then(() => {
+      const noteElement = [...root.querySelectorAll<HTMLElement>("[data-note-id]")].find(
+        (element) => element.dataset.noteId === noteId,
+      );
+
+      noteElement?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    });
+  });
 
   function paragraphNumber(id: string) {
     return id.startsWith("p") ? id.replace("p", "") : "";
@@ -20,6 +52,63 @@
 
   function blockEnd(block: ReaderTextBlock) {
     return block.sourceStart + block.text.length;
+  }
+
+  function noteAnchors(currentNotes: PaperNote[], currentDocument: ReaderDocument) {
+    const anchors: PaperNote[] = [];
+    let lastEnd = -1;
+
+    for (const note of currentNotes
+      .filter((item) => item.sourceId === currentDocument.sourceId)
+      .filter((item) => item.startOffset >= 0 && item.endOffset > item.startOffset)
+      .filter((item) => item.endOffset <= currentDocument.sourceText.length)
+      .sort((left, right) => left.startOffset - right.startOffset || left.endOffset - right.endOffset)) {
+      if (note.startOffset < lastEnd) {
+        continue;
+      }
+
+      anchors.push(note);
+      lastEnd = note.endOffset;
+    }
+
+    return anchors;
+  }
+
+  function segmentsForBlock(block: ReaderTextBlock): TextSegment[] {
+    const start = block.sourceStart;
+    const end = blockEnd(block);
+    const segments: TextSegment[] = [];
+    let cursor = start;
+
+    for (const note of visibleAnchors) {
+      const segmentStart = Math.max(note.startOffset, start);
+      const segmentEnd = Math.min(note.endOffset, end);
+
+      if (segmentStart >= segmentEnd) {
+        continue;
+      }
+
+      if (segmentStart > cursor) {
+        segments.push({
+          text: block.text.slice(cursor - start, segmentStart - start),
+        });
+      }
+
+      segments.push({
+        text: block.text.slice(segmentStart - start, segmentEnd - start),
+        noteId: note.id,
+        active: note.id === activeNoteId,
+      });
+      cursor = segmentEnd;
+    }
+
+    if (cursor < end) {
+      segments.push({
+        text: block.text.slice(cursor - start),
+      });
+    }
+
+    return segments.length ? segments : [{ text: block.text }];
   }
 
   function blockClass(block: ReaderTextBlock) {
@@ -45,8 +134,9 @@
   }
 
   function localTextOffset(block: HTMLElement, container: Node, offset: number) {
+    const sourceElement = block.querySelector<HTMLElement>("[data-source-text]") ?? block;
     const range = window.document.createRange();
-    range.selectNodeContents(block);
+    range.selectNodeContents(sourceElement);
 
     try {
       range.setEnd(container, offset);
@@ -120,20 +210,53 @@
     commentButton = null;
     window.getSelection()?.removeAllRanges();
   }
+
 </script>
 
 <svelte:document onselectionchange={updateSelectionAffordance} />
+
+{#snippet textSegment(segment: TextSegment)}
+  {#if segment.noteId}
+    <mark
+      class="note-anchor"
+      class:active={segment.active}
+      data-note-id={segment.noteId}
+    >
+      {segment.text}
+    </mark>
+  {:else}
+    {segment.text}
+  {/if}
+{/snippet}
 
 <article bind:this={pageElement} class="paper-page">
   <div class="page-kicker">Extracted text / {document.identifier} / p.1-2</div>
 
   {#each document.textBlocks as block}
     {#if block.kind === "title"}
-      <h2 data-source-start={block.sourceStart} data-source-end={blockEnd(block)}>{block.text}</h2>
+      <h2 data-source-start={block.sourceStart} data-source-end={blockEnd(block)}>
+        <span data-source-text>
+          {#each segmentsForBlock(block) as segment}
+            {@render textSegment(segment)}
+          {/each}
+        </span>
+      </h2>
     {:else if block.kind === "authors"}
-      <p class="paper-authors" data-source-start={block.sourceStart} data-source-end={blockEnd(block)}>{block.text}</p>
+      <p class="paper-authors" data-source-start={block.sourceStart} data-source-end={blockEnd(block)}>
+        <span data-source-text>
+          {#each segmentsForBlock(block) as segment}
+            {@render textSegment(segment)}
+          {/each}
+        </span>
+      </p>
     {:else if block.kind === "heading"}
-      <h3 data-source-start={block.sourceStart} data-source-end={blockEnd(block)}>{block.text}</h3>
+      <h3 data-source-start={block.sourceStart} data-source-end={blockEnd(block)}>
+        <span data-source-text>
+          {#each segmentsForBlock(block) as segment}
+            {@render textSegment(segment)}
+          {/each}
+        </span>
+      </h3>
     {:else}
       <p
         class:soft={blockClass(block).soft}
@@ -142,7 +265,11 @@
         data-source-end={blockEnd(block)}
       >
         <span class="paragraph-number">¶{paragraphNumber(block.id)}</span>
-        {block.text}
+        <span data-source-text>
+          {#each segmentsForBlock(block) as segment}
+            {@render textSegment(segment)}
+          {/each}
+        </span>
       </p>
     {/if}
   {/each}
@@ -237,6 +364,24 @@
     color: #7a5a30;
     font-size: 8px;
     user-select: none;
+  }
+
+  .note-anchor {
+    display: inline;
+    padding: 0;
+    border-bottom: 1px solid rgba(166, 110, 37, 0.85);
+    border-top: 0;
+    border-right: 0;
+    border-left: 0;
+    background: rgba(242, 169, 59, 0.28);
+    color: inherit;
+    font: inherit;
+  }
+
+  .note-anchor.active {
+    border-bottom-color: #8a4d12;
+    background: rgba(242, 169, 59, 0.55);
+    box-shadow: 0 0 0 2px rgba(242, 169, 59, 0.18);
   }
 
   p.soft .paragraph-number,

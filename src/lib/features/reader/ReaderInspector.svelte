@@ -7,6 +7,7 @@
   let {
     document,
     notes,
+    activeNoteId,
     noteDraft,
     notesEnabled,
     noteError,
@@ -14,9 +15,11 @@
     onSaveNote,
     onDeleteNote,
     onUpdateNote,
+    onActivateNote,
   }: {
     document: ReaderDocument;
     notes: PaperNote[];
+    activeNoteId: string | null;
     noteDraft: ReaderTextSelection | null;
     notesEnabled: boolean;
     noteError: string;
@@ -24,6 +27,7 @@
     onSaveNote: (body: string) => Promise<void>;
     onDeleteNote: (noteId: string) => Promise<void>;
     onUpdateNote: (noteId: string, body: string) => Promise<void>;
+    onActivateNote: (noteId: string) => void;
   } = $props();
 
   let noteBody = $state("");
@@ -183,7 +187,18 @@
               <p class="empty-note">Loading notes...</p>
             {:else if notes.length}
               {#each notes as note}
-                <article class="saved-note">
+                <article
+                  class="saved-note"
+                  class:active={activeNoteId === note.id}
+                >
+                  {#if editingNoteId !== note.id}
+                    <button
+                      class="note-recall"
+                      type="button"
+                      aria-label="show note anchor"
+                      onclick={() => onActivateNote(note.id)}
+                    ></button>
+                  {/if}
                   <div class="row saved-note-head">
                     <blockquote>{note.selectedText}</blockquote>
                     <div class="row note-buttons">
@@ -192,7 +207,10 @@
                         type="button"
                         aria-label="edit note"
                         disabled={Boolean(editingNoteId && editingNoteId !== note.id) || isUpdating}
-                        onclick={() => startEdit(note)}
+                        onclick={(event) => {
+                          event.stopPropagation();
+                          startEdit(note);
+                        }}
                       >
                         ✎
                       </button>
@@ -201,7 +219,10 @@
                         type="button"
                         aria-label="remove note"
                         disabled={deletingNoteId === note.id || isUpdating}
-                        onclick={() => void deleteNote(note.id)}
+                        onclick={(event) => {
+                          event.stopPropagation();
+                          void deleteNote(note.id);
+                        }}
                       >
                         -
                       </button>
@@ -212,6 +233,7 @@
                       bind:value={editBody}
                       aria-label="Edit note body"
                       rows="4"
+                      onclick={(event) => event.stopPropagation()}
                       onkeydown={handleEditKeydown}
                     ></textarea>
                     <div class="row note-actions">
@@ -432,15 +454,34 @@
   }
 
   .saved-note {
+    position: relative;
     margin-top: 8px;
     padding: 8px;
     border: 1px solid var(--border);
     background: rgba(255, 255, 255, 0.015);
+    cursor: pointer;
+  }
+
+  .saved-note.active {
+    border-color: var(--amber-dim);
+    background: rgba(242, 169, 59, 0.055);
+  }
+
+  .note-recall {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
   }
 
   .saved-note-head {
+    position: relative;
+    z-index: 1;
     align-items: flex-start;
     gap: 8px;
+    pointer-events: none;
   }
 
   .saved-note-head blockquote {
@@ -451,6 +492,7 @@
   .note-buttons {
     gap: 4px;
     align-items: flex-start;
+    pointer-events: auto;
   }
 
   .note-icon {
@@ -479,10 +521,25 @@
   }
 
   .saved-note p {
+    position: relative;
+    z-index: 1;
     margin: 6px 0;
     color: var(--fg-1);
     font-size: 11px;
     line-height: 1.45;
+    pointer-events: none;
+  }
+
+  .saved-note textarea,
+  .saved-note .note-actions {
+    position: relative;
+    z-index: 1;
+  }
+
+  .saved-note .mono-dim {
+    position: relative;
+    z-index: 1;
+    pointer-events: none;
   }
 
   .empty-note,

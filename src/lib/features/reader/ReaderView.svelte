@@ -21,6 +21,7 @@
   let noteDraft = $state<ReaderTextSelection | null>(null);
   let noteError = $state("");
   let isLoadingNotes = $state(false);
+  let activeNoteId = $state<string | null>(null);
   const document = $derived(createReaderDocument(paper));
   const notesEnabled = $derived(isPaperInLibrary(paper.id));
 
@@ -28,6 +29,7 @@
     const paperId = paper.id;
     noteDraft = null;
     noteError = "";
+    activeNoteId = null;
 
     if (!notesEnabled) {
       notes = [];
@@ -66,7 +68,7 @@
     }
 
     try {
-      notes = await createPaperNote({
+      const nextNotes = await createPaperNote({
         paperId: paper.id,
         sourceId: noteDraft.sourceId,
         startOffset: noteDraft.startOffset,
@@ -74,6 +76,8 @@
         selectedText: noteDraft.selectedText,
         body,
       });
+      notes = nextNotes;
+      activeNoteId = nextNotes[0]?.id ?? null;
       noteDraft = null;
       noteError = "";
       incrementPaperNoteCount(paper.id);
@@ -93,6 +97,9 @@
 
       notes = nextNotes;
       noteError = "";
+      if (!nextNotes.some((note) => note.id === activeNoteId)) {
+        activeNoteId = null;
+      }
       if (nextNotes.length < previousNoteCount) {
         decrementPaperNoteCount(paper.id);
       }
@@ -108,11 +115,16 @@
 
     try {
       notes = await updatePaperNote({ paperId: paper.id, noteId, body });
+      activeNoteId = noteId;
       noteError = "";
     } catch (error) {
       noteError = String(error);
       throw error;
     }
+  }
+
+  function activateNote(noteId: string) {
+    activeNoteId = noteId;
   }
 </script>
 
@@ -123,7 +135,13 @@
 
       <div class="reading-surface row">
         <div class="page-wrap">
-          <TextPage {document} {notesEnabled} onCreateNoteFromSelection={createNoteDraft} />
+          <TextPage
+            {document}
+            {notes}
+            {activeNoteId}
+            {notesEnabled}
+            onCreateNoteFromSelection={createNoteDraft}
+          />
         </div>
       </div>
 
@@ -133,6 +151,7 @@
     <ReaderInspector
       {document}
       {notes}
+      {activeNoteId}
       {noteDraft}
       {notesEnabled}
       {noteError}
@@ -140,6 +159,7 @@
       onSaveNote={saveNote}
       onDeleteNote={removeNote}
       onUpdateNote={updateNote}
+      onActivateNote={activateNote}
     />
   </div>
 </section>
