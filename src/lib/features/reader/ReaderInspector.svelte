@@ -13,6 +13,7 @@
     isLoadingNotes,
     onSaveNote,
     onDeleteNote,
+    onUpdateNote,
   }: {
     document: ReaderDocument;
     notes: PaperNote[];
@@ -22,13 +23,18 @@
     isLoadingNotes: boolean;
     onSaveNote: (body: string) => Promise<void>;
     onDeleteNote: (noteId: string) => Promise<void>;
+    onUpdateNote: (noteId: string, body: string) => Promise<void>;
   } = $props();
 
   let noteBody = $state("");
   let isSaving = $state(false);
   let deletingNoteId = $state<string | null>(null);
+  let editingNoteId = $state<string | null>(null);
+  let editBody = $state("");
+  let isUpdating = $state(false);
   let activeTab = $state<InspectorTab>("notes");
   const canSave = $derived(Boolean(noteDraft && noteBody.trim() && !isSaving));
+  const canUpdate = $derived(Boolean(editingNoteId && editBody.trim() && !isUpdating));
 
   $effect(() => {
     if (noteDraft) {
@@ -71,6 +77,47 @@
     } finally {
       deletingNoteId = null;
     }
+  }
+
+  function startEdit(note: PaperNote) {
+    editingNoteId = note.id;
+    editBody = note.body;
+  }
+
+  function cancelEdit() {
+    editingNoteId = null;
+    editBody = "";
+  }
+
+  async function updateNote() {
+    if (!editingNoteId || !canUpdate) {
+      return;
+    }
+
+    isUpdating = true;
+    try {
+      await onUpdateNote(editingNoteId, editBody);
+      cancelEdit();
+    } catch {
+      // ReaderView owns the visible error message; keep the draft open.
+    } finally {
+      isUpdating = false;
+    }
+  }
+
+  function handleEditKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelEdit();
+      return;
+    }
+
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+
+    event.preventDefault();
+    void updateNote();
   }
 
   const tabs: Array<{ id: InspectorTab; label: string }> = [
@@ -139,17 +186,42 @@
                 <article class="saved-note">
                   <div class="row saved-note-head">
                     <blockquote>{note.selectedText}</blockquote>
-                    <button
-                      class="note-remove"
-                      type="button"
-                      aria-label="remove note"
-                      disabled={deletingNoteId === note.id}
-                      onclick={() => void deleteNote(note.id)}
-                    >
-                      -
-                    </button>
+                    <div class="row note-buttons">
+                      <button
+                        class="note-icon"
+                        type="button"
+                        aria-label="edit note"
+                        disabled={Boolean(editingNoteId && editingNoteId !== note.id) || isUpdating}
+                        onclick={() => startEdit(note)}
+                      >
+                        ✎
+                      </button>
+                      <button
+                        class="note-icon remove"
+                        type="button"
+                        aria-label="remove note"
+                        disabled={deletingNoteId === note.id || isUpdating}
+                        onclick={() => void deleteNote(note.id)}
+                      >
+                        -
+                      </button>
+                    </div>
                   </div>
-                  <p>{note.body}</p>
+                  {#if editingNoteId === note.id}
+                    <textarea
+                      bind:value={editBody}
+                      aria-label="Edit note body"
+                      rows="4"
+                      onkeydown={handleEditKeydown}
+                    ></textarea>
+                    <div class="row note-actions">
+                      <button class="btn primary" type="button" disabled={!canUpdate} onclick={() => void updateNote()}>
+                        {isUpdating ? "Saving" : "Save"}
+                      </button>
+                    </div>
+                  {:else}
+                    <p>{note.body}</p>
+                  {/if}
                   <div class="mono-dim">{note.updatedAt}</div>
                 </article>
               {/each}
@@ -376,7 +448,12 @@
     min-width: 0;
   }
 
-  .note-remove {
+  .note-buttons {
+    gap: 4px;
+    align-items: flex-start;
+  }
+
+  .note-icon {
     width: 20px;
     height: 20px;
     flex-shrink: 0;
@@ -389,7 +466,13 @@
     cursor: pointer;
   }
 
-  .note-remove:hover {
+  .note-icon:hover {
+    border-color: var(--border-2);
+    background: rgba(242, 169, 59, 0.08);
+    color: var(--amber);
+  }
+
+  .note-icon.remove:hover {
     border-color: var(--border-2);
     background: rgba(227, 88, 74, 0.08);
     color: var(--red);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createPaperNote, deletePaperNote, getPaperNotes } from "$lib/bridge/library";
+  import { createPaperNote, deletePaperNote, getPaperNotes, updatePaperNote } from "$lib/bridge/library";
   import type { PaperNote } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
   import type { ReaderMode, ReaderTextSelection } from "$lib/domain/reader";
@@ -100,6 +100,20 @@
       noteError = String(error);
     }
   }
+
+  async function updateNote(noteId: string, body: string) {
+    if (!notesEnabled) {
+      return;
+    }
+
+    try {
+      notes = await updatePaperNote({ paperId: paper.id, noteId, body });
+      noteError = "";
+    } catch (error) {
+      noteError = String(error);
+      throw error;
+    }
+  }
 </script>
 
 <section class="reader-workspace col">
@@ -125,6 +139,7 @@
       {isLoadingNotes}
       onSaveNote={saveNote}
       onDeleteNote={removeNote}
+      onUpdateNote={updateNote}
     />
   </div>
 </section>

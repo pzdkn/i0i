@@ -69,3 +69,7 @@ export async function createPaperNote(draft: PaperNoteDraft): Promise<PaperNote[
 export async function deletePaperNote(input: { paperId: string; noteId: string }): Promise<PaperNote[]> {
   return invoke<PaperNote[]>("delete_paper_note", input);
 }
+
+export async function updatePaperNote(input: { paperId: string; noteId: string; body: string }): Promise<PaperNote[]> {
+  return invoke<PaperNote[]>("update_paper_note", input);
+}

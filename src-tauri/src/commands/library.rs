@@ -83,3 +83,14 @@ pub fn delete_paper_note(
     store.delete_paper_note(&note_id)?;
     store.get_paper_notes(&paper_id)
 }
+
+#[tauri::command]
+pub fn update_paper_note(
+    store: tauri::State<'_, LibraryStore>,
+    paper_id: String,
+    note_id: String,
+    body: String,
+) -> Result<Vec<PaperNote>, String> {
+    store.update_paper_note(&note_id, &body)?;
+    store.get_paper_notes(&paper_id)
+}

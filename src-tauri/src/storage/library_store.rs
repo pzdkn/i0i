@@ -379,6 +379,37 @@ impl LibraryStore {
         tx.commit().map_err(|error| error.to_string())
     }
 
+    pub fn update_paper_note(&self, note_id: &str, body: &str) -> StoreResult<()> {
+        let body = body.trim();
+
+        if note_id.trim().is_empty() {
+            return Err("Note id cannot be empty".to_string());
+        }
+
+        if body.is_empty() {
+            return Err("Note body cannot be empty".to_string());
+        }
+
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "
+                update paper_notes
+                set body = ?1,
+                    updated_at = datetime('now')
+                where id = ?2
+                ",
+                params![body, note_id],
+            )
+            .map_err(|error| error.to_string())?;
+
+        if updated == 0 {
+            return Err(format!("Note not found: {note_id}"));
+        }
+
+        Ok(())
+    }
+
     fn open_connection(&self) -> StoreResult<Connection> {
         let conn = Connection::open(&self.db_path).map_err(|error| error.to_string())?;
         conn.execute_batch("pragma foreign_keys = on;")
@@ -1249,6 +1280,52 @@ mod tests {
         let after = db.store.get_library()?;
 
         assert_eq!(paper(&after, "vaswani2017").note_count, initial_note_count);
+
+        Ok(())
+    }
+
+    #[test]
+    fn update_paper_note_changes_body_without_changing_note_count() -> StoreResult<()> {
+        let db = test_db()?;
+        let before = db.store.get_library()?;
+        let initial_note_count = paper(&before, "vaswani2017").note_count;
+        let notes = db
+            .store
+            .create_paper_note(&note_draft("vaswani2017", "Original body"))?;
+
+        db.store
+            .update_paper_note(&notes[0].id, "  Updated body  ")?;
+        let updated_notes = db.store.get_paper_notes("vaswani2017")?;
+        let after = db.store.get_library()?;
+
+        assert_eq!(updated_notes.len(), 1);
+        assert_eq!(updated_notes[0].body, "Updated body");
+        assert_eq!(
+            paper(&after, "vaswani2017").note_count,
+            initial_note_count + 1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn update_paper_note_rejects_empty_body_and_missing_note_id() -> StoreResult<()> {
+        let db = test_db()?;
+        let notes = db
+            .store
+            .create_paper_note(&note_draft("vaswani2017", "Original body"))?;
+
+        let empty_body_error = db
+            .store
+            .update_paper_note(&notes[0].id, "   ")
+            .expect_err("empty note body should fail");
+        let missing_note_error = db
+            .store
+            .update_paper_note("missing-note", "Updated body")
+            .expect_err("missing note should fail");
+
+        assert_eq!(empty_body_error, "Note body cannot be empty");
+        assert_eq!(missing_note_error, "Note not found: missing-note");
 
         Ok(())
     }
