@@ -352,6 +352,33 @@ impl LibraryStore {
         self.get_paper_notes(&draft.paper_id)
     }
 
+    pub fn delete_paper_note(&self, note_id: &str) -> StoreResult<()> {
+        if note_id.trim().is_empty() {
+            return Err("Note id cannot be empty".to_string());
+        }
+
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+
+        tx.execute(
+            "
+            update papers
+            set note_count = max(note_count - 1, 0),
+                updated_at = datetime('now')
+            where id = (
+              select paper_id from paper_notes where id = ?1
+            )
+            ",
+            params![note_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.execute("delete from paper_notes where id = ?1", params![note_id])
+            .map_err(|error| error.to_string())?;
+
+        tx.commit().map_err(|error| error.to_string())
+    }
+
     fn open_connection(&self) -> StoreResult<Connection> {
         let conn = Connection::open(&self.db_path).map_err(|error| error.to_string())?;
         conn.execute_batch("pragma foreign_keys = on;")
@@ -1189,6 +1216,39 @@ mod tests {
             paper(&after, "vaswani2017").note_count,
             initial_note_count + 1
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_paper_note_removes_note_and_decrements_note_count() -> StoreResult<()> {
+        let db = test_db()?;
+        let before = db.store.get_library()?;
+        let initial_note_count = paper(&before, "vaswani2017").note_count;
+        let notes = db
+            .store
+            .create_paper_note(&note_draft("vaswani2017", "Delete this note"))?;
+
+        db.store.delete_paper_note(&notes[0].id)?;
+        let remaining_notes = db.store.get_paper_notes("vaswani2017")?;
+        let after = db.store.get_library()?;
+
+        assert!(remaining_notes.is_empty());
+        assert_eq!(paper(&after, "vaswani2017").note_count, initial_note_count);
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_paper_note_ignores_missing_note_id() -> StoreResult<()> {
+        let db = test_db()?;
+        let before = db.store.get_library()?;
+        let initial_note_count = paper(&before, "vaswani2017").note_count;
+
+        db.store.delete_paper_note("missing-note")?;
+        let after = db.store.get_library()?;
+
+        assert_eq!(paper(&after, "vaswani2017").note_count, initial_note_count);
 
         Ok(())
     }

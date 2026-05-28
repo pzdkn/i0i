@@ -12,6 +12,7 @@
     noteError,
     isLoadingNotes,
     onSaveNote,
+    onDeleteNote,
   }: {
     document: ReaderDocument;
     notes: PaperNote[];
@@ -20,10 +21,12 @@
     noteError: string;
     isLoadingNotes: boolean;
     onSaveNote: (body: string) => Promise<void>;
+    onDeleteNote: (noteId: string) => Promise<void>;
   } = $props();
 
   let noteBody = $state("");
   let isSaving = $state(false);
+  let deletingNoteId = $state<string | null>(null);
   let activeTab = $state<InspectorTab>("notes");
   const canSave = $derived(Boolean(noteDraft && noteBody.trim() && !isSaving));
 
@@ -55,6 +58,19 @@
 
     event.preventDefault();
     void saveNote();
+  }
+
+  async function deleteNote(noteId: string) {
+    if (deletingNoteId) {
+      return;
+    }
+
+    deletingNoteId = noteId;
+    try {
+      await onDeleteNote(noteId);
+    } finally {
+      deletingNoteId = null;
+    }
   }
 
   const tabs: Array<{ id: InspectorTab; label: string }> = [
@@ -121,7 +137,18 @@
             {:else if notes.length}
               {#each notes as note}
                 <article class="saved-note">
-                  <blockquote>{note.selectedText}</blockquote>
+                  <div class="row saved-note-head">
+                    <blockquote>{note.selectedText}</blockquote>
+                    <button
+                      class="note-remove"
+                      type="button"
+                      aria-label="remove note"
+                      disabled={deletingNoteId === note.id}
+                      onclick={() => void deleteNote(note.id)}
+                    >
+                      -
+                    </button>
+                  </div>
                   <p>{note.body}</p>
                   <div class="mono-dim">{note.updatedAt}</div>
                 </article>
@@ -337,6 +364,35 @@
     padding: 8px;
     border: 1px solid var(--border);
     background: rgba(255, 255, 255, 0.015);
+  }
+
+  .saved-note-head {
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .saved-note-head blockquote {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .note-remove {
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--fg-3);
+    font: inherit;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .note-remove:hover {
+    border-color: var(--border-2);
+    background: rgba(227, 88, 74, 0.08);
+    color: var(--red);
   }
 
   .saved-note p {

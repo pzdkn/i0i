@@ -184,6 +184,15 @@ export function incrementPaperNoteCount(paperId: string) {
   }
 }
 
+export function decrementPaperNoteCount(paperId: string) {
+  for (const workspace of library.vaults) {
+    const paper = workspace.papers.find((item) => item.id === paperId);
+    if (paper) {
+      paper.noteCount = Math.max(paper.noteCount - 1, 0);
+    }
+  }
+}
+
 export function paperFromDiscoverCandidate(candidateId: string) {
   return candidateToPaper(candidateId);
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createPaperNote, getPaperNotes } from "$lib/bridge/library";
+  import { createPaperNote, deletePaperNote, getPaperNotes } from "$lib/bridge/library";
   import type { PaperNote } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
   import type { ReaderMode, ReaderTextSelection } from "$lib/domain/reader";
@@ -8,7 +8,7 @@
   import ReaderHeader from "$lib/features/reader/ReaderHeader.svelte";
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
   import TextPage from "$lib/features/reader/TextPage.svelte";
-  import { incrementPaperNoteCount, isPaperInLibrary } from "$lib/state/library-cache.svelte";
+  import { decrementPaperNoteCount, incrementPaperNoteCount, isPaperInLibrary } from "$lib/state/library-cache.svelte";
 
   let {
     paper,
@@ -81,6 +81,25 @@
       noteError = String(error);
     }
   }
+
+  async function removeNote(noteId: string) {
+    if (!notesEnabled) {
+      return;
+    }
+
+    try {
+      const previousNoteCount = notes.length;
+      const nextNotes = await deletePaperNote({ paperId: paper.id, noteId });
+
+      notes = nextNotes;
+      noteError = "";
+      if (nextNotes.length < previousNoteCount) {
+        decrementPaperNoteCount(paper.id);
+      }
+    } catch (error) {
+      noteError = String(error);
+    }
+  }
 </script>
 
 <section class="reader-workspace col">
@@ -97,7 +116,16 @@
       <ReaderFooter {mode} />
     </main>
 
-    <ReaderInspector {document} {notes} {noteDraft} {notesEnabled} {noteError} {isLoadingNotes} onSaveNote={saveNote} />
+    <ReaderInspector
+      {document}
+      {notes}
+      {noteDraft}
+      {notesEnabled}
+      {noteError}
+      {isLoadingNotes}
+      onSaveNote={saveNote}
+      onDeleteNote={removeNote}
+    />
   </div>
 </section>
 
