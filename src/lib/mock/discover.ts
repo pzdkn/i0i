@@ -6,6 +6,14 @@ export const discoverWorkspaces: DiscoverWorkspace[] = [
     id: "ssl-dino",
     title: "Discover: ssl + dino",
     seeds: ["@caron2021", "/self-supervised", "#frontier", "year:>2022"],
+    query: "",
+    yearFrom: "",
+    yearTo: "",
+    resultLimit: 25,
+    sortBy: "relevance",
+    openAccessOnly: true,
+    status: "idle",
+    error: "",
     candidates: [
       {
         id: "darcet2024",

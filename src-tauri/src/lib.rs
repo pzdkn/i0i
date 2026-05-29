@@ -17,6 +17,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::vault::get_vault_status,
+            commands::discovery::search_papers,
             commands::library::get_library,
             commands::library::add_paper_to_vaults,
             commands::library::create_vault,

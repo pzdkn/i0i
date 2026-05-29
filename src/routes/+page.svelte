@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
+  import { searchPapers } from "$lib/bridge/discovery";
   import {
     addPaperToVaults,
     createVault,
@@ -28,8 +29,13 @@
     getVaultWorkspace,
     getVaultWorkspaces,
     hydrateLibrary,
+    applyDiscoverSearchResponse,
+    createDiscoverWorkspace,
+    discoverTitleFromQuery,
     paperDraftFromDiscoverCandidate,
     paperFromDiscoverCandidate,
+    setDiscoverStatus,
+    setDiscoverSelectedCandidate,
   } from "$lib/state/library-cache.svelte";
 
   let vaultStatus = $state<VaultStatus | null>(null);
@@ -50,7 +56,7 @@
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
   const vaultWorkspaces = $derived(getVaultWorkspaces());
-  const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "ssl-dino"));
+  const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "discover-1"));
   const activePaper = $derived(selectedReaderPaper);
   const currentPath = $derived(activeTab?.title ?? "no workspace");
   const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "V");
@@ -105,17 +111,83 @@
     activeTabId = readerTab.id;
   }
 
-  function openDiscover(discoverId = "ssl-dino") {
-    const workspace = getDiscoverWorkspace(discoverId);
-    const discoverTab: WorkspaceTab = {
+  function makeDiscoverTab(workspace: ReturnType<typeof getDiscoverWorkspace>): WorkspaceTab {
+    return {
       id: `discover:${workspace.id}`,
       kind: "discover",
       title: workspace.title,
       discoverId: workspace.id,
     };
+  }
+
+  function openDiscover(discoverId?: string) {
+    if (!discoverId) {
+      const existingDiscoverTab = tabs.find((tab) => tab.kind === "discover");
+      if (existingDiscoverTab) {
+        activeTabId = existingDiscoverTab.id;
+        return;
+      }
+    }
+
+    const workspace = getDiscoverWorkspace(discoverId ?? "discover-1");
+    const discoverTab = makeDiscoverTab(workspace);
 
     tabs = [...tabs.filter((tab) => tab.id !== discoverTab.id), discoverTab];
     activeTabId = discoverTab.id;
+  }
+
+  function openNewDiscover() {
+    const workspace = createDiscoverWorkspace();
+    const discoverTab = makeDiscoverTab(workspace);
+
+    tabs = [...tabs, discoverTab];
+    activeTabId = discoverTab.id;
+  }
+
+  function updateDiscoverTabTitle(discoverId: string, title: string) {
+    tabs = tabs.map((tab) => (tab.discoverId === discoverId ? { ...tab, title } : tab));
+  }
+
+  function parseOptionalYear(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    const year = Number(trimmed);
+    return Number.isInteger(year) ? year : undefined;
+  }
+
+  async function runDiscoverSearch(discoverId: string) {
+    const workspace = getDiscoverWorkspace(discoverId);
+    const query = workspace.query.trim();
+    if (!query) {
+      setDiscoverStatus(discoverId, "failed", "Enter a search query before running discovery.");
+      return;
+    }
+
+    setDiscoverStatus(discoverId, "running");
+
+    try {
+      const response = await searchPapers({
+        query,
+        yearFrom: parseOptionalYear(workspace.yearFrom),
+        yearTo: parseOptionalYear(workspace.yearTo),
+        resultLimit: Number(workspace.resultLimit),
+        sortBy: workspace.sortBy,
+        openAccessOnly: workspace.openAccessOnly,
+      });
+      applyDiscoverSearchResponse(discoverId, response);
+      const title = discoverTitleFromQuery(query);
+      workspace.title = title;
+      updateDiscoverTabTitle(discoverId, title);
+    } catch (error) {
+      setDiscoverStatus(discoverId, "failed", String(error));
+    }
+  }
+
+  function selectDiscoverCandidate(discoverId: string, candidateId: string) {
+    setDiscoverSelectedCandidate(discoverId, candidateId);
   }
 
   function openCandidate(candidateId: string) {
@@ -300,6 +372,9 @@
       <DiscoverView
         workspace={activeDiscoverWorkspace}
         vaults={vaultWorkspaces}
+        onNewSearch={openNewDiscover}
+        onRunSearch={runDiscoverSearch}
+        onSelectCandidate={selectDiscoverCandidate}
         onOpenCandidate={openCandidate}
         onAddCandidate={addCandidate}
         {getCandidateVaultTargets}

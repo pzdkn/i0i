@@ -8,12 +8,18 @@
   let {
     workspace,
     vaults,
+    onNewSearch,
+    onRunSearch,
+    onSelectCandidate,
     onOpenCandidate,
     onAddCandidate,
     getCandidateVaultTargets,
   }: {
     workspace: DiscoverWorkspace;
     vaults: VaultWorkspace[];
+    onNewSearch: () => void;
+    onRunSearch: (discoverId: string) => void;
+    onSelectCandidate: (discoverId: string, candidateId: string) => void;
     onOpenCandidate: (candidateId: string) => void;
     onAddCandidate: (candidateId: string, vaultIds: string[]) => void;
     getCandidateVaultTargets: (candidateId: string) => VaultWorkspace[];
@@ -21,10 +27,17 @@
 </script>
 
 <section class="discover-workspace col">
-  <DiscoverSeedBar {workspace} />
+  <DiscoverSeedBar {workspace} {onNewSearch} {onRunSearch} />
   <div class="discover-body row">
-    <DiscoverFeed {workspace} {vaults} {onOpenCandidate} {onAddCandidate} {getCandidateVaultTargets} />
-    <DiscoverInspector />
+    <DiscoverFeed
+      {workspace}
+      {vaults}
+      {onSelectCandidate}
+      {onOpenCandidate}
+      {onAddCandidate}
+      {getCandidateVaultTargets}
+    />
+    <DiscoverInspector {workspace} />
   </div>
 </section>
 

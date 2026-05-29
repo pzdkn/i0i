@@ -1,7 +1,6 @@
 import type { Paper } from "$lib/domain/paper";
-import type { DiscoverWorkspace } from "$lib/domain/discover";
+import type { DiscoverCandidate, DiscoverWorkspace, DiscoverySearchResponse } from "$lib/domain/discover";
 import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
-import { discoverWorkspaces as discoverSeeds } from "$lib/mock/discover";
 import { librarySeedWorkspaces } from "$lib/mock/library-seed";
 
 type LibraryState = {
@@ -13,7 +12,8 @@ type LibraryState = {
 // LibrarySnapshot for Svelte views and uses seed data only before hydration.
 const initialVaults = librarySeedWorkspaces.map(cloneVaultWorkspace);
 const initialPaperIds = new Set(initialVaults.flatMap((workspace) => workspace.papers.map((paper) => paper.id)));
-const initialDiscoverWorkspaces = discoverSeeds.map(cloneDiscoverWorkspace);
+let discoverSequence = 1;
+const initialDiscoverWorkspaces = [makeDiscoverWorkspace()];
 
 for (const workspace of initialDiscoverWorkspaces) {
   for (const candidate of workspace.candidates) {
@@ -47,11 +47,48 @@ function cloneDiscoverWorkspace(workspace: DiscoverWorkspace): DiscoverWorkspace
   return {
     ...workspace,
     seeds: [...workspace.seeds],
+    lastRun: workspace.lastRun
+      ? {
+          ...workspace.lastRun,
+          filters: [...workspace.lastRun.filters],
+        }
+      : undefined,
     candidates: workspace.candidates.map((candidate) => ({
       ...candidate,
       authors: [...candidate.authors],
       tags: [...candidate.tags],
+      match: candidate.match
+        ? {
+            ...candidate.match,
+            reasons: [...candidate.match.reasons],
+            matchedKeywords: [...candidate.match.matchedKeywords],
+            fromSeedPaperIds: [...candidate.match.fromSeedPaperIds],
+          }
+        : undefined,
     })),
+  };
+}
+
+function nextDiscoverId() {
+  const id = `discover-${discoverSequence}`;
+  discoverSequence += 1;
+  return id;
+}
+
+function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
+  return {
+    id,
+    title: "Discover: Untitled",
+    seeds: [],
+    query: "",
+    yearFrom: "",
+    yearTo: "",
+    resultLimit: 25,
+    sortBy: "relevance",
+    openAccessOnly: true,
+    status: "idle",
+    error: "",
+    candidates: [],
   };
 }
 
@@ -110,7 +147,7 @@ function markDiscoverOwnership() {
 
   for (const workspace of library.discoverWorkspaces) {
     for (const candidate of workspace.candidates) {
-      candidate.owned = paperIds.has(candidate.id);
+      candidate.owned = paperIds.has(candidate.id) || candidate.alreadyInLibrary === true;
     }
   }
 }
@@ -132,7 +169,7 @@ function candidateToPaper(candidateId: string): Paper {
     noteCount: 0,
     annotationCount: 0,
     status: candidate.owned ? "READ" : "UNREAD",
-    abstract: candidate.why,
+    abstract: candidate.abstract ?? candidate.why,
   };
 }
 
@@ -146,6 +183,89 @@ export function getVaultWorkspace(vaultId: string) {
 
 export function getDiscoverWorkspace(discoverId: string) {
   return library.discoverWorkspaces.find((workspace) => workspace.id === discoverId) ?? library.discoverWorkspaces[0];
+}
+
+export function createDiscoverWorkspace() {
+  const workspace = makeDiscoverWorkspace();
+  library.discoverWorkspaces = [...library.discoverWorkspaces, workspace];
+  return workspace;
+}
+
+export function setDiscoverStatus(discoverId: string, status: DiscoverWorkspace["status"], error = "") {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.status = status;
+  workspace.error = error;
+
+  if (status === "running") {
+    workspace.candidates = [];
+    workspace.selectedCandidateId = undefined;
+    workspace.lastRun = undefined;
+  }
+}
+
+export function setDiscoverSelectedCandidate(discoverId: string, candidateId: string) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.selectedCandidateId = candidateId;
+}
+
+export function applyDiscoverSearchResponse(discoverId: string, response: DiscoverySearchResponse) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.status = "completed";
+  workspace.error = "";
+  workspace.lastRun = {
+    provider: response.provider,
+    query: response.query,
+    filters: [...response.filters],
+    resultCount: response.resultCount,
+  };
+  workspace.candidates = response.candidates.map(toDiscoverCandidate);
+  workspace.selectedCandidateId = workspace.candidates[0]?.id;
+  markDiscoverOwnership();
+}
+
+export function discoverTitleFromQuery(query: string) {
+  const normalized = query.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return "Discover: Untitled";
+  }
+
+  return `Discover: ${normalized.length > 28 ? `${normalized.slice(0, 28)}...` : normalized}`;
+}
+
+function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][number]): DiscoverCandidate {
+  const reasons = candidate.matchSummary.reasons;
+  const score = candidate.matchSummary.score ?? 0;
+  const openAccessTags = candidate.openAccess?.isOpenAccess ? ["open-access"] : [];
+
+  return {
+    id: candidate.id,
+    sourceProvider: candidate.sourceProvider,
+    sourceId: candidate.sourceId,
+    title: candidate.title,
+    authors: [...candidate.authors],
+    venue: candidate.venue ?? "OpenAlex",
+    year: candidate.year ?? 0,
+    citations: candidate.citationCount ?? 0,
+    score,
+    why: reasons[0] ?? "Matched OpenAlex search.",
+    tags: ["openalex", ...openAccessTags],
+    abstract: candidate.abstract,
+    publicationDate: candidate.publicationDate,
+    doi: candidate.doi,
+    openalexId: candidate.openalexId,
+    arxivId: candidate.arxivId,
+    externalUrl: candidate.externalUrl,
+    pdfUrl: candidate.pdfUrl,
+    openAccess: candidate.openAccess,
+    match: {
+      score: candidate.matchSummary.score,
+      reasons: [...candidate.matchSummary.reasons],
+      matchedKeywords: [...candidate.matchSummary.matchedKeywords],
+      fromSeedPaperIds: [...candidate.matchSummary.fromSeedPaperIds],
+    },
+    owned: candidate.alreadyInLibrary,
+    alreadyInLibrary: candidate.alreadyInLibrary,
+  };
 }
 
 export function getPaperById(paperId: string) {

@@ -1,34 +1,26 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { VaultWorkspace } from "$lib/domain/library";
 
   let {
     vaults,
-    initialVaultIds = [],
-    onConfirm,
+    excludedVaultIds = [],
+    onSelect,
     onCancel,
   }: {
     vaults: VaultWorkspace[];
-    initialVaultIds?: string[];
-    onConfirm: (vaultIds: string[]) => void;
+    excludedVaultIds?: string[];
+    onSelect: (vaultId: string) => void;
     onCancel: () => void;
   } = $props();
 
   let query = $state("");
-  let addedVaultIds = $state<string[]>([]);
-  let removedVaultIds = $state<string[]>([]);
-  const selectedVaultIds = $derived(
-    [...new Set([...initialVaultIds, ...addedVaultIds])].filter((vaultId) => !removedVaultIds.includes(vaultId)),
-  );
-  const selectedVaults = $derived(
-    selectedVaultIds
-      .map((vaultId) => vaults.find((vault) => vault.id === vaultId))
-      .filter((vault): vault is VaultWorkspace => Boolean(vault)),
-  );
+  let input: HTMLInputElement;
   const suggestions = $derived(
     vaults
-      .filter((vault) => !selectedVaultIds.includes(vault.id))
+      .filter((vault) => !excludedVaultIds.includes(vault.id))
       .filter((vault) => {
-        const normalizedQuery = query.trim().replace(/,$/, "").toLowerCase();
+        const normalizedQuery = query.trim().toLowerCase();
         if (!normalizedQuery) {
           return true;
         }
@@ -42,25 +34,12 @@
       .slice(0, 5),
   );
 
-  function selectVault(vaultId: string) {
-    if (!selectedVaultIds.includes(vaultId)) {
-      addedVaultIds = [...addedVaultIds, vaultId];
-    }
-    removedVaultIds = removedVaultIds.filter((removedVaultId) => removedVaultId !== vaultId);
-    query = "";
-  }
+  $effect(() => {
+    tick().then(() => input?.focus());
+  });
 
-  function removeVault(vaultId: string) {
-    addedVaultIds = addedVaultIds.filter((selectedVaultId) => selectedVaultId !== vaultId);
-    if (initialVaultIds.includes(vaultId) && !removedVaultIds.includes(vaultId)) {
-      removedVaultIds = [...removedVaultIds, vaultId];
-    }
-  }
-
-  function submit() {
-    if (selectedVaultIds.length > 0) {
-      onConfirm(selectedVaultIds);
-    }
+  function choose(vaultId: string) {
+    onSelect(vaultId);
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -70,99 +49,59 @@
       return;
     }
 
-    if (event.key === "Enter") {
+    if (event.key === "Enter" && suggestions[0]) {
       event.preventDefault();
       event.stopPropagation();
-      submit();
-      return;
-    }
-
-    if (event.key === "," && suggestions[0]) {
-      event.preventDefault();
-      event.stopPropagation();
-      selectVault(suggestions[0].id);
+      choose(suggestions[0].id);
     }
   }
 </script>
 
-<div
-  class="target-editor col"
-  role="group"
-  aria-label="Select Vault targets"
->
-  <div class="target-input row">
-    {#each selectedVaults as vault}
-      <button class="selected-chip" type="button" onclick={() => removeVault(vault.id)}>
-        {vault.path} x
-      </button>
-    {/each}
-    <input
-      bind:value={query}
-      aria-label="Filter Vault targets"
-      onkeydown={handleKeydown}
-      placeholder={selectedVaults.length ? "add another vault..." : "type vault..."}
-    />
-  </div>
+<div class="target-editor col" role="group" aria-label="Add candidate to Vault">
+  <input
+    bind:this={input}
+    bind:value={query}
+    aria-label="Filter Vault targets"
+    onkeydown={handleKeydown}
+    placeholder="type vault..."
+  />
 
   <div class="suggestions col">
     {#if suggestions.length}
       {#each suggestions as vault}
-        <button class="suggestion row" type="button" onclick={() => selectVault(vault.id)}>
+        <button class="suggestion row" type="button" onclick={() => choose(vault.id)}>
           <span class="path truncate">{vault.path}</span>
-          <span class="count">{vault.papers.length} papers</span>
+          <span class="count">{vault.papers.length}</span>
         </button>
       {/each}
     {:else}
       <div class="no-match">no matching Vault</div>
     {/if}
   </div>
-
-  <div class="target-actions row">
-    <button class="btn" type="button" onclick={onCancel}>Cancel</button>
-    <button class="btn primary" disabled={selectedVaultIds.length === 0} type="button" onclick={submit}>
-      Add to {selectedVaultIds.length || 0} Vault{selectedVaultIds.length === 1 ? "" : "s"}
-    </button>
-  </div>
 </div>
 
 <style>
   .target-editor {
-    flex: 1 1 100%;
-    min-width: 280px;
-    gap: 8px;
-    margin-top: 2px;
-    padding: 8px;
+    width: 205px;
+    gap: 0;
+    padding: 6px;
     border: 1px solid var(--border-2);
     background: var(--bg-1);
   }
 
-  .target-input {
-    min-height: 26px;
-    gap: 5px;
-    flex-wrap: wrap;
-    padding: 3px;
-    border: 1px solid var(--border-2);
-    background: var(--bg);
-  }
-
-  .selected-chip {
-    height: 18px;
-    border: 1px solid var(--amber-dim);
-    background: rgba(242, 169, 59, 0.06);
-    color: var(--amber);
-    font-size: 9px;
-    cursor: pointer;
-  }
-
   input {
-    min-width: 150px;
-    flex: 1;
-    border: 0;
+    height: 24px;
+    border: 1px solid var(--border-2);
     outline: none;
-    background: transparent;
+    background: var(--bg);
     color: var(--fg-1);
+    padding: 0 8px;
     font: inherit;
     font-size: 10px;
+  }
+
+  input:focus {
+    border-color: var(--amber-dim);
   }
 
   input::placeholder {
@@ -170,26 +109,27 @@
   }
 
   .suggestions {
-    max-height: 112px;
+    max-height: 116px;
     overflow: auto;
     border: 1px solid var(--border);
-    background: var(--panel);
+    border-top: 0;
   }
 
   .suggestion {
-    height: 22px;
-    gap: 8px;
-    padding: 0 8px;
+    height: 23px;
+    gap: 6px;
     border: 0;
     border-bottom: 1px solid var(--border);
-    background: transparent;
+    background: var(--panel);
     color: var(--fg-1);
+    padding: 0 7px;
     font-size: 10px;
-    text-align: left;
     cursor: pointer;
   }
 
-  .suggestion:hover {
+  .suggestion:hover,
+  .suggestion:focus {
+    outline: none;
     background: rgba(242, 169, 59, 0.08);
     color: var(--amber);
   }
@@ -205,19 +145,11 @@
     font-size: 9px;
   }
 
+  .count {
+    flex-shrink: 0;
+  }
+
   .no-match {
-    padding: 6px 8px;
-  }
-
-  .target-actions {
-    justify-content: flex-end;
-    gap: 6px;
-  }
-
-  .btn:disabled,
-  .btn:disabled:hover {
-    border-color: var(--border);
-    color: var(--fg-4);
-    cursor: default;
+    padding: 6px 7px;
   }
 </style>
