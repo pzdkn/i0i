@@ -1,96 +1,118 @@
+<script lang="ts">
+  import type { DiscoverWorkspace } from "$lib/domain/discover";
+
+  let {
+    workspace,
+  }: {
+    workspace: DiscoverWorkspace;
+  } = $props();
+
+  const selectedCandidate = $derived(
+    workspace.candidates.find((candidate) => candidate.id === workspace.selectedCandidateId),
+  );
+
+  function providerLabel(provider?: string) {
+    if (!provider) {
+      return "OpenAlex";
+    }
+
+    return provider === "openalex" ? "OpenAlex" : provider;
+  }
+</script>
+
 <aside class="discover-inspector col hair-l">
   <header class="panel-header hair-b">
-    <div class="label hot">Search Console</div>
-    <h2>ssl + dino run</h2>
+    <div class="label hot">Run</div>
+    <h2>{workspace.status}</h2>
   </header>
 
   <section class="panel-section col">
     <div class="row section-title">
-      <span>Filters</span>
-      <span class="mono-dim">editable later</span>
+      <span>Current Search</span>
+      <span class="mono-dim">{providerLabel(workspace.lastRun?.provider)}</span>
     </div>
-    <div class="range-row row">
-      <span>2020</span>
-      <div class="gauge flex1"><i style="width: 82%"></i></div>
-      <span>2026</span>
-    </div>
-    <div class="chips row">
-      <span class="chip hot">ICLR</span>
-      <span class="chip">CVPR</span>
-      <span class="chip">ICML</span>
-      <span class="chip">ECCV</span>
-      <span class="chip">arXiv</span>
-    </div>
+    <dl class="kv">
+      <div>
+        <dt>query</dt>
+        <dd>{workspace.lastRun?.query || workspace.query || "none"}</dd>
+      </div>
+      <div>
+        <dt>results</dt>
+        <dd>{workspace.lastRun?.resultCount ?? workspace.candidates.length}</dd>
+      </div>
+      <div>
+        <dt>limit</dt>
+        <dd>{workspace.resultLimit}</dd>
+      </div>
+      <div>
+        <dt>sort</dt>
+        <dd>{workspace.sortBy}</dd>
+      </div>
+      <div>
+        <dt>open access</dt>
+        <dd>{workspace.openAccessOnly ? "on" : "off"}</dd>
+      </div>
+    </dl>
+    {#if workspace.lastRun?.filters.length}
+      <div class="chips row">
+        {#each workspace.lastRun.filters as filter}
+          <span class="chip">{filter}</span>
+        {/each}
+      </div>
+    {/if}
+    {#if workspace.error}
+      <p class="error">{workspace.error}</p>
+    {/if}
   </section>
 
-  <section class="panel-section col">
+  <section class="panel-section col selected-section">
     <div class="row section-title">
-      <span>Signal Mix</span>
-      <span class="mono-dim">mock</span>
+      <span>Selected Candidate</span>
+      {#if selectedCandidate}
+        <span class="mono-dim">{providerLabel(selectedCandidate.sourceProvider)}</span>
+      {/if}
     </div>
-    <div class="metric-row">
-      <span>semantic</span>
-      <div class="gauge"><i style="width: 45%"></i></div>
-    </div>
-    <div class="metric-row">
-      <span>citation graph</span>
-      <div class="gauge"><i style="width: 35%"></i></div>
-    </div>
-    <div class="metric-row">
-      <span>novelty</span>
-      <div class="gauge"><i style="width: 20%"></i></div>
-    </div>
-  </section>
 
-  <section class="panel-section col">
-    <div class="row section-title">
-      <span>Agents</span>
-      <span class="mono-dim">visible only</span>
-    </div>
-    <div class="agent-row row">
-      <span class="key">A1</span>
-      <span>citation scout</span>
-      <strong>idle</strong>
-    </div>
-    <div class="agent-row row">
-      <span class="key">A2</span>
-      <span>author drift</span>
-      <strong>idle</strong>
-    </div>
-    <div class="agent-row row">
-      <span class="key">A3</span>
-      <span>venue watch</span>
-      <strong>idle</strong>
-    </div>
-  </section>
-
-  <section class="panel-section col">
-    <div class="row section-title">
-      <span>Schedule</span>
-      <span class="mono-dim">not active</span>
-    </div>
-    <div class="schedule-line row">
-      <span>weekly sweep</span>
-      <strong>off</strong>
-    </div>
-    <div class="schedule-line row">
-      <span>alert threshold</span>
-      <strong>0.88</strong>
-    </div>
+    {#if selectedCandidate}
+      <h3>{selectedCandidate.title}</h3>
+      <p class="authors">{selectedCandidate.authors.slice(0, 4).join(", ") || "unknown authors"}</p>
+      <dl class="kv">
+        <div>
+          <dt>venue</dt>
+          <dd>{selectedCandidate.venue}</dd>
+        </div>
+        <div>
+          <dt>year</dt>
+          <dd>{selectedCandidate.year || "unknown"}</dd>
+        </div>
+        <div>
+          <dt>citations</dt>
+          <dd>{selectedCandidate.citations}</dd>
+        </div>
+        <div>
+          <dt>pdf</dt>
+          <dd>{selectedCandidate.pdfUrl ? "available" : "not found"}</dd>
+        </div>
+      </dl>
+      <div class="reason-list col">
+        {#each selectedCandidate.match?.reasons ?? [selectedCandidate.why] as reason}
+          <span>{reason}</span>
+        {/each}
+      </div>
+      {#if selectedCandidate.abstract}
+        <p class="abstract">{selectedCandidate.abstract}</p>
+      {/if}
+    {:else}
+      <p class="empty">Select a candidate to inspect metadata and match reasons.</p>
+    {/if}
   </section>
 
   <div class="flex1"></div>
-
-  <footer class="batch-actions row hair-t">
-    <button class="btn" type="button">Queue</button>
-    <button class="btn" type="button">Compare</button>
-    <button class="btn primary" type="button">Add</button>
-  </footer>
 </aside>
 
 <style>
   .discover-inspector {
-    width: 300px;
+    width: 280px;
     flex-shrink: 0;
     min-height: 0;
     background: var(--panel);
@@ -105,12 +127,25 @@
     color: var(--amber);
     font-size: 15px;
     font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  h3 {
+    margin: 0;
+    color: var(--fg);
+    font-size: 13px;
+    line-height: 1.35;
   }
 
   .panel-section {
     gap: 10px;
     padding: 14px;
     border-bottom: 1px solid var(--border);
+  }
+
+  .selected-section {
+    min-height: 0;
+    overflow: auto;
   }
 
   .section-title {
@@ -120,12 +155,29 @@
     text-transform: uppercase;
   }
 
-  .range-row,
-  .agent-row,
-  .schedule-line {
+  .kv {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+  }
+
+  .kv div {
+    display: grid;
+    grid-template-columns: 78px 1fr;
     gap: 8px;
-    color: var(--fg-3);
     font-size: 10px;
+  }
+
+  dt {
+    color: var(--fg-3);
+    text-transform: uppercase;
+  }
+
+  dd {
+    margin: 0;
+    min-width: 0;
+    color: var(--fg-1);
+    overflow-wrap: anywhere;
   }
 
   .chips {
@@ -133,32 +185,40 @@
     flex-wrap: wrap;
   }
 
-  .metric-row {
-    display: grid;
-    grid-template-columns: 92px 1fr;
-    align-items: center;
-    gap: 8px;
+  .chip {
+    border: 1px solid var(--border-2);
+    padding: 1px 5px;
+    color: var(--fg-2);
+    font-size: 9px;
+  }
+
+  .authors,
+  .abstract,
+  .empty,
+  .error {
+    margin: 0;
+    color: var(--fg-2);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .abstract {
     color: var(--fg-3);
+  }
+
+  .error {
+    color: var(--red);
+  }
+
+  .reason-list {
+    gap: 5px;
+  }
+
+  .reason-list span {
+    border-left: 2px solid var(--amber-dim);
+    padding-left: 7px;
+    color: var(--fg-2);
     font-size: 10px;
-  }
-
-  .agent-row span:nth-child(2),
-  .schedule-line span {
-    flex: 1;
-    min-width: 0;
-  }
-
-  strong {
-    color: var(--amber-mid);
-    font-weight: 500;
-  }
-
-  .batch-actions {
-    height: 42px;
-    flex-shrink: 0;
-    justify-content: flex-end;
-    gap: 6px;
-    padding: 0 10px;
-    background: var(--bg-1);
+    line-height: 1.45;
   }
 </style>

@@ -6,12 +6,14 @@
   let {
     workspace,
     vaults,
+    onSelectCandidate,
     onOpenCandidate,
     onAddCandidate,
     getCandidateVaultTargets,
   }: {
     workspace: DiscoverWorkspace;
     vaults: VaultWorkspace[];
+    onSelectCandidate: (discoverId: string, candidateId: string) => void;
     onOpenCandidate: (candidateId: string) => void;
     onAddCandidate: (candidateId: string, vaultIds: string[]) => void;
     getCandidateVaultTargets: (candidateId: string) => VaultWorkspace[];
@@ -26,23 +28,74 @@
 
     return String(citations);
   }
+
+  function handleCandidateKeydown(event: KeyboardEvent, candidateId: string) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onSelectCandidate(workspace.id, candidateId);
+    }
+  }
+
+  function openTargetEditor(event: MouseEvent, candidateId: string) {
+    event.stopPropagation();
+    editingCandidateId = editingCandidateId === candidateId ? "" : candidateId;
+  }
+
+  function closeTargetEditor() {
+    editingCandidateId = "";
+  }
+
+  function targetVaultIds(candidateId: string) {
+    return getCandidateVaultTargets(candidateId).map((vault) => vault.id);
+  }
+
+  function addCandidateToVault(candidateId: string, vaultId: string) {
+    onAddCandidate(candidateId, [vaultId]);
+    closeTargetEditor();
+  }
 </script>
 
 <section class="discover-feed col">
   <div class="feed-header row">
     <span class="rank">Rank</span>
-    <span class="score">Score</span>
     <span class="paper">Candidate</span>
     <span class="meta">Meta</span>
     <span class="actions-label">Actions</span>
   </div>
 
   <div class="feed-body">
+    {#if workspace.status === "idle" && workspace.candidates.length === 0}
+      <div class="empty-state col">
+        <div class="label hot">No Scout run yet</div>
+        <p>Enter a query, adjust filters, then run OpenAlex discovery.</p>
+      </div>
+    {:else if workspace.status === "running"}
+      <div class="empty-state col">
+        <div class="label hot">Running Scout</div>
+        <p>Searching OpenAlex for matching open-access papers...</p>
+      </div>
+    {:else if workspace.status === "failed" && workspace.candidates.length === 0}
+      <div class="empty-state col">
+        <div class="label hot">Search failed</div>
+        <p>{workspace.error}</p>
+      </div>
+    {:else if workspace.status === "completed" && workspace.candidates.length === 0}
+      <div class="empty-state col">
+        <div class="label hot">No matching papers</div>
+        <p>Try a broader query, wider year range, or disabling open access.</p>
+      </div>
+    {/if}
+
     {#each workspace.candidates as candidate, index}
       {@const targets = getCandidateVaultTargets(candidate.id)}
-      <article
+      <div
         class:owned={candidate.owned}
+        class:selected={workspace.selectedCandidateId === candidate.id}
         class="candidate-row"
+        role="button"
+        tabindex="0"
+        onclick={() => onSelectCandidate(workspace.id, candidate.id)}
+        onkeydown={(event) => handleCandidateKeydown(event, candidate.id)}
         ondblclick={() => {
           if (editingCandidateId !== candidate.id) {
             onOpenCandidate(candidate.id);
@@ -50,10 +103,6 @@
         }}
       >
         <span class="rank">#{index + 1}</span>
-        <span class="score">
-          {(candidate.score * 100).toFixed(0)}
-          <i style={`width: ${candidate.score * 100}%`}></i>
-        </span>
         <span class="paper col">
           <span class="title-line row">
             <strong class="truncate">{candidate.title}</strong>
@@ -73,8 +122,11 @@
           </span>
         </span>
         <span class="meta col">
-          <span>{candidate.venue} {candidate.year}</span>
+          <span>{candidate.venue} {candidate.year || ""}</span>
           <span>{formatCitations(candidate.citations)} cites</span>
+          {#if candidate.openAccess?.isOpenAccess}
+            <span>open access</span>
+          {/if}
         </span>
         <span class="row-actions row">
           {#if candidate.owned}
@@ -90,26 +142,20 @@
             <button
               class="action"
               type="button"
-              onclick={(event) => {
-                event.stopPropagation();
-                editingCandidateId = candidate.id;
-              }}
+              onclick={(event) => openTargetEditor(event, candidate.id)}
             >
-              Add target
+              Add to Vault
             </button>
           {:else}
             <button
               class="action"
               type="button"
-              onclick={(event) => {
-                event.stopPropagation();
-                editingCandidateId = candidate.id;
-              }}
+              onclick={(event) => openTargetEditor(event, candidate.id)}
             >
-              Add
+              Add to Vault
             </button>
           {/if}
-          <button class="action" type="button">Preview</button>
+          <button class="action" type="button" title="PDF preview is not downloaded in this slice">Preview</button>
           <button class="action" type="button">Graph</button>
           {#if candidate.owned}
             <button class="action" type="button" onclick={() => onOpenCandidate(candidate.id)}>Open</button>
@@ -117,16 +163,13 @@
           {#if editingCandidateId === candidate.id}
             <DiscoverTargetEditor
               {vaults}
-              initialVaultIds={targets.map((vault) => vault.id)}
-              onCancel={() => (editingCandidateId = "")}
-              onConfirm={(vaultIds) => {
-                onAddCandidate(candidate.id, vaultIds);
-                editingCandidateId = "";
-              }}
+              excludedVaultIds={targetVaultIds(candidate.id)}
+              onCancel={closeTargetEditor}
+              onSelect={(vaultId) => addCandidateToVault(candidate.id, vaultId)}
             />
           {/if}
         </span>
-      </article>
+      </div>
     {/each}
   </div>
 </section>
@@ -179,6 +222,11 @@
     background: rgba(242, 169, 59, 0.04);
   }
 
+  .candidate-row.selected {
+    border-left-color: var(--amber);
+    background: rgba(242, 169, 59, 0.07);
+  }
+
   .candidate-row.owned {
     background: rgba(138, 168, 74, 0.05);
   }
@@ -188,22 +236,6 @@
     flex-shrink: 0;
     color: var(--amber-mid);
     font-size: 11px;
-  }
-
-  .score {
-    position: relative;
-    width: 52px;
-    flex-shrink: 0;
-    color: var(--amber);
-    font-size: 11px;
-  }
-
-  .score i {
-    position: absolute;
-    left: 0;
-    bottom: 16px;
-    height: 3px;
-    background: var(--amber);
   }
 
   .paper {
@@ -270,7 +302,8 @@
   }
 
   .row-actions {
-    width: 180px;
+    position: relative;
+    width: 214px;
     flex-shrink: 0;
     align-content: flex-start;
     align-items: flex-start;
@@ -312,4 +345,22 @@
     border-color: var(--green);
     color: var(--green);
   }
+
+  .empty-state {
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px;
+    color: var(--fg-3);
+    text-align: center;
+  }
+
+  .empty-state p {
+    max-width: 360px;
+    margin: 0;
+    color: var(--fg-2);
+    font-size: 12px;
+  }
+
 </style>
