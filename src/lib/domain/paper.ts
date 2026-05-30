@@ -12,4 +12,6 @@ export type Paper = {
   annotationCount: number;
   status: PaperStatus;
   abstract?: string;
+  activeSourceId?: string;
+  activeExtractionId?: string;
 };

@@ -1,5 +1,12 @@
 import type { Paper } from "$lib/domain/paper";
-import type { ReaderDocument, ReaderMark, ReaderParagraph, ReaderTextBlock } from "$lib/domain/reader";
+import type {
+  ReaderBlock,
+  ReaderDocument,
+  ReaderMark,
+  ReaderParagraph,
+  ReaderSpan,
+  ReaderTextBlock,
+} from "$lib/domain/reader";
 
 const sharedParagraphs: ReaderParagraph[] = [
   {
@@ -98,6 +105,31 @@ function withSourceOffsets(blocks: Array<Omit<ReaderTextBlock, "sourceStart">>) 
   });
 }
 
+function readerBlocksFromTextBlocks(textBlocks: ReaderTextBlock[]): ReaderBlock[] {
+  return textBlocks.map((block, index) => ({
+    id: `block:${block.id}`,
+    pageIndex: 0,
+    blockIndex: index,
+    readingOrder: index,
+    kind: block.kind,
+    text: block.text,
+    sourceStart: block.sourceStart,
+    sourceEnd: block.sourceStart + block.text.length,
+  }));
+}
+
+function readerSpansFromTextBlocks(textBlocks: ReaderTextBlock[]): ReaderSpan[] {
+  return textBlocks.map((block, index) => ({
+    id: `span:${block.id}`,
+    blockId: `block:${block.id}`,
+    pageIndex: 0,
+    text: block.text,
+    sourceStart: block.sourceStart,
+    sourceEnd: block.sourceStart + block.text.length,
+    bbox: [0, index * 24, 540, index * 24 + 18],
+  }));
+}
+
 export function createReaderDocument(paper: Paper): ReaderDocument {
   const textBlocks = withSourceOffsets([
     {
@@ -117,10 +149,14 @@ export function createReaderDocument(paper: Paper): ReaderDocument {
       highlight: paragraph.highlight,
     })),
   ]);
+  const sourceId = `reader-text-v1:${paper.id}`;
+  const extractionId = `mock-extraction-v1:${paper.id}`;
 
   return {
     paperId: paper.id,
-    sourceId: `reader-text-v1:${paper.id}`,
+    sourceId,
+    extractionId,
+    annotationSourceId: sourceId,
     sourceText: textBlocks.map((block) => block.text).join("\n\n"),
     title: paper.title,
     authors: paper.authors,
@@ -129,6 +165,10 @@ export function createReaderDocument(paper: Paper): ReaderDocument {
     identifier: paper.id === "vaswani2017" ? "arXiv:1706.03762" : `mock:${paper.id}`,
     citationKey: paper.id,
     tags: paper.tags,
+    pages: [{ pageIndex: 0, width: 612, height: 792 }],
+    blocks: readerBlocksFromTextBlocks(textBlocks),
+    spans: readerSpansFromTextBlocks(textBlocks),
+    assets: [],
     textBlocks,
     paragraphs: sharedParagraphs,
     marks: sharedMarks,

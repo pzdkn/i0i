@@ -232,8 +232,26 @@ export function discoverTitleFromQuery(query: string) {
   return `Discover: ${normalized.length > 28 ? `${normalized.slice(0, 28)}...` : normalized}`;
 }
 
+function candidateSignalSummary(candidate: DiscoverySearchResponse["candidates"][number]) {
+  const signals = ["OpenAlex"];
+  const citationCount = candidate.citationCount ?? 0;
+
+  if (citationCount > 0) {
+    signals.push(`${citationCount.toLocaleString()} citations`);
+  }
+
+  if (candidate.openAccess?.isOpenAccess) {
+    signals.push("Open access");
+  }
+
+  if (candidate.pdfUrl) {
+    signals.push("PDF available");
+  }
+
+  return signals.join(" · ");
+}
+
 function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][number]): DiscoverCandidate {
-  const reasons = candidate.matchSummary.reasons;
   const score = candidate.matchSummary.score ?? 0;
   const openAccessTags = candidate.openAccess?.isOpenAccess ? ["open-access"] : [];
 
@@ -247,7 +265,7 @@ function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][nu
     year: candidate.year ?? 0,
     citations: candidate.citationCount ?? 0,
     score,
-    why: reasons[0] ?? "Matched OpenAlex search.",
+    why: candidateSignalSummary(candidate),
     tags: ["openalex", ...openAccessTags],
     abstract: candidate.abstract,
     publicationDate: candidate.publicationDate,

@@ -6,6 +6,7 @@ use rusqlite::{params, Connection};
 use tauri::{AppHandle, Manager};
 
 use crate::domain::library::{
+    DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
     LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, Vault, VaultDraft, VaultPaper,
     VaultRenameDraft,
 };
@@ -440,6 +441,8 @@ impl LibraryStore {
               annotation_count integer not null default 0,
               status text not null,
               abstract text,
+              active_source_id text,
+              active_extraction_id text,
               created_at text not null,
               updated_at text not null
             );
@@ -465,9 +468,127 @@ impl LibraryStore {
               updated_at text not null,
               foreign key (paper_id) references papers(id) on delete cascade
             );
+
+            create table if not exists document_sources (
+              id text primary key,
+              paper_id text not null,
+              source_kind text not null,
+              source_url text,
+              local_path text,
+              status text not null,
+              error text,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create index if not exists idx_document_sources_paper_id
+              on document_sources(paper_id);
+
+            create table if not exists document_extractions (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extractor text not null,
+              extractor_version text not null,
+              annotation_source_id text not null unique,
+              status text not null,
+              error text,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade
+            );
+
+            create index if not exists idx_document_extractions_paper_id
+              on document_extractions(paper_id);
+
+            create index if not exists idx_document_extractions_source_id
+              on document_extractions(source_id);
+
+            create table if not exists document_pages (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              page_index integer not null,
+              width real not null,
+              height real not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade
+            );
+
+            create index if not exists idx_document_pages_extraction_id
+              on document_pages(extraction_id);
+
+            create table if not exists document_blocks (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              page_index integer not null,
+              block_index integer not null,
+              reading_order integer not null,
+              kind text not null,
+              text text,
+              asset_id text,
+              source_start integer,
+              source_end integer,
+              bbox_json text,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade
+            );
+
+            create index if not exists idx_document_blocks_extraction_id
+              on document_blocks(extraction_id);
+
+            create table if not exists document_spans (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              block_id text not null,
+              page_index integer not null,
+              text text not null,
+              source_start integer not null,
+              source_end integer not null,
+              bbox_json text not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade,
+              foreign key (block_id) references document_blocks(id) on delete cascade
+            );
+
+            create index if not exists idx_document_spans_extraction_id
+              on document_spans(extraction_id);
+
+            create table if not exists document_assets (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              asset_kind text not null,
+              page_index integer not null,
+              bbox_json text,
+              local_path text not null,
+              caption text,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade
+            );
+
+            create index if not exists idx_document_assets_extraction_id
+              on document_assets(extraction_id);
             ",
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+        add_column_if_missing(conn, "papers", "active_source_id", "text")?;
+        add_column_if_missing(conn, "papers", "active_extraction_id", "text")
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -538,6 +659,12 @@ impl LibraryStore {
             vaults: read_vaults(conn)?,
             papers: read_papers(conn)?,
             vault_papers: read_vault_papers(conn)?,
+            document_sources: read_document_sources(conn)?,
+            document_extractions: read_document_extractions(conn)?,
+            document_pages: read_document_pages(conn)?,
+            document_blocks: read_document_blocks(conn)?,
+            document_spans: read_document_spans(conn)?,
+            document_assets: read_document_assets(conn)?,
         })
     }
 }
@@ -565,7 +692,8 @@ fn read_papers(conn: &Connection) -> StoreResult<Vec<Paper>> {
         .prepare(
             "
             select id, title, authors_json, venue, year, citations, tags_json,
-                   note_count, annotation_count, status, abstract
+                   note_count, annotation_count, status, abstract,
+                   active_source_id, active_extraction_id
             from papers
             order by updated_at desc, title
             ",
@@ -589,6 +717,8 @@ fn read_papers(conn: &Connection) -> StoreResult<Vec<Paper>> {
                 annotation_count: row.get(8)?,
                 status: row.get(9)?,
                 abstract_text: row.get(10)?,
+                active_source_id: row.get(11)?,
+                active_extraction_id: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -606,6 +736,198 @@ fn read_vault_papers(conn: &Connection) -> StoreResult<Vec<VaultPaper>> {
             Ok(VaultPaper {
                 vault_id: row.get(0)?,
                 paper_id: row.get(1)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_sources(conn: &Connection) -> StoreResult<Vec<DocumentSource>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_kind, source_url, local_path,
+                   status, error, created_at, updated_at
+            from document_sources
+            order by updated_at desc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentSource {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_kind: row.get(2)?,
+                source_url: row.get(3)?,
+                local_path: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_extractions(conn: &Connection) -> StoreResult<Vec<DocumentExtraction>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extractor, extractor_version,
+                   annotation_source_id, status, error, created_at, updated_at
+            from document_extractions
+            order by updated_at desc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentExtraction {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extractor: row.get(3)?,
+                extractor_version: row.get(4)?,
+                annotation_source_id: row.get(5)?,
+                status: row.get(6)?,
+                error: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_pages(conn: &Connection) -> StoreResult<Vec<DocumentPage>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, page_index, width, height
+            from document_pages
+            order by extraction_id, page_index
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentPage {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                page_index: row.get(4)?,
+                width: row.get(5)?,
+                height: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_blocks(conn: &Connection) -> StoreResult<Vec<DocumentBlock>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, page_index,
+                   block_index, reading_order, kind, text, asset_id,
+                   source_start, source_end, bbox_json
+            from document_blocks
+            order by extraction_id, reading_order, block_index
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentBlock {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                page_index: row.get(4)?,
+                block_index: row.get(5)?,
+                reading_order: row.get(6)?,
+                kind: row.get(7)?,
+                text: row.get(8)?,
+                asset_id: row.get(9)?,
+                source_start: row.get(10)?,
+                source_end: row.get(11)?,
+                bbox_json: row.get(12)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_spans(conn: &Connection) -> StoreResult<Vec<DocumentSpan>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, block_id, page_index,
+                   text, source_start, source_end, bbox_json
+            from document_spans
+            order by extraction_id, source_start, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentSpan {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                block_id: row.get(4)?,
+                page_index: row.get(5)?,
+                text: row.get(6)?,
+                source_start: row.get(7)?,
+                source_end: row.get(8)?,
+                bbox_json: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_assets(conn: &Connection) -> StoreResult<Vec<DocumentAsset>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, asset_kind, page_index,
+                   bbox_json, local_path, caption, created_at, updated_at
+            from document_assets
+            order by extraction_id, page_index, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentAsset {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                asset_kind: row.get(4)?,
+                page_index: row.get(5)?,
+                bbox_json: row.get(6)?,
+                local_path: row.get(7)?,
+                caption: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -653,6 +975,42 @@ fn collect_rows<T>(
         values.push(row.map_err(|error| error.to_string())?);
     }
     Ok(values)
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> StoreResult<()> {
+    if column_exists(conn, table, column)? {
+        return Ok(());
+    }
+
+    conn.execute(
+        &format!("alter table {table} add column {column} {definition}"),
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
+    let mut stmt = conn
+        .prepare(&format!("pragma table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?;
+
+    for row in rows {
+        if row.map_err(|error| error.to_string())? == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn to_json(values: &[String]) -> StoreResult<String> {
@@ -1058,9 +1416,19 @@ mod tests {
         assert_eq!(snapshot.vaults.len(), default_vaults().len());
         assert_eq!(snapshot.papers.len(), default_papers().len());
         assert_eq!(snapshot.vault_papers.len(), default_memberships().len());
+        assert!(snapshot.document_sources.is_empty());
+        assert!(snapshot.document_extractions.is_empty());
+        assert!(snapshot.document_pages.is_empty());
+        assert!(snapshot.document_blocks.is_empty());
+        assert!(snapshot.document_spans.is_empty());
+        assert!(snapshot.document_assets.is_empty());
         assert!(has_vault(&snapshot, "attention"));
         assert!(has_paper(&snapshot, "vaswani2017"));
         assert!(has_membership(&snapshot, "attention", "vaswani2017"));
+        assert!(paper(&snapshot, "vaswani2017").active_source_id.is_none());
+        assert!(paper(&snapshot, "vaswani2017")
+            .active_extraction_id
+            .is_none());
 
         Ok(())
     }

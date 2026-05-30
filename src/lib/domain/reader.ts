@@ -1,5 +1,62 @@
 export type ReaderMode = "TEXT" | "PDF" | "SPLIT";
 
+export type ReaderExtractor = "docling" | "mineru" | "marker" | "grobid" | "pdfium_basic";
+
+export type ReaderPage = {
+  pageIndex: number;
+  width: number;
+  height: number;
+};
+
+export type ReaderBlock = {
+  id: string;
+  pageIndex: number;
+  blockIndex: number;
+  readingOrder: number;
+  kind: "title" | "authors" | "heading" | "paragraph" | "caption" | "figure" | "table" | "equation";
+  text?: string;
+  assetId?: string;
+  sourceStart?: number;
+  sourceEnd?: number;
+  bbox?: [number, number, number, number];
+};
+
+export type ReaderSpan = {
+  id: string;
+  blockId: string;
+  pageIndex: number;
+  text: string;
+  sourceStart: number;
+  sourceEnd: number;
+  bbox: [number, number, number, number];
+};
+
+export type ReaderAsset = {
+  id: string;
+  paperId: string;
+  sourceId: string;
+  extractionId: string;
+  kind: "page_image" | "embedded_image" | "figure" | "table" | "equation";
+  pageIndex: number;
+  bbox?: [number, number, number, number];
+  localPath: string;
+  caption?: string;
+};
+
+export type ExtractedDocument = {
+  paperId: string;
+  sourceId: string;
+  extractionId: string;
+  annotationSourceId: string;
+  extractor: ReaderExtractor;
+  extractorVersion: string;
+  sourceText: string;
+  pages: ReaderPage[];
+  blocks: ReaderBlock[];
+  spans: ReaderSpan[];
+  assets: ReaderAsset[];
+};
+
 export type ReaderParagraph = {
   id: string;
   kind: "heading" | "paragraph";
@@ -33,6 +90,8 @@ export type ReaderMark = {
 export type ReaderDocument = {
   paperId: string;
   sourceId: string;
+  extractionId?: string;
+  annotationSourceId?: string;
   sourceText: string;
   title: string;
   authors: string[];
@@ -41,6 +100,12 @@ export type ReaderDocument = {
   identifier: string;
   citationKey: string;
   tags: string[];
+  pdfLocalPath?: string;
+  pdfSourceUrl?: string;
+  pages: ReaderPage[];
+  blocks: ReaderBlock[];
+  spans: ReaderSpan[];
+  assets: ReaderAsset[];
   textBlocks: ReaderTextBlock[];
   paragraphs: ReaderParagraph[];
   marks: ReaderMark[];

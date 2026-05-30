@@ -36,6 +36,8 @@ pub struct Paper {
     pub status: String,
     #[serde(rename = "abstract")]
     pub abstract_text: Option<String>,
+    pub active_source_id: Option<String>,
+    pub active_extraction_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,8 +89,104 @@ pub struct VaultPaper {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DocumentSource {
+    pub id: String,
+    pub paper_id: String,
+    pub source_kind: String,
+    pub source_url: Option<String>,
+    pub local_path: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentExtraction {
+    pub id: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub extractor: String,
+    pub extractor_version: String,
+    pub annotation_source_id: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentPage {
+    pub id: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub extraction_id: String,
+    pub page_index: i32,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentBlock {
+    pub id: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub extraction_id: String,
+    pub page_index: i32,
+    pub block_index: i32,
+    pub reading_order: i32,
+    pub kind: String,
+    pub text: Option<String>,
+    pub asset_id: Option<String>,
+    pub source_start: Option<i64>,
+    pub source_end: Option<i64>,
+    pub bbox_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSpan {
+    pub id: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub extraction_id: String,
+    pub block_id: String,
+    pub page_index: i32,
+    pub text: String,
+    pub source_start: i64,
+    pub source_end: i64,
+    pub bbox_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentAsset {
+    pub id: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub extraction_id: String,
+    pub asset_kind: String,
+    pub page_index: i32,
+    pub bbox_json: Option<String>,
+    pub local_path: String,
+    pub caption: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LibrarySnapshot {
     pub vaults: Vec<Vault>,
     pub papers: Vec<Paper>,
     pub vault_papers: Vec<VaultPaper>,
+    pub document_sources: Vec<DocumentSource>,
+    pub document_extractions: Vec<DocumentExtraction>,
+    pub document_pages: Vec<DocumentPage>,
+    pub document_blocks: Vec<DocumentBlock>,
+    pub document_spans: Vec<DocumentSpan>,
+    pub document_assets: Vec<DocumentAsset>,
 }

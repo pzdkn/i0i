@@ -14,6 +14,10 @@
 
   let queryInput: HTMLInputElement;
   const isRunning = $derived(workspace.status === "running");
+  const statusLabel = $derived(workspace.status === "idle" ? "Idle" : workspace.status);
+  const resultLabel = $derived(
+    workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
+  );
 
   $effect(() => {
     workspace.id;
@@ -25,6 +29,14 @@
       onRunSearch(workspace.id);
     }
   }
+
+  function sortLabel(sortBy: DiscoverWorkspace["sortBy"]) {
+    if (sortBy === "most_cited") {
+      return "Most cited";
+    }
+
+    return sortBy === "newest" ? "Newest" : "Relevance";
+  }
 </script>
 
 <header class="discover-search hair-b col">
@@ -33,12 +45,25 @@
       <div class="label">Discover</div>
       <h1>{workspace.title}</h1>
     </div>
-    <span class="mono-dim">OpenAlex / transient search / explicit run</span>
+    <button class="new-search-btn" type="button" onclick={onNewSearch}>New Search</button>
+  </div>
+
+  <div class="status-strip row" aria-label="Search status">
+    <span>OpenAlex</span>
+    <span>Manual run</span>
+    {#if workspace.openAccessOnly}
+      <span>Open access</span>
+    {/if}
+    <span>{workspace.resultLimit} max</span>
+    <span>{sortLabel(workspace.sortBy)}</span>
+    <span class:hot={workspace.status === "failed"}>{statusLabel}</span>
+    {#if resultLabel}
+      <span>{resultLabel}</span>
+    {/if}
   </div>
 
   <form class="search-form col" onsubmit={(event) => { event.preventDefault(); runSearch(); }}>
     <div class="query-row row">
-      <button class="icon-btn" type="button" title="New Search" aria-label="New Search" onclick={onNewSearch}>+</button>
       <input
         bind:this={queryInput}
         bind:value={workspace.query}
@@ -92,14 +117,6 @@
         <input bind:checked={workspace.openAccessOnly} type="checkbox" disabled={isRunning} />
         <span>Open access</span>
       </label>
-      <div class="flex1"></div>
-      {#if workspace.status === "completed"}
-        <span class="mono-dim">{workspace.candidates.length} candidates</span>
-      {:else if workspace.status === "failed"}
-        <span class="mono-dim hot">run failed</span>
-      {:else if workspace.status === "idle"}
-        <span class="mono-dim">no run yet</span>
-      {/if}
     </div>
   </form>
 </header>
@@ -114,7 +131,8 @@
 
   .heading {
     gap: 12px;
-    align-items: baseline;
+    align-items: flex-start;
+    justify-content: space-between;
   }
 
   h1 {
@@ -125,7 +143,7 @@
   }
 
   .search-form {
-    gap: 8px;
+    gap: 9px;
   }
 
   .query-row {
@@ -134,7 +152,8 @@
 
   .query-row input {
     height: 30px;
-    flex: 1;
+    width: min(100%, 640px);
+    flex: 0 1 640px;
     min-width: 0;
     border: 1px solid var(--border-2);
     outline: none;
@@ -149,14 +168,34 @@
     border-color: var(--amber-dim);
   }
 
-  .icon-btn {
-    width: 30px;
+  .new-search-btn {
     height: 30px;
     border: 1px solid var(--border-2);
     background: var(--bg);
     color: var(--amber);
-    font-size: 17px;
+    padding: 0 10px;
+    font: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
     cursor: pointer;
+  }
+
+  .new-search-btn:hover {
+    border-color: var(--amber-dim);
+    background: rgba(242, 169, 59, 0.05);
+  }
+
+  .status-strip {
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+
+  .status-strip span {
+    border: 1px solid var(--border-2);
+    padding: 1px 6px;
+    color: var(--fg-2);
+    font-size: 9px;
+    text-transform: uppercase;
   }
 
   .filter-row {
