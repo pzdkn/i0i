@@ -108,6 +108,12 @@ export type PaperDraft = {
   tags: string[];
   status: Paper["status"];
   abstract?: string;
+  sources?: PaperSourceDraft[];
+};
+
+export type PaperSourceDraft = {
+  sourceKind: "pdf";
+  sourceUrl: string;
 };
 
 export type PaperNote = {

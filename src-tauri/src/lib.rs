@@ -1,7 +1,11 @@
 mod commands;
 mod domain;
+mod pdf_ingestion;
+mod services;
 mod storage;
 
+use pdf_ingestion::{PdfDownloadManager, PdfIngestionConfig};
+use services::reader_service::ReaderService;
 use storage::library_store::LibraryStore;
 use tauri::Manager;
 
@@ -12,7 +16,16 @@ pub fn run() {
         .setup(|app| {
             let store = LibraryStore::new(&app.handle()).map_err(std::io::Error::other)?;
             store.init().map_err(std::io::Error::other)?;
+            let pdf_config = PdfIngestionConfig::load(&app.handle());
+            let pdf_downloads =
+                PdfDownloadManager::new(app.handle().clone(), store.clone(), pdf_config);
+            pdf_downloads
+                .recover_and_queue_startup_downloads()
+                .map_err(std::io::Error::other)?;
+            let reader_service = ReaderService::new(store.clone());
             app.manage(store);
+            app.manage(pdf_downloads);
+            app.manage(reader_service);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -20,6 +33,8 @@ pub fn run() {
             commands::discovery::search_papers,
             commands::library::get_library,
             commands::library::add_paper_to_vaults,
+            commands::library::download_paper_pdf,
+            commands::library::get_document_sources,
             commands::library::create_vault,
             commands::library::rename_vault,
             commands::library::delete_vault,
@@ -29,6 +44,7 @@ pub fn run() {
             commands::library::create_paper_note,
             commands::library::delete_paper_note,
             commands::library::update_paper_note,
+            commands::reader::get_reader_document,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

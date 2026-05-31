@@ -6,7 +6,7 @@
     selectedPaper,
   }: {
     papers: Paper[];
-    selectedPaper: Paper;
+    selectedPaper: Paper | undefined;
   } = $props();
 
   const readCount = $derived(papers.filter((paper) => paper.status === "READ").length);
@@ -19,41 +19,48 @@
 
 <aside class="inspector hair-l">
   <header class="hair-b">
-    <div class="paper-name truncate">{selectedPaper.title}</div>
-    <div class="mono-dim">{selectedPaper.year} / {selectedPaper.venue} / selected</div>
+    {#if selectedPaper}
+      <div class="paper-name truncate">{selectedPaper.title}</div>
+      <div class="mono-dim">{selectedPaper.year} / {selectedPaper.venue} / selected</div>
+    {:else}
+      <div class="paper-name truncate">No paper selected</div>
+      <div class="mono-dim">Add papers to this vault</div>
+    {/if}
   </header>
+
+  {#if selectedPaper}
+    <section>
+      <div class="label hot">Selected paper</div>
+      <div class="meta">
+        <div><span>authors</span>{selectedPaper.authors.slice(0, 4).join(", ")}</div>
+        <div><span>cites</span>{selectedPaper.citations.toLocaleString()}</div>
+        <div><span>notes</span>{selectedPaper.noteCount}</div>
+        <div><span>ann</span>{selectedPaper.annotationCount}</div>
+      </div>
+      <div class="tags row">
+        {#each selectedPaper.tags as tag}
+          <span class="chip">{tag}</span>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   <section>
     <div class="label hot">Reading stats</div>
     <div class="stat-row">
       <span>read</span>
-      <div class="gauge"><i style={`width: ${(readCount / papers.length) * 100}%`}></i></div>
+      <div class="gauge"><i style={`width: ${papers.length ? (readCount / papers.length) * 100 : 0}%`}></i></div>
       <span>{readCount} / {papers.length}</span>
     </div>
     <div class="stat-row">
       <span>reading</span>
-      <div class="gauge"><i style={`width: ${(readingCount / papers.length) * 100}%`}></i></div>
+      <div class="gauge"><i style={`width: ${papers.length ? (readingCount / papers.length) * 100 : 0}%`}></i></div>
       <span>{readingCount} / {papers.length}</span>
     </div>
     <div class="stat-row">
       <span>unread</span>
-      <div class="gauge"><i style={`width: ${(unreadCount / papers.length) * 100}%`}></i></div>
+      <div class="gauge"><i style={`width: ${papers.length ? (unreadCount / papers.length) * 100 : 0}%`}></i></div>
       <span>{unreadCount} / {papers.length}</span>
-    </div>
-  </section>
-
-  <section>
-    <div class="label hot">Selected paper</div>
-    <div class="meta">
-      <div><span>authors</span>{selectedPaper.authors.slice(0, 4).join(", ")}</div>
-      <div><span>cites</span>{selectedPaper.citations.toLocaleString()}</div>
-      <div><span>notes</span>{selectedPaper.noteCount}</div>
-      <div><span>ann</span>{selectedPaper.annotationCount}</div>
-    </div>
-    <div class="tags row">
-      {#each selectedPaper.tags as tag}
-        <span class="chip">{tag}</span>
-      {/each}
     </div>
   </section>
 

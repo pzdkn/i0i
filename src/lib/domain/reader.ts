@@ -102,6 +102,7 @@ export type ReaderDocument = {
   tags: string[];
   pdfLocalPath?: string;
   pdfSourceUrl?: string;
+  pdfError?: string;
   pages: ReaderPage[];
   blocks: ReaderBlock[];
   spans: ReaderSpan[];

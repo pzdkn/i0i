@@ -39,7 +39,7 @@ Saving should not block on the PDF download:
 ```text
 Add to Vault
   -> save paper metadata
-  -> save DocumentSource(status = remote)
+  -> save DocumentSource(status = remote_available)
   -> return UI quickly
   -> start background PDF download
   -> update DocumentSource(status = downloading)
@@ -55,7 +55,7 @@ If no PDF URL exists, the paper can still be saved as metadata, but the Reader s
 These are internal `DocumentSource.status` values, not UI labels.
 
 ```text
-remote
+remote_available
   -> known PDF URL, no local file yet
 
 downloading
@@ -123,7 +123,7 @@ pdf:{paper_id}:{source_hash}
   source_kind: pdf
   source_url: candidate.pdfUrl
   local_path: .../documents/{paper_id}/sources/{source_id}/source.pdf
-  status: cached | failed | remote | downloading
+  status: remote_available | downloading | cached | failed
   error
 ```
 
@@ -156,7 +156,7 @@ get_document_sources(paper_id) -> Vec<DocumentSource>
 
 `add_paper_to_vaults` should persist any known PDF source URL from Discover as a `DocumentSource` row and kick off a background PDF download. The durable DB save must not depend on download success.
 
-If `source_id` is omitted from `download_paper_pdf`, download the active or first remote PDF source for the paper.
+If `source_id` is omitted from `download_paper_pdf`, download the active or first `remote_available` PDF source for the paper.
 
 ## Download Validation
 
@@ -166,7 +166,7 @@ Minimum validation:
 
 - HTTP status is 2xx.
 - Follow redirects.
-- Enforce a maximum file size, initially `100 MB`.
+- Enforce a configured maximum file size.
 - Prefer `Content-Type: application/pdf`, but do not rely on it alone.
 - Verify the downloaded bytes start with `%PDF-`.
 - Write to a temporary file first.
@@ -188,6 +188,79 @@ status = failed
 error = "Downloaded file was not a PDF"
 ```
 
+## Startup Recovery
+
+Downloads may be interrupted by app quit, crash, sleep, or network loss. On startup, recover stale `downloading` rows:
+
+```text
+for each DocumentSource where status = downloading:
+  if source.pdf validates:
+    status = cached
+    emit document_source_updated
+  else:
+    remove source.pdf.part if present
+    status = remote_available
+    queue background download retry
+    emit document_source_updated
+```
+
+For now, do not attempt partial-download resume. Partial files may be corrupt or incomplete. Redownload from the remote source URL.
+
+Future improvement:
+
+```text
+if server supports Range and .part has known length:
+  resume download
+else:
+  redownload
+```
+
+## Download Queue and Config
+
+Auto-download saved papers, but throttle downloads through a small backend queue.
+
+Queueing is unconditional for saved/imported papers with a `remote_available` PDF source. Do not add an `auto_download_on_save` flag in this slice.
+
+Default behavior:
+
+```text
+max_concurrent_downloads = 2
+max_pdf_bytes = 104857600 # 100 MB
+retry_initial_backoff_ms = 5000
+retry_max_attempts = 3
+```
+
+These defaults should be configurable in a backend-read config file, not hard-coded into UI components.
+
+Suggested config path for development:
+
+```text
+./i0i.config.toml
+```
+
+Suggested shape:
+
+```toml
+[pdf_ingestion]
+max_concurrent_downloads = 2
+max_pdf_bytes = 104857600
+retry_initial_backoff_ms = 5000
+retry_max_attempts = 3
+```
+
+Later, packaged app settings can move to app config under the user data directory. The backend should own config loading and expose only effective behavior/events to Svelte.
+
+Retry bookkeeping should remain in memory for this slice. Do not add retry counters or job rows to SQLite yet.
+
+On startup, use durable source state to decide what to queue:
+
+```text
+remote_available source with URL -> eligible for background download
+failed source -> wait for explicit retry
+stale downloading source -> recover to remote_available, then queue retry
+cached source -> no work
+```
+
 ## Events
 
 PDF downloads are asynchronous, so the backend should emit Tauri events whenever a source changes:
@@ -202,7 +275,7 @@ Payload:
 type DocumentSourceUpdated = {
   paperId: string;
   sourceId: string;
-  status: "remote" | "downloading" | "cached" | "failed";
+  status: "remote_available" | "downloading" | "cached" | "failed";
   bytesDownloaded?: number;
   contentLength?: number;
   localPath?: string;
@@ -213,7 +286,7 @@ type DocumentSourceUpdated = {
 SQLite should store only the coarse durable status. Live progress belongs in events, not in the database.
 
 ```text
-DB: remote | downloading | cached | failed
+DB: remote_available | downloading | cached | failed
 event: bytesDownloaded / contentLength while downloading
 ```
 
@@ -252,7 +325,7 @@ Removing a paper from one Vault should not delete the PDF if the paper remains i
 
 - Save a Discover candidate with a PDF URL.
 - Verify a `document_sources` PDF row exists.
-- Verify the source row starts as `remote` or `downloading`.
+- Verify the source row starts as `remote_available` or `downloading`.
 - Verify the PDF downloads to app data.
 - Verify the source row moves to `cached` and gets `local_path`.
 - Verify `papers.active_source_id` is set on first successful cache.

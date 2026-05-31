@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
@@ -40,18 +41,11 @@
 
   let vaultStatus = $state<VaultStatus | null>(null);
   let bridgeError = $state("");
-  let activeVaultId = $state("attention");
-  let selectedPaperId = $state("vaswani2017");
-  let selectedReaderPaper = $state<Paper>(getPaperById("vaswani2017"));
-  let activeTabId = $state("vault:attention");
-  let tabs = $state<WorkspaceTab[]>([
-    {
-      id: "vault:attention",
-      kind: "vault",
-      title: "/transformers/attention",
-      vaultId: "attention",
-    },
-  ]);
+  let activeVaultId = $state("");
+  let selectedPaperId = $state("");
+  let selectedReaderPaper = $state<Paper | null>(null);
+  let activeTabId = $state("");
+  let tabs = $state<WorkspaceTab[]>([]);
 
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
@@ -80,6 +74,26 @@
     }
   });
 
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen("document_source_updated", async () => {
+      try {
+        hydrateLibrary(await getLibrary());
+      } catch (error) {
+        bridgeError = String(error);
+      }
+    })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
   function openVault(vaultId = activeVaultId) {
     const workspace = getVaultWorkspace(vaultId);
     if (!workspace) {
@@ -97,6 +111,9 @@
 
   function openPaper(paperId: string) {
     const paper = getPaperById(paperId);
+    if (!paper) {
+      return;
+    }
     selectedPaperId = paper.id;
     selectedReaderPaper = paper;
 
@@ -192,6 +209,9 @@
 
   function openCandidate(candidateId: string) {
     const paper = paperFromDiscoverCandidate(candidateId);
+    if (!paper) {
+      return;
+    }
     selectedPaperId = paper.id;
     selectedReaderPaper = paper;
 
@@ -329,7 +349,10 @@
     if (tab.paperId) {
       selectedPaperId = tab.paperId;
       if (!selectedReaderPaper || selectedReaderPaper.id !== tab.paperId) {
-        selectedReaderPaper = getPaperById(tab.paperId);
+        const paper = getPaperById(tab.paperId);
+        if (paper) {
+          selectedReaderPaper = paper;
+        }
       }
     }
   }
@@ -366,7 +389,7 @@
   <section class="workspace col">
     <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
 
-    {#if activeTab?.kind === "reader"}
+    {#if activeTab?.kind === "reader" && activePaper}
       <ReaderView paper={activePaper} />
     {:else if activeTab?.kind === "discover"}
       <DiscoverView
@@ -379,7 +402,7 @@
         onAddCandidate={addCandidate}
         {getCandidateVaultTargets}
       />
-    {:else if activeTab?.kind === "vault"}
+    {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
       <VaultHome
         workspace={activeVaultWorkspace}
         onOpenPaper={openPaper}

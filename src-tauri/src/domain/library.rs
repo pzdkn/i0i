@@ -53,6 +53,15 @@ pub struct PaperDraft {
     pub status: String,
     #[serde(rename = "abstract")]
     pub abstract_text: Option<String>,
+    #[serde(default)]
+    pub sources: Vec<PaperSourceDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaperSourceDraft {
+    pub source_kind: String,
+    pub source_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

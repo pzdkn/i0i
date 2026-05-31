@@ -1,0 +1,29 @@
+[[paper]]
+id = "attention-is-all-you-need"
+title = "Attention Is All You Need"
+url = "https://arxiv.org/pdf/1706.03762"
+features = ["figures", "tables", "equations", "single_column"]
+
+[[paper]]
+id = "deep-residual-learning"
+title = "Deep Residual Learning for Image Recognition"
+url = "https://arxiv.org/pdf/1512.03385"
+features = ["two_column", "figures", "tables", "captions"]
+
+[[paper]]
+id = "faster-r-cnn"
+title = "Faster R-CNN"
+url = "https://arxiv.org/pdf/1506.01497"
+features = ["two_column", "vector_figures", "captions"]
+
+[[paper]]
+id = "adam-optimizer"
+title = "Adam: A Method for Stochastic Optimization"
+url = "https://arxiv.org/pdf/1412.6980"
+features = ["equations", "tables", "algorithms"]
+
+[[paper]]
+id = "alphafold"
+title = "Highly accurate protein structure prediction with AlphaFold"
+url = "https://arxiv.org/pdf/2006.11239"
+features = ["figures", "tables", "captions", "dense_layout"]

@@ -1,13 +1,15 @@
 <script lang="ts">
-  import { createPaperNote, deletePaperNote, getPaperNotes, updatePaperNote } from "$lib/bridge/library";
+  import { listen } from "@tauri-apps/api/event";
+  import { onMount } from "svelte";
+  import { createPaperNote, deletePaperNote, getPaperNotes, updatePaperNote, getReaderDocument } from "$lib/bridge/library";
   import type { PaperNote } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
-  import type { ReaderMode, ReaderTextSelection } from "$lib/domain/reader";
-  import { createReaderDocument } from "$lib/mock/reader";
+  import type { ReaderDocument, ReaderMode, ReaderTextSelection } from "$lib/domain/reader";
   import ReaderFooter from "$lib/features/reader/ReaderFooter.svelte";
   import ReaderHeader from "$lib/features/reader/ReaderHeader.svelte";
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
   import TextPage from "$lib/features/reader/TextPage.svelte";
+  import PdfPage from "$lib/features/reader/PdfPage.svelte";
   import { decrementPaperNoteCount, incrementPaperNoteCount, isPaperInLibrary } from "$lib/state/library-cache.svelte";
 
   let {
@@ -22,9 +24,61 @@
   let noteError = $state("");
   let isLoadingNotes = $state(false);
   let activeNoteId = $state<string | null>(null);
-  const document = $derived(createReaderDocument(paper));
-  const notesEnabled = $derived(isPaperInLibrary(paper.id));
+  let readerDocument = $state<ReaderDocument | null>(null);
+  let docError = $state("");
+  let isLoadingDoc = $state(false);
+  let refreshTick = $state(0);
 
+  const document = $derived<ReaderDocument | null>(readerDocument);
+  const notesEnabled = $derived(isPaperInLibrary(paper.id));
+  const hasCachedPdf = $derived(Boolean(readerDocument?.pdfLocalPath));
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen("document_source_updated", (event) => {
+      const payload = event.payload as { paper_id: string };
+      if (payload.paper_id === paper.id) {
+        refreshTick += 1;
+      }
+    })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for document_source_updated:", error);
+      });
+
+    return () => unlisten?.();
+  });
+
+  // Fetch real ReaderDocument from backend whenever paper changes or refreshTick increments
+  $effect(() => {
+    const paperId = paper.id;
+    void refreshTick;
+    docError = "";
+    readerDocument = null;
+    isLoadingDoc = true;
+
+    getReaderDocument(paperId)
+      .then((doc) => {
+        if (paper.id === paperId) {
+          readerDocument = doc;
+        }
+      })
+      .catch((error) => {
+        if (paper.id === paperId) {
+          docError = String(error);
+        }
+      })
+      .finally(() => {
+        if (paper.id === paperId) {
+          isLoadingDoc = false;
+        }
+      });
+  });
+
+  // Notes effect
   $effect(() => {
     const paperId = paper.id;
     noteDraft = null;
@@ -131,36 +185,80 @@
 <section class="reader-workspace col">
   <div class="reader-body row">
     <main class="reader-main col">
-      <ReaderHeader {document} {mode} onModeChange={(nextMode) => (mode = nextMode)} />
-
-      <div class="reading-surface row">
-        <div class="page-wrap">
-          <TextPage
-            {document}
-            {notes}
-            {activeNoteId}
-            {notesEnabled}
-            onCreateNoteFromSelection={createNoteDraft}
-          />
+      {#if isLoadingDoc}
+        <div class="loading col">
+          <div class="label">Loading document…</div>
         </div>
-      </div>
+      {:else if docError}
+        <div class="doc-error col">
+          <div class="label hot">Failed to load document</div>
+          <p class="mono-dim">{docError}</p>
+        </div>
+      {:else if document}
+        <ReaderHeader {document} {mode} onModeChange={(nextMode) => (mode = nextMode)} />
 
-      <ReaderFooter {mode} />
+        <div class="reading-surface row">
+          {#if mode === "TEXT"}
+            <div class="page-wrap">
+              <TextPage
+                {document}
+                {notes}
+                {activeNoteId}
+                {notesEnabled}
+                onCreateNoteFromSelection={createNoteDraft}
+              />
+            </div>
+          {:else if mode === "PDF" && hasCachedPdf}
+            <PdfPage pdfUrl={readerDocument!.pdfLocalPath!} />
+          {:else if mode === "PDF" && !hasCachedPdf}
+            <div class="missing-pdf col">
+              <div class="label hot">PDF not available</div>
+              {#if readerDocument?.pdfError}
+                <p class="mono-dim">{readerDocument.pdfError}</p>
+              {:else}
+                <p>This paper has no cached PDF.</p>
+              {/if}
+              {#if readerDocument?.pdfSourceUrl}
+                <p class="mono-dim">Source: {readerDocument.pdfSourceUrl}</p>
+              {/if}
+            </div>
+          {:else}
+            <div class="page-wrap">
+              <TextPage
+                {document}
+                {notes}
+                {activeNoteId}
+                {notesEnabled}
+                onCreateNoteFromSelection={createNoteDraft}
+              />
+            </div>
+          {/if}
+        </div>
+
+        <ReaderFooter {mode} />
+      {:else}
+        <div class="missing-pdf col">
+          <div class="label hot">Document not found</div>
+          <p>This paper is not in the library database.</p>
+        </div>
+      {/if}
     </main>
 
-    <ReaderInspector
-      {document}
-      {notes}
-      {activeNoteId}
-      {noteDraft}
-      {notesEnabled}
-      {noteError}
-      {isLoadingNotes}
-      onSaveNote={saveNote}
-      onDeleteNote={removeNote}
-      onUpdateNote={updateNote}
-      onActivateNote={activateNote}
-    />
+    {#if document}
+      <ReaderInspector
+        {document}
+        {notes}
+        {activeNoteId}
+        {noteDraft}
+        {notesEnabled}
+        {noteError}
+        {isLoadingNotes}
+        onSaveNote={saveNote}
+        onDeleteNote={removeNote}
+        onUpdateNote={updateNote}
+        onActivateNote={activateNote}
+      />
+    {/if}
   </div>
 </section>
 
@@ -201,4 +299,24 @@
     padding: 20px 24px;
   }
 
+  .loading,
+  .doc-error,
+  .missing-pdf {
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--fg-2);
+  }
+
+  .loading .label,
+  .doc-error .label,
+  .missing-pdf .label {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .missing-pdf p {
+    margin: 0;
+  }
 </style>

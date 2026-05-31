@@ -1,6 +1,8 @@
 use crate::domain::library::{
-    LibrarySnapshot, PaperDraft, PaperNote, PaperNoteDraft, VaultDraft, VaultRenameDraft,
+    DocumentSource, LibrarySnapshot, PaperDraft, PaperNote, PaperNoteDraft, VaultDraft,
+    VaultRenameDraft,
 };
+use crate::pdf_ingestion::PdfDownloadManager;
 use crate::storage::library_store::LibraryStore;
 
 #[tauri::command]
@@ -11,10 +13,56 @@ pub fn get_library(store: tauri::State<'_, LibraryStore>) -> Result<LibrarySnaps
 #[tauri::command]
 pub fn add_paper_to_vaults(
     store: tauri::State<'_, LibraryStore>,
+    pdf_downloads: tauri::State<'_, PdfDownloadManager>,
     paper: PaperDraft,
     vault_ids: Vec<String>,
 ) -> Result<LibrarySnapshot, String> {
-    store.add_paper_to_vaults(&paper, &vault_ids)
+    let snapshot = store.add_paper_to_vaults(&paper, &vault_ids)?;
+    let sources = store
+        .get_document_sources(&paper.id)?
+        .into_iter()
+        .filter(|source| source.status == "remote_available")
+        .collect();
+    pdf_downloads.queue_sources(sources);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn get_document_sources(
+    store: tauri::State<'_, LibraryStore>,
+    paper_id: String,
+) -> Result<Vec<DocumentSource>, String> {
+    store.get_document_sources(&paper_id)
+}
+
+#[tauri::command]
+pub fn download_paper_pdf(
+    store: tauri::State<'_, LibraryStore>,
+    pdf_downloads: tauri::State<'_, PdfDownloadManager>,
+    paper_id: String,
+    source_id: Option<String>,
+) -> Result<DocumentSource, String> {
+    let source = if let Some(source_id) = source_id {
+        store.get_document_source(&source_id)?
+    } else {
+        store
+            .get_document_sources(&paper_id)?
+            .into_iter()
+            .find(|source| {
+                source.source_kind == "pdf"
+                    && (source.status == "remote_available" || source.status == "failed")
+            })
+            .ok_or_else(|| format!("No downloadable PDF source found for paper {paper_id}"))?
+    };
+
+    if source.status == "failed" {
+        let source = store.reset_document_source_to_remote_available(&source.id)?;
+        pdf_downloads.queue_source(source.id.clone());
+        return Ok(source);
+    }
+
+    pdf_downloads.queue_source(source.id.clone());
+    Ok(source)
 }
 
 #[tauri::command]

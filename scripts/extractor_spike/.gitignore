@@ -1,0 +1,7 @@
+__pycache__/
+.venvs/
+corpus/pdfs/
+outputs/
+normalized/
+previews/
+report.md

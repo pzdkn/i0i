@@ -119,6 +119,9 @@
             {#each candidate.tags as tag}
               <span>{tag}</span>
             {/each}
+            {#if candidate.pdfUrl}
+              <span class="pdf-tag">PDF</span>
+            {/if}
           </span>
         </span>
         <span class="meta col">
@@ -286,6 +289,12 @@
     padding: 1px 5px;
     color: var(--fg-2);
     font-size: 9px;
+  }
+
+  .pdf-tag {
+    border-color: var(--cyan) !important;
+    color: var(--cyan) !important;
+    font-weight: 600;
   }
 
   .meta {

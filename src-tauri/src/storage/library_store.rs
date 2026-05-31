@@ -3,16 +3,18 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::domain::library::{
     DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
-    LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, Vault, VaultDraft, VaultPaper,
-    VaultRenameDraft,
+    LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, PaperSourceDraft, Vault,
+    VaultDraft, VaultPaper, VaultRenameDraft,
 };
 
 type StoreResult<T> = Result<T, String>;
 
+#[derive(Clone)]
 pub struct LibraryStore {
     db_path: PathBuf,
 }
@@ -73,6 +75,108 @@ impl LibraryStore {
         self.read_library(&conn)
     }
 
+    pub fn get_document_sources(&self, paper_id: &str) -> StoreResult<Vec<DocumentSource>> {
+        let conn = self.open_connection()?;
+        read_document_sources_for_paper(&conn, paper_id)
+    }
+
+    pub fn get_document_source(&self, source_id: &str) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn remote_available_pdf_sources(&self) -> StoreResult<Vec<DocumentSource>> {
+        let conn = self.open_connection()?;
+        read_document_sources_by_status(&conn, "remote_available")
+    }
+
+    pub fn stale_downloading_pdf_sources(&self) -> StoreResult<Vec<DocumentSource>> {
+        let conn = self.open_connection()?;
+        read_document_sources_by_status(&conn, "downloading")
+    }
+
+    pub fn set_document_source_downloading(&self, source_id: &str) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "
+            update document_sources
+            set status = 'downloading', error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![source_id],
+        )
+        .map_err(|error| error.to_string())?;
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn set_document_source_cached(
+        &self,
+        source_id: &str,
+        local_path: &str,
+    ) -> StoreResult<DocumentSource> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "
+            update document_sources
+            set status = 'cached', local_path = ?2, error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![source_id, local_path],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "
+            update papers
+            set active_source_id = coalesce(active_source_id, ?1),
+                updated_at = datetime('now')
+            where id = (
+              select paper_id from document_sources where id = ?1
+            )
+            ",
+            params![source_id],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn set_document_source_failed(
+        &self,
+        source_id: &str,
+        error: &str,
+    ) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "
+            update document_sources
+            set status = 'failed', error = ?2, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![source_id, error],
+        )
+        .map_err(|error| error.to_string())?;
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn reset_document_source_to_remote_available(
+        &self,
+        source_id: &str,
+    ) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "
+            update document_sources
+            set status = 'remote_available', error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![source_id],
+        )
+        .map_err(|error| error.to_string())?;
+        read_document_source(&conn, source_id)
+    }
+
     pub fn add_paper_to_vaults(
         &self,
         paper: &PaperDraft,
@@ -114,6 +218,8 @@ impl LibraryStore {
             ],
         )
         .map_err(|error| error.to_string())?;
+
+        upsert_document_sources(&tx, paper)?;
 
         for vault_id in vault_ids {
             tx.execute(
@@ -774,6 +880,80 @@ fn read_document_sources(conn: &Connection) -> StoreResult<Vec<DocumentSource>> 
     collect_rows(rows)
 }
 
+fn read_document_sources_for_paper(
+    conn: &Connection,
+    paper_id: &str,
+) -> StoreResult<Vec<DocumentSource>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_kind, source_url, local_path,
+                   status, error, created_at, updated_at
+            from document_sources
+            where paper_id = ?1
+            order by updated_at desc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![paper_id], document_source_from_row)
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_sources_by_status(
+    conn: &Connection,
+    status: &str,
+) -> StoreResult<Vec<DocumentSource>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_kind, source_url, local_path,
+                   status, error, created_at, updated_at
+            from document_sources
+            where source_kind = 'pdf' and status = ?1 and source_url is not null
+            order by updated_at asc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![status], document_source_from_row)
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_source(conn: &Connection, source_id: &str) -> StoreResult<DocumentSource> {
+    conn.query_row(
+        "
+        select id, paper_id, source_kind, source_url, local_path,
+               status, error, created_at, updated_at
+        from document_sources
+        where id = ?1
+        ",
+        params![source_id],
+        document_source_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn document_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentSource> {
+    Ok(DocumentSource {
+        id: row.get(0)?,
+        paper_id: row.get(1)?,
+        source_kind: row.get(2)?,
+        source_url: row.get(3)?,
+        local_path: row.get(4)?,
+        status: row.get(5)?,
+        error: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
 fn read_document_extractions(conn: &Connection) -> StoreResult<Vec<DocumentExtraction>> {
     let mut stmt = conn
         .prepare(
@@ -965,6 +1145,59 @@ fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperN
         .map_err(|error| error.to_string())?;
 
     collect_rows(rows)
+}
+
+fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -> StoreResult<()> {
+    for source in &paper.sources {
+        if source.source_kind != "pdf" || source.source_url.trim().is_empty() {
+            continue;
+        }
+
+        let source_url = source.source_url.trim();
+        let source_id = document_source_id(&paper.id, source);
+
+        tx.execute(
+            "
+            insert into document_sources (
+              id, paper_id, source_kind, source_url, local_path, status, error,
+              created_at, updated_at
+            )
+            values (?1, ?2, ?3, ?4, null, 'remote_available', null, datetime('now'), datetime('now'))
+            on conflict(id) do update set
+              source_url = excluded.source_url,
+              status = case
+                when document_sources.status = 'cached' then document_sources.status
+                else 'remote_available'
+              end,
+              local_path = case
+                when document_sources.status = 'cached' then document_sources.local_path
+                else null
+              end,
+              error = case
+                when document_sources.status = 'cached' then document_sources.error
+                else null
+              end,
+              updated_at = datetime('now')
+            ",
+            params![source_id, paper.id, source.source_kind, source_url],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+pub fn document_source_id(paper_id: &str, source: &PaperSourceDraft) -> String {
+    let hash = short_sha256(&source.source_url);
+    format!("{}:{}:{hash}", source.source_kind, paper_id)
+}
+
+fn short_sha256(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn collect_rows<T>(
@@ -1314,9 +1547,12 @@ fn default_memberships() -> Vec<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct TestDb {
         store: LibraryStore,
@@ -1334,8 +1570,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("i0i-store-test-{}-{unique_id}", std::process::id()));
+        let sequence = TEST_DB_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "i0i-store-test-{}-{unique_id}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
 
         let store = LibraryStore::for_test(dir.join("library.sqlite"));
@@ -1355,7 +1594,17 @@ mod tests {
             tags: vec!["test".to_string()],
             status: "UNREAD".to_string(),
             abstract_text: Some("Test abstract".to_string()),
+            sources: vec![],
         }
+    }
+
+    fn paper_draft_with_pdf(id: &str, pdf_url: &str) -> PaperDraft {
+        let mut draft = paper_draft(id);
+        draft.sources = vec![PaperSourceDraft {
+            source_kind: "pdf".to_string(),
+            source_url: pdf_url.to_string(),
+        }];
+        draft
     }
 
     fn note_draft(paper_id: &str, body: &str) -> PaperNoteDraft {
@@ -1405,6 +1654,14 @@ mod tests {
             .vault_papers
             .iter()
             .filter(|link| link.paper_id == paper_id)
+            .count()
+    }
+
+    fn document_source_count(snapshot: &LibrarySnapshot, paper_id: &str) -> usize {
+        snapshot
+            .document_sources
+            .iter()
+            .filter(|source| source.paper_id == paper_id)
             .count()
     }
 
@@ -1507,6 +1764,37 @@ mod tests {
         assert!(has_membership(&snapshot, "attention", "multi-vault-paper"));
         assert!(has_membership(&snapshot, "scaling", "multi-vault-paper"));
         assert_eq!(paper_membership_count(&snapshot, "multi-vault-paper"), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_paper_to_vault_persists_pdf_source_without_duplicates() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft_with_pdf("pdf-source-paper", "https://example.test/paper.pdf");
+        let vault_ids = vec!["attention".to_string()];
+
+        db.store.add_paper_to_vaults(&draft, &vault_ids)?;
+        let snapshot = db.store.add_paper_to_vaults(&draft, &vault_ids)?;
+
+        assert_eq!(document_source_count(&snapshot, "pdf-source-paper"), 1);
+        let source = snapshot
+            .document_sources
+            .iter()
+            .find(|source| source.paper_id == "pdf-source-paper")
+            .expect("PDF source should exist");
+
+        assert!(source.id.starts_with("pdf:pdf-source-paper:"));
+        assert_eq!(source.source_kind, "pdf");
+        assert_eq!(
+            source.source_url.as_deref(),
+            Some("https://example.test/paper.pdf")
+        );
+        assert_eq!(source.status, "remote_available");
+        assert!(source.local_path.is_none());
+        assert!(paper(&snapshot, "pdf-source-paper")
+            .active_source_id
+            .is_none());
 
         Ok(())
     }
