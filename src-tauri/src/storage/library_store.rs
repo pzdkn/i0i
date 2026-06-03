@@ -148,15 +148,21 @@ impl LibraryStore {
         error: &str,
     ) -> StoreResult<DocumentSource> {
         let conn = self.open_connection()?;
-        conn.execute(
-            "
+        let updated = conn
+            .execute(
+                "
             update document_sources
             set status = 'failed', error = ?2, updated_at = datetime('now')
             where id = ?1
             ",
-            params![source_id, error],
-        )
-        .map_err(|error| error.to_string())?;
+                params![source_id, error],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!(
+                "Document source disappeared before marking download failed: {source_id}"
+            ));
+        }
         read_document_source(&conn, source_id)
     }
 
@@ -399,6 +405,7 @@ impl LibraryStore {
 
     pub fn create_paper_note(&self, draft: &PaperNoteDraft) -> StoreResult<Vec<PaperNote>> {
         let body = draft.body.trim();
+        let anchor_kind = draft.anchor_kind.as_deref().unwrap_or("text_offset").trim();
 
         if draft.paper_id.trim().is_empty() {
             return Err("Paper id cannot be empty".to_string());
@@ -408,16 +415,34 @@ impl LibraryStore {
             return Err("Source id cannot be empty".to_string());
         }
 
-        if draft.selected_text.trim().is_empty() {
-            return Err("Selected text cannot be empty".to_string());
-        }
-
         if body.is_empty() {
             return Err("Note body cannot be empty".to_string());
         }
 
-        if draft.start_offset < 0 || draft.end_offset <= draft.start_offset {
-            return Err("Note offsets must define a non-empty range".to_string());
+        match anchor_kind {
+            "text_offset" => {
+                if draft.selected_text.trim().is_empty() {
+                    return Err("Selected text cannot be empty".to_string());
+                }
+
+                if draft.start_offset < 0 || draft.end_offset <= draft.start_offset {
+                    return Err("Note offsets must define a non-empty range".to_string());
+                }
+            }
+            "pdf_rect" => {
+                if draft.page_index.is_none() {
+                    return Err("PDF note page index is required".to_string());
+                }
+
+                let rects_json = draft
+                    .rects_json
+                    .as_deref()
+                    .ok_or_else(|| "PDF note rectangles are required".to_string())?;
+                validate_note_rects_json(rects_json)?;
+            }
+            _ => {
+                return Err(format!("Unsupported note anchor kind: {anchor_kind}"));
+            }
         }
 
         let note_id = generate_note_id()?;
@@ -428,9 +453,10 @@ impl LibraryStore {
             "
             insert into paper_notes (
               id, paper_id, source_id, start_offset, end_offset,
-              selected_text, body, created_at, updated_at
+              selected_text, anchor_kind, page_index, rects_json, quote_context,
+              body, created_at, updated_at
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'), datetime('now'))
             ",
             params![
                 note_id,
@@ -439,6 +465,10 @@ impl LibraryStore {
                 draft.start_offset,
                 draft.end_offset,
                 draft.selected_text,
+                anchor_kind,
+                draft.page_index,
+                draft.rects_json.as_deref(),
+                draft.quote_context.as_deref(),
                 body,
             ],
         )
@@ -569,6 +599,10 @@ impl LibraryStore {
               start_offset integer not null,
               end_offset integer not null,
               selected_text text not null,
+              anchor_kind text not null default 'text_offset',
+              page_index integer,
+              rects_json text,
+              quote_context text,
               body text not null,
               created_at text not null,
               updated_at text not null,
@@ -694,7 +728,16 @@ impl LibraryStore {
         .map_err(|error| error.to_string())?;
 
         add_column_if_missing(conn, "papers", "active_source_id", "text")?;
-        add_column_if_missing(conn, "papers", "active_extraction_id", "text")
+        add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
+        add_column_if_missing(
+            conn,
+            "paper_notes",
+            "anchor_kind",
+            "text not null default 'text_offset'",
+        )?;
+        add_column_if_missing(conn, "paper_notes", "page_index", "integer")?;
+        add_column_if_missing(conn, "paper_notes", "rects_json", "text")?;
+        add_column_if_missing(conn, "paper_notes", "quote_context", "text")
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -1120,7 +1163,8 @@ fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperN
         .prepare(
             "
             select id, paper_id, source_id, start_offset, end_offset,
-                   selected_text, body, created_at, updated_at
+                   selected_text, anchor_kind, page_index, rects_json, quote_context,
+                   body, created_at, updated_at
             from paper_notes
             where paper_id = ?1
             order by updated_at desc, id desc
@@ -1137,9 +1181,13 @@ fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperN
                 start_offset: row.get(3)?,
                 end_offset: row.get(4)?,
                 selected_text: row.get(5)?,
-                body: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                anchor_kind: row.get(6)?,
+                page_index: row.get(7)?,
+                rects_json: row.get(8)?,
+                quote_context: row.get(9)?,
+                body: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1208,6 +1256,16 @@ fn collect_rows<T>(
         values.push(row.map_err(|error| error.to_string())?);
     }
     Ok(values)
+}
+
+fn validate_note_rects_json(rects_json: &str) -> StoreResult<()> {
+    let value: serde_json::Value = serde_json::from_str(rects_json)
+        .map_err(|_| "PDF note rectangles must be valid JSON".to_string())?;
+
+    match value {
+        serde_json::Value::Array(rects) if !rects.is_empty() => Ok(()),
+        _ => Err("PDF note rectangles must be a non-empty array".to_string()),
+    }
 }
 
 fn add_column_if_missing(
@@ -1614,6 +1672,10 @@ mod tests {
             start_offset: 4,
             end_offset: 16,
             selected_text: "selected text".to_string(),
+            anchor_kind: None,
+            page_index: None,
+            rects_json: None,
+            quote_context: None,
             body: body.to_string(),
         }
     }
@@ -1898,11 +1960,37 @@ mod tests {
         assert_eq!(notes[0].start_offset, 4);
         assert_eq!(notes[0].end_offset, 16);
         assert_eq!(notes[0].selected_text, "selected text");
+        assert_eq!(notes[0].anchor_kind, "text_offset");
+        assert!(notes[0].page_index.is_none());
+        assert!(notes[0].rects_json.is_none());
         assert_eq!(notes[0].body, "This is worth revisiting.");
         assert_eq!(
             paper(&after, "vaswani2017").note_count,
             initial_note_count + 1
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_pdf_note_allows_location_anchor_without_selected_text() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut draft = note_draft("vaswani2017", "This figure matters.");
+        draft.source_id = "pdf:vaswani2017:test".to_string();
+        draft.start_offset = 0;
+        draft.end_offset = 0;
+        draft.selected_text = String::new();
+        draft.anchor_kind = Some("pdf_rect".to_string());
+        draft.page_index = Some(2);
+        draft.rects_json = Some(r#"[{"x":0.2,"y":0.3,"width":0.1,"height":0.08}]"#.to_string());
+
+        let notes = db.store.create_paper_note(&draft)?;
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].anchor_kind, "pdf_rect");
+        assert_eq!(notes[0].page_index, Some(2));
+        assert_eq!(notes[0].selected_text, "");
+        assert_eq!(notes[0].rects_json, draft.rects_json);
 
         Ok(())
     }

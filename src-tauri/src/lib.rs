@@ -45,6 +45,7 @@ pub fn run() {
             commands::library::delete_paper_note,
             commands::library::update_paper_note,
             commands::reader::get_reader_document,
+            commands::reader::get_reader_pdf_bytes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -59,6 +59,7 @@
     let lastEnd = -1;
 
     for (const note of currentNotes
+      .filter((item) => item.anchorKind === "text_offset")
       .filter((item) => item.sourceId === currentDocument.sourceId)
       .filter((item) => item.startOffset >= 0 && item.endOffset > item.startOffset)
       .filter((item) => item.endOffset <= currentDocument.sourceText.length)

@@ -123,6 +123,10 @@ export type PaperNote = {
   startOffset: number;
   endOffset: number;
   selectedText: string;
+  anchorKind: "text_offset" | "pdf_rect";
+  pageIndex?: number;
+  rectsJson?: string;
+  quoteContext?: string;
   body: string;
   createdAt: string;
   updatedAt: string;
@@ -134,6 +138,10 @@ export type PaperNoteDraft = {
   startOffset: number;
   endOffset: number;
   selectedText: string;
+  anchorKind?: "text_offset" | "pdf_rect";
+  pageIndex?: number;
+  rectsJson?: string;
+  quoteContext?: string;
   body: string;
 };
 

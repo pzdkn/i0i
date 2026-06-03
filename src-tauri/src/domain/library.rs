@@ -73,6 +73,10 @@ pub struct PaperNote {
     pub start_offset: i64,
     pub end_offset: i64,
     pub selected_text: String,
+    pub anchor_kind: String,
+    pub page_index: Option<i32>,
+    pub rects_json: Option<String>,
+    pub quote_context: Option<String>,
     pub body: String,
     pub created_at: String,
     pub updated_at: String,
@@ -86,6 +90,10 @@ pub struct PaperNoteDraft {
     pub start_offset: i64,
     pub end_offset: i64,
     pub selected_text: String,
+    pub anchor_kind: Option<String>,
+    pub page_index: Option<i32>,
+    pub rects_json: Option<String>,
+    pub quote_context: Option<String>,
     pub body: String,
 }
 

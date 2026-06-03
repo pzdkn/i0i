@@ -151,6 +151,7 @@ impl PdfDownloadManager {
             return;
         }
 
+        pdf_log(format!("queued source_id={source_id}"));
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
             let source_id_for_cleanup = source_id.clone();
@@ -158,7 +159,9 @@ impl PdfDownloadManager {
             manager.mark_finished(&source_id_for_cleanup);
 
             if let Err(error) = result {
-                eprintln!("PDF download failed: {error}");
+                pdf_log(format!(
+                    "failed source_id={source_id_for_cleanup} error={error}"
+                ));
             }
         });
     }
@@ -230,6 +233,11 @@ impl PdfDownloadManager {
         let local_path = self.source_pdf_path(&source)?;
         let partial_path = PathBuf::from(format!("{}.part", local_path.display()));
 
+        pdf_log(format!(
+            "start source_id={} paper_id={} url={}",
+            source.id, source.paper_id, source_url
+        ));
+
         if let Some(parent) = local_path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
@@ -239,6 +247,10 @@ impl PdfDownloadManager {
 
         let mut last_error = None;
         for attempt in 1..=self.config.retry_max_attempts {
+            pdf_log(format!(
+                "attempt {attempt}/{} source_id={} url={}",
+                self.config.retry_max_attempts, source.id, source_url
+            ));
             match self
                 .download_once(&source_url, &partial_path, &local_path, &source)
                 .await
@@ -248,6 +260,10 @@ impl PdfDownloadManager {
                     return Ok(());
                 }
                 Err(error) => {
+                    pdf_log(format!(
+                        "attempt failed source_id={} attempt={attempt} error={error}",
+                        source.id
+                    ));
                     last_error = Some(error);
                     let _ = fs::remove_file(&partial_path);
 
@@ -275,15 +291,32 @@ impl PdfDownloadManager {
         let response = self
             .client
             .get(source_url)
+            .header("Accept", "application/pdf,*/*;q=0.8")
             .send()
             .await
             .map_err(|error| error.to_string())?;
         let status = response.status();
+        let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string();
+        pdf_log(format!(
+            "response source_id={} status={} content_type={} final_url={}",
+            source.id, status, content_type, final_url
+        ));
         if !status.is_success() {
-            return Err(status_error(status));
+            let body = response.text().await.unwrap_or_default();
+            return Err(status_error(status, &final_url, &content_type, &body));
         }
 
         let content_length = response.content_length();
+        pdf_log(format!(
+            "headers source_id={} content_length={:?}",
+            source.id, content_length
+        ));
         if let Some(content_length) = content_length {
             if content_length > self.config.max_pdf_bytes {
                 return Err(format!(
@@ -304,6 +337,10 @@ impl PdfDownloadManager {
             ));
         }
         if !bytes.starts_with(b"%PDF-") {
+            pdf_log(format!(
+                "invalid magic source_id={} bytes_downloaded={} content_type={} final_url={}",
+                source.id, bytes_downloaded, content_type, final_url
+            ));
             return Err("Downloaded file was not a PDF".to_string());
         }
 
@@ -314,6 +351,12 @@ impl PdfDownloadManager {
             .store
             .set_document_source_cached(&source.id, &local_path.to_string_lossy())?;
         self.emit_update(&source, Some(bytes_downloaded), content_length);
+        pdf_log(format!(
+            "cached source_id={} bytes={} path={}",
+            source.id,
+            bytes_downloaded,
+            local_path.display()
+        ));
 
         Ok(source)
     }
@@ -378,8 +421,34 @@ fn candidate_config_paths(app: &AppHandle) -> Vec<PathBuf> {
     paths
 }
 
-fn status_error(status: StatusCode) -> String {
-    format!("PDF download returned HTTP status {status}")
+fn pdf_log(message: impl AsRef<str>) {
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    eprintln!("[pdf-ingestion {timestamp_ms}] {}", message.as_ref());
+}
+
+fn status_error(status: StatusCode, final_url: &str, content_type: &str, body: &str) -> String {
+    let snippet = body_snippet(body);
+    if snippet.is_empty() {
+        return format!(
+            "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type})"
+        );
+    }
+
+    format!(
+        "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type}; body: {snippet})"
+    )
+}
+
+fn body_snippet(body: &str) -> String {
+    body.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(220)
+        .collect()
 }
 
 fn validate_cached_pdf(path: &Path) -> bool {

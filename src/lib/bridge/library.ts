@@ -95,3 +95,9 @@ export async function getReaderDocument(paperId: string, extractionId?: string):
     extractionId,
   });
 }
+
+export async function getReaderPdfBytes(sourceId: string): Promise<number[]> {
+  return invoke<number[]>("get_reader_pdf_bytes", {
+    sourceId,
+  });
+}

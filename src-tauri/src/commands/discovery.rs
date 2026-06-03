@@ -42,6 +42,7 @@ pub async fn search_papers(
                 "cited_by_count",
                 "authorships",
                 "primary_location",
+                "best_oa_location",
                 "open_access",
                 "abstract_inverted_index",
                 "relevance_score",
@@ -214,6 +215,7 @@ fn normalize_openalex_work(
             .unwrap_or_else(|| "unknown".to_string())
     });
     let id = format!("openalex:{source_id}");
+    let pdf_url = choose_openalex_pdf_url(&work);
     let authors = work
         .authorships
         .unwrap_or_default()
@@ -229,16 +231,12 @@ fn normalize_openalex_work(
         .primary_location
         .as_ref()
         .and_then(|location| location.landing_page_url.clone())
-        .or_else(|| work.id.clone());
-    let pdf_url = work
-        .primary_location
-        .as_ref()
-        .and_then(|location| location.pdf_url.clone())
         .or_else(|| {
-            work.open_access
+            work.best_oa_location
                 .as_ref()
-                .and_then(|open_access| open_access.oa_url.clone())
-        });
+                .and_then(|location| location.landing_page_url.clone())
+        })
+        .or_else(|| work.id.clone());
     let open_access = work.open_access.map(|open_access| OpenAccessSummary {
         is_open_access: open_access.is_oa.unwrap_or(false),
         status: open_access.oa_status,
@@ -297,6 +295,17 @@ fn normalize_openalex_work(
     }
 }
 
+fn choose_openalex_pdf_url(work: &OpenAlexWork) -> Option<String> {
+    work.best_oa_location
+        .as_ref()
+        .and_then(|location| location.pdf_url.clone())
+        .or_else(|| {
+            work.primary_location
+                .as_ref()
+                .and_then(|location| location.pdf_url.clone())
+        })
+}
+
 fn openalex_work_suffix(value: Option<&str>) -> Option<String> {
     let value = value?;
     value
@@ -347,6 +356,7 @@ struct OpenAlexWork {
     cited_by_count: Option<i32>,
     authorships: Option<Vec<OpenAlexAuthorship>>,
     primary_location: Option<OpenAlexLocation>,
+    best_oa_location: Option<OpenAlexLocation>,
     open_access: Option<OpenAlexAccess>,
     abstract_inverted_index: Option<HashMap<String, Vec<usize>>>,
     relevance_score: Option<f64>,
@@ -379,7 +389,6 @@ struct OpenAlexSource {
 struct OpenAlexAccess {
     is_oa: Option<bool>,
     oa_status: Option<String>,
-    oa_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,6 +437,38 @@ mod tests {
         assert_eq!(
             openalex_work_suffix(Some("https://openalex.org/W123456")),
             Some("W123456".to_string())
+        );
+    }
+
+    #[test]
+    fn pdf_url_prefers_best_open_access_location() {
+        let work = OpenAlexWork {
+            id: Some("https://openalex.org/W123456".to_string()),
+            doi: None,
+            display_name: None,
+            publication_year: None,
+            publication_date: None,
+            cited_by_count: None,
+            authorships: None,
+            primary_location: Some(OpenAlexLocation {
+                landing_page_url: None,
+                pdf_url: Some("https://publisher.test/paywalled.pdf".to_string()),
+                source: None,
+            }),
+            best_oa_location: Some(OpenAlexLocation {
+                landing_page_url: None,
+                pdf_url: Some("https://repository.test/open.pdf".to_string()),
+                source: None,
+            }),
+            open_access: None,
+            abstract_inverted_index: None,
+            relevance_score: None,
+            ids: None,
+        };
+
+        assert_eq!(
+            choose_openalex_pdf_url(&work).as_deref(),
+            Some("https://repository.test/open.pdf")
         );
     }
 }

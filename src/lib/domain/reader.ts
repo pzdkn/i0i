@@ -77,6 +77,17 @@ export type ReaderTextSelection = {
   startOffset: number;
   endOffset: number;
   selectedText: string;
+  anchorKind?: "text_offset" | "pdf_rect";
+  pageIndex?: number;
+  rectsJson?: string;
+  quoteContext?: string;
+};
+
+export type PdfRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 export type ReaderMark = {

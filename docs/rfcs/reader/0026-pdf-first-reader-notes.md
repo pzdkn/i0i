@@ -113,6 +113,14 @@ If the first implementation keeps the current `<object>` PDF embed, it should be
 
 PDF notes should be anchored to a `DocumentSource`, not to a `DocumentExtraction`.
 
+For v1, the PDF note anchor is visual and positional:
+
+```text
+source_id + page_index + normalized_rects
+```
+
+That is the source of truth for where the note belongs. The referenced text is stored as a helpful snapshot when the PDF renderer can provide it, but text is not required to place the note back on the PDF.
+
 Conceptual shape:
 
 ```ts
@@ -147,6 +155,111 @@ origin is top-left of the rendered page
 ```
 
 This makes anchors resilient to zoom, window size, and device scale factor.
+
+## Do We Need Position?
+
+Yes, if the note should appear on the PDF again.
+
+A paper-level note only needs:
+
+```text
+paper_id + note_body
+```
+
+A PDF-attached note needs more:
+
+```text
+paper_id + source_id + page_index + rects_json + note_body
+```
+
+The rectangle is what lets i0i:
+
+- draw the note highlight on the PDF
+- scroll back to the note
+- keep the note aligned after zoom/resize
+- distinguish two notes on the same page
+
+Without position data, the app can still store a note about the paper, but it cannot show what part of the PDF the note refers to.
+
+## How Position Is Captured
+
+The PDF viewer should own each rendered page as a DOM element:
+
+```text
+page container
+  -> canvas or SVG PDF rendering
+  -> optional text layer
+  -> i0i annotation overlay
+```
+
+When the user selects text or drags a region, the frontend captures screen rectangles from the interaction and converts them into page-local normalized rectangles:
+
+```text
+x = (selection.left - page.left) / page.width
+y = (selection.top - page.top) / page.height
+width = selection.width / page.width
+height = selection.height / page.height
+```
+
+Store those normalized values, not raw pixels.
+
+On render:
+
+```text
+left = x * current_page_width
+top = y * current_page_height
+width = width * current_page_width
+height = height * current_page_height
+```
+
+This is why notes survive zooming, resizing, and different device scale factors.
+
+If a text selection spans multiple lines, store multiple rectangles in `rects`.
+
+If a note is created by dragging over a figure, table, equation, or blank region, store one rectangle and leave `selectedText` empty.
+
+## How Referenced Text Is Known
+
+Referenced text is best-effort in PDF mode.
+
+With PDF.js or another controlled renderer, selectable PDFs expose a text layer. When the user selects text, the browser selection can provide:
+
+```text
+selectedText = window.getSelection().toString()
+```
+
+That selected text should be saved on the note as a quote snapshot.
+
+Important rule:
+
+```text
+normalized_rects place the note
+selectedText explains the note
+```
+
+Do not use regex or string matching as the v1 source of truth for PDF note placement. It is fragile because:
+
+- PDFs can repeat the same phrase many times
+- ligatures and hyphenation can change extracted text
+- equations and symbols may not map cleanly to Unicode
+- scanned or image-heavy PDFs may have no selectable text
+
+Later, MinerU or another extractor may reconcile a PDF anchor to structured text spans. That should be an enrichment step, not a requirement for saving or reopening the note.
+
+## Anchor Flow
+
+```mermaid
+flowchart LR
+    A[User selects text<br/>or drags region] --> B[PDF page DOM rect]
+    B --> C[Normalize rect<br/>against page size]
+    C --> D[Save PdfNoteAnchor]
+    A --> E{Text layer?}
+    E -- yes --> F[Save selectedText<br/>as quote snapshot]
+    E -- no --> G[No quote text]
+    D --> H[Reopen PDF]
+    H --> I[Scale rect to<br/>current page size]
+    I --> J[Draw note overlay]
+```
 
 ## Note Creation
 
@@ -295,4 +408,3 @@ Optional:
 - Run `pnpm check`.
 - Run `pnpm build`.
 - Run `cargo test`.
-

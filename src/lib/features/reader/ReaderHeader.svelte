@@ -11,7 +11,7 @@
     onModeChange: (mode: ReaderMode) => void;
   } = $props();
 
-  const viewModes: ReaderMode[] = ["TEXT", "PDF", "SPLIT"];
+  const viewModes = $derived<ReaderMode[]>(document.sourceText.trim() ? ["PDF", "TEXT"] : ["PDF"]);
 </script>
 
 <header class="reader-header hair-b">
@@ -35,7 +35,7 @@
         <button
           class:active={mode === viewMode}
           type="button"
-          title={viewMode === "TEXT" ? "Text view" : `${viewMode} view placeholder`}
+          title={viewMode === "TEXT" ? "Text view" : "PDF view"}
           onclick={() => onModeChange(viewMode)}
         >
           {viewMode}
@@ -44,13 +44,10 @@
       {/each}
     </div>
 
-    <button class="btn" type="button">Notes</button>
-    <button class="btn" type="button">Annotate</button>
     <button class="btn" type="button">Graph</button>
     <button class="btn" type="button">Ask</button>
 
     <div class="flex1"></div>
-    <span class="mono-dim">[h] highlight / [n] note / [q] question</span>
   </div>
 </header>
 

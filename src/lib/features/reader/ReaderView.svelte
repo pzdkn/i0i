@@ -18,7 +18,7 @@
     paper: Paper;
   } = $props();
 
-  let mode = $state<ReaderMode>("TEXT");
+  let mode = $state<ReaderMode>("PDF");
   let notes = $state<PaperNote[]>([]);
   let noteDraft = $state<ReaderTextSelection | null>(null);
   let noteError = $state("");
@@ -28,6 +28,7 @@
   let docError = $state("");
   let isLoadingDoc = $state(false);
   let refreshTick = $state(0);
+  let documentLoadSequence = 0;
 
   const document = $derived<ReaderDocument | null>(readerDocument);
   const notesEnabled = $derived(isPaperInLibrary(paper.id));
@@ -55,23 +56,35 @@
   // Fetch real ReaderDocument from backend whenever paper changes or refreshTick increments
   $effect(() => {
     const paperId = paper.id;
+    const loadId = (documentLoadSequence += 1);
     void refreshTick;
     docError = "";
     readerDocument = null;
     isLoadingDoc = true;
+    readerLog("document-load-start", { loadId, paperId, refreshTick });
 
     getReaderDocument(paperId)
       .then((doc) => {
+        readerLog("document-load-resolved", {
+          loadId,
+          paperId,
+          docPaperId: doc.paperId,
+          sourceId: doc.sourceId,
+          hasPdf: Boolean(doc.pdfLocalPath),
+          pdfError: doc.pdfError,
+        });
         if (paper.id === paperId) {
           readerDocument = doc;
         }
       })
       .catch((error) => {
+        readerLog("document-load-error", { loadId, paperId, error: errorDetail(error) }, "error");
         if (paper.id === paperId) {
           docError = String(error);
         }
       })
       .finally(() => {
+        readerLog("document-load-finally", { loadId, paperId, stillCurrent: paper.id === paperId });
         if (paper.id === paperId) {
           isLoadingDoc = false;
         }
@@ -128,6 +141,10 @@
         startOffset: noteDraft.startOffset,
         endOffset: noteDraft.endOffset,
         selectedText: noteDraft.selectedText,
+        anchorKind: noteDraft.anchorKind,
+        pageIndex: noteDraft.pageIndex,
+        rectsJson: noteDraft.rectsJson,
+        quoteContext: noteDraft.quoteContext,
         body,
       });
       notes = nextNotes;
@@ -180,6 +197,31 @@
   function activateNote(noteId: string) {
     activeNoteId = noteId;
   }
+
+  function readerLog(stage: string, payload: Record<string, unknown>, level: "info" | "error" = "info") {
+    const message = `[reader ${new Date().toISOString()}] ${stage}`;
+    if (level === "error") {
+      console.error(message, payload);
+      return;
+    }
+
+    console.info(message, payload);
+  }
+
+  function errorDetail(value: unknown) {
+    if (value instanceof Error) {
+      return {
+        name: value.name,
+        message: value.message,
+        stack: value.stack,
+      };
+    }
+
+    return {
+      type: typeof value,
+      value: String(value),
+    };
+  }
 </script>
 
 <section class="reader-workspace col">
@@ -209,7 +251,15 @@
               />
             </div>
           {:else if mode === "PDF" && hasCachedPdf}
-            <PdfPage pdfUrl={readerDocument!.pdfLocalPath!} />
+            <PdfPage
+              pdfUrl={readerDocument!.pdfLocalPath!}
+              sourceId={document.sourceId}
+              {notes}
+              {activeNoteId}
+              {notesEnabled}
+              onCreateNoteFromSelection={createNoteDraft}
+              onActivateNote={activateNote}
+            />
           {:else if mode === "PDF" && !hasCachedPdf}
             <div class="missing-pdf col">
               <div class="label hot">PDF not available</div>

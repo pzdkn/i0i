@@ -124,6 +124,18 @@
     void updateNote();
   }
 
+  function noteAnchorLabel(note: { selectedText: string; anchorKind?: "text_offset" | "pdf_rect"; pageIndex?: number }) {
+    if (note.selectedText.trim()) {
+      return note.selectedText;
+    }
+
+    if (note.anchorKind === "pdf_rect" && note.pageIndex !== undefined) {
+      return `PDF region, page ${note.pageIndex + 1}`;
+    }
+
+    return "Untitled note anchor";
+  }
+
   const tabs: Array<{ id: InspectorTab; label: string }> = [
     { id: "notes", label: "Notes" },
     { id: "lineage", label: "Lineage" },
@@ -158,8 +170,8 @@
         {#if notesEnabled}
           {#if noteDraft}
             <div class="note-draft">
-              <div class="label">Selected quote</div>
-              <blockquote>{noteDraft.selectedText}</blockquote>
+              <div class="label">{noteDraft.anchorKind === "pdf_rect" ? "PDF anchor" : "Selected quote"}</div>
+              <blockquote>{noteAnchorLabel(noteDraft)}</blockquote>
               <textarea
                 bind:value={noteBody}
                 aria-label="Note body"
@@ -200,7 +212,7 @@
                     ></button>
                   {/if}
                   <div class="row saved-note-head">
-                    <blockquote>{note.selectedText}</blockquote>
+                    <blockquote>{noteAnchorLabel(note)}</blockquote>
                     <div class="row note-buttons">
                       <button
                         class="note-icon"
