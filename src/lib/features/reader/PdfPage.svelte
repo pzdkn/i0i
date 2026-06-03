@@ -17,6 +17,7 @@
     sourceId,
     notes,
     activeNoteId,
+    noteDraft,
     notesEnabled,
     onCreateNoteFromSelection,
     onActivateNote,
@@ -25,6 +26,7 @@
     sourceId: string;
     notes: PaperNote[];
     activeNoteId: string | null;
+    noteDraft: ReaderTextSelection | null;
     notesEnabled: boolean;
     onCreateNoteFromSelection: (selection: ReaderTextSelection) => void;
     onActivateNote: (noteId: string) => void;
@@ -143,6 +145,7 @@
             {scale}
             notes={pdfNotes}
             {activeNoteId}
+            {noteDraft}
             {notesEnabled}
             {sourceId}
             {onCreateNoteFromSelection}

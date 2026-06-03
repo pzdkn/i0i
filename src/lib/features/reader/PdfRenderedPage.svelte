@@ -16,6 +16,7 @@
     scale,
     notes,
     activeNoteId,
+    noteDraft,
     notesEnabled,
     sourceId,
     onCreateNoteFromSelection,
@@ -26,6 +27,7 @@
     scale: number;
     notes: PaperNote[];
     activeNoteId: string | null;
+    noteDraft: ReaderTextSelection | null;
     notesEnabled: boolean;
     sourceId: string;
     onCreateNoteFromSelection: (selection: ReaderTextSelection) => void;
@@ -43,6 +45,7 @@
 
   const pageIndex = $derived(pageNumber - 1);
   const pageNotes = $derived(notes.filter((note) => note.pageIndex === pageIndex));
+  const draftRects = $derived(noteDraft?.pageIndex === pageIndex ? rectsFromJson(noteDraft.rectsJson) : []);
 
   $effect(() => {
     const document = pdfDocument;
@@ -245,16 +248,19 @@
       quoteContext: pendingNote.quoteContext,
     });
     pendingNote = null;
-    window.getSelection()?.removeAllRanges();
   }
 
   function noteRects(note: PaperNote): PdfRect[] {
-    if (!note.rectsJson) {
+    return rectsFromJson(note.rectsJson);
+  }
+
+  function rectsFromJson(rectsJson?: string): PdfRect[] {
+    if (!rectsJson) {
       return [];
     }
 
     try {
-      const rects = JSON.parse(note.rectsJson);
+      const rects = JSON.parse(rectsJson);
       return Array.isArray(rects) ? rects : [];
     } catch {
       return [];
@@ -291,6 +297,10 @@
           }}
         ></button>
       {/each}
+    {/each}
+
+    {#each draftRects as rect}
+      <div class="pdf-note-draft-anchor" style={rectStyle(rect)}></div>
     {/each}
   </div>
 
@@ -410,6 +420,13 @@
     border-color: rgba(107, 160, 168, 0.95);
     background: rgba(107, 160, 168, 0.22);
     box-shadow: 0 0 0 2px rgba(107, 160, 168, 0.18);
+  }
+
+  .pdf-note-draft-anchor {
+    position: absolute;
+    border: 1px solid rgba(107, 160, 168, 0.95);
+    background: rgba(107, 160, 168, 0.2);
+    pointer-events: none;
   }
 
   .page-loading,

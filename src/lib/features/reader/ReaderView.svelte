@@ -129,6 +129,12 @@
     noteError = "";
   }
 
+  function cancelNoteDraft() {
+    noteDraft = null;
+    noteError = "";
+    clearReaderSelection();
+  }
+
   async function saveNote(body: string) {
     if (!noteDraft || !notesEnabled) {
       return;
@@ -151,10 +157,15 @@
       activeNoteId = nextNotes[0]?.id ?? null;
       noteDraft = null;
       noteError = "";
+      clearReaderSelection();
       incrementPaperNoteCount(paper.id);
     } catch (error) {
       noteError = String(error);
     }
+  }
+
+  function clearReaderSelection() {
+    window.getSelection()?.removeAllRanges();
   }
 
   async function removeNote(noteId: string) {
@@ -256,6 +267,7 @@
               sourceId={document.sourceId}
               {notes}
               {activeNoteId}
+              {noteDraft}
               {notesEnabled}
               onCreateNoteFromSelection={createNoteDraft}
               onActivateNote={activateNote}
@@ -304,6 +316,7 @@
         {noteError}
         {isLoadingNotes}
         onSaveNote={saveNote}
+        onCancelNoteDraft={cancelNoteDraft}
         onDeleteNote={removeNote}
         onUpdateNote={updateNote}
         onActivateNote={activateNote}
