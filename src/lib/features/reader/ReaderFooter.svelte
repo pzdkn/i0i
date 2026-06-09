@@ -1,12 +1,9 @@
 <script lang="ts">
-  import type { ReaderMode } from "$lib/domain/reader";
-
-  let { mode }: { mode: ReaderMode } = $props();
 </script>
 
 <footer class="reader-footer row hair-t">
   <span><span class="key">&lt;</span> p.2 / 15 <span class="key">&gt;</span></span>
-  <span class="mono-dim">mode: {mode}</span>
+  <span class="mono-dim">mode: PDF</span>
   <span class="mono-dim">scroll / up down / j k</span>
   <div class="flex1"></div>
   <span><span class="key">h</span> highlight</span>

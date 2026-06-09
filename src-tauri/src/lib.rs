@@ -22,7 +22,7 @@ pub fn run() {
             pdf_downloads
                 .recover_and_queue_startup_downloads()
                 .map_err(std::io::Error::other)?;
-            let reader_service = ReaderService::new(store.clone());
+            let reader_service = ReaderService::new(app.handle().clone(), store.clone());
             let discovery_service = commands::discovery::AppDiscoveryService::new(
                 commands::discovery::providers::openalex::OpenAlexProvider::from_app_config()
                     .map_err(std::io::Error::other)?,
@@ -50,6 +50,7 @@ pub fn run() {
             commands::library::delete_paper_note,
             commands::library::update_paper_note,
             commands::reader::get_reader_document,
+            commands::reader::get_discovery_reader_document,
             commands::reader::get_reader_pdf_bytes,
         ])
         .run(tauri::generate_context!())

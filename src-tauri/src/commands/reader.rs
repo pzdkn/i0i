@@ -1,8 +1,9 @@
+use crate::domain::reader::DiscoveryReaderCandidate;
 use crate::services::reader_service::ReaderService;
-use crate::storage::library_store::LibraryStore;
 
+/// Load a Reader document for a durable library paper.
 #[tauri::command]
-pub fn get_reader_document(
+pub async fn get_reader_document(
     reader_service: tauri::State<'_, ReaderService>,
     paper_id: String,
     extraction_id: Option<String>,
@@ -11,13 +12,16 @@ pub fn get_reader_document(
         "get_reader_document start paper_id={paper_id} extraction_id={:?}",
         extraction_id
     ));
-    let result = reader_service.get_reader_document(&paper_id, extraction_id.as_deref());
+    let result = reader_service
+        .get_reader_document(&paper_id, extraction_id.as_deref())
+        .await;
     match &result {
         Ok(document) => reader_log(format!(
-            "get_reader_document ok paper_id={} source_id={} has_pdf={}",
+            "get_reader_document ok paper_id={} source_id={} has_pdf={} pdf_error={:?}",
             document.paper_id,
             document.source_id,
-            document.pdf_local_path.is_some()
+            document.pdf_local_path.is_some(),
+            document.pdf_error
         )),
         Err(error) => reader_log(format!(
             "get_reader_document error paper_id={paper_id} error={error}"
@@ -26,28 +30,43 @@ pub fn get_reader_document(
     result
 }
 
+/// Load a Reader document directly from a transient discovery candidate.
+#[tauri::command]
+pub async fn get_discovery_reader_document(
+    reader_service: tauri::State<'_, ReaderService>,
+    candidate: DiscoveryReaderCandidate,
+) -> Result<crate::domain::reader::ReaderDocument, String> {
+    reader_log(format!(
+        "get_discovery_reader_document start paper_id={} pdf_url={:?}",
+        candidate.id, candidate.pdf_url
+    ));
+    let result = reader_service
+        .get_discovery_reader_document(&candidate)
+        .await;
+    match &result {
+        Ok(document) => reader_log(format!(
+            "get_discovery_reader_document ok paper_id={} source_id={} has_pdf={} pdf_error={:?}",
+            document.paper_id,
+            document.source_id,
+            document.pdf_local_path.is_some(),
+            document.pdf_error
+        )),
+        Err(error) => reader_log(format!(
+            "get_discovery_reader_document error paper_id={} error={error}",
+            candidate.id
+        )),
+    }
+    result
+}
+
+/// Read PDF bytes for either a durable or temporary Reader source id.
 #[tauri::command]
 pub fn get_reader_pdf_bytes(
-    store: tauri::State<'_, LibraryStore>,
+    reader_service: tauri::State<'_, ReaderService>,
     source_id: String,
 ) -> Result<Vec<u8>, String> {
     reader_log(format!("get_reader_pdf_bytes start source_id={source_id}"));
-    let source = store.get_document_source(&source_id)?;
-    if source.source_kind != "pdf" {
-        return Err(format!("Document source is not a PDF: {source_id}"));
-    }
-    if source.status != "cached" {
-        return Err(format!(
-            "PDF source is not cached yet: {source_id} ({})",
-            source.status
-        ));
-    }
-
-    let local_path = source
-        .local_path
-        .ok_or_else(|| format!("Cached PDF source has no local path: {source_id}"))?;
-    let bytes = std::fs::read(&local_path)
-        .map_err(|error| format!("Failed to read cached PDF {local_path}: {error}"))?;
+    let bytes = reader_service.get_reader_pdf_bytes(&source_id)?;
     reader_log(format!(
         "get_reader_pdf_bytes ok source_id={source_id} bytes={}",
         bytes.len()

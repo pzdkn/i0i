@@ -1,3 +1,5 @@
+import type { DiscoveryReaderCandidate } from "$lib/domain/reader";
+
 export type WorkspaceKind = "vault" | "reader" | "discover";
 
 export type WorkspaceTab = {
@@ -6,5 +8,6 @@ export type WorkspaceTab = {
   title: string;
   vaultId?: string;
   paperId?: string;
+  readerCandidate?: DiscoveryReaderCandidate;
   discoverId?: string;
 };

@@ -1,4 +1,17 @@
-export type ReaderMode = "TEXT" | "PDF" | "SPLIT";
+export type DiscoveryReaderCandidate = {
+  id: string;
+  sourceProvider?: string;
+  sourceId?: string;
+  title: string;
+  authors: string[];
+  venue: string;
+  year: number;
+  citations: number;
+  tags: string[];
+  abstract?: string;
+  externalUrl?: string;
+  pdfUrl?: string;
+};
 
 export type ReaderExtractor = "docling" | "mineru" | "marker" | "grobid" | "pdfium_basic";
 

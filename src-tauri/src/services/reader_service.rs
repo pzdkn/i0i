@@ -1,17 +1,181 @@
-use crate::domain::reader::{ReaderAsset, ReaderBlock, ReaderDocument, ReaderPage, ReaderSpan};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use reqwest::StatusCode;
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Manager};
+
+use crate::domain::library::DocumentSource;
+use crate::domain::reader::{
+    DiscoveryReaderCandidate, ReaderAsset, ReaderBlock, ReaderDocument, ReaderPage,
+    ReaderParagraph, ReaderSpan, ReaderTextBlock,
+};
 use crate::storage::library_store::LibraryStore;
 
+const DISCOVERY_PDF_SOURCE_PREFIX: &str = "temp-pdf";
+const DISCOVERY_NO_SOURCE_PREFIX: &str = "temp-meta";
+const READER_MAX_PDF_BYTES: u64 = 104_857_600;
+
+/// Builds Reader documents from either saved papers or transient discovery candidates.
+///
+/// The Reader UI stays unified by asking this service for the same
+/// `ReaderDocument` shape regardless of whether the user opened a library paper
+/// or an unsaved discovery result.
 #[derive(Clone)]
 pub struct ReaderService {
+    app: AppHandle,
     store: LibraryStore,
+    client: reqwest::Client,
+}
+
+enum ReaderTarget<'a> {
+    SavedPaper {
+        paper_id: &'a str,
+        extraction_id: Option<&'a str>,
+    },
+    DiscoveryCandidate(&'a DiscoveryReaderCandidate),
 }
 
 impl ReaderService {
-    pub fn new(store: LibraryStore) -> Self {
-        Self { store }
+    /// Create a Reader service with access to durable storage and app-local cache paths.
+    pub fn new(app: AppHandle, store: LibraryStore) -> Self {
+        let client = reqwest::Client::builder()
+            .user_agent(concat!(
+                env!("CARGO_PKG_NAME"),
+                "/",
+                env!("CARGO_PKG_VERSION"),
+                " reader"
+            ))
+            .build()
+            .expect("reqwest client should build");
+        Self { app, store, client }
     }
 
-    pub fn get_reader_document(
+    /// Load a Reader document for a saved library paper.
+    ///
+    /// Args:
+    ///     paper_id: Durable library paper id.
+    ///     extraction_id: Optional extraction override for structured Reader data.
+    ///
+    /// Returns:
+    ///     A `ReaderDocument` backed by durable library state.
+    pub async fn get_reader_document(
+        &self,
+        paper_id: &str,
+        extraction_id: Option<&str>,
+    ) -> Result<ReaderDocument, String> {
+        self.get_reader_document_for_target(ReaderTarget::SavedPaper {
+            paper_id,
+            extraction_id,
+        })
+        .await
+    }
+
+    /// Load a Reader document directly from a discovery candidate.
+    ///
+    /// Args:
+    ///     candidate: Transient candidate metadata from the Discover UI.
+    ///
+    /// Returns:
+    ///     A `ReaderDocument` that may use temporary app-cache-backed assets.
+    pub async fn get_discovery_reader_document(
+        &self,
+        candidate: &DiscoveryReaderCandidate,
+    ) -> Result<ReaderDocument, String> {
+        self.get_reader_document_for_target(ReaderTarget::DiscoveryCandidate(candidate))
+            .await
+    }
+
+    /// Read PDF bytes for a Reader source id.
+    ///
+    /// Durable source ids resolve through `LibraryStore`. Temporary discovery
+    /// source ids resolve through the app cache path derived from the source id.
+    pub fn get_reader_pdf_bytes(&self, source_id: &str) -> Result<Vec<u8>, String> {
+        // One Reader UI means one byte-loading entrypoint, but the backing file
+        // lives either in durable library storage or in temporary discovery cache.
+        let local_path = if is_discovery_source_id(source_id) {
+            let path = self.discovery_pdf_path(source_id)?;
+            if !validate_cached_pdf(&path) {
+                return Err(format!(
+                    "Cached discovery PDF is missing or invalid: {source_id}"
+                ));
+            }
+            path
+        } else {
+            let source = self.store.get_document_source(source_id)?;
+            if source.source_kind != "pdf" {
+                return Err(format!("Document source is not a PDF: {source_id}"));
+            }
+            if source.status != "cached" {
+                return Err(format!(
+                    "PDF source is not cached yet: {source_id} ({})",
+                    source.status
+                ));
+            }
+
+            PathBuf::from(
+                source
+                    .local_path
+                    .ok_or_else(|| format!("Cached PDF source has no local path: {source_id}"))?,
+            )
+        };
+
+        fs::read(&local_path).map_err(|error| {
+            format!(
+                "Failed to read cached PDF {}: {error}",
+                local_path.display()
+            )
+        })
+    }
+
+    /// Promote a discovery-cached PDF into the durable document-source layout.
+    ///
+    /// Returns `Ok(true)` when a matching cached discovery PDF existed and was
+    /// attached to the durable source, or `Ok(false)` when there was nothing to
+    /// promote and the normal download path should continue.
+    pub fn promote_discovery_cached_pdf(&self, source: &DocumentSource) -> Result<bool, String> {
+        let Some(source_url) = source.source_url.as_deref() else {
+            return Ok(false);
+        };
+
+        // The temporary cache key is derived from the paper id plus PDF URL, so
+        // "open in Discover" and "save to Vault" can converge on the same file.
+        let discovery_source_id = discovery_pdf_source_id(&source.paper_id, source_url);
+        let discovery_pdf_path = self.discovery_pdf_path(&discovery_source_id)?;
+        if !validate_cached_pdf(&discovery_pdf_path) {
+            return Ok(false);
+        }
+
+        let durable_pdf_path = self.durable_source_pdf_path(source)?;
+        if let Some(parent) = durable_pdf_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+
+        fs::copy(&discovery_pdf_path, &durable_pdf_path).map_err(|error| error.to_string())?;
+        self.store
+            .set_document_source_cached(&source.id, &durable_pdf_path.to_string_lossy())?;
+        Ok(true)
+    }
+
+    /// Resolve a Reader target into the shared `ReaderDocument` output model.
+    async fn get_reader_document_for_target(
+        &self,
+        target: ReaderTarget<'_>,
+    ) -> Result<ReaderDocument, String> {
+        match target {
+            ReaderTarget::SavedPaper {
+                paper_id,
+                extraction_id,
+            } => self.get_saved_reader_document(paper_id, extraction_id),
+            ReaderTarget::DiscoveryCandidate(candidate) => {
+                self.get_discovery_candidate_reader_document(candidate)
+                    .await
+            }
+        }
+    }
+
+    /// Build a Reader document from durable library state.
+    fn get_saved_reader_document(
         &self,
         paper_id: &str,
         extraction_id: Option<&str>,
@@ -24,7 +188,6 @@ impl ReaderService {
             .find(|p| p.id == paper_id)
             .ok_or_else(|| format!("Paper not found: {paper_id}"))?;
 
-        // Resolve active or requested source
         let source = snapshot
             .document_sources
             .into_iter()
@@ -34,13 +197,15 @@ impl ReaderService {
             })
             .filter(|s| s.status == "cached" || s.status == "remote_available");
 
-        // Resolve active extraction, or a specific one
         let active_extraction = if let Some(id) = extraction_id {
             snapshot
                 .document_extractions
                 .into_iter()
                 .find(|e| e.id == id)
         } else {
+            // If the caller does not pin an extraction, follow the paper's active
+            // extraction first and otherwise fall back to the extraction for the
+            // chosen source so older records still remain readable.
             snapshot.document_extractions.into_iter().find(|e| {
                 paper.active_extraction_id.as_deref() == Some(&e.id)
                     || (paper.active_extraction_id.is_none()
@@ -57,7 +222,6 @@ impl ReaderService {
                     .document_pages
                     .iter()
                     .filter(|p| p.extraction_id == extraction.id)
-                    .cloned()
                     .map(|p| ReaderPage {
                         page_index: p.page_index,
                         width: p.width,
@@ -120,7 +284,7 @@ impl ReaderService {
                     })
                     .collect();
 
-                // Build source_text from blocks in reading order
+                // Structured extraction rows still drive the durable Reader path.
                 let source_text: String = blocks
                     .iter()
                     .filter_map(|b| b.text.as_deref())
@@ -147,6 +311,10 @@ impl ReaderService {
         let identifier = format!("{}:{}", paper.id, paper.venue.to_lowercase());
         let citation_key = paper.id.clone();
         let tags = paper.tags.clone();
+        let text_blocks = blocks
+            .iter()
+            .filter_map(reader_text_block_from_block)
+            .collect::<Vec<_>>();
 
         Ok(ReaderDocument {
             paper_id: paper.id,
@@ -170,9 +338,271 @@ impl ReaderService {
             blocks,
             spans,
             assets,
-            text_blocks: Vec::new(),
+            text_blocks,
             paragraphs: Vec::new(),
             marks: Vec::new(),
         })
     }
+
+    /// Build a Reader document from a transient discovery candidate.
+    ///
+    /// If the candidate exposes a PDF URL, this path tries to cache a temporary
+    /// copy in the app cache so the existing PDF Reader UI can render it.
+    async fn get_discovery_candidate_reader_document(
+        &self,
+        candidate: &DiscoveryReaderCandidate,
+    ) -> Result<ReaderDocument, String> {
+        let (source_id, pdf_local_path, pdf_error) =
+            if let Some(pdf_url) = candidate.pdf_url.as_deref() {
+                let source_id = discovery_pdf_source_id(&candidate.id, pdf_url);
+                let local_path = match self.cache_discovery_pdf(&source_id, pdf_url).await {
+                    Ok(path) => Some(path.to_string_lossy().to_string()),
+                    Err(error) => {
+                        // Discovery open is intentionally forgiving: no PDF yet should
+                        // degrade to metadata + abstract text, not block the Reader.
+                        return Ok(self.discovery_reader_document(
+                            candidate,
+                            source_id,
+                            None,
+                            Some(error),
+                        ));
+                    }
+                };
+                (source_id, local_path, None)
+            } else {
+                (
+                    format!("{DISCOVERY_NO_SOURCE_PREFIX}:{}", candidate.id),
+                    None,
+                    None,
+                )
+            };
+
+        Ok(self.discovery_reader_document(candidate, source_id, pdf_local_path, pdf_error))
+    }
+
+    /// Adapt a discovery candidate into the standard `ReaderDocument` shape.
+    fn discovery_reader_document(
+        &self,
+        candidate: &DiscoveryReaderCandidate,
+        source_id: String,
+        pdf_local_path: Option<String>,
+        pdf_error: Option<String>,
+    ) -> ReaderDocument {
+        let source_text = candidate.abstract_text.clone().unwrap_or_default();
+        let (text_blocks, paragraphs) = text_fallback(&source_text);
+
+        ReaderDocument {
+            paper_id: candidate.id.clone(),
+            source_id,
+            extraction_id: None,
+            annotation_source_id: None,
+            title: candidate.title.clone(),
+            authors: candidate.authors.clone(),
+            venue: candidate.venue.clone(),
+            year: candidate.year,
+            identifier: format!("{}:{}", candidate.id, candidate.venue.to_lowercase()),
+            citation_key: candidate.id.clone(),
+            tags: candidate.tags.clone(),
+            pdf_local_path,
+            pdf_source_url: candidate.pdf_url.clone(),
+            pdf_error,
+            source_text,
+            pages: Vec::new(),
+            blocks: Vec::new(),
+            spans: Vec::new(),
+            assets: Vec::new(),
+            text_blocks,
+            paragraphs,
+            marks: Vec::new(),
+        }
+    }
+
+    /// Cache a discovery PDF into the app cache area using the same basic
+    /// validation rules as the durable PDF ingestion flow.
+    async fn cache_discovery_pdf(&self, source_id: &str, pdf_url: &str) -> Result<PathBuf, String> {
+        let local_path = self.discovery_pdf_path(source_id)?;
+        if validate_cached_pdf(&local_path) {
+            return Ok(local_path);
+        }
+
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+
+        let partial_path = PathBuf::from(format!("{}.part", local_path.display()));
+        let response = self
+            .client
+            .get(pdf_url)
+            .header("Accept", "application/pdf,*/*;q=0.8")
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        let status = response.status();
+        let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(status_error(status, &final_url, &content_type, &body));
+        }
+
+        if let Some(content_length) = response.content_length() {
+            if content_length > READER_MAX_PDF_BYTES {
+                return Err(format!(
+                    "PDF is too large: {content_length} bytes exceeds {READER_MAX_PDF_BYTES} bytes"
+                ));
+            }
+        }
+
+        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+        if bytes.len() as u64 > READER_MAX_PDF_BYTES {
+            return Err(format!(
+                "PDF is too large: {} bytes exceeds {READER_MAX_PDF_BYTES} bytes",
+                bytes.len()
+            ));
+        }
+        if !bytes.starts_with(b"%PDF-") {
+            return Err("Downloaded file was not a PDF".to_string());
+        }
+
+        // Write through a temporary file so partial downloads do not look like a
+        // valid cached PDF to later Reader opens.
+        fs::write(&partial_path, &bytes).map_err(|error| error.to_string())?;
+        fs::rename(&partial_path, &local_path).map_err(|error| error.to_string())?;
+        Ok(local_path)
+    }
+
+    /// Resolve the app-cache path for a temporary discovery PDF source id.
+    fn discovery_pdf_path(&self, source_id: &str) -> Result<PathBuf, String> {
+        let app_cache_dir = self
+            .app
+            .path()
+            .app_cache_dir()
+            .map_err(|error| error.to_string())?;
+        Ok(app_cache_dir
+            .join("reader")
+            .join("discovery")
+            .join(sanitize_path_component(source_id))
+            .join("source.pdf"))
+    }
+
+    /// Resolve the durable on-disk PDF path for a saved document source.
+    fn durable_source_pdf_path(&self, source: &DocumentSource) -> Result<PathBuf, String> {
+        let app_data_dir = self
+            .app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?;
+        Ok(app_data_dir
+            .join("documents")
+            .join(&source.paper_id)
+            .join("sources")
+            .join(sanitize_path_component(&source.id))
+            .join("source.pdf"))
+    }
+}
+
+/// Returns whether a source id belongs to the temporary discovery-reader path.
+fn is_discovery_source_id(source_id: &str) -> bool {
+    source_id.starts_with(&format!("{DISCOVERY_PDF_SOURCE_PREFIX}:"))
+}
+
+/// Derive a stable temporary PDF source id from paper id and source URL.
+fn discovery_pdf_source_id(paper_id: &str, pdf_url: &str) -> String {
+    let digest = Sha256::digest(pdf_url.as_bytes());
+    let suffix = format!("{:x}", digest);
+    format!("{DISCOVERY_PDF_SOURCE_PREFIX}:{paper_id}:{}", &suffix[..12])
+}
+
+/// Convert a structured Reader block into the lighter text-block view model.
+fn reader_text_block_from_block(block: &ReaderBlock) -> Option<ReaderTextBlock> {
+    let kind = match block.kind.as_str() {
+        "title" | "authors" | "heading" | "paragraph" => block.kind.clone(),
+        _ => return None,
+    };
+
+    Some(ReaderTextBlock {
+        id: block.id.clone(),
+        kind,
+        text: block.text.clone()?,
+        source_start: block.source_start?,
+        highlight: None,
+    })
+}
+
+/// Build a minimal text fallback for unsaved discovery candidates.
+///
+/// The first increment uses abstract text as a lightweight reading surface when
+/// no structured extraction exists yet.
+fn text_fallback(source_text: &str) -> (Vec<ReaderTextBlock>, Vec<ReaderParagraph>) {
+    let trimmed = source_text.trim();
+    if trimmed.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    (
+        vec![ReaderTextBlock {
+            id: "p1".to_string(),
+            kind: "paragraph".to_string(),
+            text: trimmed.to_string(),
+            source_start: 0,
+            highlight: None,
+        }],
+        vec![ReaderParagraph {
+            id: "p1".to_string(),
+            kind: "paragraph".to_string(),
+            text: trimmed.to_string(),
+            highlight: None,
+        }],
+    )
+}
+
+/// Build a readable download error from HTTP status and response metadata.
+fn status_error(status: StatusCode, final_url: &str, content_type: &str, body: &str) -> String {
+    let snippet = body_snippet(body);
+    if snippet.is_empty() {
+        return format!(
+            "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type})"
+        );
+    }
+
+    format!(
+        "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type}; body: {snippet})"
+    )
+}
+
+/// Trim an HTML or text response body to a short loggable snippet.
+fn body_snippet(body: &str) -> String {
+    body.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(220)
+        .collect()
+}
+
+/// Check whether a cached file looks like a PDF by validating the magic header.
+fn validate_cached_pdf(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    bytes.starts_with(b"%PDF-")
+}
+
+/// Replace filesystem-hostile characters in generated cache path components.
+fn sanitize_path_component(input: &str) -> String {
+    input
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

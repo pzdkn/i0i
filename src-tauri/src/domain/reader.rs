@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+/// Discovery candidate payload sent to the Reader before a paper is saved.
+///
+/// This keeps the Reader command boundary small: the frontend can pass the
+/// metadata it already has from Discover, and the backend can adapt it into the
+/// normal `ReaderDocument` shape without creating a durable library row first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryReaderCandidate {
+    pub id: String,
+    pub source_provider: Option<String>,
+    pub source_id: Option<String>,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub venue: String,
+    pub year: i32,
+    pub citations: i32,
+    pub tags: Vec<String>,
+    #[serde(rename = "abstract")]
+    pub abstract_text: Option<String>,
+    pub external_url: Option<String>,
+    pub pdf_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReaderTextBlock {

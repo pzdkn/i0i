@@ -8,7 +8,7 @@ import type {
   VaultDraft,
   VaultRenameDraft,
 } from "$lib/domain/library";
-import type { ReaderDocument } from "$lib/domain/reader";
+import type { DiscoveryReaderCandidate, ReaderDocument } from "$lib/domain/reader";
 
 export async function getLibrary(): Promise<LibrarySnapshot> {
   return invoke<LibrarySnapshot>("get_library");
@@ -93,6 +93,12 @@ export async function getReaderDocument(paperId: string, extractionId?: string):
   return invoke<ReaderDocument>("get_reader_document", {
     paperId,
     extractionId,
+  });
+}
+
+export async function getDiscoveryReaderDocument(candidate: DiscoveryReaderCandidate): Promise<ReaderDocument> {
+  return invoke<ReaderDocument>("get_discovery_reader_document", {
+    candidate,
   });
 }
 

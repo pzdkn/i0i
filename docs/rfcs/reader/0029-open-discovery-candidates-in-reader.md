@@ -9,119 +9,161 @@ Target: Tauri v2 + Svelte, macOS first
 
 Let users open a discovery candidate in Reader immediately, without first adding it to a Vault.
 
-Today the Reader only opens durable library papers:
+The key design constraint is elegance through reuse:
 
-```text
-Reader open
-  -> backend looks up paper in LibraryStore
-  -> paper must already exist in a Vault/library snapshot
-```
+- keep one Reader UI
+- keep one `ReaderDocument` output model
+- keep one core `ReaderService`
+- reuse existing PDF/cache behavior where possible
+- add only the smallest new abstraction needed at the input boundary
 
-That makes saved-paper reading work, but it makes discovery browsing feel heavier than it should. In discovery, opening a paper is an inspection action, not a commitment to save it.
-
-This RFC introduces a temporary reader path for unsaved discovery candidates:
-
-```text
-Discover candidate
-  -> Open in Reader
-  -> create temporary reader session
-  -> optionally cache PDF in app cache/temp storage
-  -> render Reader
-
-Later:
-Save to Vault
-  -> promote metadata into durable library state
-  -> reuse any already cached PDF/source when possible
-```
+The backend should stop assuming that every readable paper is already a durable library row.
 
 ## Context
 
-Discovery candidates are transient frontend objects. They are not durable `Paper` rows in the backend library store until the user explicitly adds them to a Vault.
-
-Reader currently assumes the opposite. Its backend path starts from a durable paper id and fails when the id is only a transient discovery candidate.
-
-Observed behavior:
+Today Reader opens a durable library paper:
 
 ```text
-get_reader_document(paper_id = openalex:W...)
-  -> ReaderService searches LibraryStore snapshot
-  -> no durable paper row exists
+paper_id
+  -> ReaderService::get_reader_document(paper_id)
+  -> LibraryStore lookup
+  -> ReaderDocument
+```
+
+That works for Vault papers, but not for discovery candidates. A discovery candidate is transient frontend state until the user explicitly saves it.
+
+Current failure:
+
+```text
+openalex:W...
+  -> get_reader_document(paper_id)
+  -> ReaderService searches durable LibraryStore snapshot
   -> "Paper not found"
 ```
 
-This means discovery currently has an awkward product rule:
+This creates an awkward product rule:
 
 ```text
-discover candidate
-  -> add to vault
-  -> then open in reader
+Discover candidate
+  -> Add to Vault
+  -> then Open in Reader
 ```
 
-That is functional but wrong-feeling. Users should be able to inspect first and decide later.
+That is functionally valid but conceptually wrong. Opening from discovery is an inspection action, not a commitment to save.
 
 ## Product Decision
 
-Reader should support two entry modes:
+Open from Discover should always work.
 
-- durable library papers
-- temporary discovery reader sessions
+Save to Vault remains a separate decision.
 
-The user-facing rule should be:
+Do not silently create a durable library paper just because the user opened something in Reader.
+
+## Core Design
+
+Do not build a second Reader system for discovery.
+
+Instead:
+
+- keep one Reader frontend
+- keep one `ReaderDocument`
+- extend `ReaderService` so it can resolve more than one kind of input
+
+The new abstraction should be the input target, not a parallel temporary reader subsystem.
+
+Conceptually:
 
 ```text
-Open from Discover should always work.
-Save to Vault is a separate decision.
+ReaderTarget
+  -> SavedPaper
+  -> DiscoveryCandidate
 ```
 
-Do not silently save a paper to the library just because the user opened it in Reader.
+`ReaderService` should accept a target and produce the same `ReaderDocument` regardless of where the target came from.
 
 ## Goals
 
 - Let any discovery candidate open in Reader immediately.
+- Reuse `ReaderDocument` as the single Reader response shape.
+- Reuse `ReaderService` as the main Reader orchestration layer.
+- Reuse existing PDF download/cache primitives where possible.
 - Keep unsaved discovery viewing separate from durable library persistence.
-- Allow temporary PDF/document caching for unsaved reader sessions.
-- Reuse already downloaded temporary files when the user later saves the paper.
-- Preserve the current Reader behavior for saved library papers.
+- Reuse an already downloaded PDF when the user later saves the paper to a Vault.
 - Keep the first implementation small and understandable.
 
 ## Non-Goals
 
-- No full redesign of the Reader document model.
-- No automatic persistence of every discovery candidate.
+- No second Reader UI.
+- No second Reader document model.
+- No automatic saving of every opened discovery candidate.
 - No temporary notes or annotations in the first increment.
-- No long-term scout/session history persistence in v0.1.
-- No sophisticated cache eviction system in the first increment.
-- No multi-provider abstraction changes beyond what is needed for discovery-open.
+- No new durable database tables unless they become clearly necessary.
+- No full general document-source redesign in this RFC.
 
-## Proposed User Flow
+## User Flow
 
 ```text
 User runs Discover
   -> sees candidate rows
   -> clicks or double-clicks Open
-  -> Reader opens that candidate immediately
+  -> Reader opens immediately
 
-If candidate has a PDF URL:
-  -> app may download/cache PDF into temporary app cache storage
-  -> Reader can use the cached file when available
+If PDF URL exists:
+  -> app may download/cache PDF in app cache
+  -> Reader can render PDF when available
 
 If user later clicks Add to Vault:
-  -> save durable paper metadata
-  -> save durable document source row
-  -> reuse the already cached PDF if one exists for the same candidate/source
+  -> create durable paper metadata
+  -> create/attach durable document source
+  -> reuse the already cached PDF when identities match
+```
+
+## Architecture
+
+```mermaid
+flowchart LR
+  A[Svelte Discover UI] --> B[bridge invoke]
+  C[Svelte Vault UI] --> B
+
+  B --> D[Tauri reader command]
+  D --> E[ReaderService]
+
+  E --> F{ReaderTarget}
+  F --> G[SavedPaper target]
+  F --> H[DiscoveryCandidate target]
+
+  G --> I[LibraryStore lookup]
+  H --> J[Candidate adapter]
+
+  I --> K[Document source resolver]
+  J --> K
+
+  K --> L[PDF/cache helper]
+  K --> M[Extraction resolver]
+
+  L --> N[ReaderDocument]
+  M --> N
+
+  N --> O[Reader UI]
+
+  P[Add to Vault] --> Q[Durable paper save]
+  L --> R[Cached PDF path]
+  R --> Q
 ```
 
 ## Product Rules
 
 ### Opening from Discover
 
-Opening a candidate from Discover should not require:
+Opening from Discover should not require:
 
 - a Vault membership
 - a durable `papers` row
 - a durable `document_sources` row
 
-It should require only enough candidate metadata to build a Reader document shell:
+It should only require enough candidate metadata to construct the same `ReaderDocument` shell the Reader already knows how to render.
+
+Minimum useful candidate inputs:
 
 - stable candidate id such as `openalex:W...`
 - title
@@ -129,7 +171,7 @@ It should require only enough candidate metadata to build a Reader document shel
 - venue/year when present
 - external URL
 - PDF URL when present
-- abstract and other metadata already returned by discovery
+- abstract and match metadata already returned by discovery
 
 ### Notes and annotations
 
@@ -138,108 +180,116 @@ For the first increment, notes remain a saved-library feature.
 Rule:
 
 ```text
-unsaved discovery reader session
+unsaved discovery reader target
   -> readable
   -> note creation disabled
 ```
 
-This keeps the temporary path small and avoids inventing a second note lifecycle before the reading path itself is solid.
+This keeps the first implementation focused on reading, not on inventing a second note lifecycle.
 
-### Save to Vault after opening
+### Save after open
 
-Yes: if the paper was already downloaded while open in the temporary reader session, saving to Vault should reuse that downloaded file whenever possible.
+Yes: if Reader already downloaded the paper while it was opened from Discover, saving to a Vault should reuse that downloaded file whenever possible.
 
 That is the preferred behavior because it:
 
 - avoids a redundant second download
-- makes save/import feel fast
-- preserves the user’s work if they already opened the paper successfully
+- makes save/import feel faster
+- preserves useful work the app already did
 
-The durable save path should promote or relink the cached file into the durable document-source model rather than pretending the temporary session never happened.
+The durable save path should promote or relink the cached file into the existing durable document-source flow rather than starting over.
 
-## Storage Decision
+## Proposed Abstractions
 
-Use a temporary app-owned cache layer for unsaved discovery reader assets.
+### `ReaderTarget`
 
-Prefer app cache storage over an arbitrary raw OS temp path:
-
-- app cache is still disposable and non-durable
-- app cache is easier to namespace by paper/source id
-- app cache is easier to inspect, clean, and migrate later
+Introduce one small input abstraction for `ReaderService`.
 
 Conceptual shape:
 
-```text
-~/Library/Caches/i0i/discovery-reader/{candidate_id}/
-  session.json
-  source.pdf
-  extraction/...
-```
-
-The exact final path can use Tauri’s app-cache APIs, but the product rule is:
-
-```text
-temporary reader assets live in disposable app cache storage
-```
-
-## Proposed Architecture
-
-Keep the current durable Reader path intact and add a second explicit path for discovery candidates.
-
-### Durable path
-
-Current path remains:
-
-```text
-saved Paper id
-  -> ReaderService::get_reader_document(paper_id)
-  -> LibraryStore-backed ReaderDocument
-```
-
-### Temporary discovery path
-
-Add a separate backend command/service path:
-
-```text
-DiscoverCandidate
-  -> open_discovery_candidate_in_reader(candidate)
-  -> build temporary ReaderDocument
-  -> resolve/download temporary document source as needed
-  -> return ReaderDocument
-```
-
-This keeps the semantics clean:
-
-- library reader path = durable
-- discovery reader path = temporary
-
-It also avoids forcing `ReaderService` to pretend that every readable thing is already a saved `Paper`.
-
-## Data Shapes
-
-Conceptual frontend payload:
-
 ```ts
-type DiscoveryReaderOpenInput = {
-  candidate: DiscoverCandidate;
-};
+type ReaderTarget =
+  | {
+      kind: "saved_paper";
+      paperId: string;
+      extractionId?: string;
+    }
+  | {
+      kind: "discovery_candidate";
+      candidate: DiscoverCandidate;
+    };
 ```
 
-Conceptual backend temporary session shape:
+This is the new abstraction in this RFC. It is justified because the current method signature hardcodes one assumption that is no longer true:
 
-```ts
-type TemporaryReaderSession = {
-  candidateId: string;
-  sourceProvider: string;
-  pdfUrl?: string;
-  externalUrl?: string;
-  cachedPdfPath?: string;
-  createdAt: string;
-  updatedAt: string;
-};
+```text
+every readable paper already exists in the durable library
 ```
 
-This does not need to become a durable database table in the first increment. The initial implementation may keep the session index in memory and the downloaded file on disk in cache storage.
+### `ReaderDocument`
+
+Do not create a new Reader response model.
+
+Both saved papers and discovery candidates should be adapted into the existing `ReaderDocument` shape.
+
+That keeps the Reader frontend simple and prevents divergence between two near-identical rendering paths.
+
+### `ReaderService`
+
+Keep one `ReaderService`.
+
+Expand it from:
+
+```text
+saved paper id -> ReaderDocument
+```
+
+to:
+
+```text
+ReaderTarget -> ReaderDocument
+```
+
+Internally it can still branch, but the important design rule is:
+
+```text
+one reader orchestration service
+```
+
+### PDF/cache helper
+
+Do not invent a discovery-only downloader if the existing saved-paper flow already has useful primitives.
+
+Instead, factor PDF resolution/caching so both targets can use the same low-level behavior:
+
+- resolve source URL
+- check for cached local file
+- download when needed
+- validate PDF
+
+The difference should be ownership and persistence, not the byte-handling logic itself.
+
+## Storage Decision
+
+Use app cache storage for unsaved discovery-reader assets.
+
+Prefer app cache over an arbitrary raw temp folder:
+
+- still disposable
+- easier to namespace by candidate/source identity
+- easier to inspect and clean up
+
+Conceptual path:
+
+```text
+~/Library/Caches/i0i/reader/discovery/{candidate_id}/source.pdf
+```
+
+The exact path should use Tauri app-cache APIs, but the product rule is:
+
+```text
+unsaved reader artifacts live in app cache, not in the durable library store
+```
 
 ## Promotion Rule
 
@@ -247,77 +297,83 @@ When the user saves a discovery-opened paper to a Vault:
 
 1. Create the durable `Paper`.
 2. Create or attach the durable `DocumentSource`.
-3. If a temporary cached PDF already exists for the same candidate/source URL, reuse it.
-4. Set durable `active_source_id` as usual.
-5. Clean up or dereference the temporary session once the durable source owns the file.
+3. If a cached PDF already exists for the same source identity, reuse it.
+4. Set `active_source_id` as usual.
+5. Continue with the normal durable Reader behavior after save.
 
-Matching should prefer stable source identity:
+Preferred identity match:
 
 ```text
 paper id + source url
 ```
 
-If the temporary cached file cannot be safely promoted, fallback to the existing durable download path.
+If reuse fails safely, fall back to the normal durable download path.
 
-## Implementation Strategy
+## Proposed Backend Shape
 
-First increment:
+Smallest honest change:
 
-1. Add a backend command for opening a discovery candidate in Reader.
-2. Build a temporary ReaderDocument from discovery metadata.
-3. If a PDF URL exists, allow temporary PDF caching in app cache storage.
-4. Reuse cached temporary PDF on later save when source identity matches.
-5. Keep notes disabled for unsaved sessions.
-
-This is intentionally smaller than a unified reader abstraction for every possible source.
+1. Add a new Reader command that accepts a discovery candidate, or evolve the current command to accept a `ReaderTarget`.
+2. Teach `ReaderService` to resolve either:
+   - a saved library paper
+   - a discovery candidate
+3. Reuse the same `ReaderDocument` output shape.
+4. Reuse or extract PDF/cache helpers so both cases rely on the same low-level logic.
+5. Keep note creation disabled when the target is unsaved.
 
 ## Alternatives Considered
 
 ### 1. Require save before open
 
-Rejected because it turns inspection into commitment and already feels wrong in use.
+Rejected because it turns inspection into commitment.
 
-### 2. Insert every opened candidate into the durable library automatically
+### 2. Automatically insert opened candidates into the durable library
 
-Rejected because it pollutes the durable library with papers the user has not actually chosen to keep.
+Rejected because it pollutes the durable library with papers the user may only be skimming.
 
-### 3. Reuse durable library tables with a transient flag
+### 3. Build a separate temporary reader subsystem
 
-Possible later, but not preferred for the first increment.
+Rejected for the first increment because it duplicates concepts we already have:
 
-It blurs semantics:
+- second service shape
+- second reader lifecycle
+- higher risk of drift from the durable Reader path
 
-- is this in the user’s library or not?
-- should notes work?
-- should it appear in Vault counts/search?
+This RFC prefers one reader service plus one small target abstraction.
 
-A separate temporary path is easier to reason about.
+### 4. Add durable temp tables now
 
-### 4. Full unified ReaderSource abstraction now
+Possible later, but premature for the first increment.
 
-Attractive long-term, but a larger design move than needed for the immediate product fix.
+The first version should prove the user flow using:
+
+- transient candidate input
+- app-cache-backed files
+- reuse of existing Reader structures
 
 ## Risks
 
-- Temporary cache cleanup policy may be underspecified at first.
-- Promotion from temporary cache to durable source must avoid duplicate files and broken links.
-- Unsaved reader sessions should not accidentally appear as saved library papers anywhere in the UI.
-- We should avoid growing a second shadow persistence system before we need it.
+- If `ReaderService` grows too many conditionals, the target branching could get messy.
+- Reusing cache/download code may require some refactoring before it feels truly shared.
+- Unsaved targets must not accidentally appear as saved papers in Vault/library UI.
+- Cleanup policy for cache files will still need a follow-up decision.
 
 ## Open Questions
 
-- Should temporary discovery reader sessions survive app restart, or only the current session?
-- Should temporary cached PDFs be retained for a short TTL, or cleared on next startup?
-- Should “Open” from Discover immediately start PDF download, or only when the user switches to PDF mode?
-- When a temporary cached PDF is promoted on save, should we move the file or copy it into the durable location?
+- Should the command boundary use one evolved `get_reader_document(target)` command, or a new sibling command such as `open_discovery_candidate_in_reader(candidate)` that still funnels into the same `ReaderService`?
+- Should PDF download start immediately on open, or only when the user enters PDF mode?
+- When promoting cached PDF on save, should we move the file into the durable location or copy it?
+- Should unsaved discovery reader targets survive app restart, or stay session-only in v0.1?
 
 ## Recommendation
 
-Implement the first increment with:
+Implement this with:
 
-- a separate discovery-reader backend command
-- temporary app-cache-backed PDF storage
-- no temporary notes
-- reuse of already downloaded temporary PDFs on save when identities match
+- one Reader frontend
+- one `ReaderDocument`
+- one `ReaderService`
+- one small new `ReaderTarget` abstraction
+- app-cache-backed temporary PDF storage
+- reuse of cached PDFs on later save when identities match
 
-This gives the right product behavior with the smallest honest change.
+This gives the right product behavior with the leanest architecture.

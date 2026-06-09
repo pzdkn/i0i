@@ -3,6 +3,7 @@ use crate::domain::library::{
     VaultRenameDraft,
 };
 use crate::pdf_ingestion::PdfDownloadManager;
+use crate::services::reader_service::ReaderService;
 use crate::storage::library_store::LibraryStore;
 
 #[tauri::command]
@@ -14,17 +15,26 @@ pub fn get_library(store: tauri::State<'_, LibraryStore>) -> Result<LibrarySnaps
 pub fn add_paper_to_vaults(
     store: tauri::State<'_, LibraryStore>,
     pdf_downloads: tauri::State<'_, PdfDownloadManager>,
+    reader_service: tauri::State<'_, ReaderService>,
     paper: PaperDraft,
     vault_ids: Vec<String>,
 ) -> Result<LibrarySnapshot, String> {
-    let snapshot = store.add_paper_to_vaults(&paper, &vault_ids)?;
-    let sources = store
+    let mut queue_sources = Vec::new();
+    store.add_paper_to_vaults(&paper, &vault_ids)?;
+    for source in store
         .get_document_sources(&paper.id)?
         .into_iter()
         .filter(|source| source.status == "remote_available")
-        .collect();
-    pdf_downloads.queue_sources(sources);
-    Ok(snapshot)
+    {
+        // If the user already opened this paper from Discover, prefer promoting
+        // the temporary cached PDF over starting a second network download.
+        if !reader_service.promote_discovery_cached_pdf(&source)? {
+            queue_sources.push(source);
+        }
+    }
+
+    pdf_downloads.queue_sources(queue_sources);
+    store.get_library()
 }
 
 #[tauri::command]

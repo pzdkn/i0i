@@ -326,6 +326,10 @@ export function paperFromDiscoverCandidate(candidateId: string) {
   return candidateToPaper(candidateId);
 }
 
+export function getDiscoverCandidate(candidateId: string) {
+  return findCandidate(candidateId);
+}
+
 export function paperDraftFromDiscoverCandidate(candidateId: string): PaperDraft {
   const candidate = findCandidate(candidateId);
   const paper = candidateToPaper(candidateId);
