@@ -1,0 +1,13 @@
+{
+    "discovery": {
+        "providers": {
+            "openalex": {
+                "url": "https://api.openalex.org/works",
+                "api_key": "OPENALEX_API_KEY"
+            }
+        },
+        "search": {
+            "max_result_limit": 30
+        }
+    }
+}
