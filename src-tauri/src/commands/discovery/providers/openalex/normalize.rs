@@ -82,10 +82,10 @@ fn derive_source_id(work: &OpenAlexWork) -> String {
 /// Flatten OpenAlex authorship entries into a simple list of author names.
 fn extract_authors(work: &OpenAlexWork) -> Vec<String> {
     work.authorships
-        .clone()
+        .as_deref()
         .unwrap_or_default()
-        .into_iter()
-        .filter_map(|authorship| authorship.author?.display_name)
+        .iter()
+        .filter_map(|authorship| authorship.author.as_ref()?.display_name.clone())
         .collect()
 }
 

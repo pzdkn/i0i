@@ -1,3 +1,4 @@
+mod config;
 mod search;
 
 mod normalize;

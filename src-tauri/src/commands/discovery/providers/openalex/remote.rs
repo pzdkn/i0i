@@ -4,6 +4,8 @@
 //! discovery flow requests with `select=...`. They are provider-local types:
 //! the rest of the app should work with normalized domain types like
 //! `PaperCandidate`, not with these raw API payload structs.
+use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct OpenAlexWork {

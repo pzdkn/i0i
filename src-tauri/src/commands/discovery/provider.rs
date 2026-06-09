@@ -5,10 +5,10 @@
 //! OpenAlex URL params, JSON fields, API-key parsing, or HTTP details belong
 //! here.
 
-use std::{error::Error, fmt};
+use std::fmt;
 
-use crate::domain::discovery::{DiscoverySearchRequest, PaperCandidate};
 use super::error::DiscoveryError;
+use crate::domain::discovery::{DiscoverySearchRequest, PaperCandidate};
 
 /// Search providers supported by the discovery layer.
 ///
@@ -37,18 +37,6 @@ impl fmt::Display for DiscoveryProviderId {
     }
 }
 
-/// Provider capability summary used by the service/UI to understand support.
-///
-/// Capabilities describe what the provider can do directly. They do not promise
-/// that the service currently exposes every capability in the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProviderCapabilities {
-    pub supports_open_access_filter: bool,
-    pub supports_citation_sort: bool,
-    pub supports_seed_similarity: bool,
-    pub requires_api_key: bool,
-}
-
 /// Normalized result returned by one provider adapter.
 ///
 /// This is intentionally smaller than `DiscoverySearchResponse`. The service
@@ -61,28 +49,15 @@ pub struct ProviderSearchResult {
     pub candidates: Vec<PaperCandidate>,
 }
 
-
 /// Common behavior every discovery provider must expose.
 pub trait DiscoveryProvider {
     fn id(&self) -> DiscoveryProviderId;
 
-    fn capabilities(&self) -> ProviderCapabilities;
-
-    /// Resolve the provider API key.
-    ///
-    /// TODO: This is provider-specific and should move into `OpenAlexProvider`
-    /// once `search.rs` is refactored enough to make it a private helper. =>
-    /// No this is an undefined interace!
-    /// All providers should implement this. Dont move it into OpenAlex
-    fn api_key(&self) -> String;
+    /// Resolve the provider API key from its configured secret source.
+    fn api_key(&self) -> Result<String, DiscoveryError>;
 
     /// Build the provider request URL from query parameters.
-    ///
-    /// TODO: This is provider-specific and should move into `OpenAlexProvider`.
-    /// The parameter type is also temporary; structured key/value params will
-    /// be clearer than a raw `String`. => No this is an undefined interace!
-    /// All providers should implement this. Dont move it into OpenAlex
-    fn build_url(&self, query_params: String) -> String;
+    fn build_url(&self, query_params: &[(&str, String)]) -> Result<String, DiscoveryError>;
 
     async fn search(
         &self,

@@ -2,6 +2,8 @@
 ///
 /// Keep this boring until we actually need typed variants. For now a clear
 /// message is enough for the Tauri command to turn into `Result<_, String>`.
+use std::{error::Error, fmt};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryError {
     pub message: String,
