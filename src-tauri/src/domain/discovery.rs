@@ -6,6 +6,7 @@ pub enum DiscoveryProviderChoice {
     #[default]
     OpenAlex,
     Arxiv,
+    SemanticScholar,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

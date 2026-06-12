@@ -4,8 +4,6 @@
 //! each entry into the app's shared PaperCandidate type.
 
 use reqwest::Client;
-use url::Url;
-
 use super::{
     config::ArxivConfig,
     normalize::normalize_entry,
@@ -15,6 +13,7 @@ use crate::{
     commands::discovery::{
         error::DiscoveryError,
         provider::{DiscoveryProvider, DiscoveryProviderId, ProviderSearchResult},
+        providers::shared::{build_query_url, clamp_result_limit},
     },
     domain::discovery::{DiscoverySearchRequest, DiscoverySort},
 };
@@ -34,10 +33,6 @@ impl ArxivProvider {
         })
     }
 
-    fn result_limit(&self, request: &DiscoverySearchRequest) -> i32 {
-        let max_limit = self.config.max_result_limit().max(1);
-        request.result_limit.clamp(1, max_limit)
-    }
 }
 
 impl DiscoveryProvider for ArxivProvider {
@@ -51,22 +46,14 @@ impl DiscoveryProvider for ArxivProvider {
     }
 
     fn build_url(&self, query_params: &[(&str, String)]) -> Result<String, DiscoveryError> {
-        let mut url = Url::parse(&self.config.url)
-            .map_err(|error| DiscoveryError::new(format!("Invalid arXiv URL: {error}")))?;
-        {
-            let mut pairs = url.query_pairs_mut();
-            for (key, value) in query_params {
-                pairs.append_pair(key, value);
-            }
-        }
-        Ok(url.to_string())
+        build_query_url(&self.config.url, query_params)
     }
 
     async fn search(
         &self,
         request: &DiscoverySearchRequest,
     ) -> Result<ProviderSearchResult, DiscoveryError> {
-        let limit = self.result_limit(request);
+        let limit = clamp_result_limit(request.result_limit, self.config.max_result_limit());
         let query_params = arxiv_query_params(request, limit);
         let url = self.build_url(&query_params)?;
 

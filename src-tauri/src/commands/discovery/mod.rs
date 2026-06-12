@@ -10,13 +10,17 @@ use crate::domain::discovery::{
 };
 
 use self::{
-    providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider},
+    providers::{
+        arxiv::ArxivProvider,
+        openalex::OpenAlexProvider,
+        semantic_scholar::SemanticScholarProvider,
+    },
     service::DiscoveryService,
 };
 
 use super::discovery::error::DiscoveryError;
 
-/// Both provider adapters, initialized once at app startup and shared across
+/// All provider adapters, initialized once at app startup and shared across
 /// all search calls.
 ///
 /// Each provider holds its own `reqwest::Client` which maintains a connection
@@ -25,6 +29,7 @@ use super::discovery::error::DiscoveryError;
 pub struct DiscoveryProviders {
     pub openalex: OpenAlexProvider,
     pub arxiv: ArxivProvider,
+    pub semantic_scholar: SemanticScholarProvider,
 }
 
 impl DiscoveryProviders {
@@ -32,6 +37,7 @@ impl DiscoveryProviders {
         Ok(Self {
             openalex: OpenAlexProvider::from_app_config()?,
             arxiv: ArxivProvider::from_app_config()?,
+            semantic_scholar: SemanticScholarProvider::from_app_config()?,
         })
     }
 }
@@ -49,6 +55,11 @@ pub async fn search_papers(
         }
         DiscoveryProviderChoice::Arxiv => {
             DiscoveryService::new(providers.arxiv.clone())
+                .search(request)
+                .await
+        }
+        DiscoveryProviderChoice::SemanticScholar => {
+            DiscoveryService::new(providers.semantic_scholar.clone())
                 .search(request)
                 .await
         }

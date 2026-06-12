@@ -2,7 +2,10 @@
 //!
 //! Converts raw ArxivEntry wire values into the shared PaperCandidate type.
 
-use crate::domain::discovery::{CandidateMatch, OpenAccessSummary, PaperCandidate};
+use crate::{
+    commands::discovery::providers::shared::extract_matched_keywords,
+    domain::discovery::{CandidateMatch, OpenAccessSummary, PaperCandidate},
+};
 
 use super::remote::ArxivEntry;
 
@@ -91,16 +94,6 @@ fn extract_date(published: Option<&str>) -> Option<String> {
     published
         .and_then(|s| s.get(..10))
         .map(str::to_string)
-}
-
-/// Tokenize the query into lowercase keywords for the match summary.
-fn extract_matched_keywords(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(|part| part.trim_matches(|ch: char| !ch.is_alphanumeric()))
-        .filter(|part| !part.is_empty())
-        .map(str::to_lowercase)
-        .collect()
 }
 
 #[cfg(test)]

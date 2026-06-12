@@ -7,7 +7,10 @@
 
 use std::collections::HashMap;
 
-use crate::domain::discovery::{CandidateMatch, OpenAccessSummary, PaperCandidate};
+use crate::{
+    commands::discovery::providers::shared::extract_matched_keywords,
+    domain::discovery::{CandidateMatch, OpenAccessSummary, PaperCandidate},
+};
 
 use super::remote::OpenAlexWork;
 
@@ -121,18 +124,8 @@ fn extract_open_access(work: &OpenAlexWork) -> Option<OpenAccessSummary> {
         })
 }
 
-/// Tokenize the freeform query into lowercase keywords used in the match summary.
-fn extract_matched_keywords(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(|part| part.trim_matches(|ch: char| !ch.is_alphanumeric()))
-        .filter(|part| !part.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
 /// Build the human-readable explanation shown for why a candidate appeared.
-/// TOOD: Might deprecate
+// TODO: Might deprecate
 fn build_match_reasons(query: &str, citation_count: Option<i32>) -> Vec<String> {
     let mut reasons = vec![format!("Matched OpenAlex search query \"{query}\".")];
 

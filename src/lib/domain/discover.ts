@@ -34,7 +34,17 @@ export type DiscoverCandidate = {
 
 export type DiscoverSort = "relevance" | "newest" | "most_cited";
 
-export type DiscoveryProviderChoice = "open_alex" | "arxiv";
+export type DiscoveryProviderChoice = "open_alex" | "arxiv" | "semantic_scholar";
+
+const PROVIDER_DISPLAY_NAMES: Record<DiscoveryProviderChoice, string> = {
+  open_alex: "OpenAlex",
+  arxiv: "arXiv",
+  semantic_scholar: "Semantic Scholar",
+};
+
+export function providerDisplayName(provider: DiscoveryProviderChoice): string {
+  return PROVIDER_DISPLAY_NAMES[provider] ?? "Unknown";
+}
 
 export type DiscoverRunStatus = "idle" | "running" | "completed" | "failed";
 

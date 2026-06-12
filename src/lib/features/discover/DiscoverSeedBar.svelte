@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { DiscoverWorkspace } from "$lib/domain/discover";
+  import { providerDisplayName, type DiscoverWorkspace } from "$lib/domain/discover";
 
   let {
     workspace,
@@ -18,9 +18,13 @@
   const resultLabel = $derived(
     workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
   );
-  const providerLabel = $derived(workspace.provider === "arxiv" ? "arXiv" : "OpenAlex");
-  // arXiv has no citation-count sort; disable that option to avoid confusion.
-  const mostCitedDisabled = $derived(workspace.provider === "arxiv");
+  const providerLabel = $derived(providerDisplayName(workspace.provider));
+  // arXiv and Semantic Scholar have no citation-count sort.
+  // Semantic Scholar has no sort at all — all options fall back to relevance.
+  const mostCitedDisabled = $derived(
+    workspace.provider === "arxiv" || workspace.provider === "semantic_scholar"
+  );
+  const sortDisabled = $derived(workspace.provider === "semantic_scholar");
 
   $effect(() => {
     workspace.id;
@@ -34,7 +38,10 @@
   }
 
   function onProviderChange() {
-    if (workspace.provider === "arxiv" && workspace.sortBy === "most_cited") {
+    if (
+      (workspace.provider === "arxiv" || workspace.provider === "semantic_scholar") &&
+      workspace.sortBy === "most_cited"
+    ) {
       workspace.sortBy = "relevance";
     }
   }
@@ -114,9 +121,9 @@
       </label>
       <label>
         <span>Sort</span>
-        <select bind:value={workspace.sortBy} disabled={isRunning}>
+        <select bind:value={workspace.sortBy} disabled={isRunning || sortDisabled}>
           <option value="relevance">Relevance</option>
-          <option value="newest">Newest</option>
+          <option value="newest" disabled={mostCitedDisabled}>Newest</option>
           <option value="most_cited" disabled={mostCitedDisabled}>Most cited</option>
         </select>
       </label>
@@ -125,6 +132,7 @@
         <select bind:value={workspace.provider} onchange={onProviderChange} disabled={isRunning}>
           <option value="open_alex">OpenAlex</option>
           <option value="arxiv">arXiv</option>
+          <option value="semantic_scholar">Semantic Scholar</option>
         </select>
       </label>
     </div>

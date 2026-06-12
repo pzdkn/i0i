@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { DiscoverCandidate, DiscoverWorkspace } from "$lib/domain/discover";
+  import { providerDisplayName, type DiscoverCandidate, type DiscoveryProviderChoice, type DiscoverWorkspace } from "$lib/domain/discover";
 
   let {
     workspace,
@@ -11,13 +11,6 @@
     workspace.candidates.find((candidate) => candidate.id === workspace.selectedCandidateId),
   );
 
-  function providerLabel(provider?: string) {
-    if (!provider) {
-      return "OpenAlex";
-    }
-
-    return provider === "openalex" ? "OpenAlex" : provider;
-  }
 
   function statusLabel(status: DiscoverWorkspace["status"]) {
     if (status === "idle") {
@@ -28,7 +21,7 @@
   }
 
   function candidateSignals(candidate: DiscoverCandidate) {
-    const signals = [providerLabel(candidate.sourceProvider)];
+    const signals = [providerDisplayName((candidate.sourceProvider ?? "open_alex") as DiscoveryProviderChoice)];
 
     if (candidate.citations > 0) {
       signals.push(`${candidate.citations.toLocaleString()} citations`);
@@ -59,7 +52,7 @@
   <section class="panel-section col">
     <div class="row section-title">
       <span>Current Search</span>
-      <span class="mono-dim">{providerLabel(workspace.lastRun?.provider)}</span>
+      <span class="mono-dim">{providerDisplayName((workspace.lastRun?.provider ?? "open_alex") as DiscoveryProviderChoice)}</span>
     </div>
     <dl class="kv">
       <div>
@@ -99,7 +92,7 @@
     <div class="row section-title">
       <span>Selected Candidate</span>
       {#if selectedCandidate}
-        <span class="mono-dim">{providerLabel(selectedCandidate.sourceProvider)}</span>
+        <span class="mono-dim">{providerDisplayName((selectedCandidate.sourceProvider ?? "open_alex") as DiscoveryProviderChoice)}</span>
       {/if}
     </div>
 

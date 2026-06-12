@@ -5,13 +5,13 @@
 //! domain.
 
 use reqwest::{Client, StatusCode};
-use url::Url;
 
 use super::{config::OpenAlexConfig, normalize::normalize_work, remote::OpenAlexWorksResponse};
 use crate::{
     commands::discovery::{
         error::DiscoveryError,
         provider::{DiscoveryProvider, DiscoveryProviderId, ProviderSearchResult},
+        providers::shared::{build_query_url, clamp_result_limit},
     },
     domain::discovery::{DiscoverySearchRequest, DiscoverySort},
 };
@@ -31,10 +31,6 @@ impl OpenAlexProvider {
         })
     }
 
-    fn result_limit(&self, request: &DiscoverySearchRequest) -> i32 {
-        let max_limit = self.config.max_result_limit().max(1);
-        request.result_limit.clamp(1, max_limit)
-    }
 }
 
 impl DiscoveryProvider for OpenAlexProvider {
@@ -48,19 +44,8 @@ impl DiscoveryProvider for OpenAlexProvider {
         self.config.resolve_api_key()
     }
 
-    /// Build an OpenAlex URL by appending encoded query parameters.
     fn build_url(&self, query_params: &[(&str, String)]) -> Result<String, DiscoveryError> {
-        let mut url = Url::parse(&self.config.url)
-            .map_err(|error| DiscoveryError::new(format!("Invalid OpenAlex URL: {error}")))?;
-
-        {
-            let mut pairs = url.query_pairs_mut();
-            for (key, value) in query_params {
-                pairs.append_pair(key, value);
-            }
-        }
-
-        Ok(url.to_string())
+        build_query_url(&self.config.url, query_params)
     }
 
     /// Search OpenAlex and return normalized provider candidates.
@@ -69,12 +54,8 @@ impl DiscoveryProvider for OpenAlexProvider {
         request: &DiscoverySearchRequest,
     ) -> Result<ProviderSearchResult, DiscoveryError> {
         let filters = openalex_filters(request);
-        let query_params = openalex_query_params(
-            self.api_key()?,
-            request,
-            self.result_limit(request),
-            &filters,
-        );
+        let limit = clamp_result_limit(request.result_limit, self.config.max_result_limit());
+        let query_params = openalex_query_params(self.api_key()?, request, limit, &filters);
         let url = self.build_url(&query_params)?;
         let response = self
             .client

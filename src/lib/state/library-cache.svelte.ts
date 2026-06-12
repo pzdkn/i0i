@@ -1,5 +1,5 @@
 import type { Paper } from "$lib/domain/paper";
-import type { DiscoverCandidate, DiscoverWorkspace, DiscoverySearchResponse } from "$lib/domain/discover";
+import { providerDisplayName, type DiscoverCandidate, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
 import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
 
 type LibraryState = {
@@ -224,7 +224,9 @@ export function discoverTitleFromQuery(query: string) {
 }
 
 function candidateSignalSummary(candidate: DiscoverySearchResponse["candidates"][number]) {
-  const providerLabel = candidate.sourceProvider === "arxiv" ? "arXiv" : "OpenAlex";
+  const providerLabel = providerDisplayName(
+    (candidate.sourceProvider ?? "open_alex") as DiscoveryProviderChoice
+  );
   const signals = [providerLabel];
   const citationCount = candidate.citationCount ?? 0;
 
