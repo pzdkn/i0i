@@ -17,6 +17,7 @@ use crate::{
 };
 
 /// OpenAlex provider adapter.
+#[derive(Clone)]
 pub struct OpenAlexProvider {
     client: Client,
     config: OpenAlexConfig,
@@ -98,7 +99,7 @@ impl DiscoveryProvider for OpenAlexProvider {
         let candidates = payload
             .results
             .into_iter()
-            .map(|work| normalize_work(work, request.query.trim(), request.open_access_only))
+            .map(|work| normalize_work(work, request.query.trim()))
             .collect();
 
         Ok(ProviderSearchResult {
@@ -169,9 +170,7 @@ fn openalex_filters(request: &DiscoverySearchRequest) -> Vec<String> {
         filters.push(format!("to_publication_date:{year_to}-12-31"));
     }
 
-    if request.open_access_only {
-        filters.push("is_oa:true".to_string());
-    }
+    filters.push("is_oa:true".to_string());
 
     filters
 }
@@ -198,7 +197,7 @@ mod tests {
             year_to: Some(2026),
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
-            open_access_only: true,
+            provider: Default::default(),
         };
 
         assert_eq!(

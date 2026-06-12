@@ -23,14 +23,13 @@ pub fn run() {
                 .recover_and_queue_startup_downloads()
                 .map_err(std::io::Error::other)?;
             let reader_service = ReaderService::new(app.handle().clone(), store.clone());
-            let discovery_service = commands::discovery::AppDiscoveryService::new(
-                commands::discovery::providers::openalex::OpenAlexProvider::from_app_config()
-                    .map_err(std::io::Error::other)?,
-            );
+            let discovery_providers =
+                commands::discovery::DiscoveryProviders::from_app_config()
+                    .map_err(std::io::Error::other)?;
             app.manage(store);
             app.manage(pdf_downloads);
             app.manage(reader_service);
-            app.manage(discovery_service);
+            app.manage(discovery_providers);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

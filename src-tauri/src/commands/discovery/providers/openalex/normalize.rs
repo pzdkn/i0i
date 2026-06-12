@@ -13,7 +13,7 @@ use super::remote::OpenAlexWork;
 
 /// Convert one raw OpenAlex work record into the app's normalized candidate
 /// shape used by discovery UI and save flows.
-pub fn normalize_work(work: OpenAlexWork, query: &str, open_access_only: bool) -> PaperCandidate {
+pub fn normalize_work(work: OpenAlexWork, query: &str) -> PaperCandidate {
     // Derive the stable provider-local identity first so downstream fields can
     // reuse it consistently.
     let source_id = derive_source_id(&work);
@@ -35,7 +35,7 @@ pub fn normalize_work(work: OpenAlexWork, query: &str, open_access_only: bool) -
         .clone()
         .map(reconstruct_abstract);
     let matched_keywords = extract_matched_keywords(query);
-    let reasons = build_match_reasons(query, open_access_only, work.cited_by_count);
+    let reasons = build_match_reasons(query, work.cited_by_count);
     let doi = extract_doi(&work);
     let openalex_id = extract_openalex_id(&work);
     let arxiv_id = extract_arxiv_id(&work);
@@ -133,16 +133,8 @@ fn extract_matched_keywords(query: &str) -> Vec<String> {
 
 /// Build the human-readable explanation shown for why a candidate appeared.
 /// TOOD: Might deprecate
-fn build_match_reasons(
-    query: &str,
-    open_access_only: bool,
-    citation_count: Option<i32>,
-) -> Vec<String> {
+fn build_match_reasons(query: &str, citation_count: Option<i32>) -> Vec<String> {
     let mut reasons = vec![format!("Matched OpenAlex search query \"{query}\".")];
-
-    if open_access_only {
-        reasons.push("Open-access filter was applied.".to_string());
-    }
 
     if let Some(citation_count) = citation_count.filter(|count| *count > 0) {
         reasons.push(format!("{citation_count} OpenAlex citations."));

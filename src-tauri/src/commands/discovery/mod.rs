@@ -1,27 +1,57 @@
 //! Discovery command-side modules.
-//!
-//! Rust only compiles sibling files when the parent module declares them here.
-//! This makes `service.rs`, `provider.rs`, and provider adapters discoverable
-//! from `crate::commands::discovery`.
 
 pub mod error;
 pub mod provider;
 pub mod providers;
 pub mod service;
 
-use crate::domain::discovery::{DiscoverySearchRequest, DiscoverySearchResponse};
+use crate::domain::discovery::{
+    DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySearchResponse,
+};
 
-use self::{providers::openalex::OpenAlexProvider, service::DiscoveryService};
+use self::{
+    providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider},
+    service::DiscoveryService,
+};
 
-pub type AppDiscoveryService = DiscoveryService<OpenAlexProvider>;
+use super::discovery::error::DiscoveryError;
+
+/// Both provider adapters, initialized once at app startup and shared across
+/// all search calls.
+///
+/// Each provider holds its own `reqwest::Client` which maintains a connection
+/// pool. Storing providers here instead of constructing them per-request lets
+/// that pool survive between searches.
+pub struct DiscoveryProviders {
+    pub openalex: OpenAlexProvider,
+    pub arxiv: ArxivProvider,
+}
+
+impl DiscoveryProviders {
+    pub fn from_app_config() -> Result<Self, DiscoveryError> {
+        Ok(Self {
+            openalex: OpenAlexProvider::from_app_config()?,
+            arxiv: ArxivProvider::from_app_config()?,
+        })
+    }
+}
 
 #[tauri::command]
 pub async fn search_papers(
-    service: tauri::State<'_, AppDiscoveryService>,
+    providers: tauri::State<'_, DiscoveryProviders>,
     request: DiscoverySearchRequest,
 ) -> Result<DiscoverySearchResponse, String> {
-    service
-        .search(request)
-        .await
-        .map_err(|error| error.to_string())
+    match request.provider {
+        DiscoveryProviderChoice::OpenAlex => {
+            DiscoveryService::new(providers.openalex.clone())
+                .search(request)
+                .await
+        }
+        DiscoveryProviderChoice::Arxiv => {
+            DiscoveryService::new(providers.arxiv.clone())
+                .search(request)
+                .await
+        }
+    }
+    .map_err(|e| e.to_string())
 }

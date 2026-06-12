@@ -80,7 +80,7 @@
       </div>
       <div>
         <dt>open access</dt>
-        <dd>{workspace.openAccessOnly ? "on" : "off"}</dd>
+        <dd>always</dd>
       </div>
     </dl>
     {#if workspace.lastRun?.filters.length}

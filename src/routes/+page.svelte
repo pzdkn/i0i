@@ -212,7 +212,7 @@
         yearTo: parseOptionalYear(workspace.yearTo),
         resultLimit: Number(workspace.resultLimit),
         sortBy: workspace.sortBy,
-        openAccessOnly: workspace.openAccessOnly,
+        provider: workspace.provider,
       });
       applyDiscoverSearchResponse(discoverId, response);
       const title = discoverTitleFromQuery(query);

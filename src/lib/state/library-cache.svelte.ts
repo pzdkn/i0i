@@ -76,7 +76,7 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     yearTo: "",
     resultLimit: 25,
     sortBy: "relevance",
-    openAccessOnly: true,
+    provider: "open_alex",
     status: "idle",
     error: "",
     candidates: [],
@@ -224,7 +224,8 @@ export function discoverTitleFromQuery(query: string) {
 }
 
 function candidateSignalSummary(candidate: DiscoverySearchResponse["candidates"][number]) {
-  const signals = ["OpenAlex"];
+  const providerLabel = candidate.sourceProvider === "arxiv" ? "arXiv" : "OpenAlex";
+  const signals = [providerLabel];
   const citationCount = candidate.citationCount ?? 0;
 
   if (citationCount > 0) {
@@ -252,7 +253,7 @@ function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][nu
     sourceId: candidate.sourceId,
     title: candidate.title,
     authors: [...candidate.authors],
-    venue: candidate.venue ?? "OpenAlex",
+    venue: candidate.venue ?? candidate.sourceProvider ?? "",
     year: candidate.year ?? 0,
     citations: candidate.citationCount ?? 0,
     score,

@@ -18,6 +18,9 @@
   const resultLabel = $derived(
     workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
   );
+  const providerLabel = $derived(workspace.provider === "arxiv" ? "arXiv" : "OpenAlex");
+  // arXiv has no citation-count sort; disable that option to avoid confusion.
+  const mostCitedDisabled = $derived(workspace.provider === "arxiv");
 
   $effect(() => {
     workspace.id;
@@ -27,6 +30,12 @@
   function runSearch() {
     if (!isRunning) {
       onRunSearch(workspace.id);
+    }
+  }
+
+  function onProviderChange() {
+    if (workspace.provider === "arxiv" && workspace.sortBy === "most_cited") {
+      workspace.sortBy = "relevance";
     }
   }
 
@@ -49,11 +58,9 @@
   </div>
 
   <div class="status-strip row" aria-label="Search status">
-    <span>OpenAlex</span>
+    <span>{providerLabel}</span>
     <span>Manual run</span>
-    {#if workspace.openAccessOnly}
-      <span>Open access</span>
-    {/if}
+    <span>Open access</span>
     <span>{workspace.resultLimit} max</span>
     <span>{sortLabel(workspace.sortBy)}</span>
     <span class:hot={workspace.status === "failed"}>{statusLabel}</span>
@@ -68,7 +75,7 @@
         bind:this={queryInput}
         bind:value={workspace.query}
         aria-label="Search papers"
-        placeholder="search OpenAlex papers..."
+        placeholder="search {providerLabel} papers..."
         disabled={isRunning}
       />
       <button class="btn primary" type="submit" disabled={isRunning || !workspace.query.trim()}>
@@ -110,12 +117,15 @@
         <select bind:value={workspace.sortBy} disabled={isRunning}>
           <option value="relevance">Relevance</option>
           <option value="newest">Newest</option>
-          <option value="most_cited">Most cited</option>
+          <option value="most_cited" disabled={mostCitedDisabled}>Most cited</option>
         </select>
       </label>
-      <label class="check row">
-        <input bind:checked={workspace.openAccessOnly} type="checkbox" disabled={isRunning} />
-        <span>Open access</span>
+      <label>
+        <span>Provider</span>
+        <select bind:value={workspace.provider} onchange={onProviderChange} disabled={isRunning}>
+          <option value="open_alex">OpenAlex</option>
+          <option value="arxiv">arXiv</option>
+        </select>
       </label>
     </div>
   </form>
@@ -224,20 +234,6 @@
     font: inherit;
     font-size: 10px;
     text-transform: none;
-  }
-
-  .check {
-    height: 22px;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    margin-left: 2px;
-  }
-
-  .check input {
-    min-width: 0;
-    height: auto;
-    padding: 0;
   }
 
   button:disabled,

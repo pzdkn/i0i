@@ -4,6 +4,9 @@
             "openalex": {
                 "url": "https://api.openalex.org/works",
                 "api_key": "OPENALEX_API_KEY"
+            },
+            "arxiv": {
+                "url": "https://export.arxiv.org/api/query"
             }
         },
         "search": {
