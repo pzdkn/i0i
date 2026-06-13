@@ -1,0 +1,20 @@
+{
+    "discovery": {
+        "providers": {
+            "openalex": {
+                "url": "https://api.openalex.org/works",
+                "api_key": "OPENALEX_API_KEY"
+            },
+            "arxiv": {
+                "url": "https://export.arxiv.org/api/query"
+            },
+            "semantic_scholar": {
+                "url": "https://api.semanticscholar.org/graph/v1/paper/search",
+                "api_key": "SEMANTIC_SCHOLAR_API_KEY"
+            }
+        },
+        "search": {
+            "max_result_limit": 30
+        }
+    }
+}

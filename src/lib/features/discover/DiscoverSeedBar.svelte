@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { DiscoverWorkspace } from "$lib/domain/discover";
+  import { providerDisplayName, type DiscoverWorkspace } from "$lib/domain/discover";
 
   let {
     workspace,
@@ -14,6 +14,17 @@
 
   let queryInput: HTMLInputElement;
   const isRunning = $derived(workspace.status === "running");
+  const statusLabel = $derived(workspace.status === "idle" ? "Idle" : workspace.status);
+  const resultLabel = $derived(
+    workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
+  );
+  const providerLabel = $derived(providerDisplayName(workspace.provider));
+  // arXiv and Semantic Scholar have no citation-count sort.
+  // Semantic Scholar has no sort at all — all options fall back to relevance.
+  const mostCitedDisabled = $derived(
+    workspace.provider === "arxiv" || workspace.provider === "semantic_scholar"
+  );
+  const sortDisabled = $derived(workspace.provider === "semantic_scholar");
 
   $effect(() => {
     workspace.id;
@@ -25,6 +36,23 @@
       onRunSearch(workspace.id);
     }
   }
+
+  function onProviderChange() {
+    if (
+      (workspace.provider === "arxiv" || workspace.provider === "semantic_scholar") &&
+      workspace.sortBy === "most_cited"
+    ) {
+      workspace.sortBy = "relevance";
+    }
+  }
+
+  function sortLabel(sortBy: DiscoverWorkspace["sortBy"]) {
+    if (sortBy === "most_cited") {
+      return "Most cited";
+    }
+
+    return sortBy === "newest" ? "Newest" : "Relevance";
+  }
 </script>
 
 <header class="discover-search hair-b col">
@@ -33,17 +61,28 @@
       <div class="label">Discover</div>
       <h1>{workspace.title}</h1>
     </div>
-    <span class="mono-dim">OpenAlex / transient search / explicit run</span>
+    <button class="new-search-btn" type="button" onclick={onNewSearch}>New Search</button>
+  </div>
+
+  <div class="status-strip row" aria-label="Search status">
+    <span>{providerLabel}</span>
+    <span>Manual run</span>
+    <span>Open access</span>
+    <span>{workspace.resultLimit} max</span>
+    <span>{sortLabel(workspace.sortBy)}</span>
+    <span class:hot={workspace.status === "failed"}>{statusLabel}</span>
+    {#if resultLabel}
+      <span>{resultLabel}</span>
+    {/if}
   </div>
 
   <form class="search-form col" onsubmit={(event) => { event.preventDefault(); runSearch(); }}>
     <div class="query-row row">
-      <button class="icon-btn" type="button" title="New Search" aria-label="New Search" onclick={onNewSearch}>+</button>
       <input
         bind:this={queryInput}
         bind:value={workspace.query}
         aria-label="Search papers"
-        placeholder="search OpenAlex papers..."
+        placeholder="search {providerLabel} papers..."
         disabled={isRunning}
       />
       <button class="btn primary" type="submit" disabled={isRunning || !workspace.query.trim()}>
@@ -82,24 +121,20 @@
       </label>
       <label>
         <span>Sort</span>
-        <select bind:value={workspace.sortBy} disabled={isRunning}>
+        <select bind:value={workspace.sortBy} disabled={isRunning || sortDisabled}>
           <option value="relevance">Relevance</option>
-          <option value="newest">Newest</option>
-          <option value="most_cited">Most cited</option>
+          <option value="newest" disabled={mostCitedDisabled}>Newest</option>
+          <option value="most_cited" disabled={mostCitedDisabled}>Most cited</option>
         </select>
       </label>
-      <label class="check row">
-        <input bind:checked={workspace.openAccessOnly} type="checkbox" disabled={isRunning} />
-        <span>Open access</span>
+      <label>
+        <span>Provider</span>
+        <select bind:value={workspace.provider} onchange={onProviderChange} disabled={isRunning}>
+          <option value="open_alex">OpenAlex</option>
+          <option value="arxiv">arXiv</option>
+          <option value="semantic_scholar">Semantic Scholar</option>
+        </select>
       </label>
-      <div class="flex1"></div>
-      {#if workspace.status === "completed"}
-        <span class="mono-dim">{workspace.candidates.length} candidates</span>
-      {:else if workspace.status === "failed"}
-        <span class="mono-dim hot">run failed</span>
-      {:else if workspace.status === "idle"}
-        <span class="mono-dim">no run yet</span>
-      {/if}
     </div>
   </form>
 </header>
@@ -114,7 +149,8 @@
 
   .heading {
     gap: 12px;
-    align-items: baseline;
+    align-items: flex-start;
+    justify-content: space-between;
   }
 
   h1 {
@@ -125,7 +161,7 @@
   }
 
   .search-form {
-    gap: 8px;
+    gap: 9px;
   }
 
   .query-row {
@@ -134,7 +170,8 @@
 
   .query-row input {
     height: 30px;
-    flex: 1;
+    width: min(100%, 640px);
+    flex: 0 1 640px;
     min-width: 0;
     border: 1px solid var(--border-2);
     outline: none;
@@ -149,14 +186,34 @@
     border-color: var(--amber-dim);
   }
 
-  .icon-btn {
-    width: 30px;
+  .new-search-btn {
     height: 30px;
     border: 1px solid var(--border-2);
     background: var(--bg);
     color: var(--amber);
-    font-size: 17px;
+    padding: 0 10px;
+    font: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
     cursor: pointer;
+  }
+
+  .new-search-btn:hover {
+    border-color: var(--amber-dim);
+    background: rgba(242, 169, 59, 0.05);
+  }
+
+  .status-strip {
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+
+  .status-strip span {
+    border: 1px solid var(--border-2);
+    padding: 1px 6px;
+    color: var(--fg-2);
+    font-size: 9px;
+    text-transform: uppercase;
   }
 
   .filter-row {
@@ -185,20 +242,6 @@
     font: inherit;
     font-size: 10px;
     text-transform: none;
-  }
-
-  .check {
-    height: 22px;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    margin-left: 2px;
-  }
-
-  .check input {
-    min-width: 0;
-    height: auto;
-    padding: 0;
   }
 
   button:disabled,

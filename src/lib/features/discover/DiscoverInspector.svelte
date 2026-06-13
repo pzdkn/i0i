@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { DiscoverWorkspace } from "$lib/domain/discover";
+  import { providerDisplayName, type DiscoverCandidate, type DiscoveryProviderChoice, type DiscoverWorkspace } from "$lib/domain/discover";
 
   let {
     workspace,
@@ -11,25 +11,48 @@
     workspace.candidates.find((candidate) => candidate.id === workspace.selectedCandidateId),
   );
 
-  function providerLabel(provider?: string) {
-    if (!provider) {
-      return "OpenAlex";
+
+  function statusLabel(status: DiscoverWorkspace["status"]) {
+    if (status === "idle") {
+      return "Idle";
     }
 
-    return provider === "openalex" ? "OpenAlex" : provider;
+    return status[0].toUpperCase() + status.slice(1);
+  }
+
+  function candidateSignals(candidate: DiscoverCandidate) {
+    const signals = [providerDisplayName((candidate.sourceProvider ?? "open_alex") as DiscoveryProviderChoice)];
+
+    if (candidate.citations > 0) {
+      signals.push(`${candidate.citations.toLocaleString()} citations`);
+    }
+
+    if (candidate.openAccess?.isOpenAccess) {
+      signals.push("Open access");
+    }
+
+    if (candidate.pdfUrl) {
+      signals.push("PDF available");
+    }
+
+    if (candidate.doi) {
+      signals.push("DOI");
+    }
+
+    return signals;
   }
 </script>
 
 <aside class="discover-inspector col hair-l">
   <header class="panel-header hair-b">
     <div class="label hot">Run</div>
-    <h2>{workspace.status}</h2>
+    <h2>{statusLabel(workspace.status)}</h2>
   </header>
 
   <section class="panel-section col">
     <div class="row section-title">
       <span>Current Search</span>
-      <span class="mono-dim">{providerLabel(workspace.lastRun?.provider)}</span>
+      <span class="mono-dim">{providerDisplayName((workspace.lastRun?.provider ?? "open_alex") as DiscoveryProviderChoice)}</span>
     </div>
     <dl class="kv">
       <div>
@@ -50,7 +73,7 @@
       </div>
       <div>
         <dt>open access</dt>
-        <dd>{workspace.openAccessOnly ? "on" : "off"}</dd>
+        <dd>always</dd>
       </div>
     </dl>
     {#if workspace.lastRun?.filters.length}
@@ -69,7 +92,7 @@
     <div class="row section-title">
       <span>Selected Candidate</span>
       {#if selectedCandidate}
-        <span class="mono-dim">{providerLabel(selectedCandidate.sourceProvider)}</span>
+        <span class="mono-dim">{providerDisplayName((selectedCandidate.sourceProvider ?? "open_alex") as DiscoveryProviderChoice)}</span>
       {/if}
     </div>
 
@@ -94,16 +117,29 @@
           <dd>{selectedCandidate.pdfUrl ? "available" : "not found"}</dd>
         </div>
       </dl>
-      <div class="reason-list col">
-        {#each selectedCandidate.match?.reasons ?? [selectedCandidate.why] as reason}
-          <span>{reason}</span>
-        {/each}
+      <div class="signals col">
+        <div class="section-title">Signals</div>
+        <div class="chips row">
+          {#each candidateSignals(selectedCandidate) as signal}
+            <span class="chip">{signal}</span>
+          {/each}
+        </div>
       </div>
+      {#if selectedCandidate.match?.matchedKeywords.length}
+        <div class="signals col">
+          <div class="section-title">Matched Keywords</div>
+          <div class="chips row">
+            {#each selectedCandidate.match.matchedKeywords as keyword}
+              <span class="chip">{keyword}</span>
+            {/each}
+          </div>
+        </div>
+      {/if}
       {#if selectedCandidate.abstract}
         <p class="abstract">{selectedCandidate.abstract}</p>
       {/if}
     {:else}
-      <p class="empty">Select a candidate to inspect metadata and match reasons.</p>
+      <p class="empty">Select a candidate to inspect metadata and signals.</p>
     {/if}
   </section>
 
@@ -127,7 +163,6 @@
     color: var(--amber);
     font-size: 15px;
     font-weight: 600;
-    text-transform: capitalize;
   }
 
   h3 {
@@ -210,15 +245,7 @@
     color: var(--red);
   }
 
-  .reason-list {
-    gap: 5px;
-  }
-
-  .reason-list span {
-    border-left: 2px solid var(--amber-dim);
-    padding-left: 7px;
-    color: var(--fg-2);
-    font-size: 10px;
-    line-height: 1.45;
+  .signals {
+    gap: 6px;
   }
 </style>

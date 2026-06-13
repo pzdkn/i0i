@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryProviderChoice {
+    #[default]
+    OpenAlex,
+    Arxiv,
+    SemanticScholar,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverySearchRequest {
@@ -8,7 +17,8 @@ pub struct DiscoverySearchRequest {
     pub year_to: Option<i32>,
     pub result_limit: i32,
     pub sort_by: DiscoverySort,
-    pub open_access_only: bool,
+    #[serde(default)]
+    pub provider: DiscoveryProviderChoice,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

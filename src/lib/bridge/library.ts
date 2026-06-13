@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   LibrarySnapshot,
+  DocumentSource,
   PaperDraft,
   PaperNote,
   PaperNoteDraft,
   VaultDraft,
   VaultRenameDraft,
 } from "$lib/domain/library";
+import type { DiscoveryReaderCandidate, ReaderDocument } from "$lib/domain/reader";
 
 export async function getLibrary(): Promise<LibrarySnapshot> {
   return invoke<LibrarySnapshot>("get_library");
@@ -16,6 +18,19 @@ export async function addPaperToVaults(paper: PaperDraft, vaultIds: string[]): P
   return invoke<LibrarySnapshot>("add_paper_to_vaults", {
     paper,
     vaultIds,
+  });
+}
+
+export async function getDocumentSources(paperId: string): Promise<DocumentSource[]> {
+  return invoke<DocumentSource[]>("get_document_sources", {
+    paperId,
+  });
+}
+
+export async function downloadPaperPdf(paperId: string, sourceId?: string): Promise<DocumentSource> {
+  return invoke<DocumentSource>("download_paper_pdf", {
+    paperId,
+    sourceId,
   });
 }
 
@@ -72,4 +87,23 @@ export async function deletePaperNote(input: { paperId: string; noteId: string }
 
 export async function updatePaperNote(input: { paperId: string; noteId: string; body: string }): Promise<PaperNote[]> {
   return invoke<PaperNote[]>("update_paper_note", input);
+}
+
+export async function getReaderDocument(paperId: string, extractionId?: string): Promise<ReaderDocument> {
+  return invoke<ReaderDocument>("get_reader_document", {
+    paperId,
+    extractionId,
+  });
+}
+
+export async function getDiscoveryReaderDocument(candidate: DiscoveryReaderCandidate): Promise<ReaderDocument> {
+  return invoke<ReaderDocument>("get_discovery_reader_document", {
+    candidate,
+  });
+}
+
+export async function getReaderPdfBytes(sourceId: string): Promise<number[]> {
+  return invoke<number[]>("get_reader_pdf_bytes", {
+    sourceId,
+  });
 }

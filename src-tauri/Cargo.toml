@@ -25,3 +25,6 @@ serde_json = "1"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 reqwest = { version = "0.13.3", features = ["json"] }
 url = "2"
+sha2 = "0.10.9"
+tokio = { version = "1.52.3", features = ["sync", "time"] }
+quick-xml = "0.36"

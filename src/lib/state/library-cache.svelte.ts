@@ -1,7 +1,6 @@
 import type { Paper } from "$lib/domain/paper";
-import type { DiscoverCandidate, DiscoverWorkspace, DiscoverySearchResponse } from "$lib/domain/discover";
+import { providerDisplayName, type DiscoverCandidate, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
 import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
-import { librarySeedWorkspaces } from "$lib/mock/library-seed";
 
 type LibraryState = {
   vaults: VaultWorkspace[];
@@ -9,20 +8,12 @@ type LibraryState = {
 };
 
 // Saved library data comes from Rust/SQLite. This module caches the latest
-// LibrarySnapshot for Svelte views and uses seed data only before hydration.
-const initialVaults = librarySeedWorkspaces.map(cloneVaultWorkspace);
-const initialPaperIds = new Set(initialVaults.flatMap((workspace) => workspace.papers.map((paper) => paper.id)));
+// LibrarySnapshot for Svelte views.
 let discoverSequence = 1;
 const initialDiscoverWorkspaces = [makeDiscoverWorkspace()];
 
-for (const workspace of initialDiscoverWorkspaces) {
-  for (const candidate of workspace.candidates) {
-    candidate.owned ||= initialPaperIds.has(candidate.id);
-  }
-}
-
 const library = $state<LibraryState>({
-  vaults: initialVaults,
+  vaults: [],
   discoverWorkspaces: initialDiscoverWorkspaces,
 });
 
@@ -85,7 +76,7 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     yearTo: "",
     resultLimit: 25,
     sortBy: "relevance",
-    openAccessOnly: true,
+    provider: "open_alex",
     status: "idle",
     error: "",
     candidates: [],
@@ -152,10 +143,10 @@ function markDiscoverOwnership() {
   }
 }
 
-function candidateToPaper(candidateId: string): Paper {
+function candidateToPaper(candidateId: string): Paper | undefined {
   const candidate = findCandidate(candidateId);
   if (!candidate) {
-    return library.vaults[0].papers[0];
+    return undefined;
   }
 
   return {
@@ -178,7 +169,7 @@ export function getVaultWorkspaces() {
 }
 
 export function getVaultWorkspace(vaultId: string) {
-  return library.vaults.find((workspace) => workspace.id === vaultId) ?? library.vaults[0];
+  return library.vaults.find((workspace) => workspace.id === vaultId);
 }
 
 export function getDiscoverWorkspace(discoverId: string) {
@@ -232,8 +223,29 @@ export function discoverTitleFromQuery(query: string) {
   return `Discover: ${normalized.length > 28 ? `${normalized.slice(0, 28)}...` : normalized}`;
 }
 
+function candidateSignalSummary(candidate: DiscoverySearchResponse["candidates"][number]) {
+  const providerLabel = providerDisplayName(
+    (candidate.sourceProvider ?? "open_alex") as DiscoveryProviderChoice
+  );
+  const signals = [providerLabel];
+  const citationCount = candidate.citationCount ?? 0;
+
+  if (citationCount > 0) {
+    signals.push(`${citationCount.toLocaleString()} citations`);
+  }
+
+  if (candidate.openAccess?.isOpenAccess) {
+    signals.push("Open access");
+  }
+
+  if (candidate.pdfUrl) {
+    signals.push("PDF available");
+  }
+
+  return signals.join(" · ");
+}
+
 function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][number]): DiscoverCandidate {
-  const reasons = candidate.matchSummary.reasons;
   const score = candidate.matchSummary.score ?? 0;
   const openAccessTags = candidate.openAccess?.isOpenAccess ? ["open-access"] : [];
 
@@ -243,11 +255,11 @@ function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][nu
     sourceId: candidate.sourceId,
     title: candidate.title,
     authors: [...candidate.authors],
-    venue: candidate.venue ?? "OpenAlex",
+    venue: candidate.venue ?? candidate.sourceProvider ?? "",
     year: candidate.year ?? 0,
     citations: candidate.citationCount ?? 0,
     score,
-    why: reasons[0] ?? "Matched OpenAlex search.",
+    why: candidateSignalSummary(candidate),
     tags: ["openalex", ...openAccessTags],
     abstract: candidate.abstract,
     publicationDate: candidate.publicationDate,
@@ -268,7 +280,7 @@ function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][nu
   };
 }
 
-export function getPaperById(paperId: string) {
+export function getPaperById(paperId: string): Paper | undefined {
   for (const workspace of library.vaults) {
     const paper = workspace.papers.find((item) => item.id === paperId);
     if (paper) {
@@ -279,8 +291,8 @@ export function getPaperById(paperId: string) {
   return candidateToPaper(paperId);
 }
 
-export function getPaperTitle(paperId: string) {
-  return getPaperById(paperId).title;
+export function getPaperTitle(paperId: string): string {
+  return getPaperById(paperId)?.title ?? "Unknown paper";
 }
 
 export function isCandidateInVault(candidateId: string) {
@@ -317,19 +329,32 @@ export function paperFromDiscoverCandidate(candidateId: string) {
   return candidateToPaper(candidateId);
 }
 
+export function getDiscoverCandidate(candidateId: string) {
+  return findCandidate(candidateId);
+}
+
 export function paperDraftFromDiscoverCandidate(candidateId: string): PaperDraft {
+  const candidate = findCandidate(candidateId);
   const paper = candidateToPaper(candidateId);
 
   return {
-    id: paper.id,
-    title: paper.title,
-    authors: [...paper.authors],
-    venue: paper.venue,
-    year: paper.year,
-    citations: paper.citations,
-    tags: [...paper.tags],
-    status: paper.status,
-    abstract: paper.abstract,
+    id: paper?.id ?? candidateId,
+    title: paper?.title ?? "Unknown",
+    authors: [...(paper?.authors ?? [])],
+    venue: paper?.venue ?? "",
+    year: paper?.year ?? 0,
+    citations: paper?.citations ?? 0,
+    tags: [...(paper?.tags ?? [])],
+    status: paper?.status ?? "UNREAD",
+    abstract: paper?.abstract,
+    sources: candidate?.pdfUrl
+      ? [
+          {
+            sourceKind: "pdf",
+            sourceUrl: candidate.pdfUrl,
+          },
+        ]
+      : [],
   };
 }
 

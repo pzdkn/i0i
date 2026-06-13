@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
@@ -15,6 +16,7 @@
   import type { LibrarySnapshot, Vault } from "$lib/domain/library";
   import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
+  import type { DiscoveryReaderCandidate } from "$lib/domain/reader";
   import type { VaultStatus } from "$lib/domain/vault";
   import type { WorkspaceTab } from "$lib/domain/workspace";
   import DiscoverView from "$lib/features/discover/DiscoverView.svelte";
@@ -23,12 +25,14 @@
   import VaultHome from "$lib/features/vault/VaultHome.svelte";
   import {
     getCandidateVaultTargets,
+    getDiscoverCandidate,
     getDiscoverWorkspace,
     getPaperById,
     getPaperTitle,
     getVaultWorkspace,
     getVaultWorkspaces,
     hydrateLibrary,
+    isPaperInLibrary,
     applyDiscoverSearchResponse,
     createDiscoverWorkspace,
     discoverTitleFromQuery,
@@ -40,24 +44,34 @@
 
   let vaultStatus = $state<VaultStatus | null>(null);
   let bridgeError = $state("");
-  let activeVaultId = $state("attention");
-  let selectedPaperId = $state("vaswani2017");
-  let selectedReaderPaper = $state<Paper>(getPaperById("vaswani2017"));
-  let activeTabId = $state("vault:attention");
-  let tabs = $state<WorkspaceTab[]>([
-    {
-      id: "vault:attention",
-      kind: "vault",
-      title: "/transformers/attention",
-      vaultId: "attention",
-    },
-  ]);
+  let activeVaultId = $state("");
+  let selectedPaperId = $state("");
+  let selectedReaderPaper = $state<Paper | null>(null);
+  let activeTabId = $state("");
+  let tabs = $state<WorkspaceTab[]>([]);
 
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
   const vaultWorkspaces = $derived(getVaultWorkspaces());
   const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "discover-1"));
-  const activePaper = $derived(selectedReaderPaper);
+  const activePaper = $derived.by<Paper | null>(() => {
+    if (activeTab?.kind !== "reader") {
+      return null;
+    }
+
+    if (activeTab.paperId) {
+      return getPaperById(activeTab.paperId) ?? selectedReaderPaper;
+    }
+
+    return selectedReaderPaper;
+  });
+  const activeReaderCandidate = $derived.by<DiscoveryReaderCandidate | undefined>(() => {
+    if (activeTab?.kind !== "reader" || !activeTab.readerCandidate) {
+      return undefined;
+    }
+
+    return isPaperInLibrary(activeTab.paperId ?? activeTab.readerCandidate.id) ? undefined : activeTab.readerCandidate;
+  });
   const currentPath = $derived(activeTab?.title ?? "no workspace");
   const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "V");
 
@@ -80,6 +94,26 @@
     }
   });
 
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen("document_source_updated", async () => {
+      try {
+        hydrateLibrary(await getLibrary());
+      } catch (error) {
+        bridgeError = String(error);
+      }
+    })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
   function openVault(vaultId = activeVaultId) {
     const workspace = getVaultWorkspace(vaultId);
     if (!workspace) {
@@ -97,6 +131,9 @@
 
   function openPaper(paperId: string) {
     const paper = getPaperById(paperId);
+    if (!paper) {
+      return;
+    }
     selectedPaperId = paper.id;
     selectedReaderPaper = paper;
 
@@ -175,7 +212,7 @@
         yearTo: parseOptionalYear(workspace.yearTo),
         resultLimit: Number(workspace.resultLimit),
         sortBy: workspace.sortBy,
-        openAccessOnly: workspace.openAccessOnly,
+        provider: workspace.provider,
       });
       applyDiscoverSearchResponse(discoverId, response);
       const title = discoverTitleFromQuery(query);
@@ -191,7 +228,11 @@
   }
 
   function openCandidate(candidateId: string) {
+    const candidate = getDiscoverCandidate(candidateId);
     const paper = paperFromDiscoverCandidate(candidateId);
+    if (!paper || !candidate) {
+      return;
+    }
     selectedPaperId = paper.id;
     selectedReaderPaper = paper;
 
@@ -200,6 +241,20 @@
       kind: "reader",
       title: paper.title,
       paperId: paper.id,
+      readerCandidate: {
+        id: candidate.id,
+        sourceProvider: candidate.sourceProvider,
+        sourceId: candidate.sourceId,
+        title: candidate.title,
+        authors: [...candidate.authors],
+        venue: candidate.venue,
+        year: candidate.year,
+        citations: candidate.citations,
+        tags: [...candidate.tags],
+        abstract: candidate.abstract,
+        externalUrl: candidate.externalUrl,
+        pdfUrl: candidate.pdfUrl,
+      },
     };
 
     tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
@@ -329,7 +384,12 @@
     if (tab.paperId) {
       selectedPaperId = tab.paperId;
       if (!selectedReaderPaper || selectedReaderPaper.id !== tab.paperId) {
-        selectedReaderPaper = getPaperById(tab.paperId);
+        const paper =
+          getPaperById(tab.paperId) ??
+          (tab.readerCandidate ? paperFromDiscoverCandidate(tab.readerCandidate.id) : undefined);
+        if (paper) {
+          selectedReaderPaper = paper;
+        }
       }
     }
   }
@@ -366,8 +426,8 @@
   <section class="workspace col">
     <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
 
-    {#if activeTab?.kind === "reader"}
-      <ReaderView paper={activePaper} />
+    {#if activeTab?.kind === "reader" && activePaper}
+      <ReaderView paper={activePaper} candidate={activeReaderCandidate} />
     {:else if activeTab?.kind === "discover"}
       <DiscoverView
         workspace={activeDiscoverWorkspace}
@@ -379,7 +439,7 @@
         onAddCandidate={addCandidate}
         {getCandidateVaultTargets}
       />
-    {:else if activeTab?.kind === "vault"}
+    {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
       <VaultHome
         workspace={activeVaultWorkspace}
         onOpenPaper={openPaper}

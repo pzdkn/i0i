@@ -13,6 +13,7 @@
     noteError,
     isLoadingNotes,
     onSaveNote,
+    onCancelNoteDraft,
     onDeleteNote,
     onUpdateNote,
     onActivateNote,
@@ -25,6 +26,7 @@
     noteError: string;
     isLoadingNotes: boolean;
     onSaveNote: (body: string) => Promise<void>;
+    onCancelNoteDraft: () => void;
     onDeleteNote: (noteId: string) => Promise<void>;
     onUpdateNote: (noteId: string, body: string) => Promise<void>;
     onActivateNote: (noteId: string) => void;
@@ -37,6 +39,7 @@
   let editBody = $state("");
   let isUpdating = $state(false);
   let activeTab = $state<InspectorTab>("notes");
+  let inspectorElement = $state<HTMLElement | null>(null);
   const canSave = $derived(Boolean(noteDraft && noteBody.trim() && !isSaving));
   const canUpdate = $derived(Boolean(editingNoteId && editBody.trim() && !isUpdating));
 
@@ -46,6 +49,26 @@
     }
 
     noteBody = "";
+  });
+
+  $effect(() => {
+    if (!noteDraft) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!inspectorElement || inspectorElement.contains(event.target as Node)) {
+        return;
+      }
+
+      cancelEmptyDraft();
+    };
+
+    window.document.addEventListener("pointerdown", handlePointerDown);
+
+    return () => {
+      window.document.removeEventListener("pointerdown", handlePointerDown);
+    };
   });
 
   async function saveNote() {
@@ -61,7 +84,24 @@
     }
   }
 
+  function cancelDraft() {
+    noteBody = "";
+    onCancelNoteDraft();
+  }
+
+  function cancelEmptyDraft() {
+    if (!noteBody.trim()) {
+      cancelDraft();
+    }
+  }
+
   function handleNoteKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelEmptyDraft();
+      return;
+    }
+
     if (event.key !== "Enter" || event.shiftKey) {
       return;
     }
@@ -124,6 +164,18 @@
     void updateNote();
   }
 
+  function noteAnchorLabel(note: { selectedText: string; anchorKind?: "text_offset" | "pdf_rect"; pageIndex?: number }) {
+    if (note.selectedText.trim()) {
+      return note.selectedText;
+    }
+
+    if (note.anchorKind === "pdf_rect" && note.pageIndex !== undefined) {
+      return `PDF region, page ${note.pageIndex + 1}`;
+    }
+
+    return "Untitled note anchor";
+  }
+
   const tabs: Array<{ id: InspectorTab; label: string }> = [
     { id: "notes", label: "Notes" },
     { id: "lineage", label: "Lineage" },
@@ -132,7 +184,7 @@
   ];
 </script>
 
-<aside class="reader-inspector hair-l">
+<aside bind:this={inspectorElement} class="reader-inspector hair-l">
   <header class="hair-b">
     <div class="paper-name truncate">{document.title}</div>
     <div class="mono-dim">paper / selected / reader</div>
@@ -158,8 +210,8 @@
         {#if notesEnabled}
           {#if noteDraft}
             <div class="note-draft">
-              <div class="label">Selected quote</div>
-              <blockquote>{noteDraft.selectedText}</blockquote>
+              <div class="label">{noteDraft.anchorKind === "pdf_rect" ? "PDF anchor" : "Selected quote"}</div>
+              <blockquote>{noteAnchorLabel(noteDraft)}</blockquote>
               <textarea
                 bind:value={noteBody}
                 aria-label="Note body"
@@ -170,6 +222,9 @@
               <div class="row note-actions">
                 <button class="btn primary" type="button" disabled={!canSave} onclick={() => void saveNote()}>
                   {isSaving ? "Saving" : "Save"}
+                </button>
+                <button class="btn ghost" type="button" disabled={isSaving} onclick={cancelDraft}>
+                  Cancel
                 </button>
               </div>
             </div>
@@ -200,7 +255,7 @@
                     ></button>
                   {/if}
                   <div class="row saved-note-head">
-                    <blockquote>{note.selectedText}</blockquote>
+                    <blockquote>{noteAnchorLabel(note)}</blockquote>
                     <div class="row note-buttons">
                       <button
                         class="note-icon"

@@ -34,6 +34,18 @@ export type DiscoverCandidate = {
 
 export type DiscoverSort = "relevance" | "newest" | "most_cited";
 
+export type DiscoveryProviderChoice = "open_alex" | "arxiv" | "semantic_scholar";
+
+const PROVIDER_DISPLAY_NAMES: Record<DiscoveryProviderChoice, string> = {
+  open_alex: "OpenAlex",
+  arxiv: "arXiv",
+  semantic_scholar: "Semantic Scholar",
+};
+
+export function providerDisplayName(provider: DiscoveryProviderChoice): string {
+  return PROVIDER_DISPLAY_NAMES[provider] ?? "Unknown";
+}
+
 export type DiscoverRunStatus = "idle" | "running" | "completed" | "failed";
 
 export type DiscoverWorkspace = {
@@ -45,7 +57,7 @@ export type DiscoverWorkspace = {
   yearTo: string;
   resultLimit: 10 | 25 | 50;
   sortBy: DiscoverSort;
-  openAccessOnly: boolean;
+  provider: DiscoveryProviderChoice;
   status: DiscoverRunStatus;
   error: string;
   lastRun?: {
@@ -64,7 +76,7 @@ export type DiscoverySearchRequest = {
   yearTo?: number;
   resultLimit: number;
   sortBy: DiscoverSort;
-  openAccessOnly: boolean;
+  provider: DiscoveryProviderChoice;
 };
 
 export type DiscoverySearchResponse = {

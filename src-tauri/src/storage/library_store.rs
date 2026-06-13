@@ -3,15 +3,18 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::domain::library::{
-    LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, Vault, VaultDraft, VaultPaper,
-    VaultRenameDraft,
+    DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
+    LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, PaperSourceDraft, Vault,
+    VaultDraft, VaultPaper, VaultRenameDraft,
 };
 
 type StoreResult<T> = Result<T, String>;
 
+#[derive(Clone)]
 pub struct LibraryStore {
     db_path: PathBuf,
 }
@@ -72,6 +75,114 @@ impl LibraryStore {
         self.read_library(&conn)
     }
 
+    pub fn get_document_sources(&self, paper_id: &str) -> StoreResult<Vec<DocumentSource>> {
+        let conn = self.open_connection()?;
+        read_document_sources_for_paper(&conn, paper_id)
+    }
+
+    pub fn get_document_source(&self, source_id: &str) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn remote_available_pdf_sources(&self) -> StoreResult<Vec<DocumentSource>> {
+        let conn = self.open_connection()?;
+        read_document_sources_by_status(&conn, "remote_available")
+    }
+
+    pub fn stale_downloading_pdf_sources(&self) -> StoreResult<Vec<DocumentSource>> {
+        let conn = self.open_connection()?;
+        read_document_sources_by_status(&conn, "downloading")
+    }
+
+    pub fn set_document_source_downloading(&self, source_id: &str) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "
+            update document_sources
+            set status = 'downloading', error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![source_id],
+        )
+        .map_err(|error| error.to_string())?;
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn set_document_source_cached(
+        &self,
+        source_id: &str,
+        local_path: &str,
+    ) -> StoreResult<DocumentSource> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "
+            update document_sources
+            set status = 'cached', local_path = ?2, error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![source_id, local_path],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "
+            update papers
+            set active_source_id = coalesce(active_source_id, ?1),
+                updated_at = datetime('now')
+            where id = (
+              select paper_id from document_sources where id = ?1
+            )
+            ",
+            params![source_id],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn set_document_source_failed(
+        &self,
+        source_id: &str,
+        error: &str,
+    ) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "
+            update document_sources
+            set status = 'failed', error = ?2, updated_at = datetime('now')
+            where id = ?1
+            ",
+                params![source_id, error],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!(
+                "Document source disappeared before marking download failed: {source_id}"
+            ));
+        }
+        read_document_source(&conn, source_id)
+    }
+
+    pub fn reset_document_source_to_remote_available(
+        &self,
+        source_id: &str,
+    ) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "
+            update document_sources
+            set status = 'remote_available', error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![source_id],
+        )
+        .map_err(|error| error.to_string())?;
+        read_document_source(&conn, source_id)
+    }
+
     pub fn add_paper_to_vaults(
         &self,
         paper: &PaperDraft,
@@ -113,6 +224,8 @@ impl LibraryStore {
             ],
         )
         .map_err(|error| error.to_string())?;
+
+        upsert_document_sources(&tx, paper)?;
 
         for vault_id in vault_ids {
             tx.execute(
@@ -292,6 +405,7 @@ impl LibraryStore {
 
     pub fn create_paper_note(&self, draft: &PaperNoteDraft) -> StoreResult<Vec<PaperNote>> {
         let body = draft.body.trim();
+        let anchor_kind = draft.anchor_kind.as_deref().unwrap_or("text_offset").trim();
 
         if draft.paper_id.trim().is_empty() {
             return Err("Paper id cannot be empty".to_string());
@@ -301,16 +415,34 @@ impl LibraryStore {
             return Err("Source id cannot be empty".to_string());
         }
 
-        if draft.selected_text.trim().is_empty() {
-            return Err("Selected text cannot be empty".to_string());
-        }
-
         if body.is_empty() {
             return Err("Note body cannot be empty".to_string());
         }
 
-        if draft.start_offset < 0 || draft.end_offset <= draft.start_offset {
-            return Err("Note offsets must define a non-empty range".to_string());
+        match anchor_kind {
+            "text_offset" => {
+                if draft.selected_text.trim().is_empty() {
+                    return Err("Selected text cannot be empty".to_string());
+                }
+
+                if draft.start_offset < 0 || draft.end_offset <= draft.start_offset {
+                    return Err("Note offsets must define a non-empty range".to_string());
+                }
+            }
+            "pdf_rect" => {
+                if draft.page_index.is_none() {
+                    return Err("PDF note page index is required".to_string());
+                }
+
+                let rects_json = draft
+                    .rects_json
+                    .as_deref()
+                    .ok_or_else(|| "PDF note rectangles are required".to_string())?;
+                validate_note_rects_json(rects_json)?;
+            }
+            _ => {
+                return Err(format!("Unsupported note anchor kind: {anchor_kind}"));
+            }
         }
 
         let note_id = generate_note_id()?;
@@ -321,9 +453,10 @@ impl LibraryStore {
             "
             insert into paper_notes (
               id, paper_id, source_id, start_offset, end_offset,
-              selected_text, body, created_at, updated_at
+              selected_text, anchor_kind, page_index, rects_json, quote_context,
+              body, created_at, updated_at
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'), datetime('now'))
             ",
             params![
                 note_id,
@@ -332,6 +465,10 @@ impl LibraryStore {
                 draft.start_offset,
                 draft.end_offset,
                 draft.selected_text,
+                anchor_kind,
+                draft.page_index,
+                draft.rects_json.as_deref(),
+                draft.quote_context.as_deref(),
                 body,
             ],
         )
@@ -440,6 +577,8 @@ impl LibraryStore {
               annotation_count integer not null default 0,
               status text not null,
               abstract text,
+              active_source_id text,
+              active_extraction_id text,
               created_at text not null,
               updated_at text not null
             );
@@ -460,14 +599,145 @@ impl LibraryStore {
               start_offset integer not null,
               end_offset integer not null,
               selected_text text not null,
+              anchor_kind text not null default 'text_offset',
+              page_index integer,
+              rects_json text,
+              quote_context text,
               body text not null,
               created_at text not null,
               updated_at text not null,
               foreign key (paper_id) references papers(id) on delete cascade
             );
+
+            create table if not exists document_sources (
+              id text primary key,
+              paper_id text not null,
+              source_kind text not null,
+              source_url text,
+              local_path text,
+              status text not null,
+              error text,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create index if not exists idx_document_sources_paper_id
+              on document_sources(paper_id);
+
+            create table if not exists document_extractions (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extractor text not null,
+              extractor_version text not null,
+              annotation_source_id text not null unique,
+              status text not null,
+              error text,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade
+            );
+
+            create index if not exists idx_document_extractions_paper_id
+              on document_extractions(paper_id);
+
+            create index if not exists idx_document_extractions_source_id
+              on document_extractions(source_id);
+
+            create table if not exists document_pages (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              page_index integer not null,
+              width real not null,
+              height real not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade
+            );
+
+            create index if not exists idx_document_pages_extraction_id
+              on document_pages(extraction_id);
+
+            create table if not exists document_blocks (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              page_index integer not null,
+              block_index integer not null,
+              reading_order integer not null,
+              kind text not null,
+              text text,
+              asset_id text,
+              source_start integer,
+              source_end integer,
+              bbox_json text,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade
+            );
+
+            create index if not exists idx_document_blocks_extraction_id
+              on document_blocks(extraction_id);
+
+            create table if not exists document_spans (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              block_id text not null,
+              page_index integer not null,
+              text text not null,
+              source_start integer not null,
+              source_end integer not null,
+              bbox_json text not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade,
+              foreign key (block_id) references document_blocks(id) on delete cascade
+            );
+
+            create index if not exists idx_document_spans_extraction_id
+              on document_spans(extraction_id);
+
+            create table if not exists document_assets (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              asset_kind text not null,
+              page_index integer not null,
+              bbox_json text,
+              local_path text not null,
+              caption text,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade
+            );
+
+            create index if not exists idx_document_assets_extraction_id
+              on document_assets(extraction_id);
             ",
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+        add_column_if_missing(conn, "papers", "active_source_id", "text")?;
+        add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
+        add_column_if_missing(
+            conn,
+            "paper_notes",
+            "anchor_kind",
+            "text not null default 'text_offset'",
+        )?;
+        add_column_if_missing(conn, "paper_notes", "page_index", "integer")?;
+        add_column_if_missing(conn, "paper_notes", "rects_json", "text")?;
+        add_column_if_missing(conn, "paper_notes", "quote_context", "text")
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -538,6 +808,12 @@ impl LibraryStore {
             vaults: read_vaults(conn)?,
             papers: read_papers(conn)?,
             vault_papers: read_vault_papers(conn)?,
+            document_sources: read_document_sources(conn)?,
+            document_extractions: read_document_extractions(conn)?,
+            document_pages: read_document_pages(conn)?,
+            document_blocks: read_document_blocks(conn)?,
+            document_spans: read_document_spans(conn)?,
+            document_assets: read_document_assets(conn)?,
         })
     }
 }
@@ -565,7 +841,8 @@ fn read_papers(conn: &Connection) -> StoreResult<Vec<Paper>> {
         .prepare(
             "
             select id, title, authors_json, venue, year, citations, tags_json,
-                   note_count, annotation_count, status, abstract
+                   note_count, annotation_count, status, abstract,
+                   active_source_id, active_extraction_id
             from papers
             order by updated_at desc, title
             ",
@@ -589,6 +866,8 @@ fn read_papers(conn: &Connection) -> StoreResult<Vec<Paper>> {
                 annotation_count: row.get(8)?,
                 status: row.get(9)?,
                 abstract_text: row.get(10)?,
+                active_source_id: row.get(11)?,
+                active_extraction_id: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -613,12 +892,279 @@ fn read_vault_papers(conn: &Connection) -> StoreResult<Vec<VaultPaper>> {
     collect_rows(rows)
 }
 
+fn read_document_sources(conn: &Connection) -> StoreResult<Vec<DocumentSource>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_kind, source_url, local_path,
+                   status, error, created_at, updated_at
+            from document_sources
+            order by updated_at desc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentSource {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_kind: row.get(2)?,
+                source_url: row.get(3)?,
+                local_path: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_sources_for_paper(
+    conn: &Connection,
+    paper_id: &str,
+) -> StoreResult<Vec<DocumentSource>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_kind, source_url, local_path,
+                   status, error, created_at, updated_at
+            from document_sources
+            where paper_id = ?1
+            order by updated_at desc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![paper_id], document_source_from_row)
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_sources_by_status(
+    conn: &Connection,
+    status: &str,
+) -> StoreResult<Vec<DocumentSource>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_kind, source_url, local_path,
+                   status, error, created_at, updated_at
+            from document_sources
+            where source_kind = 'pdf' and status = ?1 and source_url is not null
+            order by updated_at asc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![status], document_source_from_row)
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_source(conn: &Connection, source_id: &str) -> StoreResult<DocumentSource> {
+    conn.query_row(
+        "
+        select id, paper_id, source_kind, source_url, local_path,
+               status, error, created_at, updated_at
+        from document_sources
+        where id = ?1
+        ",
+        params![source_id],
+        document_source_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn document_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentSource> {
+    Ok(DocumentSource {
+        id: row.get(0)?,
+        paper_id: row.get(1)?,
+        source_kind: row.get(2)?,
+        source_url: row.get(3)?,
+        local_path: row.get(4)?,
+        status: row.get(5)?,
+        error: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn read_document_extractions(conn: &Connection) -> StoreResult<Vec<DocumentExtraction>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extractor, extractor_version,
+                   annotation_source_id, status, error, created_at, updated_at
+            from document_extractions
+            order by updated_at desc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentExtraction {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extractor: row.get(3)?,
+                extractor_version: row.get(4)?,
+                annotation_source_id: row.get(5)?,
+                status: row.get(6)?,
+                error: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_pages(conn: &Connection) -> StoreResult<Vec<DocumentPage>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, page_index, width, height
+            from document_pages
+            order by extraction_id, page_index
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentPage {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                page_index: row.get(4)?,
+                width: row.get(5)?,
+                height: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_blocks(conn: &Connection) -> StoreResult<Vec<DocumentBlock>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, page_index,
+                   block_index, reading_order, kind, text, asset_id,
+                   source_start, source_end, bbox_json
+            from document_blocks
+            order by extraction_id, reading_order, block_index
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentBlock {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                page_index: row.get(4)?,
+                block_index: row.get(5)?,
+                reading_order: row.get(6)?,
+                kind: row.get(7)?,
+                text: row.get(8)?,
+                asset_id: row.get(9)?,
+                source_start: row.get(10)?,
+                source_end: row.get(11)?,
+                bbox_json: row.get(12)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_spans(conn: &Connection) -> StoreResult<Vec<DocumentSpan>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, block_id, page_index,
+                   text, source_start, source_end, bbox_json
+            from document_spans
+            order by extraction_id, source_start, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentSpan {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                block_id: row.get(4)?,
+                page_index: row.get(5)?,
+                text: row.get(6)?,
+                source_start: row.get(7)?,
+                source_end: row.get(8)?,
+                bbox_json: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_assets(conn: &Connection) -> StoreResult<Vec<DocumentAsset>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, asset_kind, page_index,
+                   bbox_json, local_path, caption, created_at, updated_at
+            from document_assets
+            order by extraction_id, page_index, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocumentAsset {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                asset_kind: row.get(4)?,
+                page_index: row.get(5)?,
+                bbox_json: row.get(6)?,
+                local_path: row.get(7)?,
+                caption: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
 fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperNote>> {
     let mut stmt = conn
         .prepare(
             "
             select id, paper_id, source_id, start_offset, end_offset,
-                   selected_text, body, created_at, updated_at
+                   selected_text, anchor_kind, page_index, rects_json, quote_context,
+                   body, created_at, updated_at
             from paper_notes
             where paper_id = ?1
             order by updated_at desc, id desc
@@ -635,14 +1181,71 @@ fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperN
                 start_offset: row.get(3)?,
                 end_offset: row.get(4)?,
                 selected_text: row.get(5)?,
-                body: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                anchor_kind: row.get(6)?,
+                page_index: row.get(7)?,
+                rects_json: row.get(8)?,
+                quote_context: row.get(9)?,
+                body: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?;
 
     collect_rows(rows)
+}
+
+fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -> StoreResult<()> {
+    for source in &paper.sources {
+        if source.source_kind != "pdf" || source.source_url.trim().is_empty() {
+            continue;
+        }
+
+        let source_url = source.source_url.trim();
+        let source_id = document_source_id(&paper.id, source);
+
+        tx.execute(
+            "
+            insert into document_sources (
+              id, paper_id, source_kind, source_url, local_path, status, error,
+              created_at, updated_at
+            )
+            values (?1, ?2, ?3, ?4, null, 'remote_available', null, datetime('now'), datetime('now'))
+            on conflict(id) do update set
+              source_url = excluded.source_url,
+              status = case
+                when document_sources.status = 'cached' then document_sources.status
+                else 'remote_available'
+              end,
+              local_path = case
+                when document_sources.status = 'cached' then document_sources.local_path
+                else null
+              end,
+              error = case
+                when document_sources.status = 'cached' then document_sources.error
+                else null
+              end,
+              updated_at = datetime('now')
+            ",
+            params![source_id, paper.id, source.source_kind, source_url],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+pub fn document_source_id(paper_id: &str, source: &PaperSourceDraft) -> String {
+    let hash = short_sha256(&source.source_url);
+    format!("{}:{}:{hash}", source.source_kind, paper_id)
+}
+
+fn short_sha256(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn collect_rows<T>(
@@ -653,6 +1256,52 @@ fn collect_rows<T>(
         values.push(row.map_err(|error| error.to_string())?);
     }
     Ok(values)
+}
+
+fn validate_note_rects_json(rects_json: &str) -> StoreResult<()> {
+    let value: serde_json::Value = serde_json::from_str(rects_json)
+        .map_err(|_| "PDF note rectangles must be valid JSON".to_string())?;
+
+    match value {
+        serde_json::Value::Array(rects) if !rects.is_empty() => Ok(()),
+        _ => Err("PDF note rectangles must be a non-empty array".to_string()),
+    }
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> StoreResult<()> {
+    if column_exists(conn, table, column)? {
+        return Ok(());
+    }
+
+    conn.execute(
+        &format!("alter table {table} add column {column} {definition}"),
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
+    let mut stmt = conn
+        .prepare(&format!("pragma table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?;
+
+    for row in rows {
+        if row.map_err(|error| error.to_string())? == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn to_json(values: &[String]) -> StoreResult<String> {
@@ -956,9 +1605,12 @@ fn default_memberships() -> Vec<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct TestDb {
         store: LibraryStore,
@@ -976,8 +1628,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("i0i-store-test-{}-{unique_id}", std::process::id()));
+        let sequence = TEST_DB_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "i0i-store-test-{}-{unique_id}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
 
         let store = LibraryStore::for_test(dir.join("library.sqlite"));
@@ -997,7 +1652,17 @@ mod tests {
             tags: vec!["test".to_string()],
             status: "UNREAD".to_string(),
             abstract_text: Some("Test abstract".to_string()),
+            sources: vec![],
         }
+    }
+
+    fn paper_draft_with_pdf(id: &str, pdf_url: &str) -> PaperDraft {
+        let mut draft = paper_draft(id);
+        draft.sources = vec![PaperSourceDraft {
+            source_kind: "pdf".to_string(),
+            source_url: pdf_url.to_string(),
+        }];
+        draft
     }
 
     fn note_draft(paper_id: &str, body: &str) -> PaperNoteDraft {
@@ -1007,6 +1672,10 @@ mod tests {
             start_offset: 4,
             end_offset: 16,
             selected_text: "selected text".to_string(),
+            anchor_kind: None,
+            page_index: None,
+            rects_json: None,
+            quote_context: None,
             body: body.to_string(),
         }
     }
@@ -1050,6 +1719,14 @@ mod tests {
             .count()
     }
 
+    fn document_source_count(snapshot: &LibrarySnapshot, paper_id: &str) -> usize {
+        snapshot
+            .document_sources
+            .iter()
+            .filter(|source| source.paper_id == paper_id)
+            .count()
+    }
+
     #[test]
     fn init_seeds_default_library_when_empty() -> StoreResult<()> {
         let db = test_db()?;
@@ -1058,9 +1735,19 @@ mod tests {
         assert_eq!(snapshot.vaults.len(), default_vaults().len());
         assert_eq!(snapshot.papers.len(), default_papers().len());
         assert_eq!(snapshot.vault_papers.len(), default_memberships().len());
+        assert!(snapshot.document_sources.is_empty());
+        assert!(snapshot.document_extractions.is_empty());
+        assert!(snapshot.document_pages.is_empty());
+        assert!(snapshot.document_blocks.is_empty());
+        assert!(snapshot.document_spans.is_empty());
+        assert!(snapshot.document_assets.is_empty());
         assert!(has_vault(&snapshot, "attention"));
         assert!(has_paper(&snapshot, "vaswani2017"));
         assert!(has_membership(&snapshot, "attention", "vaswani2017"));
+        assert!(paper(&snapshot, "vaswani2017").active_source_id.is_none());
+        assert!(paper(&snapshot, "vaswani2017")
+            .active_extraction_id
+            .is_none());
 
         Ok(())
     }
@@ -1139,6 +1826,37 @@ mod tests {
         assert!(has_membership(&snapshot, "attention", "multi-vault-paper"));
         assert!(has_membership(&snapshot, "scaling", "multi-vault-paper"));
         assert_eq!(paper_membership_count(&snapshot, "multi-vault-paper"), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_paper_to_vault_persists_pdf_source_without_duplicates() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft_with_pdf("pdf-source-paper", "https://example.test/paper.pdf");
+        let vault_ids = vec!["attention".to_string()];
+
+        db.store.add_paper_to_vaults(&draft, &vault_ids)?;
+        let snapshot = db.store.add_paper_to_vaults(&draft, &vault_ids)?;
+
+        assert_eq!(document_source_count(&snapshot, "pdf-source-paper"), 1);
+        let source = snapshot
+            .document_sources
+            .iter()
+            .find(|source| source.paper_id == "pdf-source-paper")
+            .expect("PDF source should exist");
+
+        assert!(source.id.starts_with("pdf:pdf-source-paper:"));
+        assert_eq!(source.source_kind, "pdf");
+        assert_eq!(
+            source.source_url.as_deref(),
+            Some("https://example.test/paper.pdf")
+        );
+        assert_eq!(source.status, "remote_available");
+        assert!(source.local_path.is_none());
+        assert!(paper(&snapshot, "pdf-source-paper")
+            .active_source_id
+            .is_none());
 
         Ok(())
     }
@@ -1242,11 +1960,37 @@ mod tests {
         assert_eq!(notes[0].start_offset, 4);
         assert_eq!(notes[0].end_offset, 16);
         assert_eq!(notes[0].selected_text, "selected text");
+        assert_eq!(notes[0].anchor_kind, "text_offset");
+        assert!(notes[0].page_index.is_none());
+        assert!(notes[0].rects_json.is_none());
         assert_eq!(notes[0].body, "This is worth revisiting.");
         assert_eq!(
             paper(&after, "vaswani2017").note_count,
             initial_note_count + 1
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_pdf_note_allows_location_anchor_without_selected_text() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut draft = note_draft("vaswani2017", "This figure matters.");
+        draft.source_id = "pdf:vaswani2017:test".to_string();
+        draft.start_offset = 0;
+        draft.end_offset = 0;
+        draft.selected_text = String::new();
+        draft.anchor_kind = Some("pdf_rect".to_string());
+        draft.page_index = Some(2);
+        draft.rects_json = Some(r#"[{"x":0.2,"y":0.3,"width":0.1,"height":0.08}]"#.to_string());
+
+        let notes = db.store.create_paper_note(&draft)?;
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].anchor_kind, "pdf_rect");
+        assert_eq!(notes[0].page_index, Some(2));
+        assert_eq!(notes[0].selected_text, "");
+        assert_eq!(notes[0].rects_json, draft.rects_json);
 
         Ok(())
     }
