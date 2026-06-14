@@ -11,9 +11,7 @@ use crate::domain::discovery::{
 
 use self::{
     providers::{
-        arxiv::ArxivProvider,
-        openalex::OpenAlexProvider,
-        semantic_scholar::SemanticScholarProvider,
+        arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
     },
     service::DiscoveryService,
 };

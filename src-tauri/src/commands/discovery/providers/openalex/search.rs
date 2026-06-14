@@ -30,7 +30,6 @@ impl OpenAlexProvider {
             config: OpenAlexConfig::load()?,
         })
     }
-
 }
 
 impl DiscoveryProvider for OpenAlexProvider {

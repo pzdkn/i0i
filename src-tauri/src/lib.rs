@@ -2,9 +2,11 @@ mod commands;
 mod domain;
 mod pdf_ingestion;
 mod services;
+mod shared;
 mod storage;
 
 use pdf_ingestion::{PdfDownloadManager, PdfIngestionConfig};
+use services::chat::ChatService;
 use services::reader_service::ReaderService;
 use storage::library_store::LibraryStore;
 use tauri::Manager;
@@ -23,12 +25,14 @@ pub fn run() {
                 .recover_and_queue_startup_downloads()
                 .map_err(std::io::Error::other)?;
             let reader_service = ReaderService::new(app.handle().clone(), store.clone());
-            let discovery_providers =
-                commands::discovery::DiscoveryProviders::from_app_config()
-                    .map_err(std::io::Error::other)?;
+            let chat_service = ChatService::from_app_config(store.clone(), reader_service.clone())
+                .map_err(std::io::Error::other)?;
+            let discovery_providers = commands::discovery::DiscoveryProviders::from_app_config()
+                .map_err(std::io::Error::other)?;
             app.manage(store);
             app.manage(pdf_downloads);
             app.manage(reader_service);
+            app.manage(chat_service);
             app.manage(discovery_providers);
             Ok(())
         })
@@ -51,6 +55,17 @@ pub fn run() {
             commands::reader::get_reader_document,
             commands::reader::get_discovery_reader_document,
             commands::reader::get_reader_pdf_bytes,
+            commands::chat::list_chat_threads,
+            commands::chat::get_chat_thread,
+            commands::chat::open_chat_document_thread,
+            commands::chat::create_chat_thread,
+            commands::chat::add_chat_note,
+            commands::chat::ask_chat_thread,
+            commands::chat::ask_chat_thread_streamed,
+            commands::chat::set_chat_entry_pinned,
+            commands::chat::list_pinned_chat_entries,
+            commands::chat::rename_chat_thread,
+            commands::chat::delete_chat_thread,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

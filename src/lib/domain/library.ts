@@ -116,6 +116,8 @@ export type PaperSourceDraft = {
   sourceUrl: string;
 };
 
+export type NoteAnchorKind = "text_offset" | "pdf_rect" | "chat";
+
 export type PaperNote = {
   id: string;
   paperId: string;
@@ -123,7 +125,7 @@ export type PaperNote = {
   startOffset: number;
   endOffset: number;
   selectedText: string;
-  anchorKind: "text_offset" | "pdf_rect";
+  anchorKind: NoteAnchorKind;
   pageIndex?: number;
   rectsJson?: string;
   quoteContext?: string;
@@ -138,7 +140,7 @@ export type PaperNoteDraft = {
   startOffset: number;
   endOffset: number;
   selectedText: string;
-  anchorKind?: "text_offset" | "pdf_rect";
+  anchorKind?: NoteAnchorKind;
   pageIndex?: number;
   rectsJson?: string;
   quoteContext?: string;

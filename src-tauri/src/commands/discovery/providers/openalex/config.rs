@@ -8,7 +8,8 @@ use std::{env, fs, path::Path};
 
 use serde::Deserialize;
 
-use crate::commands::discovery::{error::DiscoveryError, providers::shared::read_dotenv_value};
+use crate::commands::discovery::error::DiscoveryError;
+use crate::shared::env::read_dotenv_value;
 
 #[derive(Debug, Clone)]
 pub(super) struct OpenAlexConfig {

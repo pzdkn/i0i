@@ -3,12 +3,7 @@
 //! Builds arXiv Atom API requests, parses the XML response, and normalizes
 //! each entry into the app's shared PaperCandidate type.
 
-use reqwest::Client;
-use super::{
-    config::ArxivConfig,
-    normalize::normalize_entry,
-    remote::parse_feed,
-};
+use super::{config::ArxivConfig, normalize::normalize_entry, remote::parse_feed};
 use crate::{
     commands::discovery::{
         error::DiscoveryError,
@@ -17,6 +12,7 @@ use crate::{
     },
     domain::discovery::{DiscoverySearchRequest, DiscoverySort},
 };
+use reqwest::Client;
 
 /// arXiv provider adapter.
 #[derive(Clone)]
@@ -32,7 +28,6 @@ impl ArxivProvider {
             config: ArxivConfig::load()?,
         })
     }
-
 }
 
 impl DiscoveryProvider for ArxivProvider {
@@ -63,9 +58,7 @@ impl DiscoveryProvider for ArxivProvider {
             .header("User-Agent", "ioi/0.1 local Tauri Discovery")
             .send()
             .await
-            .map_err(|error| {
-                DiscoveryError::new(format!("arXiv request failed: {error}"))
-            })?;
+            .map_err(|error| DiscoveryError::new(format!("arXiv request failed: {error}")))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -95,15 +88,8 @@ impl DiscoveryProvider for ArxivProvider {
 }
 
 /// Build arXiv query parameters from an app-level search request.
-fn arxiv_query_params(
-    request: &DiscoverySearchRequest,
-    limit: i32,
-) -> Vec<(&'static str, String)> {
-    let search_query = embed_year_filter(
-        request.query.trim(),
-        request.year_from,
-        request.year_to,
-    );
+fn arxiv_query_params(request: &DiscoverySearchRequest, limit: i32) -> Vec<(&'static str, String)> {
+    let search_query = embed_year_filter(request.query.trim(), request.year_from, request.year_to);
     let (sort_by, sort_order) = arxiv_sort(request.sort_by.clone());
 
     vec![
@@ -182,18 +168,27 @@ mod tests {
 
     #[test]
     fn sort_relevance_maps_to_arxiv_relevance() {
-        assert_eq!(arxiv_sort(DiscoverySort::Relevance), ("relevance", "descending"));
+        assert_eq!(
+            arxiv_sort(DiscoverySort::Relevance),
+            ("relevance", "descending")
+        );
     }
 
     #[test]
     fn sort_newest_maps_to_submitted_date_descending() {
-        assert_eq!(arxiv_sort(DiscoverySort::Newest), ("submittedDate", "descending"));
+        assert_eq!(
+            arxiv_sort(DiscoverySort::Newest),
+            ("submittedDate", "descending")
+        );
     }
 
     #[test]
     fn sort_most_cited_falls_back_to_relevance() {
         // arXiv has no citation-count sort; must not silently change behaviour.
-        assert_eq!(arxiv_sort(DiscoverySort::MostCited), ("relevance", "descending"));
+        assert_eq!(
+            arxiv_sort(DiscoverySort::MostCited),
+            ("relevance", "descending")
+        );
     }
 
     // --- embed_year_filter ---

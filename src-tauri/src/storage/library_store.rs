@@ -2,10 +2,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
+use crate::domain::chat::{
+    ChatContextSummary, ChatEntry, ChatEntryDraft, ChatThread, ChatThreadSummary, ChatThreadView,
+    PinnedHighlight, ThreadAnchor, ENTRY_ANSWER, ENTRY_QUESTION,
+};
 use crate::domain::library::{
     DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
     LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, PaperSourceDraft, Vault,
@@ -62,6 +66,7 @@ impl LibraryStore {
     pub fn init(&self) -> StoreResult<()> {
         let mut conn = self.open_connection()?;
         self.create_schema(&conn)?;
+        migrate_chat_messages_to_threads(&mut conn)?;
 
         if self.is_library_empty(&conn)? {
             self.seed_defaults(&mut conn)?;
@@ -382,8 +387,9 @@ impl LibraryStore {
             return Err("Paper id cannot be empty".to_string());
         }
 
-        let conn = self.open_connection()?;
-        let deleted = conn
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let deleted = tx
             .execute("delete from papers where id = ?1", params![paper_id])
             .map_err(|error| error.to_string())?;
 
@@ -391,6 +397,16 @@ impl LibraryStore {
             return Err(format!("Paper not found: {paper_id}"));
         }
 
+        // chat_threads has no FK to papers (scope_id is polymorphic), so its
+        // paper-scoped rows are cleaned up explicitly alongside the paper; their
+        // entries cascade via the chat_entries FK.
+        tx.execute(
+            "delete from chat_threads where scope_kind = 'paper' and scope_id = ?1",
+            params![paper_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.commit().map_err(|error| error.to_string())?;
         self.get_library()
     }
 
@@ -439,6 +455,11 @@ impl LibraryStore {
                     .as_deref()
                     .ok_or_else(|| "PDF note rectangles are required".to_string())?;
                 validate_note_rects_json(rects_json)?;
+            }
+            "chat" => {
+                // Chat-born notes have no document anchor: no selected text,
+                // offsets, page, or rects. The body (validated above) is the
+                // saved answer; quote_context carries the originating question.
             }
             _ => {
                 return Err(format!("Unsupported note anchor kind: {anchor_kind}"));
@@ -544,6 +565,224 @@ impl LibraryStore {
             return Err(format!("Note not found: {note_id}"));
         }
 
+        Ok(())
+    }
+
+    /// List a scope's threads, newest-activity first, with entry/pin counts.
+    pub fn list_chat_threads(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> StoreResult<Vec<ChatThreadSummary>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "
+                select t.id, t.anchor_kind, t.source_id, t.start_offset, t.end_offset,
+                       t.selected_text, t.page_index, t.rects_json, t.title, t.updated_at,
+                       (select count(*) from chat_entries e where e.thread_id = t.id),
+                       (select count(*) from chat_entries e where e.thread_id = t.id and e.pinned = 1)
+                from chat_threads t
+                where t.scope_kind = ?1 and t.scope_id = ?2
+                order by t.updated_at desc, t.id desc
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = stmt
+            .query_map(params![scope_kind, scope_id], |row| {
+                Ok(ChatThreadSummary {
+                    id: row.get(0)?,
+                    anchor: thread_anchor_from_row(row, 1)?,
+                    title: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    entry_count: row.get(10)?,
+                    pinned_count: row.get(11)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+
+        collect_rows(rows)
+    }
+
+    /// Load a thread with its entries, oldest-first.
+    pub fn get_chat_thread(&self, thread_id: &str) -> StoreResult<ChatThreadView> {
+        let conn = self.open_connection()?;
+        let thread = read_chat_thread(&conn, thread_id)?;
+        let entries = read_chat_entries(&conn, thread_id)?;
+        Ok(ChatThreadView { thread, entries })
+    }
+
+    /// Return a thread's `(scope_kind, scope_id)`, e.g. `("paper", paper_id)`.
+    pub fn chat_thread_scope(&self, thread_id: &str) -> StoreResult<(String, String)> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "select scope_kind, scope_id from chat_threads where id = ?1",
+            params![thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Create a thread for an anchor and return it.
+    pub fn create_chat_thread(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        anchor: &ThreadAnchor,
+        title: Option<&str>,
+    ) -> StoreResult<ChatThread> {
+        let id = timestamped_id("thread")?;
+        let conn = self.open_connection()?;
+        insert_chat_thread(&conn, &id, scope_kind, scope_id, anchor, title)?;
+        read_chat_thread(&conn, &id)
+    }
+
+    /// Return the scope's whole-paper (document) thread, creating it if absent.
+    pub fn ensure_document_thread(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> StoreResult<ChatThread> {
+        let conn = self.open_connection()?;
+        let existing: Option<String> = conn
+            .query_row(
+                "
+                select id from chat_threads
+                where scope_kind = ?1 and scope_id = ?2 and anchor_kind = 'document'
+                order by created_at asc
+                limit 1
+                ",
+                params![scope_kind, scope_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+
+        if let Some(id) = existing {
+            return read_chat_thread(&conn, &id);
+        }
+
+        drop(conn);
+        self.create_chat_thread(scope_kind, scope_id, &ThreadAnchor::Document, None)
+    }
+
+    /// Append an entry to a thread (bumping the thread's activity) and return it.
+    pub fn append_chat_entry(
+        &self,
+        thread_id: &str,
+        draft: &ChatEntryDraft,
+    ) -> StoreResult<ChatEntry> {
+        let id = timestamped_id("entry")?;
+        let context_json = match &draft.context_summary {
+            Some(summary) => Some(serde_json::to_string(summary).map_err(|e| e.to_string())?),
+            None => None,
+        };
+
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "
+            insert into chat_entries (
+              id, thread_id, kind, body, model, context_json, pinned, created_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+            ",
+            params![
+                id,
+                thread_id,
+                draft.kind,
+                draft.body,
+                draft.model,
+                context_json,
+                draft.pinned as i64,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update chat_threads set updated_at = datetime('now') where id = ?1",
+            params![thread_id],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+
+        let conn = self.open_connection()?;
+        read_chat_entry(&conn, &id)
+    }
+
+    /// Set or clear an entry's pin.
+    pub fn set_chat_entry_pinned(&self, entry_id: &str, pinned: bool) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "update chat_entries set pinned = ?2 where id = ?1",
+                params![entry_id, pinned as i64],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!("Chat entry not found: {entry_id}"));
+        }
+        Ok(())
+    }
+
+    /// List a scope's pinned entries across all threads, newest-first.
+    pub fn list_pinned_chat_entries(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> StoreResult<Vec<PinnedHighlight>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "
+                select e.id, e.thread_id, e.kind, e.body, e.model, e.context_json, e.pinned,
+                       e.created_at, t.title, t.anchor_kind, t.source_id, t.start_offset,
+                       t.end_offset, t.selected_text, t.page_index, t.rects_json
+                from chat_entries e
+                join chat_threads t on e.thread_id = t.id
+                where t.scope_kind = ?1 and t.scope_id = ?2 and e.pinned = 1
+                order by e.created_at desc, e.id desc
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = stmt
+            .query_map(params![scope_kind, scope_id], |row| {
+                Ok(PinnedHighlight {
+                    entry: chat_entry_from_row(row)?,
+                    thread_title: row.get(8)?,
+                    anchor: thread_anchor_from_row(row, 9)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+
+        collect_rows(rows)
+    }
+
+    /// Rename a thread.
+    pub fn rename_chat_thread(&self, thread_id: &str, title: &str) -> StoreResult<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("Thread title cannot be empty".to_string());
+        }
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "update chat_threads set title = ?2, updated_at = datetime('now') where id = ?1",
+                params![thread_id, title],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!("Thread not found: {thread_id}"));
+        }
+        Ok(())
+    }
+
+    /// Delete a thread and its entries (entries cascade via FK).
+    pub fn delete_chat_thread(&self, thread_id: &str) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute("delete from chat_threads where id = ?1", params![thread_id])
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -723,6 +962,43 @@ impl LibraryStore {
 
             create index if not exists idx_document_assets_extraction_id
               on document_assets(extraction_id);
+
+            create table if not exists chat_threads (
+              id text primary key,
+              scope_kind text not null,
+              scope_id text not null,
+              anchor_kind text not null,
+              source_id text,
+              start_offset integer,
+              end_offset integer,
+              selected_text text,
+              page_index integer,
+              rects_json text,
+              title text not null,
+              created_at text not null,
+              updated_at text not null
+            );
+
+            create index if not exists idx_chat_threads_scope
+              on chat_threads(scope_kind, scope_id, updated_at);
+
+            create table if not exists chat_entries (
+              id text primary key,
+              thread_id text not null,
+              kind text not null,
+              body text not null,
+              model text,
+              context_json text,
+              pinned integer not null default 0,
+              created_at text not null,
+              foreign key (thread_id) references chat_threads(id) on delete cascade
+            );
+
+            create index if not exists idx_chat_entries_thread
+              on chat_entries(thread_id, created_at);
+
+            create index if not exists idx_chat_entries_pinned
+              on chat_entries(thread_id, pinned);
             ",
         )
         .map_err(|error| error.to_string())?;
@@ -1195,6 +1471,314 @@ fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperN
     collect_rows(rows)
 }
 
+fn read_chat_thread(conn: &Connection, thread_id: &str) -> StoreResult<ChatThread> {
+    conn.query_row(
+        "
+        select id, anchor_kind, source_id, start_offset, end_offset, selected_text,
+               page_index, rects_json, title, created_at, updated_at
+        from chat_threads
+        where id = ?1
+        ",
+        params![thread_id],
+        |row| {
+            Ok(ChatThread {
+                id: row.get(0)?,
+                anchor: thread_anchor_from_row(row, 1)?,
+                title: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn read_chat_entries(conn: &Connection, thread_id: &str) -> StoreResult<Vec<ChatEntry>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, thread_id, kind, body, model, context_json, pinned, created_at
+            from chat_entries
+            where thread_id = ?1
+            order by created_at asc, id asc
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![thread_id], chat_entry_from_row)
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_chat_entry(conn: &Connection, id: &str) -> StoreResult<ChatEntry> {
+    conn.query_row(
+        "
+        select id, thread_id, kind, body, model, context_json, pinned, created_at
+        from chat_entries
+        where id = ?1
+        ",
+        params![id],
+        chat_entry_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn chat_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEntry> {
+    let context_json: Option<String> = row.get(5)?;
+    let context_summary = context_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<ChatContextSummary>(json).ok());
+    let pinned: i64 = row.get(6)?;
+
+    Ok(ChatEntry {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        kind: row.get(2)?,
+        body: row.get(3)?,
+        model: row.get(4)?,
+        context_summary,
+        pinned: pinned != 0,
+        created_at: row.get(7)?,
+    })
+}
+
+/// Read a `ThreadAnchor` from seven consecutive columns starting at `base`:
+/// anchor_kind, source_id, start_offset, end_offset, selected_text, page_index,
+/// rects_json.
+fn thread_anchor_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<ThreadAnchor> {
+    let anchor_kind: String = row.get(base)?;
+    let source_id: Option<String> = row.get(base + 1)?;
+    let start_offset: Option<i64> = row.get(base + 2)?;
+    let end_offset: Option<i64> = row.get(base + 3)?;
+    let selected_text: Option<String> = row.get(base + 4)?;
+    let page_index: Option<i32> = row.get(base + 5)?;
+    let rects_json: Option<String> = row.get(base + 6)?;
+
+    Ok(match anchor_kind.as_str() {
+        "text_offset" => ThreadAnchor::TextOffset {
+            source_id: source_id.unwrap_or_default(),
+            start_offset: start_offset.unwrap_or_default(),
+            end_offset: end_offset.unwrap_or_default(),
+            selected_text: selected_text.unwrap_or_default(),
+        },
+        "pdf_rect" => ThreadAnchor::PdfRect {
+            source_id: source_id.unwrap_or_default(),
+            page_index: page_index.unwrap_or_default(),
+            rects_json: rects_json.unwrap_or_default(),
+            selected_text: selected_text.unwrap_or_default(),
+        },
+        _ => ThreadAnchor::Document,
+    })
+}
+
+/// Flatten a `ThreadAnchor` into nullable storage columns.
+type AnchorColumns = (
+    &'static str,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<i32>,
+    Option<String>,
+);
+
+fn thread_anchor_to_columns(anchor: &ThreadAnchor) -> AnchorColumns {
+    match anchor {
+        ThreadAnchor::Document => ("document", None, None, None, None, None, None),
+        ThreadAnchor::TextOffset {
+            source_id,
+            start_offset,
+            end_offset,
+            selected_text,
+        } => (
+            "text_offset",
+            Some(source_id.clone()),
+            Some(*start_offset),
+            Some(*end_offset),
+            Some(selected_text.clone()),
+            None,
+            None,
+        ),
+        ThreadAnchor::PdfRect {
+            source_id,
+            page_index,
+            rects_json,
+            selected_text,
+        } => (
+            "pdf_rect",
+            Some(source_id.clone()),
+            None,
+            None,
+            Some(selected_text.clone()),
+            Some(*page_index),
+            Some(rects_json.clone()),
+        ),
+    }
+}
+
+fn insert_chat_thread(
+    conn: &Connection,
+    id: &str,
+    scope_kind: &str,
+    scope_id: &str,
+    anchor: &ThreadAnchor,
+    title: Option<&str>,
+) -> StoreResult<()> {
+    let (kind, source_id, start_offset, end_offset, selected_text, page_index, rects_json) =
+        thread_anchor_to_columns(anchor);
+    let title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| anchor.default_title());
+
+    conn.execute(
+        "
+        insert into chat_threads (
+          id, scope_kind, scope_id, anchor_kind, source_id, start_offset, end_offset,
+          selected_text, page_index, rects_json, title, created_at, updated_at
+        )
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'), datetime('now'))
+        ",
+        params![
+            id,
+            scope_kind,
+            scope_id,
+            kind,
+            source_id,
+            start_offset,
+            end_offset,
+            selected_text,
+            page_index,
+            rects_json,
+            title,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> StoreResult<bool> {
+    let count: i64 = conn
+        .query_row(
+            "select count(*) from sqlite_master where type = 'table' and name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(count > 0)
+}
+
+/// A legacy `chat_messages` row: (scope_kind, scope_id, role, body, model,
+/// context_json, created_at).
+type LegacyChatMessage = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+/// One-time migration of RFC 0032 `chat_messages` into document threads.
+///
+/// Runs only when no threads exist yet and a legacy `chat_messages` table is
+/// present. Each scope's messages become one whole-paper thread of entries
+/// (`user` → question, `assistant` → answer), preserving timestamps.
+fn migrate_chat_messages_to_threads(conn: &mut Connection) -> StoreResult<()> {
+    let thread_count: i64 = conn
+        .query_row("select count(*) from chat_threads", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if thread_count > 0 || !table_exists(conn, "chat_messages")? {
+        return Ok(());
+    }
+
+    let messages: Vec<LegacyChatMessage> = {
+        let mut stmt = conn
+            .prepare(
+                "
+                select scope_kind, scope_id, role, body, model, context_json, created_at
+                from chat_messages
+                order by scope_kind, scope_id, created_at, id
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)?
+    };
+    if messages.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let mut seq = 0u64;
+    let mut current_key: Option<(String, String)> = None;
+    let mut thread_id = String::new();
+    for (scope_kind, scope_id, role, body, model, context_json, created_at) in messages {
+        let key = (scope_kind.clone(), scope_id.clone());
+        if current_key.as_ref() != Some(&key) {
+            thread_id = format!("thread_mig_{seq}");
+            seq += 1;
+            tx.execute(
+                "
+                insert into chat_threads
+                  (id, scope_kind, scope_id, anchor_kind, title, created_at, updated_at)
+                values (?1, ?2, ?3, 'document', 'Whole paper', ?4, ?4)
+                ",
+                params![thread_id, scope_kind, scope_id, created_at],
+            )
+            .map_err(|error| error.to_string())?;
+            current_key = Some(key);
+        }
+
+        let kind = if role == "assistant" {
+            ENTRY_ANSWER
+        } else {
+            ENTRY_QUESTION
+        };
+        let entry_id = format!("entry_mig_{seq}");
+        seq += 1;
+        tx.execute(
+            "
+            insert into chat_entries
+              (id, thread_id, kind, body, model, context_json, pinned, created_at)
+            values (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)
+            ",
+            params![
+                entry_id,
+                thread_id,
+                kind,
+                body,
+                model,
+                context_json,
+                created_at
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update chat_threads set updated_at = ?2 where id = ?1",
+            params![thread_id, created_at],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -> StoreResult<()> {
     for source in &paper.sources {
         if source.source_kind != "pdf" || source.source_url.trim().is_empty() {
@@ -1317,12 +1901,20 @@ fn from_json(value: &str) -> Vec<String> {
 }
 
 fn generate_note_id() -> StoreResult<String> {
+    timestamped_id("note")
+}
+
+/// Build a monotonic, lexicographically-sortable id with a feature prefix.
+///
+/// `created_at` is only second-resolution, so transcript ordering leans on the
+/// nanosecond suffix here to break ties within the same second.
+fn timestamped_id(prefix: &str) -> StoreResult<String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_nanos();
 
-    Ok(format!("note_{nanos}"))
+    Ok(format!("{prefix}_{nanos}"))
 }
 
 fn normalize_vault_path(input: &str) -> StoreResult<String> {
@@ -1973,6 +2565,32 @@ mod tests {
     }
 
     #[test]
+    fn create_chat_note_allows_anchorless_note_with_question_context() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut draft = note_draft("vaswani2017", "Saved from the chat answer.");
+        draft.start_offset = 0;
+        draft.end_offset = 0;
+        draft.selected_text = String::new();
+        draft.anchor_kind = Some("chat".to_string());
+        draft.page_index = None;
+        draft.rects_json = None;
+        draft.quote_context = Some("What is scaled dot-product attention?".to_string());
+
+        let notes = db.store.create_paper_note(&draft)?;
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].anchor_kind, "chat");
+        assert_eq!(notes[0].selected_text, "");
+        assert_eq!(notes[0].body, "Saved from the chat answer.");
+        assert_eq!(
+            notes[0].quote_context.as_deref(),
+            Some("What is scaled dot-product attention?")
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn create_pdf_note_allows_location_anchor_without_selected_text() -> StoreResult<()> {
         let db = test_db()?;
         let mut draft = note_draft("vaswani2017", "This figure matters.");
@@ -2121,6 +2739,209 @@ mod tests {
         let notes = db.store.get_paper_notes("caron2021")?;
 
         assert!(notes.is_empty());
+
+        Ok(())
+    }
+
+    fn text_anchor() -> ThreadAnchor {
+        ThreadAnchor::TextOffset {
+            source_id: "reader-text-v1:vaswani2017".to_string(),
+            start_offset: 4,
+            end_offset: 22,
+            selected_text: "scaled dot-product".to_string(),
+        }
+    }
+
+    fn summary() -> ChatContextSummary {
+        ChatContextSummary {
+            paper_title: "Attention Is All You Need".to_string(),
+            included_chars: 1234,
+            truncated: true,
+        }
+    }
+
+    #[test]
+    fn create_thread_and_append_entries_round_trip_oldest_first() -> StoreResult<()> {
+        let db = test_db()?;
+        let thread = db
+            .store
+            .create_chat_thread("paper", "vaswani2017", &text_anchor(), None)?;
+
+        assert_eq!(thread.title, "scaled dot-product");
+        assert!(matches!(thread.anchor, ThreadAnchor::TextOffset { .. }));
+
+        db.store
+            .append_chat_entry(&thread.id, &ChatEntryDraft::note("my note".to_string()))?;
+        db.store.append_chat_entry(
+            &thread.id,
+            &ChatEntryDraft::question("why scale?".to_string()),
+        )?;
+        db.store.append_chat_entry(
+            &thread.id,
+            &ChatEntryDraft::answer(
+                "because gradients".to_string(),
+                "model-x".to_string(),
+                summary(),
+            ),
+        )?;
+
+        let view = db.store.get_chat_thread(&thread.id)?;
+        assert_eq!(view.entries.len(), 3);
+
+        assert_eq!(view.entries[0].kind, "note");
+        assert!(view.entries[0].pinned, "notes are pinned by default");
+        assert_eq!(view.entries[1].kind, "question");
+        assert!(!view.entries[1].pinned);
+        assert_eq!(view.entries[2].kind, "answer");
+        assert!(!view.entries[2].pinned);
+        assert_eq!(view.entries[2].model.as_deref(), Some("model-x"));
+        assert!(view.entries[2].context_summary.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_document_thread_is_idempotent() -> StoreResult<()> {
+        let db = test_db()?;
+        let first = db.store.ensure_document_thread("paper", "vaswani2017")?;
+        let second = db.store.ensure_document_thread("paper", "vaswani2017")?;
+
+        assert_eq!(first.id, second.id);
+        assert!(matches!(first.anchor, ThreadAnchor::Document));
+        assert_eq!(first.title, "Whole paper");
+        assert_eq!(db.store.list_chat_threads("paper", "vaswani2017")?.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn pinning_drives_highlights_and_thread_counts() -> StoreResult<()> {
+        let db = test_db()?;
+        let thread = db
+            .store
+            .create_chat_thread("paper", "vaswani2017", &text_anchor(), None)?;
+        let note = db
+            .store
+            .append_chat_entry(&thread.id, &ChatEntryDraft::note("kept".to_string()))?;
+        let answer = db.store.append_chat_entry(
+            &thread.id,
+            &ChatEntryDraft::answer("ans".to_string(), "m".to_string(), summary()),
+        )?;
+
+        // The note is pinned by default; the answer is not.
+        let pinned = db.store.list_pinned_chat_entries("paper", "vaswani2017")?;
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].entry.id, note.id);
+        assert_eq!(pinned[0].thread_title, "scaled dot-product");
+        assert!(matches!(pinned[0].anchor, ThreadAnchor::TextOffset { .. }));
+
+        // Star the answer, unpin the note.
+        db.store.set_chat_entry_pinned(&answer.id, true)?;
+        db.store.set_chat_entry_pinned(&note.id, false)?;
+        let pinned = db.store.list_pinned_chat_entries("paper", "vaswani2017")?;
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].entry.id, answer.id);
+
+        let threads = db.store.list_chat_threads("paper", "vaswani2017")?;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].entry_count, 2);
+        assert_eq!(threads[0].pinned_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn rename_thread_changes_title() -> StoreResult<()> {
+        let db = test_db()?;
+        let thread =
+            db.store
+                .create_chat_thread("paper", "vaswani2017", &ThreadAnchor::Document, None)?;
+        db.store.rename_chat_thread(&thread.id, "  My title  ")?;
+        assert_eq!(
+            db.store.get_chat_thread(&thread.id)?.thread.title,
+            "My title"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_thread_removes_its_entries() -> StoreResult<()> {
+        let db = test_db()?;
+        let thread =
+            db.store
+                .create_chat_thread("paper", "vaswani2017", &ThreadAnchor::Document, None)?;
+        db.store
+            .append_chat_entry(&thread.id, &ChatEntryDraft::note("n".to_string()))?;
+
+        db.store.delete_chat_thread(&thread.id)?;
+
+        assert!(db
+            .store
+            .list_chat_threads("paper", "vaswani2017")?
+            .is_empty());
+        assert!(db
+            .store
+            .list_pinned_chat_entries("paper", "vaswani2017")?
+            .is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_paper_globally_removes_its_threads() -> StoreResult<()> {
+        let db = test_db()?;
+        let thread =
+            db.store
+                .create_chat_thread("paper", "caron2021", &ThreadAnchor::Document, None)?;
+        db.store
+            .append_chat_entry(&thread.id, &ChatEntryDraft::note("n".to_string()))?;
+
+        db.store.delete_paper_globally("caron2021")?;
+
+        assert!(db.store.list_chat_threads("paper", "caron2021")?.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_legacy_chat_messages_into_document_threads() -> StoreResult<()> {
+        let db = test_db()?;
+        {
+            let conn = Connection::open(&db.store.db_path).map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "create table chat_messages (id text primary key, scope_kind text, \
+                 scope_id text, role text, body text, model text, context_json text, \
+                 created_at text);",
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "insert into chat_messages values \
+                 ('m1','paper','vaswani2017','user','q1',null,null,'2026-01-01 00:00:00')",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "insert into chat_messages values \
+                 ('m2','paper','vaswani2017','assistant','a1','model-x',null,'2026-01-01 00:00:01')",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        let mut conn = Connection::open(&db.store.db_path).map_err(|e| e.to_string())?;
+        migrate_chat_messages_to_threads(&mut conn)?;
+
+        let threads = db.store.list_chat_threads("paper", "vaswani2017")?;
+        assert_eq!(threads.len(), 1);
+        assert!(matches!(threads[0].anchor, ThreadAnchor::Document));
+        assert_eq!(threads[0].entry_count, 2);
+
+        let view = db.store.get_chat_thread(&threads[0].id)?;
+        assert_eq!(view.entries[0].kind, "question");
+        assert_eq!(view.entries[0].body, "q1");
+        assert_eq!(view.entries[1].kind, "answer");
+        assert_eq!(view.entries[1].model.as_deref(), Some("model-x"));
 
         Ok(())
     }

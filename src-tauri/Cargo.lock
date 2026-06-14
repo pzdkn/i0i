@@ -1678,6 +1678,7 @@ dependencies = [
 name = "i0i"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "quick-xml 0.36.2",
  "reqwest",
  "rusqlite",
