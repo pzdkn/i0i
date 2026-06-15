@@ -3,8 +3,6 @@ import type {
   LibrarySnapshot,
   DocumentSource,
   PaperDraft,
-  PaperNote,
-  PaperNoteDraft,
   VaultDraft,
   VaultRenameDraft,
 } from "$lib/domain/library";
@@ -67,26 +65,6 @@ export async function removePaperFromLibrary(paperId: string): Promise<LibrarySn
   return invoke<LibrarySnapshot>("delete_paper_globally", {
     paperId,
   });
-}
-
-export async function getPaperNotes(paperId: string): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("get_paper_notes", {
-    paperId,
-  });
-}
-
-export async function createPaperNote(draft: PaperNoteDraft): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("create_paper_note", {
-    draft,
-  });
-}
-
-export async function deletePaperNote(input: { paperId: string; noteId: string }): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("delete_paper_note", input);
-}
-
-export async function updatePaperNote(input: { paperId: string; noteId: string; body: string }): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("update_paper_note", input);
 }
 
 export async function getReaderDocument(paperId: string, extractionId?: string): Promise<ReaderDocument> {

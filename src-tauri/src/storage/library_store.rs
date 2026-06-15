@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,12 +9,12 @@ use tauri::{AppHandle, Manager};
 
 use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatThread, ChatThreadSummary, ChatThreadView,
-    PinnedHighlight, ThreadAnchor, ENTRY_ANSWER, ENTRY_QUESTION,
+    PinnedHighlight, ThreadAnchor, ENTRY_ANSWER, ENTRY_NOTE, ENTRY_QUESTION,
 };
 use crate::domain::library::{
     DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
-    LibrarySnapshot, Paper, PaperDraft, PaperNote, PaperNoteDraft, PaperSourceDraft, Vault,
-    VaultDraft, VaultPaper, VaultRenameDraft,
+    LibrarySnapshot, Paper, PaperDraft, PaperSourceDraft, Vault, VaultDraft, VaultPaper,
+    VaultRenameDraft,
 };
 
 type StoreResult<T> = Result<T, String>;
@@ -66,7 +67,11 @@ impl LibraryStore {
     pub fn init(&self) -> StoreResult<()> {
         let mut conn = self.open_connection()?;
         self.create_schema(&conn)?;
+        // Legacy chat first (it guards on "no threads yet"), then notes — which
+        // may reuse the whole-paper threads the chat migration just created.
         migrate_chat_messages_to_threads(&mut conn)?;
+        migrate_paper_notes_into_threads(&mut conn)?;
+        drop_legacy_chat_messages(&conn)?;
 
         if self.is_library_empty(&conn)? {
             self.seed_defaults(&mut conn)?;
@@ -410,164 +415,6 @@ impl LibraryStore {
         self.get_library()
     }
 
-    pub fn get_paper_notes(&self, paper_id: &str) -> StoreResult<Vec<PaperNote>> {
-        if paper_id.trim().is_empty() {
-            return Err("Paper id cannot be empty".to_string());
-        }
-
-        let conn = self.open_connection()?;
-        read_paper_notes(&conn, paper_id)
-    }
-
-    pub fn create_paper_note(&self, draft: &PaperNoteDraft) -> StoreResult<Vec<PaperNote>> {
-        let body = draft.body.trim();
-        let anchor_kind = draft.anchor_kind.as_deref().unwrap_or("text_offset").trim();
-
-        if draft.paper_id.trim().is_empty() {
-            return Err("Paper id cannot be empty".to_string());
-        }
-
-        if draft.source_id.trim().is_empty() {
-            return Err("Source id cannot be empty".to_string());
-        }
-
-        if body.is_empty() {
-            return Err("Note body cannot be empty".to_string());
-        }
-
-        match anchor_kind {
-            "text_offset" => {
-                if draft.selected_text.trim().is_empty() {
-                    return Err("Selected text cannot be empty".to_string());
-                }
-
-                if draft.start_offset < 0 || draft.end_offset <= draft.start_offset {
-                    return Err("Note offsets must define a non-empty range".to_string());
-                }
-            }
-            "pdf_rect" => {
-                if draft.page_index.is_none() {
-                    return Err("PDF note page index is required".to_string());
-                }
-
-                let rects_json = draft
-                    .rects_json
-                    .as_deref()
-                    .ok_or_else(|| "PDF note rectangles are required".to_string())?;
-                validate_note_rects_json(rects_json)?;
-            }
-            "chat" => {
-                // Chat-born notes have no document anchor: no selected text,
-                // offsets, page, or rects. The body (validated above) is the
-                // saved answer; quote_context carries the originating question.
-            }
-            _ => {
-                return Err(format!("Unsupported note anchor kind: {anchor_kind}"));
-            }
-        }
-
-        let note_id = generate_note_id()?;
-        let mut conn = self.open_connection()?;
-        let tx = conn.transaction().map_err(|error| error.to_string())?;
-
-        tx.execute(
-            "
-            insert into paper_notes (
-              id, paper_id, source_id, start_offset, end_offset,
-              selected_text, anchor_kind, page_index, rects_json, quote_context,
-              body, created_at, updated_at
-            )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'), datetime('now'))
-            ",
-            params![
-                note_id,
-                draft.paper_id,
-                draft.source_id,
-                draft.start_offset,
-                draft.end_offset,
-                draft.selected_text,
-                anchor_kind,
-                draft.page_index,
-                draft.rects_json.as_deref(),
-                draft.quote_context.as_deref(),
-                body,
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-
-        tx.execute(
-            "
-            update papers
-            set note_count = note_count + 1,
-                updated_at = datetime('now')
-            where id = ?1
-            ",
-            params![draft.paper_id],
-        )
-        .map_err(|error| error.to_string())?;
-
-        tx.commit().map_err(|error| error.to_string())?;
-        self.get_paper_notes(&draft.paper_id)
-    }
-
-    pub fn delete_paper_note(&self, note_id: &str) -> StoreResult<()> {
-        if note_id.trim().is_empty() {
-            return Err("Note id cannot be empty".to_string());
-        }
-
-        let mut conn = self.open_connection()?;
-        let tx = conn.transaction().map_err(|error| error.to_string())?;
-
-        tx.execute(
-            "
-            update papers
-            set note_count = max(note_count - 1, 0),
-                updated_at = datetime('now')
-            where id = (
-              select paper_id from paper_notes where id = ?1
-            )
-            ",
-            params![note_id],
-        )
-        .map_err(|error| error.to_string())?;
-
-        tx.execute("delete from paper_notes where id = ?1", params![note_id])
-            .map_err(|error| error.to_string())?;
-
-        tx.commit().map_err(|error| error.to_string())
-    }
-
-    pub fn update_paper_note(&self, note_id: &str, body: &str) -> StoreResult<()> {
-        let body = body.trim();
-
-        if note_id.trim().is_empty() {
-            return Err("Note id cannot be empty".to_string());
-        }
-
-        if body.is_empty() {
-            return Err("Note body cannot be empty".to_string());
-        }
-
-        let conn = self.open_connection()?;
-        let updated = conn
-            .execute(
-                "
-                update paper_notes
-                set body = ?1,
-                    updated_at = datetime('now')
-                where id = ?2
-                ",
-                params![body, note_id],
-            )
-            .map_err(|error| error.to_string())?;
-
-        if updated == 0 {
-            return Err(format!("Note not found: {note_id}"));
-        }
-
-        Ok(())
-    }
-
     /// List a scope's threads, newest-activity first, with entry/pin counts.
     pub fn list_chat_threads(
         &self,
@@ -624,49 +471,6 @@ impl LibraryStore {
         .map_err(|error| error.to_string())
     }
 
-    /// Create a thread for an anchor and return it.
-    pub fn create_chat_thread(
-        &self,
-        scope_kind: &str,
-        scope_id: &str,
-        anchor: &ThreadAnchor,
-        title: Option<&str>,
-    ) -> StoreResult<ChatThread> {
-        let id = timestamped_id("thread")?;
-        let conn = self.open_connection()?;
-        insert_chat_thread(&conn, &id, scope_kind, scope_id, anchor, title)?;
-        read_chat_thread(&conn, &id)
-    }
-
-    /// Return the scope's whole-paper (document) thread, creating it if absent.
-    pub fn ensure_document_thread(
-        &self,
-        scope_kind: &str,
-        scope_id: &str,
-    ) -> StoreResult<ChatThread> {
-        let conn = self.open_connection()?;
-        let existing: Option<String> = conn
-            .query_row(
-                "
-                select id from chat_threads
-                where scope_kind = ?1 and scope_id = ?2 and anchor_kind = 'document'
-                order by created_at asc
-                limit 1
-                ",
-                params![scope_kind, scope_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-
-        if let Some(id) = existing {
-            return read_chat_thread(&conn, &id);
-        }
-
-        drop(conn);
-        self.create_chat_thread(scope_kind, scope_id, &ThreadAnchor::Document, None)
-    }
-
     /// Append an entry to a thread (bumping the thread's activity) and return it.
     pub fn append_chat_entry(
         &self,
@@ -674,40 +478,65 @@ impl LibraryStore {
         draft: &ChatEntryDraft,
     ) -> StoreResult<ChatEntry> {
         let id = timestamped_id("entry")?;
-        let context_json = match &draft.context_summary {
-            Some(summary) => Some(serde_json::to_string(summary).map_err(|e| e.to_string())?),
-            None => None,
-        };
-
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
-        tx.execute(
-            "
-            insert into chat_entries (
-              id, thread_id, kind, body, model, context_json, pinned, created_at
-            )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
-            ",
-            params![
-                id,
-                thread_id,
-                draft.kind,
-                draft.body,
-                draft.model,
-                context_json,
-                draft.pinned as i64,
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-        tx.execute(
-            "update chat_threads set updated_at = datetime('now') where id = ?1",
-            params![thread_id],
-        )
-        .map_err(|error| error.to_string())?;
+        insert_chat_entry(&tx, &id, thread_id, draft)?;
         tx.commit().map_err(|error| error.to_string())?;
 
         let conn = self.open_connection()?;
         read_chat_entry(&conn, &id)
+    }
+
+    /// Add a self-authored note at an anchor, creating its thread lazily, and
+    /// return the thread view. The thread and its (pinned) note are written in
+    /// one transaction, so a passage never leaves behind an empty thread. A
+    /// `document` anchor reuses the paper's single whole-paper thread; every
+    /// other anchor creates a fresh thread (no de-duplication, per RFC 0034).
+    pub fn add_note_at_anchor(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        anchor: &ThreadAnchor,
+        body: &str,
+    ) -> StoreResult<ChatThreadView> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let thread_id = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
+        let entry_id = timestamped_id("entry")?;
+        insert_chat_entry(
+            &tx,
+            &entry_id,
+            &thread_id,
+            &ChatEntryDraft::note(body.to_string()),
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_chat_thread(&thread_id)
+    }
+
+    /// Persist a completed ask turn at an anchor, creating the thread lazily.
+    ///
+    /// The thread (created or reused, like [`Self::add_note_at_anchor`]), the
+    /// question, and the answer are written in one transaction. Because the
+    /// caller invokes this only after the model reply succeeds, a failed ask
+    /// persists nothing — no empty thread, no orphaned question.
+    pub fn persist_anchored_turn(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        anchor: &ThreadAnchor,
+        question: &ChatEntryDraft,
+        answer: &ChatEntryDraft,
+    ) -> StoreResult<ChatThreadView> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let thread_id = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
+        // Derive both ids from one base so the question always sorts before the
+        // answer even when their `created_at` second is identical.
+        let base = timestamped_id("entry")?;
+        insert_chat_entry(&tx, &format!("{base}_1"), &thread_id, question)?;
+        insert_chat_entry(&tx, &format!("{base}_2"), &thread_id, answer)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_chat_thread(&thread_id)
     }
 
     /// Set or clear an entry's pin.
@@ -828,23 +657,6 @@ impl LibraryStore {
               added_at text not null,
               primary key (vault_id, paper_id),
               foreign key (vault_id) references vaults(id) on delete cascade,
-              foreign key (paper_id) references papers(id) on delete cascade
-            );
-
-            create table if not exists paper_notes (
-              id text primary key,
-              paper_id text not null,
-              source_id text not null,
-              start_offset integer not null,
-              end_offset integer not null,
-              selected_text text not null,
-              anchor_kind text not null default 'text_offset',
-              page_index integer,
-              rects_json text,
-              quote_context text,
-              body text not null,
-              created_at text not null,
-              updated_at text not null,
               foreign key (paper_id) references papers(id) on delete cascade
             );
 
@@ -1004,16 +816,7 @@ impl LibraryStore {
         .map_err(|error| error.to_string())?;
 
         add_column_if_missing(conn, "papers", "active_source_id", "text")?;
-        add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
-        add_column_if_missing(
-            conn,
-            "paper_notes",
-            "anchor_kind",
-            "text not null default 'text_offset'",
-        )?;
-        add_column_if_missing(conn, "paper_notes", "page_index", "integer")?;
-        add_column_if_missing(conn, "paper_notes", "rects_json", "text")?;
-        add_column_if_missing(conn, "paper_notes", "quote_context", "text")
+        add_column_if_missing(conn, "papers", "active_extraction_id", "text")
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -1113,11 +916,19 @@ fn read_vaults(conn: &Connection) -> StoreResult<Vec<Vault>> {
 }
 
 fn read_papers(conn: &Connection) -> StoreResult<Vec<Paper>> {
+    // `highlight_count` is the number of pinned chat entries across the paper's
+    // threads (RFC 0034) — computed on read so it never drifts. The legacy
+    // `note_count` column is left unused.
     let mut stmt = conn
         .prepare(
             "
             select id, title, authors_json, venue, year, citations, tags_json,
-                   note_count, annotation_count, status, abstract,
+                   (select count(*)
+                      from chat_entries e
+                      join chat_threads t on e.thread_id = t.id
+                     where t.scope_kind = 'paper' and t.scope_id = papers.id
+                       and e.pinned = 1) as highlight_count,
+                   annotation_count, status, abstract,
                    active_source_id, active_extraction_id
             from papers
             order by updated_at desc, title
@@ -1138,7 +949,7 @@ fn read_papers(conn: &Connection) -> StoreResult<Vec<Paper>> {
                 year: row.get(4)?,
                 citations: row.get(5)?,
                 tags: from_json(&tags_json),
-                note_count: row.get(7)?,
+                highlight_count: row.get(7)?,
                 annotation_count: row.get(8)?,
                 status: row.get(9)?,
                 abstract_text: row.get(10)?,
@@ -1434,43 +1245,6 @@ fn read_document_assets(conn: &Connection) -> StoreResult<Vec<DocumentAsset>> {
     collect_rows(rows)
 }
 
-fn read_paper_notes(conn: &Connection, paper_id: &str) -> StoreResult<Vec<PaperNote>> {
-    let mut stmt = conn
-        .prepare(
-            "
-            select id, paper_id, source_id, start_offset, end_offset,
-                   selected_text, anchor_kind, page_index, rects_json, quote_context,
-                   body, created_at, updated_at
-            from paper_notes
-            where paper_id = ?1
-            order by updated_at desc, id desc
-            ",
-        )
-        .map_err(|error| error.to_string())?;
-
-    let rows = stmt
-        .query_map(params![paper_id], |row| {
-            Ok(PaperNote {
-                id: row.get(0)?,
-                paper_id: row.get(1)?,
-                source_id: row.get(2)?,
-                start_offset: row.get(3)?,
-                end_offset: row.get(4)?,
-                selected_text: row.get(5)?,
-                anchor_kind: row.get(6)?,
-                page_index: row.get(7)?,
-                rects_json: row.get(8)?,
-                quote_context: row.get(9)?,
-                body: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-
-    collect_rows(rows)
-}
-
 fn read_chat_thread(conn: &Connection, thread_id: &str) -> StoreResult<ChatThread> {
     conn.query_row(
         "
@@ -1659,6 +1433,78 @@ fn insert_chat_thread(
     Ok(())
 }
 
+/// Insert one chat entry and bump its thread's activity timestamp. Operates on
+/// any `Connection` (a `&Transaction` coerces here), so it composes inside the
+/// atomic anchored writes as well as the standalone `append_chat_entry`.
+fn insert_chat_entry(
+    conn: &Connection,
+    id: &str,
+    thread_id: &str,
+    draft: &ChatEntryDraft,
+) -> StoreResult<()> {
+    let context_json = match &draft.context_summary {
+        Some(summary) => Some(serde_json::to_string(summary).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    conn.execute(
+        "
+        insert into chat_entries (
+          id, thread_id, kind, body, model, context_json, pinned, created_at
+        )
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+        ",
+        params![
+            id,
+            thread_id,
+            draft.kind,
+            draft.body,
+            draft.model,
+            context_json,
+            draft.pinned as i64,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "update chat_threads set updated_at = datetime('now') where id = ?1",
+        params![thread_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Resolve the thread id for an anchor, creating the thread if needed. A
+/// `document` anchor is get-or-create-singular (one whole-paper thread per
+/// paper); every other anchor always creates a fresh thread.
+fn find_or_create_thread_id(
+    conn: &Connection,
+    scope_kind: &str,
+    scope_id: &str,
+    anchor: &ThreadAnchor,
+) -> StoreResult<String> {
+    if matches!(anchor, ThreadAnchor::Document) {
+        let existing: Option<String> = conn
+            .query_row(
+                "
+                select id from chat_threads
+                where scope_kind = ?1 and scope_id = ?2 and anchor_kind = 'document'
+                order by created_at asc
+                limit 1
+                ",
+                params![scope_kind, scope_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+    }
+
+    let id = timestamped_id("thread")?;
+    insert_chat_thread(conn, &id, scope_kind, scope_id, anchor, None)?;
+    Ok(id)
+}
+
 fn table_exists(conn: &Connection, name: &str) -> StoreResult<bool> {
     let count: i64 = conn
         .query_row(
@@ -1779,6 +1625,222 @@ fn migrate_chat_messages_to_threads(conn: &mut Connection) -> StoreResult<()> {
     Ok(())
 }
 
+/// A legacy `paper_notes` row used during migration: (paper_id, source_id,
+/// start_offset, end_offset, selected_text, anchor_kind, page_index,
+/// rects_json, body, created_at).
+type LegacyPaperNote = (
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    String,
+    Option<i32>,
+    Option<String>,
+    String,
+    String,
+);
+
+/// One-time migration of RFC 0033's `paper_notes` into anchored threads
+/// (RFC 0034). Each note becomes a thread carrying a single **pinned** `note`
+/// entry — so migrated notes stay highlighted, as before. Text/PDF anchors get
+/// their own thread; anchorless chat notes append to the paper's whole-paper
+/// thread. The `paper_notes` table is dropped afterward, which also guards
+/// against re-running.
+fn migrate_paper_notes_into_threads(conn: &mut Connection) -> StoreResult<()> {
+    if !table_exists(conn, "paper_notes")? {
+        return Ok(());
+    }
+
+    let notes: Vec<LegacyPaperNote> = {
+        let mut stmt = conn
+            .prepare(
+                "
+                select paper_id, source_id, start_offset, end_offset, selected_text,
+                       anchor_kind, page_index, rects_json, body, created_at
+                from paper_notes
+                order by paper_id, created_at, id
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)?
+    };
+
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let mut seq = 0u64;
+    let mut doc_thread_by_paper: HashMap<String, String> = HashMap::new();
+    for note in notes {
+        let (
+            paper_id,
+            source_id,
+            start_offset,
+            end_offset,
+            selected_text,
+            anchor_kind,
+            page_index,
+            rects_json,
+            body,
+            created_at,
+        ) = note;
+
+        let thread_id = match anchor_kind.as_str() {
+            "pdf_rect" => {
+                let id = format!("thread_pn_{seq}");
+                seq += 1;
+                let anchor = ThreadAnchor::PdfRect {
+                    source_id,
+                    page_index: page_index.unwrap_or_default(),
+                    rects_json: rects_json.unwrap_or_else(|| "[]".to_string()),
+                    selected_text,
+                };
+                insert_migrated_thread(&tx, &id, &paper_id, &anchor, &created_at)?;
+                id
+            }
+            "chat" => migrated_document_thread(
+                &tx,
+                &paper_id,
+                &created_at,
+                &mut doc_thread_by_paper,
+                &mut seq,
+            )?,
+            _ => {
+                // text_offset (and any unknown kind) → a text-anchored thread.
+                let id = format!("thread_pn_{seq}");
+                seq += 1;
+                let anchor = ThreadAnchor::TextOffset {
+                    source_id,
+                    start_offset,
+                    end_offset,
+                    selected_text,
+                };
+                insert_migrated_thread(&tx, &id, &paper_id, &anchor, &created_at)?;
+                id
+            }
+        };
+
+        let entry_id = format!("entry_pn_{seq}");
+        seq += 1;
+        tx.execute(
+            "
+            insert into chat_entries
+              (id, thread_id, kind, body, model, context_json, pinned, created_at)
+            values (?1, ?2, ?3, ?4, null, null, 1, ?5)
+            ",
+            params![entry_id, thread_id, ENTRY_NOTE, body, created_at],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update chat_threads set updated_at = ?2 where id = ?1",
+            params![thread_id, created_at],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    tx.execute_batch("drop table paper_notes;")
+        .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Insert a migrated thread, preserving the note's original timestamps.
+fn insert_migrated_thread(
+    conn: &Connection,
+    id: &str,
+    paper_id: &str,
+    anchor: &ThreadAnchor,
+    created_at: &str,
+) -> StoreResult<()> {
+    let (kind, source_id, start_offset, end_offset, selected_text, page_index, rects_json) =
+        thread_anchor_to_columns(anchor);
+    conn.execute(
+        "
+        insert into chat_threads (
+          id, scope_kind, scope_id, anchor_kind, source_id, start_offset, end_offset,
+          selected_text, page_index, rects_json, title, created_at, updated_at
+        )
+        values (?1, 'paper', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+        ",
+        params![
+            id,
+            paper_id,
+            kind,
+            source_id,
+            start_offset,
+            end_offset,
+            selected_text,
+            page_index,
+            rects_json,
+            anchor.default_title(),
+            created_at,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// The paper's whole-paper thread during migration — reusing one created by the
+/// chat-message migration when present, otherwise creating it.
+fn migrated_document_thread(
+    conn: &Connection,
+    paper_id: &str,
+    created_at: &str,
+    cache: &mut HashMap<String, String>,
+    seq: &mut u64,
+) -> StoreResult<String> {
+    if let Some(id) = cache.get(paper_id) {
+        return Ok(id.clone());
+    }
+    let existing: Option<String> = conn
+        .query_row(
+            "
+            select id from chat_threads
+            where scope_kind = 'paper' and scope_id = ?1 and anchor_kind = 'document'
+            order by created_at asc
+            limit 1
+            ",
+            params![paper_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            let id = format!("thread_pn_{}", *seq);
+            *seq += 1;
+            insert_migrated_thread(conn, &id, paper_id, &ThreadAnchor::Document, created_at)?;
+            id
+        }
+    };
+    cache.insert(paper_id.to_string(), id.clone());
+    Ok(id)
+}
+
+/// Drop the legacy `chat_messages` table once it has been migrated (RFC 0034).
+fn drop_legacy_chat_messages(conn: &Connection) -> StoreResult<()> {
+    if table_exists(conn, "chat_messages")? {
+        conn.execute_batch("drop table chat_messages;")
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -> StoreResult<()> {
     for source in &paper.sources {
         if source.source_kind != "pdf" || source.source_url.trim().is_empty() {
@@ -1842,16 +1904,6 @@ fn collect_rows<T>(
     Ok(values)
 }
 
-fn validate_note_rects_json(rects_json: &str) -> StoreResult<()> {
-    let value: serde_json::Value = serde_json::from_str(rects_json)
-        .map_err(|_| "PDF note rectangles must be valid JSON".to_string())?;
-
-    match value {
-        serde_json::Value::Array(rects) if !rects.is_empty() => Ok(()),
-        _ => Err("PDF note rectangles must be a non-empty array".to_string()),
-    }
-}
-
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -1898,10 +1950,6 @@ fn to_json_slice(values: &[&str]) -> StoreResult<String> {
 
 fn from_json(value: &str) -> Vec<String> {
     serde_json::from_str(value).unwrap_or_default()
-}
-
-fn generate_note_id() -> StoreResult<String> {
-    timestamped_id("note")
 }
 
 /// Build a monotonic, lexicographically-sortable id with a feature prefix.
@@ -2257,21 +2305,6 @@ mod tests {
         draft
     }
 
-    fn note_draft(paper_id: &str, body: &str) -> PaperNoteDraft {
-        PaperNoteDraft {
-            paper_id: paper_id.to_string(),
-            source_id: format!("reader-text-v1:{paper_id}"),
-            start_offset: 4,
-            end_offset: 16,
-            selected_text: "selected text".to_string(),
-            anchor_kind: None,
-            page_index: None,
-            rects_json: None,
-            quote_context: None,
-            body: body.to_string(),
-        }
-    }
-
     fn has_vault(snapshot: &LibrarySnapshot, vault_id: &str) -> bool {
         snapshot.vaults.iter().any(|vault| vault.id == vault_id)
     }
@@ -2536,213 +2569,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn create_paper_note_persists_note_and_increments_note_count() -> StoreResult<()> {
-        let db = test_db()?;
-        let before = db.store.get_library()?;
-        let initial_note_count = paper(&before, "vaswani2017").note_count;
-        let notes = db
-            .store
-            .create_paper_note(&note_draft("vaswani2017", "This is worth revisiting."))?;
-        let after = db.store.get_library()?;
-
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].paper_id, "vaswani2017");
-        assert_eq!(notes[0].source_id, "reader-text-v1:vaswani2017");
-        assert_eq!(notes[0].start_offset, 4);
-        assert_eq!(notes[0].end_offset, 16);
-        assert_eq!(notes[0].selected_text, "selected text");
-        assert_eq!(notes[0].anchor_kind, "text_offset");
-        assert!(notes[0].page_index.is_none());
-        assert!(notes[0].rects_json.is_none());
-        assert_eq!(notes[0].body, "This is worth revisiting.");
-        assert_eq!(
-            paper(&after, "vaswani2017").note_count,
-            initial_note_count + 1
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn create_chat_note_allows_anchorless_note_with_question_context() -> StoreResult<()> {
-        let db = test_db()?;
-        let mut draft = note_draft("vaswani2017", "Saved from the chat answer.");
-        draft.start_offset = 0;
-        draft.end_offset = 0;
-        draft.selected_text = String::new();
-        draft.anchor_kind = Some("chat".to_string());
-        draft.page_index = None;
-        draft.rects_json = None;
-        draft.quote_context = Some("What is scaled dot-product attention?".to_string());
-
-        let notes = db.store.create_paper_note(&draft)?;
-
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].anchor_kind, "chat");
-        assert_eq!(notes[0].selected_text, "");
-        assert_eq!(notes[0].body, "Saved from the chat answer.");
-        assert_eq!(
-            notes[0].quote_context.as_deref(),
-            Some("What is scaled dot-product attention?")
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn create_pdf_note_allows_location_anchor_without_selected_text() -> StoreResult<()> {
-        let db = test_db()?;
-        let mut draft = note_draft("vaswani2017", "This figure matters.");
-        draft.source_id = "pdf:vaswani2017:test".to_string();
-        draft.start_offset = 0;
-        draft.end_offset = 0;
-        draft.selected_text = String::new();
-        draft.anchor_kind = Some("pdf_rect".to_string());
-        draft.page_index = Some(2);
-        draft.rects_json = Some(r#"[{"x":0.2,"y":0.3,"width":0.1,"height":0.08}]"#.to_string());
-
-        let notes = db.store.create_paper_note(&draft)?;
-
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].anchor_kind, "pdf_rect");
-        assert_eq!(notes[0].page_index, Some(2));
-        assert_eq!(notes[0].selected_text, "");
-        assert_eq!(notes[0].rects_json, draft.rects_json);
-
-        Ok(())
-    }
-
-    #[test]
-    fn delete_paper_note_removes_note_and_decrements_note_count() -> StoreResult<()> {
-        let db = test_db()?;
-        let before = db.store.get_library()?;
-        let initial_note_count = paper(&before, "vaswani2017").note_count;
-        let notes = db
-            .store
-            .create_paper_note(&note_draft("vaswani2017", "Delete this note"))?;
-
-        db.store.delete_paper_note(&notes[0].id)?;
-        let remaining_notes = db.store.get_paper_notes("vaswani2017")?;
-        let after = db.store.get_library()?;
-
-        assert!(remaining_notes.is_empty());
-        assert_eq!(paper(&after, "vaswani2017").note_count, initial_note_count);
-
-        Ok(())
-    }
-
-    #[test]
-    fn delete_paper_note_ignores_missing_note_id() -> StoreResult<()> {
-        let db = test_db()?;
-        let before = db.store.get_library()?;
-        let initial_note_count = paper(&before, "vaswani2017").note_count;
-
-        db.store.delete_paper_note("missing-note")?;
-        let after = db.store.get_library()?;
-
-        assert_eq!(paper(&after, "vaswani2017").note_count, initial_note_count);
-
-        Ok(())
-    }
-
-    #[test]
-    fn update_paper_note_changes_body_without_changing_note_count() -> StoreResult<()> {
-        let db = test_db()?;
-        let before = db.store.get_library()?;
-        let initial_note_count = paper(&before, "vaswani2017").note_count;
-        let notes = db
-            .store
-            .create_paper_note(&note_draft("vaswani2017", "Original body"))?;
-
-        db.store
-            .update_paper_note(&notes[0].id, "  Updated body  ")?;
-        let updated_notes = db.store.get_paper_notes("vaswani2017")?;
-        let after = db.store.get_library()?;
-
-        assert_eq!(updated_notes.len(), 1);
-        assert_eq!(updated_notes[0].body, "Updated body");
-        assert_eq!(
-            paper(&after, "vaswani2017").note_count,
-            initial_note_count + 1
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn update_paper_note_rejects_empty_body_and_missing_note_id() -> StoreResult<()> {
-        let db = test_db()?;
-        let notes = db
-            .store
-            .create_paper_note(&note_draft("vaswani2017", "Original body"))?;
-
-        let empty_body_error = db
-            .store
-            .update_paper_note(&notes[0].id, "   ")
-            .expect_err("empty note body should fail");
-        let missing_note_error = db
-            .store
-            .update_paper_note("missing-note", "Updated body")
-            .expect_err("missing note should fail");
-
-        assert_eq!(empty_body_error, "Note body cannot be empty");
-        assert_eq!(missing_note_error, "Note not found: missing-note");
-
-        Ok(())
-    }
-
-    #[test]
-    fn get_paper_notes_returns_newest_notes_first() -> StoreResult<()> {
-        let db = test_db()?;
-
-        db.store
-            .create_paper_note(&note_draft("vaswani2017", "First note"))?;
-        let notes = db
-            .store
-            .create_paper_note(&note_draft("vaswani2017", "Second note"))?;
-
-        assert_eq!(notes.len(), 2);
-        assert_eq!(notes[0].body, "Second note");
-        assert_eq!(notes[1].body, "First note");
-
-        Ok(())
-    }
-
-    #[test]
-    fn create_paper_note_rejects_empty_body_and_invalid_offsets() -> StoreResult<()> {
-        let db = test_db()?;
-        let empty_body_error = db
-            .store
-            .create_paper_note(&note_draft("vaswani2017", "   "))
-            .expect_err("empty note body should fail");
-        let mut invalid_offsets = note_draft("vaswani2017", "Body");
-        invalid_offsets.end_offset = invalid_offsets.start_offset;
-        let offset_error = db
-            .store
-            .create_paper_note(&invalid_offsets)
-            .expect_err("empty offset range should fail");
-
-        assert_eq!(empty_body_error, "Note body cannot be empty");
-        assert_eq!(offset_error, "Note offsets must define a non-empty range");
-
-        Ok(())
-    }
-
-    #[test]
-    fn deleting_paper_deletes_its_notes() -> StoreResult<()> {
-        let db = test_db()?;
-
-        db.store
-            .create_paper_note(&note_draft("caron2021", "Remove with paper"))?;
-        db.store.delete_paper_globally("caron2021")?;
-        let notes = db.store.get_paper_notes("caron2021")?;
-
-        assert!(notes.is_empty());
-
-        Ok(())
-    }
-
     fn text_anchor() -> ThreadAnchor {
         ThreadAnchor::TextOffset {
             source_id: "reader-text-v1:vaswani2017".to_string(),
@@ -2761,17 +2587,17 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_and_append_entries_round_trip_oldest_first() -> StoreResult<()> {
+    fn append_entries_round_trip_oldest_first() -> StoreResult<()> {
         let db = test_db()?;
+        // The first note creates the thread lazily; later turns append to it.
         let thread = db
             .store
-            .create_chat_thread("paper", "vaswani2017", &text_anchor(), None)?;
+            .add_note_at_anchor("paper", "vaswani2017", &text_anchor(), "my note")?
+            .thread;
 
         assert_eq!(thread.title, "scaled dot-product");
         assert!(matches!(thread.anchor, ThreadAnchor::TextOffset { .. }));
 
-        db.store
-            .append_chat_entry(&thread.id, &ChatEntryDraft::note("my note".to_string()))?;
         db.store.append_chat_entry(
             &thread.id,
             &ChatEntryDraft::question("why scale?".to_string()),
@@ -2801,28 +2627,13 @@ mod tests {
     }
 
     #[test]
-    fn ensure_document_thread_is_idempotent() -> StoreResult<()> {
-        let db = test_db()?;
-        let first = db.store.ensure_document_thread("paper", "vaswani2017")?;
-        let second = db.store.ensure_document_thread("paper", "vaswani2017")?;
-
-        assert_eq!(first.id, second.id);
-        assert!(matches!(first.anchor, ThreadAnchor::Document));
-        assert_eq!(first.title, "Whole paper");
-        assert_eq!(db.store.list_chat_threads("paper", "vaswani2017")?.len(), 1);
-
-        Ok(())
-    }
-
-    #[test]
     fn pinning_drives_highlights_and_thread_counts() -> StoreResult<()> {
         let db = test_db()?;
         let thread = db
             .store
-            .create_chat_thread("paper", "vaswani2017", &text_anchor(), None)?;
-        let note = db
-            .store
-            .append_chat_entry(&thread.id, &ChatEntryDraft::note("kept".to_string()))?;
+            .add_note_at_anchor("paper", "vaswani2017", &text_anchor(), "kept")?
+            .thread;
+        let note = db.store.get_chat_thread(&thread.id)?.entries[0].clone();
         let answer = db.store.append_chat_entry(
             &thread.id,
             &ChatEntryDraft::answer("ans".to_string(), "m".to_string(), summary()),
@@ -2853,9 +2664,10 @@ mod tests {
     #[test]
     fn rename_thread_changes_title() -> StoreResult<()> {
         let db = test_db()?;
-        let thread =
-            db.store
-                .create_chat_thread("paper", "vaswani2017", &ThreadAnchor::Document, None)?;
+        let thread = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "n")?
+            .thread;
         db.store.rename_chat_thread(&thread.id, "  My title  ")?;
         assert_eq!(
             db.store.get_chat_thread(&thread.id)?.thread.title,
@@ -2868,11 +2680,10 @@ mod tests {
     #[test]
     fn delete_thread_removes_its_entries() -> StoreResult<()> {
         let db = test_db()?;
-        let thread =
-            db.store
-                .create_chat_thread("paper", "vaswani2017", &ThreadAnchor::Document, None)?;
-        db.store
-            .append_chat_entry(&thread.id, &ChatEntryDraft::note("n".to_string()))?;
+        let thread = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "n")?
+            .thread;
 
         db.store.delete_chat_thread(&thread.id)?;
 
@@ -2891,11 +2702,8 @@ mod tests {
     #[test]
     fn delete_paper_globally_removes_its_threads() -> StoreResult<()> {
         let db = test_db()?;
-        let thread =
-            db.store
-                .create_chat_thread("paper", "caron2021", &ThreadAnchor::Document, None)?;
         db.store
-            .append_chat_entry(&thread.id, &ChatEntryDraft::note("n".to_string()))?;
+            .add_note_at_anchor("paper", "caron2021", &ThreadAnchor::Document, "n")?;
 
         db.store.delete_paper_globally("caron2021")?;
 
@@ -2942,6 +2750,223 @@ mod tests {
         assert_eq!(view.entries[0].body, "q1");
         assert_eq!(view.entries[1].kind, "answer");
         assert_eq!(view.entries[1].model.as_deref(), Some("model-x"));
+
+        Ok(())
+    }
+
+    fn other_text_anchor() -> ThreadAnchor {
+        ThreadAnchor::TextOffset {
+            source_id: "reader-text-v1:vaswani2017".to_string(),
+            start_offset: 40,
+            end_offset: 55,
+            selected_text: "multi-head".to_string(),
+        }
+    }
+
+    fn highlight_count(db: &TestDb, paper_id: &str) -> StoreResult<i32> {
+        Ok(db
+            .store
+            .get_library()?
+            .papers
+            .iter()
+            .find(|paper| paper.id == paper_id)
+            .expect("paper should exist")
+            .highlight_count)
+    }
+
+    #[test]
+    fn add_note_at_anchor_creates_thread_lazily_with_one_pinned_note() -> StoreResult<()> {
+        let db = test_db()?;
+        assert!(db
+            .store
+            .list_chat_threads("paper", "vaswani2017")?
+            .is_empty());
+
+        let view = db.store.add_note_at_anchor(
+            "paper",
+            "vaswani2017",
+            &text_anchor(),
+            "worth revisiting",
+        )?;
+
+        assert!(matches!(
+            view.thread.anchor,
+            ThreadAnchor::TextOffset { .. }
+        ));
+        assert_eq!(view.thread.title, "scaled dot-product");
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries[0].kind, "note");
+        assert_eq!(view.entries[0].body, "worth revisiting");
+        assert!(view.entries[0].pinned, "notes pin by default");
+
+        let threads = db.store.list_chat_threads("paper", "vaswani2017")?;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].pinned_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_note_at_anchor_is_new_per_selection_but_singular_for_document() -> StoreResult<()> {
+        let db = test_db()?;
+        db.store
+            .add_note_at_anchor("paper", "vaswani2017", &text_anchor(), "a")?;
+        db.store
+            .add_note_at_anchor("paper", "vaswani2017", &other_text_anchor(), "b")?;
+        assert_eq!(db.store.list_chat_threads("paper", "vaswani2017")?.len(), 2);
+
+        // Two whole-paper notes share one document thread.
+        db.store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "c")?;
+        db.store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "d")?;
+        let doc_threads: Vec<_> = db
+            .store
+            .list_chat_threads("paper", "vaswani2017")?
+            .into_iter()
+            .filter(|thread| matches!(thread.anchor, ThreadAnchor::Document))
+            .collect();
+        assert_eq!(doc_threads.len(), 1);
+        assert_eq!(doc_threads[0].title, "Whole paper");
+        assert_eq!(doc_threads[0].entry_count, 2);
+        assert_eq!(doc_threads[0].pinned_count, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn persist_anchored_turn_creates_thread_with_question_then_answer() -> StoreResult<()> {
+        let db = test_db()?;
+        let view = db.store.persist_anchored_turn(
+            "paper",
+            "vaswani2017",
+            &text_anchor(),
+            &ChatEntryDraft::question("why scale?".to_string()),
+            &ChatEntryDraft::answer(
+                "because gradients".to_string(),
+                "model-x".to_string(),
+                summary(),
+            ),
+        )?;
+
+        assert_eq!(view.entries.len(), 2);
+        assert_eq!(view.entries[0].kind, "question");
+        assert_eq!(view.entries[0].body, "why scale?");
+        assert!(!view.entries[0].pinned);
+        assert_eq!(view.entries[1].kind, "answer");
+        assert_eq!(view.entries[1].model.as_deref(), Some("model-x"));
+
+        // Follow-up turns on the document anchor continue one thread.
+        for (q, a) in [("q2", "a2"), ("q3", "a3")] {
+            db.store.persist_anchored_turn(
+                "paper",
+                "vaswani2017",
+                &ThreadAnchor::Document,
+                &ChatEntryDraft::question(q.to_string()),
+                &ChatEntryDraft::answer(a.to_string(), "m".to_string(), summary()),
+            )?;
+        }
+        let doc: Vec<_> = db
+            .store
+            .list_chat_threads("paper", "vaswani2017")?
+            .into_iter()
+            .filter(|thread| matches!(thread.anchor, ThreadAnchor::Document))
+            .collect();
+        assert_eq!(doc.len(), 1);
+        assert_eq!(doc[0].entry_count, 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn highlight_count_counts_pinned_entries_and_tracks_pinning() -> StoreResult<()> {
+        let db = test_db()?;
+        assert_eq!(highlight_count(&db, "vaswani2017")?, 0);
+
+        let thread = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &text_anchor(), "kept")?
+            .thread;
+        let note = db.store.get_chat_thread(&thread.id)?.entries[0].clone();
+        let answer = db.store.append_chat_entry(
+            &thread.id,
+            &ChatEntryDraft::answer("a".to_string(), "m".to_string(), summary()),
+        )?;
+
+        // The note pins by default → one highlight.
+        assert_eq!(highlight_count(&db, "vaswani2017")?, 1);
+
+        // Star the answer → two; unpin the note → one.
+        db.store.set_chat_entry_pinned(&answer.id, true)?;
+        assert_eq!(highlight_count(&db, "vaswani2017")?, 2);
+        db.store.set_chat_entry_pinned(&note.id, false)?;
+        assert_eq!(highlight_count(&db, "vaswani2017")?, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_paper_notes_into_pinned_threads() -> StoreResult<()> {
+        let db = test_db()?;
+        {
+            let conn = Connection::open(&db.store.db_path).map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "create table paper_notes (id text primary key, paper_id text not null, \
+                 source_id text not null, start_offset integer not null, \
+                 end_offset integer not null, selected_text text not null, \
+                 anchor_kind text not null default 'text_offset', page_index integer, \
+                 rects_json text, quote_context text, body text not null, \
+                 created_at text not null, updated_at text not null);",
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "insert into paper_notes values ('n1','vaswani2017','src',4,16,\
+                 'scaled dot-product','text_offset',null,null,null,'text note',\
+                 '2026-01-01 00:00:00','2026-01-01 00:00:00')",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "insert into paper_notes values ('n2','vaswani2017','pdf:src',0,0,'',\
+                 'pdf_rect',2,'[{\"x\":0.1,\"y\":0.2,\"width\":0.3,\"height\":0.05}]',\
+                 null,'pdf note','2026-01-01 00:00:01','2026-01-01 00:00:01')",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "insert into paper_notes values ('n3','vaswani2017','',0,0,'','chat',\
+                 null,null,'why?','chat note','2026-01-01 00:00:02','2026-01-01 00:00:02')",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        let mut conn = Connection::open(&db.store.db_path).map_err(|e| e.to_string())?;
+        migrate_paper_notes_into_threads(&mut conn)?;
+
+        // text_offset + pdf_rect + one shared document thread (the chat note) = 3.
+        let threads = db.store.list_chat_threads("paper", "vaswani2017")?;
+        assert_eq!(threads.len(), 3);
+
+        // Every migrated note is one pinned `note` entry → still highlighted.
+        let pinned = db.store.list_pinned_chat_entries("paper", "vaswani2017")?;
+        assert_eq!(pinned.len(), 3);
+        assert!(pinned
+            .iter()
+            .all(|pin| pin.entry.kind == "note" && pin.entry.pinned));
+        assert_eq!(highlight_count(&db, "vaswani2017")?, 3);
+
+        let doc_threads: Vec<_> = threads
+            .iter()
+            .filter(|thread| matches!(thread.anchor, ThreadAnchor::Document))
+            .collect();
+        assert_eq!(doc_threads.len(), 1);
+        assert_eq!(doc_threads[0].entry_count, 1);
+
+        // The table is dropped, so re-running is a guarded no-op.
+        assert!(!table_exists(&conn, "paper_notes")?);
+        migrate_paper_notes_into_threads(&mut conn)?;
+        assert_eq!(db.store.list_chat_threads("paper", "vaswani2017")?.len(), 3);
 
         Ok(())
     }

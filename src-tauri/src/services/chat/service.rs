@@ -58,25 +58,22 @@ impl ChatService {
         self.store.get_chat_thread(thread_id)
     }
 
-    /// Open (creating if needed) the scope's whole-paper thread.
-    pub async fn open_document_thread(&self, scope: &ChatScope) -> Result<ChatThreadView, String> {
-        let thread = self
-            .store
-            .ensure_document_thread(scope.kind(), scope.id())?;
-        self.store.get_chat_thread(&thread.id)
-    }
-
-    /// Create a thread for an anchor (e.g. a reader selection) and return it.
-    pub async fn create_thread(
+    /// Add a self-authored note at an anchor, creating its thread lazily, and
+    /// return the thread (RFC 0034). A `document` anchor reuses the whole-paper
+    /// thread; a selection anchor starts a new one. Nothing is written for an
+    /// empty note.
+    pub async fn add_note_at_anchor(
         &self,
         scope: &ChatScope,
         anchor: ThreadAnchor,
-        title: Option<String>,
+        body: String,
     ) -> Result<ChatThreadView, String> {
-        let thread =
-            self.store
-                .create_chat_thread(scope.kind(), scope.id(), &anchor, title.as_deref())?;
-        self.store.get_chat_thread(&thread.id)
+        let body = body.trim();
+        if body.is_empty() {
+            return Err("Enter a note before saving.".to_string());
+        }
+        self.store
+            .add_note_at_anchor(scope.kind(), scope.id(), &anchor, body)
     }
 
     /// Append a self-authored note (pinned by default) and return the thread.
@@ -155,6 +152,80 @@ impl ChatService {
         .await?;
         self.finalize_ask(thread_id, &prep.user_body, answer, prep.summary)
             .await
+    }
+
+    /// Ask at an anchor, creating the thread lazily on success (RFC 0034).
+    ///
+    /// Nothing is persisted until the reply arrives, so a failed ask leaves no
+    /// thread. The passage (for a selection anchor) is foregrounded in the
+    /// prompt, just as for a thread-scoped ask.
+    pub async fn ask_at_anchor_streamed<F>(
+        &self,
+        scope: &ChatScope,
+        anchor: ThreadAnchor,
+        body: String,
+        on_delta: F,
+    ) -> Result<ChatThreadView, String>
+    where
+        F: FnMut(String),
+    {
+        let prep = self.prepare_ask_at_anchor(scope, &anchor, body).await?;
+        let request = CompletionRequest {
+            model: self.config.model.clone(),
+            messages: prep.request_messages,
+            stream: true,
+        };
+        let answer = openrouter::complete_streamed(
+            &self.client,
+            &self.config.url,
+            &prep.api_key,
+            &request,
+            on_delta,
+        )
+        .await?;
+        self.store.persist_anchored_turn(
+            scope.kind(),
+            scope.id(),
+            &anchor,
+            &ChatEntryDraft::question(prep.user_body),
+            &ChatEntryDraft::answer(answer, self.config.model.clone(), prep.summary),
+        )
+    }
+
+    /// Assemble the prompt for a brand-new anchored ask — persisting nothing.
+    ///
+    /// A new anchored thread has no prior entries; whole-paper continuity is
+    /// handled by the thread-scoped ask path once the thread exists.
+    async fn prepare_ask_at_anchor(
+        &self,
+        scope: &ChatScope,
+        anchor: &ThreadAnchor,
+        body: String,
+    ) -> Result<PreparedAsk, String> {
+        let user_body = body.trim().to_string();
+        if user_body.is_empty() {
+            return Err("Enter a message before sending.".to_string());
+        }
+        if scope.kind() != "paper" {
+            return Err(format!("Unsupported chat scope: {}", scope.kind()));
+        }
+        let api_key = self.config.resolve_api_key()?;
+        let document = self.reader.get_reader_document(scope.id(), None).await?;
+        let bundle = build_context(
+            &document.title,
+            &document.authors,
+            &document.venue,
+            document.year,
+            &document.source_text,
+            self.config.max_context_chars,
+            anchor.selected_text(),
+        );
+        Ok(PreparedAsk {
+            api_key,
+            request_messages: build_wire_messages(bundle.system_prompt, &[], &user_body),
+            summary: bundle.summary,
+            user_body,
+        })
     }
 
     /// Validate, resolve the key, and assemble the prompt — persisting nothing.

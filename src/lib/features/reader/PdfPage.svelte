@@ -3,7 +3,7 @@
   import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
   import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
   import { getReaderPdfBytes } from "$lib/bridge/library";
-  import type { PaperNote } from "$lib/domain/library";
+  import type { ChatThreadSummary } from "$lib/domain/chat";
   import type { ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
   import PdfRenderedPage from "$lib/features/reader/PdfRenderedPage.svelte";
@@ -15,21 +15,19 @@
   let {
     pdfUrl,
     sourceId,
-    notes,
-    activeNoteId,
-    noteDraft,
-    notesEnabled,
-    onCreateNoteFromSelection,
-    onActivateNote,
+    threads,
+    selection,
+    chatEnabled,
+    onSelectPassage,
+    onOpenThread,
   }: {
     pdfUrl: string;
     sourceId: string;
-    notes: PaperNote[];
-    activeNoteId: string | null;
-    noteDraft: ReaderTextSelection | null;
-    notesEnabled: boolean;
-    onCreateNoteFromSelection: (selection: ReaderTextSelection) => void;
-    onActivateNote: (noteId: string) => void;
+    threads: ChatThreadSummary[];
+    selection: ReaderTextSelection | null;
+    chatEnabled: boolean;
+    onSelectPassage: (selection: ReaderTextSelection) => void;
+    onOpenThread: (threadId: string) => void;
   } = $props();
 
   let pdfDocument = $state<PDFDocumentProxy | null>(null);
@@ -39,8 +37,14 @@
   let scale = $state(1.15);
   let renderSessionSequence = 0;
 
-  const pdfNotes = $derived(
-    notes.filter((note) => note.anchorKind === "pdf_rect" && note.sourceId === sourceId),
+  // Pinned threads anchored to this PDF source become the on-page highlights.
+  const pdfMarks = $derived(
+    threads.filter(
+      (thread) =>
+        thread.pinnedCount > 0 &&
+        thread.anchor.kind === "pdfRect" &&
+        thread.anchor.sourceId === sourceId,
+    ),
   );
 
   $effect(() => {
@@ -143,13 +147,12 @@
             {pdfDocument}
             {pageNumber}
             {scale}
-            notes={pdfNotes}
-            {activeNoteId}
-            {noteDraft}
-            {notesEnabled}
+            marks={pdfMarks}
+            {selection}
+            {chatEnabled}
             {sourceId}
-            {onCreateNoteFromSelection}
-            {onActivateNote}
+            {onSelectPassage}
+            {onOpenThread}
           />
         {/each}
       </div>

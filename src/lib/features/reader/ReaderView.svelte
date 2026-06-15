@@ -1,22 +1,16 @@
 <script lang="ts">
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import {
-    createPaperNote,
-    deletePaperNote,
-    getDiscoveryReaderDocument,
-    getPaperNotes,
-    updatePaperNote,
-    getReaderDocument,
-  } from "$lib/bridge/library";
-  import type { PaperNote } from "$lib/domain/library";
+  import { getDiscoveryReaderDocument, getReaderDocument } from "$lib/bridge/library";
+  import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
+  import type { ChatThreadSummary, PinnedHighlight } from "$lib/domain/chat";
   import type { Paper } from "$lib/domain/paper";
   import type { DiscoveryReaderCandidate, ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
   import ReaderFooter from "$lib/features/reader/ReaderFooter.svelte";
   import ReaderHeader from "$lib/features/reader/ReaderHeader.svelte";
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
   import PdfPage from "$lib/features/reader/PdfPage.svelte";
-  import { decrementPaperNoteCount, incrementPaperNoteCount, isPaperInLibrary } from "$lib/state/library-cache.svelte";
+  import { isPaperInLibrary } from "$lib/state/library-cache.svelte";
 
   let {
     paper,
@@ -26,11 +20,16 @@
     candidate?: DiscoveryReaderCandidate;
   } = $props();
 
-  let notes = $state<PaperNote[]>([]);
-  let noteDraft = $state<ReaderTextSelection | null>(null);
-  let noteError = $state("");
-  let isLoadingNotes = $state(false);
-  let activeNoteId = $state<string | null>(null);
+  // Anchored chat state (RFC 0034). ReaderView owns the thread/pin lists so the
+  // PDF highlight layer (pinned threads) and the inspector share one source of
+  // truth, and a single reload keeps marks, the Threads list, and Pins in sync.
+  let selection = $state<ReaderTextSelection | null>(null);
+  let threads = $state<ChatThreadSummary[]>([]);
+  let pins = $state<PinnedHighlight[]>([]);
+  let requestedThreadId = $state<string | null>(null);
+  let isLoadingChat = $state(false);
+  let chatError = $state("");
+  let chatLoadSequence = 0;
   let readerDocument = $state<ReaderDocument | null>(null);
   let docError = $state("");
   let docErrorDebug = $state("");
@@ -39,8 +38,8 @@
   let documentLoadSequence = 0;
 
   const document = $derived<ReaderDocument | null>(readerDocument);
-  const notesEnabled = $derived(isPaperInLibrary(paper.id));
-  const activeCandidate = $derived(candidate && !notesEnabled ? candidate : undefined);
+  const chatEnabled = $derived(isPaperInLibrary(paper.id));
+  const activeCandidate = $derived(candidate && !chatEnabled ? candidate : undefined);
   const hasCachedPdf = $derived(Boolean(readerDocument?.pdfLocalPath));
 
   onMount(() => {
@@ -106,122 +105,67 @@
       });
   });
 
-  // Notes effect
+  // Load the paper's threads + pins when it changes (once it's chat-enabled).
   $effect(() => {
     const paperId = paper.id;
-    noteDraft = null;
-    noteError = "";
-    activeNoteId = null;
+    selection = null;
+    requestedThreadId = null;
+    chatError = "";
 
-    if (!notesEnabled) {
-      notes = [];
-      isLoadingNotes = false;
+    if (!chatEnabled) {
+      threads = [];
+      pins = [];
+      isLoadingChat = false;
       return;
     }
 
-    isLoadingNotes = true;
-    getPaperNotes(paperId)
-      .then((nextNotes) => {
-        if (paper.id === paperId) {
-          notes = nextNotes;
-        }
-      })
-      .catch((error) => {
-        if (paper.id === paperId) {
-          noteError = String(error);
-          notes = [];
-        }
-      })
-      .finally(() => {
-        if (paper.id === paperId) {
-          isLoadingNotes = false;
-        }
-      });
+    void reloadChat(paperId);
   });
 
-  function createNoteDraft(selection: ReaderTextSelection) {
-    noteDraft = selection;
-    noteError = "";
-  }
-
-  function cancelNoteDraft() {
-    noteDraft = null;
-    noteError = "";
-    clearReaderSelection();
-  }
-
-  async function saveNote(body: string) {
-    if (!noteDraft || !notesEnabled) {
+  // Reload threads + pins together, so the PDF marks, Threads list, and Pins
+  // tab stay consistent after any chat mutation.
+  async function reloadChat(paperId: string = paper.id) {
+    if (!chatEnabled) {
       return;
     }
 
+    const loadId = (chatLoadSequence += 1);
+    isLoadingChat = true;
     try {
-      const nextNotes = await createPaperNote({
-        paperId: paper.id,
-        sourceId: noteDraft.sourceId,
-        startOffset: noteDraft.startOffset,
-        endOffset: noteDraft.endOffset,
-        selectedText: noteDraft.selectedText,
-        anchorKind: noteDraft.anchorKind,
-        pageIndex: noteDraft.pageIndex,
-        rectsJson: noteDraft.rectsJson,
-        quoteContext: noteDraft.quoteContext,
-        body,
-      });
-      notes = nextNotes;
-      activeNoteId = nextNotes[0]?.id ?? null;
-      noteDraft = null;
-      noteError = "";
-      clearReaderSelection();
-      incrementPaperNoteCount(paper.id);
+      const [threadList, pinList] = await Promise.all([
+        listChatThreads({ kind: "paper", paperId }),
+        listPinnedChatEntries({ kind: "paper", paperId }),
+      ]);
+      if (paper.id === paperId && loadId === chatLoadSequence) {
+        threads = threadList;
+        pins = pinList;
+      }
     } catch (error) {
-      noteError = String(error);
+      if (paper.id === paperId) {
+        chatError = String(error);
+      }
+    } finally {
+      if (paper.id === paperId && loadId === chatLoadSequence) {
+        isLoadingChat = false;
+      }
     }
   }
 
-  function clearReaderSelection() {
+  function selectPassage(next: ReaderTextSelection) {
+    selection = next;
+  }
+
+  function clearSelection() {
+    selection = null;
     window.getSelection()?.removeAllRanges();
   }
 
-  async function removeNote(noteId: string) {
-    if (!notesEnabled) {
-      return;
-    }
-
-    try {
-      const previousNoteCount = notes.length;
-      const nextNotes = await deletePaperNote({ paperId: paper.id, noteId });
-
-      notes = nextNotes;
-      noteError = "";
-      if (!nextNotes.some((note) => note.id === activeNoteId)) {
-        activeNoteId = null;
-      }
-      if (nextNotes.length < previousNoteCount) {
-        decrementPaperNoteCount(paper.id);
-      }
-    } catch (error) {
-      noteError = String(error);
-    }
+  function openThreadFromMark(threadId: string) {
+    requestedThreadId = threadId;
   }
 
-  async function updateNote(noteId: string, body: string) {
-    if (!notesEnabled) {
-      return;
-    }
-
-    try {
-      notes = await updatePaperNote({ paperId: paper.id, noteId, body });
-      activeNoteId = noteId;
-      noteError = "";
-    } catch (error) {
-      noteError = String(error);
-      throw error;
-    }
-  }
-
-  function activateNote(noteId: string) {
-    activeNoteId = noteId;
+  function consumeRequestedThread() {
+    requestedThreadId = null;
   }
 
   function readerLog(stage: string, payload: Record<string, unknown>, level: "info" | "error" = "info") {
@@ -276,12 +220,11 @@
             <PdfPage
               pdfUrl={readerDocument!.pdfLocalPath!}
               sourceId={document.sourceId}
-              {notes}
-              {activeNoteId}
-              {noteDraft}
-              {notesEnabled}
-              onCreateNoteFromSelection={createNoteDraft}
-              onActivateNote={activateNote}
+              {threads}
+              {selection}
+              {chatEnabled}
+              onSelectPassage={selectPassage}
+              onOpenThread={openThreadFromMark}
             />
           {:else}
             <div class="missing-pdf col">
@@ -310,17 +253,16 @@
     {#if document}
       <ReaderInspector
         {document}
-        {notes}
-        {activeNoteId}
-        {noteDraft}
-        {notesEnabled}
-        {noteError}
-        {isLoadingNotes}
-        onSaveNote={saveNote}
-        onCancelNoteDraft={cancelNoteDraft}
-        onDeleteNote={removeNote}
-        onUpdateNote={updateNote}
-        onActivateNote={activateNote}
+        {chatEnabled}
+        {threads}
+        {pins}
+        {selection}
+        {requestedThreadId}
+        {isLoadingChat}
+        {chatError}
+        onReloadChat={reloadChat}
+        onClearSelection={clearSelection}
+        onConsumeRequestedThread={consumeRequestedThread}
       />
     {/if}
   </div>

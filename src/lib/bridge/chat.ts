@@ -15,16 +15,13 @@ export async function getChatThread(threadId: string): Promise<ChatThreadView> {
   return invoke<ChatThreadView>("get_chat_thread", { threadId });
 }
 
-export async function openChatDocumentThread(scope: ChatScope): Promise<ChatThreadView> {
-  return invoke<ChatThreadView>("open_chat_document_thread", { scope });
-}
-
-export async function createChatThread(
+/// Add a note at an anchor; the thread is created lazily and returned (RFC 0034).
+export async function noteAtAnchor(
   scope: ChatScope,
   anchor: ThreadAnchor,
-  title?: string,
+  body: string,
 ): Promise<ChatThreadView> {
-  return invoke<ChatThreadView>("create_chat_thread", { scope, anchor, title });
+  return invoke<ChatThreadView>("add_note_at_anchor", { scope, anchor, body });
 }
 
 export async function addChatNote(threadId: string, body: string): Promise<ChatThreadView> {
@@ -59,6 +56,27 @@ export async function askChatThreadStreamed(
   body: string,
   onDelta: (text: string) => void,
 ): Promise<ChatThreadView> {
+  return streamAsk("ask_chat_thread_streamed", { threadId, body }, onDelta);
+}
+
+/// Ask at an anchor; the thread is created lazily on success and returned
+/// (RFC 0034). A failed ask persists nothing.
+export async function askAtAnchorStreamed(
+  scope: ChatScope,
+  anchor: ThreadAnchor,
+  body: string,
+  onDelta: (text: string) => void,
+): Promise<ChatThreadView> {
+  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body }, onDelta);
+}
+
+/// Shared streaming-ask plumbing: open a channel, forward deltas, and resolve
+/// with the thread on `done` (or reject on `error`).
+function streamAsk(
+  command: string,
+  args: Record<string, unknown>,
+  onDelta: (text: string) => void,
+): Promise<ChatThreadView> {
   const channel = new Channel<ChatStreamEvent>();
 
   return new Promise<ChatThreadView>((resolve, reject) => {
@@ -72,6 +90,6 @@ export async function askChatThreadStreamed(
       }
     };
 
-    invoke<void>("ask_chat_thread_streamed", { threadId, body, onEvent: channel }).catch(reject);
+    invoke<void>(command, { ...args, onEvent: channel }).catch(reject);
   });
 }

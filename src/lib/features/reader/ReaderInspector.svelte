@@ -1,363 +1,167 @@
 <script lang="ts">
   import {
     addChatNote,
+    askAtAnchorStreamed,
     askChatThreadStreamed,
-    createChatThread,
     deleteChatThread,
     getChatThread,
-    listChatThreads,
-    listPinnedChatEntries,
-    openChatDocumentThread,
+    noteAtAnchor,
     renameChatThread,
     setChatEntryPinned,
   } from "$lib/bridge/chat";
-  import type {
-    ChatEntry,
-    ChatScope,
-    ChatThreadSummary,
-    ChatThreadView,
-    PinnedHighlight,
-    ThreadAnchor,
+  import {
+    anchorSelectedText,
+    type ChatEntry,
+    type ChatScope,
+    type ChatThreadSummary,
+    type ChatThreadView,
+    type PinnedHighlight,
+    type ThreadAnchor,
   } from "$lib/domain/chat";
-  import type { NoteAnchorKind, PaperNote } from "$lib/domain/library";
   import type { ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
 
-  type InspectorTab = "notes" | "threads" | "pins" | "meta";
+  type InspectorTab = "threads" | "pins" | "meta";
 
   let {
     document,
-    notes,
-    activeNoteId,
-    noteDraft,
-    notesEnabled,
-    noteError,
-    isLoadingNotes,
-    onSaveNote,
-    onCancelNoteDraft,
-    onDeleteNote,
-    onUpdateNote,
-    onActivateNote,
+    chatEnabled,
+    threads,
+    pins,
+    selection,
+    requestedThreadId,
+    isLoadingChat,
+    chatError,
+    onReloadChat,
+    onClearSelection,
+    onConsumeRequestedThread,
   }: {
     document: ReaderDocument;
-    notes: PaperNote[];
-    activeNoteId: string | null;
-    noteDraft: ReaderTextSelection | null;
-    notesEnabled: boolean;
-    noteError: string;
-    isLoadingNotes: boolean;
-    onSaveNote: (body: string) => Promise<void>;
-    onCancelNoteDraft: () => void;
-    onDeleteNote: (noteId: string) => Promise<void>;
-    onUpdateNote: (noteId: string, body: string) => Promise<void>;
-    onActivateNote: (noteId: string) => void;
+    chatEnabled: boolean;
+    threads: ChatThreadSummary[];
+    pins: PinnedHighlight[];
+    selection: ReaderTextSelection | null;
+    requestedThreadId: string | null;
+    isLoadingChat: boolean;
+    chatError: string;
+    onReloadChat: () => void;
+    onClearSelection: () => void;
+    onConsumeRequestedThread: () => void;
   } = $props();
 
-  let noteBody = $state("");
-  let isSaving = $state(false);
-  let deletingNoteId = $state<string | null>(null);
-  let editingNoteId = $state<string | null>(null);
-  let editBody = $state("");
-  let isUpdating = $state(false);
-  let activeTab = $state<InspectorTab>("notes");
-  let inspectorElement = $state<HTMLElement | null>(null);
-  const canSave = $derived(Boolean(noteDraft && noteBody.trim() && !isSaving));
-  const canUpdate = $derived(Boolean(editingNoteId && editBody.trim() && !isUpdating));
-
-  $effect(() => {
-    if (noteDraft) {
-      activeTab = "notes";
-    }
-
-    noteBody = "";
-  });
-
-  $effect(() => {
-    if (!noteDraft) {
-      return;
-    }
-
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!inspectorElement || inspectorElement.contains(event.target as Node)) {
-        return;
-      }
-
-      cancelEmptyDraft();
-    };
-
-    window.document.addEventListener("pointerdown", handlePointerDown);
-
-    return () => {
-      window.document.removeEventListener("pointerdown", handlePointerDown);
-    };
-  });
-
-  async function saveNote() {
-    if (!canSave) {
-      return;
-    }
-
-    isSaving = true;
-    try {
-      await onSaveNote(noteBody);
-    } finally {
-      isSaving = false;
-    }
-  }
-
-  function cancelDraft() {
-    noteBody = "";
-    onCancelNoteDraft();
-  }
-
-  function cancelEmptyDraft() {
-    if (!noteBody.trim()) {
-      cancelDraft();
-    }
-  }
-
-  function handleNoteKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancelEmptyDraft();
-      return;
-    }
-
-    if (event.key !== "Enter" || event.shiftKey) {
-      return;
-    }
-
-    event.preventDefault();
-    void saveNote();
-  }
-
-  async function deleteNote(noteId: string) {
-    if (deletingNoteId) {
-      return;
-    }
-
-    deletingNoteId = noteId;
-    try {
-      await onDeleteNote(noteId);
-    } finally {
-      deletingNoteId = null;
-    }
-  }
-
-  function startEdit(note: PaperNote) {
-    editingNoteId = note.id;
-    editBody = note.body;
-  }
-
-  function cancelEdit() {
-    editingNoteId = null;
-    editBody = "";
-  }
-
-  async function updateNote() {
-    if (!editingNoteId || !canUpdate) {
-      return;
-    }
-
-    isUpdating = true;
-    try {
-      await onUpdateNote(editingNoteId, editBody);
-      cancelEdit();
-    } catch {
-      // ReaderView owns the visible error message; keep the draft open.
-    } finally {
-      isUpdating = false;
-    }
-  }
-
-  function handleEditKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancelEdit();
-      return;
-    }
-
-    if (event.key !== "Enter" || event.shiftKey) {
-      return;
-    }
-
-    event.preventDefault();
-    void updateNote();
-  }
-
-  function noteAnchorLabel(note: { selectedText: string; anchorKind?: NoteAnchorKind; pageIndex?: number }) {
-    if (note.selectedText.trim()) {
-      return note.selectedText;
-    }
-
-    if (note.anchorKind === "pdf_rect" && note.pageIndex !== undefined) {
-      return `PDF region, page ${note.pageIndex + 1}`;
-    }
-
-    return "Untitled note anchor";
-  }
-
-  // --- Threads + Pins: anchored chat (RFC 0033) ---
-  let threads = $state<ChatThreadSummary[]>([]);
-  let pins = $state<PinnedHighlight[]>([]);
+  let activeTab = $state<InspectorTab>("threads");
+  // A thread with an empty id is *virtual*: it shows a passage's composer before
+  // the first Note/Ask creates the row (RFC 0034 lazy threads).
   let openThread = $state<ChatThreadView | null>(null);
-  let threadsLoadedPaperId = $state<string | null>(null);
-  let pinsLoadedPaperId = $state<string | null>(null);
-  let isLoadingThreads = $state(false);
-  let isLoadingPins = $state(false);
-  let chatError = $state("");
   let chatInput = $state("");
   let isBusy = $state(false);
   let pendingQuestion = $state<string | null>(null);
   let streamingAnswer = $state<string | null>(null);
+  let error = $state("");
   let renaming = $state(false);
   let renameTitle = $state("");
+  // Guards streamed deltas against paper switches / superseded asks.
+  let askSequence = 0;
+  let activeAskId = $state(0);
 
-  // Chat is durable, so it is only available once the paper is in a Vault —
-  // the same boundary that gates Notes.
-  const chatEnabled = $derived(notesEnabled);
   const scope = $derived<ChatScope>({ kind: "paper", paperId: document.paperId });
   const documentThread = $derived(threads.find((thread) => thread.anchor.kind === "document"));
   const anchoredThreads = $derived(threads.filter((thread) => thread.anchor.kind !== "document"));
+  const isVirtual = $derived(Boolean(openThread) && openThread!.thread.id === "");
+  const openPassage = $derived(openThread ? anchorSelectedText(openThread.thread.anchor) : null);
+  // For a selection thread the title defaults to the passage, so the quote block
+  // alone says it — only show the heading when it adds something (a renamed
+  // thread, or the whole-paper thread that has no passage).
+  const showTitle = $derived(
+    !openPassage || (openThread?.thread.title.trim() ?? "") !== openPassage.trim(),
+  );
   const canSubmit = $derived(Boolean(openThread && chatInput.trim() && !isBusy));
+  const visibleError = $derived(error || chatError);
 
-  // Reset chat state whenever the open paper changes.
+  // Reset the open conversation when the paper changes.
   $effect(() => {
     void document.paperId;
     openThread = null;
-    threadsLoadedPaperId = null;
-    pinsLoadedPaperId = null;
-    chatError = "";
     chatInput = "";
+    error = "";
     renaming = false;
+    activeAskId = (askSequence += 1);
   });
 
+  // A new reader selection opens that passage's (virtual) thread.
   $effect(() => {
-    const paperId = document.paperId;
-    if (activeTab !== "threads" || !chatEnabled || openThread) {
+    if (!selection) {
       return;
     }
-    if (threadsLoadedPaperId === paperId || isLoadingThreads) {
-      return;
-    }
-    void loadThreads(paperId);
+    openThread = virtualThread(anchorFromSelection(selection), selection.selectedText.trim() || "New thread");
+    error = "";
+    renaming = false;
+    activeTab = "threads";
   });
 
+  // A clicked margin mark (or pin) requests a specific thread to open.
   $effect(() => {
-    const paperId = document.paperId;
-    if (activeTab !== "pins" || !chatEnabled) {
+    const threadId = requestedThreadId;
+    if (!threadId) {
       return;
     }
-    if (pinsLoadedPaperId === paperId || isLoadingPins) {
-      return;
-    }
-    void loadPins(paperId);
+    activeTab = "threads";
+    void openThreadById(threadId);
+    onConsumeRequestedThread();
   });
 
-  async function loadThreads(paperId: string) {
-    isLoadingThreads = true;
-    chatError = "";
-    try {
-      const list = await listChatThreads({ kind: "paper", paperId });
-      if (document.paperId === paperId) {
-        threads = list;
-      }
-    } catch (error) {
-      if (document.paperId === paperId) {
-        chatError = String(error);
-      }
-    } finally {
-      if (document.paperId === paperId) {
-        isLoadingThreads = false;
-        threadsLoadedPaperId = paperId;
-      }
+  function anchorFromSelection(sel: ReaderTextSelection): ThreadAnchor {
+    if (sel.anchorKind === "pdf_rect") {
+      return {
+        kind: "pdfRect",
+        sourceId: sel.sourceId,
+        pageIndex: sel.pageIndex ?? 0,
+        rectsJson: sel.rectsJson ?? "[]",
+        selectedText: sel.selectedText,
+      };
     }
+    return {
+      kind: "textOffset",
+      sourceId: sel.sourceId,
+      startOffset: sel.startOffset,
+      endOffset: sel.endOffset,
+      selectedText: sel.selectedText,
+    };
   }
 
-  async function loadPins(paperId: string) {
-    isLoadingPins = true;
-    try {
-      const list = await listPinnedChatEntries({ kind: "paper", paperId });
-      if (document.paperId === paperId) {
-        pins = list;
-      }
-    } catch (error) {
-      if (document.paperId === paperId) {
-        chatError = String(error);
-      }
-    } finally {
-      if (document.paperId === paperId) {
-        isLoadingPins = false;
-        pinsLoadedPaperId = paperId;
-      }
-    }
+  function virtualThread(anchor: ThreadAnchor, title: string): ChatThreadView {
+    return {
+      thread: { id: "", anchor, title, createdAt: "", updatedAt: "" },
+      entries: [],
+    };
   }
 
-  async function openDocumentThread() {
-    chatError = "";
-    try {
-      openThread = await openChatDocumentThread(scope);
-      threadsLoadedPaperId = null;
-    } catch (error) {
-      chatError = String(error);
+  function openWholePaper() {
+    activeTab = "threads";
+    error = "";
+    if (documentThread) {
+      void openThreadById(documentThread.id);
+    } else {
+      openThread = virtualThread({ kind: "document" }, "Whole paper");
     }
   }
 
   async function openThreadById(threadId: string) {
-    chatError = "";
+    error = "";
     try {
       openThread = await getChatThread(threadId);
-    } catch (error) {
-      chatError = String(error);
+    } catch (caught) {
+      error = String(caught);
     }
   }
 
   function backToThreadList() {
     openThread = null;
     renaming = false;
-    threadsLoadedPaperId = null;
-  }
-
-  function anchorFromDraft(draft: ReaderTextSelection): ThreadAnchor {
-    if (draft.anchorKind === "pdf_rect") {
-      return {
-        kind: "pdfRect",
-        sourceId: draft.sourceId,
-        pageIndex: draft.pageIndex ?? 0,
-        rectsJson: draft.rectsJson ?? "[]",
-        selectedText: draft.selectedText,
-      };
-    }
-    return {
-      kind: "textOffset",
-      sourceId: draft.sourceId,
-      startOffset: draft.startOffset,
-      endOffset: draft.endOffset,
-      selectedText: draft.selectedText,
-    };
-  }
-
-  async function askFromSelection() {
-    if (!noteDraft || !chatEnabled || isBusy) {
-      return;
-    }
-
-    isBusy = true;
-    chatError = "";
-    try {
-      const view = await createChatThread(scope, anchorFromDraft(noteDraft));
-      onCancelNoteDraft();
-      openThread = view;
-      threadsLoadedPaperId = null;
-      activeTab = "threads";
-    } catch (error) {
-      chatError = String(error);
-    } finally {
-      isBusy = false;
-    }
+    onClearSelection();
   }
 
   async function refreshOpenThread() {
-    if (!openThread) {
+    if (!openThread || openThread.thread.id === "") {
       return;
     }
     const threadId = openThread.thread.id;
@@ -367,7 +171,7 @@
     }
   }
 
-  function handleThreadKeydown(event: KeyboardEvent) {
+  function handleComposerKeydown(event: KeyboardEvent) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void ask();
@@ -380,28 +184,43 @@
       return;
     }
 
+    const virtual = openThread.thread.id === "";
+    const anchor = openThread.thread.anchor;
     const threadId = openThread.thread.id;
+    const askId = (askSequence += 1);
+    activeAskId = askId;
     isBusy = true;
-    chatError = "";
+    error = "";
     pendingQuestion = body;
     streamingAnswer = "";
     chatInput = "";
     try {
-      const view = await askChatThreadStreamed(threadId, body, (text) => {
-        if (openThread?.thread.id === threadId) {
+      const onDelta = (text: string) => {
+        if (activeAskId === askId) {
           streamingAnswer = (streamingAnswer ?? "") + text;
         }
-      });
-      if (openThread?.thread.id === threadId) {
+      };
+      const view = virtual
+        ? await askAtAnchorStreamed(scope, anchor, body, onDelta)
+        : await askChatThreadStreamed(threadId, body, onDelta);
+      if (activeAskId === askId) {
         openThread = view;
+        onReloadChat();
+        if (virtual) {
+          onClearSelection();
+        }
       }
-    } catch (error) {
-      chatError = String(error);
-      chatInput = body;
+    } catch (caught) {
+      if (activeAskId === askId) {
+        error = String(caught);
+        chatInput = body;
+      }
     } finally {
-      isBusy = false;
-      pendingQuestion = null;
-      streamingAnswer = null;
+      if (activeAskId === askId) {
+        isBusy = false;
+        pendingQuestion = null;
+        streamingAnswer = null;
+      }
     }
   }
 
@@ -411,30 +230,34 @@
       return;
     }
 
+    const virtual = openThread.thread.id === "";
+    const anchor = openThread.thread.anchor;
     const threadId = openThread.thread.id;
     isBusy = true;
-    chatError = "";
+    error = "";
     try {
-      const view = await addChatNote(threadId, body);
-      if (openThread?.thread.id === threadId) {
-        openThread = view;
-        chatInput = "";
+      const view = virtual ? await noteAtAnchor(scope, anchor, body) : await addChatNote(threadId, body);
+      openThread = view;
+      chatInput = "";
+      onReloadChat();
+      if (virtual) {
+        onClearSelection();
       }
-    } catch (error) {
-      chatError = String(error);
+    } catch (caught) {
+      error = String(caught);
     } finally {
       isBusy = false;
     }
   }
 
   async function togglePin(entry: ChatEntry) {
-    chatError = "";
+    error = "";
     try {
       await setChatEntryPinned(entry.id, !entry.pinned);
-      pinsLoadedPaperId = null;
       await refreshOpenThread();
-    } catch (error) {
-      chatError = String(error);
+      onReloadChat();
+    } catch (caught) {
+      error = String(caught);
     }
   }
 
@@ -442,26 +265,29 @@
     if (!openThread) {
       return;
     }
+    if (openThread.thread.id === "") {
+      backToThreadList();
+      return;
+    }
     const threadId = openThread.thread.id;
     try {
       await deleteChatThread(threadId);
       openThread = null;
-      threadsLoadedPaperId = null;
-      pinsLoadedPaperId = null;
-    } catch (error) {
-      chatError = String(error);
+      onReloadChat();
+    } catch (caught) {
+      error = String(caught);
     }
   }
 
   function startRename() {
-    if (openThread) {
+    if (openThread && openThread.thread.id !== "") {
       renameTitle = openThread.thread.title;
       renaming = true;
     }
   }
 
   async function commitRename() {
-    if (!openThread || !renameTitle.trim()) {
+    if (!openThread || openThread.thread.id === "" || !renameTitle.trim()) {
       renaming = false;
       return;
     }
@@ -469,9 +295,9 @@
     try {
       await renameChatThread(threadId, renameTitle);
       await refreshOpenThread();
-      threadsLoadedPaperId = null;
-    } catch (error) {
-      chatError = String(error);
+      onReloadChat();
+    } catch (caught) {
+      error = String(caught);
     } finally {
       renaming = false;
     }
@@ -489,22 +315,24 @@
     if (!summary) {
       return "";
     }
-    if (summary.includedChars === 0) {
-      return "Context: no paper text available";
+    // `includedChars` counts the paper body text; the foregrounded passage (for
+    // an anchored thread) is sent separately, so reflect that rather than
+    // claiming there was no context.
+    if (summary.includedChars > 0) {
+      const chars = summary.includedChars.toLocaleString();
+      return `Context: ${chars} chars${summary.truncated ? " · truncated" : ""}`;
     }
-    const chars = summary.includedChars.toLocaleString();
-    return `Context: ${chars} chars${summary.truncated ? " · truncated" : ""}`;
+    return openPassage ? "Context: selected passage only" : "Context: title + metadata only";
   }
 
   const tabs: Array<{ id: InspectorTab; label: string }> = [
-    { id: "notes", label: "Notes" },
     { id: "threads", label: "Threads" },
     { id: "pins", label: "Pins" },
     { id: "meta", label: "Meta" },
   ];
 </script>
 
-<aside bind:this={inspectorElement} class="reader-inspector hair-l">
+<aside class="reader-inspector hair-l">
   <header class="hair-b">
     <div class="paper-name truncate">{document.title}</div>
     <div class="mono-dim">paper / selected / reader</div>
@@ -519,121 +347,7 @@
   </nav>
 
   <div class="tab-panel">
-    {#if activeTab === "notes"}
-      <section>
-        <div class="row section-title">
-          <span class="label hot">Notes</span>
-          <div class="flex1"></div>
-          <span class="mono-dim">{notes.length}</span>
-        </div>
-
-        {#if notesEnabled}
-          {#if noteDraft}
-            <div class="note-draft">
-              <div class="label">{noteDraft.anchorKind === "pdf_rect" ? "PDF anchor" : "Selected quote"}</div>
-              <blockquote>{noteAnchorLabel(noteDraft)}</blockquote>
-              <textarea
-                bind:value={noteBody}
-                aria-label="Note body"
-                placeholder="Write a note..."
-                rows="5"
-                onkeydown={handleNoteKeydown}
-              ></textarea>
-              <div class="row note-actions">
-                <button class="btn primary" type="button" disabled={!canSave} onclick={() => void saveNote()}>
-                  {isSaving ? "Saving" : "Save"}
-                </button>
-                <button class="btn ghost" type="button" disabled={isBusy} onclick={() => void askFromSelection()}>
-                  Ask
-                </button>
-                <button class="btn ghost" type="button" disabled={isSaving} onclick={cancelDraft}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          {:else}
-            <p class="empty-note">Select text in the Reader to add a note or ask about it.</p>
-          {/if}
-
-          {#if noteError}
-            <p class="note-error">{noteError}</p>
-          {/if}
-
-          <div class="saved-notes">
-            <div class="label">Saved notes</div>
-            {#if isLoadingNotes}
-              <p class="empty-note">Loading notes...</p>
-            {:else if notes.length}
-              {#each notes as note}
-                <article
-                  class="saved-note"
-                  class:active={activeNoteId === note.id}
-                >
-                  {#if editingNoteId !== note.id}
-                    <button
-                      class="note-recall"
-                      type="button"
-                      aria-label="show note anchor"
-                      onclick={() => onActivateNote(note.id)}
-                    ></button>
-                  {/if}
-                  <div class="row saved-note-head">
-                    <blockquote>{noteAnchorLabel(note)}</blockquote>
-                    <div class="row note-buttons">
-                      <button
-                        class="note-icon"
-                        type="button"
-                        aria-label="edit note"
-                        disabled={Boolean(editingNoteId && editingNoteId !== note.id) || isUpdating}
-                        onclick={(event) => {
-                          event.stopPropagation();
-                          startEdit(note);
-                        }}
-                      >
-                        ✎
-                      </button>
-                      <button
-                        class="note-icon remove"
-                        type="button"
-                        aria-label="remove note"
-                        disabled={deletingNoteId === note.id || isUpdating}
-                        onclick={(event) => {
-                          event.stopPropagation();
-                          void deleteNote(note.id);
-                        }}
-                      >
-                        -
-                      </button>
-                    </div>
-                  </div>
-                  {#if editingNoteId === note.id}
-                    <textarea
-                      bind:value={editBody}
-                      aria-label="Edit note body"
-                      rows="4"
-                      onclick={(event) => event.stopPropagation()}
-                      onkeydown={handleEditKeydown}
-                    ></textarea>
-                    <div class="row note-actions">
-                      <button class="btn primary" type="button" disabled={!canUpdate} onclick={() => void updateNote()}>
-                        {isUpdating ? "Saving" : "Save"}
-                      </button>
-                    </div>
-                  {:else}
-                    <p>{note.body}</p>
-                  {/if}
-                  <div class="mono-dim">{note.updatedAt}</div>
-                </article>
-              {/each}
-            {:else}
-              <p class="empty-note">No saved notes yet.</p>
-            {/if}
-          </div>
-        {:else}
-          <p class="empty-note">Add this paper to a Vault before saving notes.</p>
-        {/if}
-      </section>
-    {:else if activeTab === "threads"}
+    {#if activeTab === "threads"}
       <section>
         {#if !chatEnabled}
           <div class="row section-title"><span class="label hot">Threads</span></div>
@@ -642,7 +356,9 @@
           <div class="row section-title">
             <button class="link-btn" type="button" onclick={backToThreadList}>‹ Threads</button>
             <div class="flex1"></div>
-            <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}>✎</button>
+            {#if !isVirtual}
+              <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}>✎</button>
+            {/if}
             <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}>-</button>
           </div>
 
@@ -659,8 +375,12 @@
             <div class="row note-actions">
               <button class="btn primary" type="button" onclick={() => void commitRename()}>Rename</button>
             </div>
-          {:else}
+          {:else if showTitle}
             <h3 class="thread-title">{openThread.thread.title}</h3>
+          {/if}
+
+          {#if openPassage}
+            <blockquote>{openPassage}</blockquote>
           {/if}
 
           <div class="thread-view">
@@ -701,8 +421,8 @@
               <p class="empty-note">Write a note or ask a question to start this thread.</p>
             {/if}
 
-            {#if chatError}
-              <p class="note-error">{chatError}</p>
+            {#if visibleError}
+              <p class="note-error">{visibleError}</p>
             {/if}
           </div>
 
@@ -713,7 +433,7 @@
               placeholder="Note this passage, or ask… (Enter asks, Shift+Enter newline)"
               rows="3"
               disabled={isBusy}
-              onkeydown={handleThreadKeydown}
+              onkeydown={handleComposerKeydown}
             ></textarea>
             <div class="row note-actions">
               <button class="btn ghost" type="button" disabled={!canSubmit} onclick={() => void addNote()}>Note</button>
@@ -730,14 +450,14 @@
           </div>
 
           <div class="thread-list">
-            <button class="thread-row" type="button" onclick={() => void openDocumentThread()}>
+            <button class="thread-row" type="button" onclick={openWholePaper}>
               <span class="thread-row-title">Whole paper</span>
               {#if documentThread}
                 <span class="mono-dim">{documentThread.pinnedCount > 0 ? "★ " : ""}{documentThread.entryCount}</span>
               {/if}
             </button>
 
-            {#if isLoadingThreads}
+            {#if isLoadingChat}
               <p class="empty-note">Loading threads…</p>
             {:else}
               {#each anchoredThreads as thread}
@@ -749,10 +469,10 @@
             {/if}
           </div>
 
-          <p class="empty-note">Select text in the Reader and choose “Ask” to start a thread about a passage.</p>
+          <p class="empty-note">Select text in the Reader and choose “Note” or “Ask” to start a thread about a passage.</p>
 
-          {#if chatError}
-            <p class="note-error">{chatError}</p>
+          {#if visibleError}
+            <p class="note-error">{visibleError}</p>
           {/if}
         {/if}
       </section>
@@ -766,7 +486,7 @@
 
         {#if !chatEnabled}
           <p class="empty-note">Add this paper to a Vault to collect highlights.</p>
-        {:else if isLoadingPins}
+        {:else if isLoadingChat}
           <p class="empty-note">Loading highlights…</p>
         {:else if pins.length}
           <div class="pins-list">
@@ -872,15 +592,8 @@
     align-items: center;
   }
 
-  .note-draft {
-    margin-top: 8px;
-    padding: 8px;
-    border: 1px solid var(--border-2);
-    background: rgba(107, 160, 168, 0.04);
-  }
-
   blockquote {
-    margin: 6px 0;
+    margin: 8px 0 0;
     padding: 0 0 0 8px;
     border-left: 2px solid var(--amber-mid);
     color: var(--fg-2);
@@ -890,7 +603,7 @@
 
   textarea {
     width: 100%;
-    min-height: 86px;
+    min-height: 72px;
     resize: vertical;
     padding: 7px;
     border: 1px solid var(--border-2);
@@ -917,50 +630,16 @@
     opacity: 0.45;
   }
 
-  .saved-notes {
-    margin-top: 10px;
+  .empty-note,
+  .note-error {
+    margin: 8px 0 0;
+    color: var(--fg-3);
+    font-size: 10.5px;
+    line-height: 1.45;
   }
 
-  .saved-note {
-    position: relative;
-    margin-top: 8px;
-    padding: 8px;
-    border: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.015);
-    cursor: pointer;
-  }
-
-  .saved-note.active {
-    border-color: var(--amber-dim);
-    background: rgba(242, 169, 59, 0.055);
-  }
-
-  .note-recall {
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-  }
-
-  .saved-note-head {
-    position: relative;
-    z-index: 1;
-    align-items: flex-start;
-    gap: 8px;
-    pointer-events: none;
-  }
-
-  .saved-note-head blockquote {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .note-buttons {
-    gap: 4px;
-    align-items: flex-start;
-    pointer-events: auto;
+  .note-error {
+    color: var(--red);
   }
 
   .note-icon {
@@ -985,40 +664,6 @@
   .note-icon.remove:hover {
     border-color: var(--border-2);
     background: rgba(227, 88, 74, 0.08);
-    color: var(--red);
-  }
-
-  .saved-note p {
-    position: relative;
-    z-index: 1;
-    margin: 6px 0;
-    color: var(--fg-1);
-    font-size: 11px;
-    line-height: 1.45;
-    pointer-events: none;
-  }
-
-  .saved-note textarea,
-  .saved-note .note-actions {
-    position: relative;
-    z-index: 1;
-  }
-
-  .saved-note .mono-dim {
-    position: relative;
-    z-index: 1;
-    pointer-events: none;
-  }
-
-  .empty-note,
-  .note-error {
-    margin: 8px 0 0;
-    color: var(--fg-3);
-    font-size: 10.5px;
-    line-height: 1.45;
-  }
-
-  .note-error {
     color: var(--red);
   }
 

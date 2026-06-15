@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { tick } from "svelte";
   import { TextLayer } from "pdfjs-dist/legacy/build/pdf.mjs";
   import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist/legacy/build/pdf.mjs";
-  import type { PaperNote } from "$lib/domain/library";
+  import type { ChatThreadSummary } from "$lib/domain/chat";
   import type { PdfRect, ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
 
@@ -14,24 +13,23 @@
     pdfDocument,
     pageNumber,
     scale,
-    notes,
-    activeNoteId,
-    noteDraft,
-    notesEnabled,
+    marks,
+    selection,
+    chatEnabled,
     sourceId,
-    onCreateNoteFromSelection,
-    onActivateNote,
+    onSelectPassage,
+    onOpenThread,
   }: {
     pdfDocument: PDFDocumentProxy;
     pageNumber: number;
     scale: number;
-    notes: PaperNote[];
-    activeNoteId: string | null;
-    noteDraft: ReaderTextSelection | null;
-    notesEnabled: boolean;
+    // Pinned threads anchored to this PDF source — the on-page highlights.
+    marks: ChatThreadSummary[];
+    selection: ReaderTextSelection | null;
+    chatEnabled: boolean;
     sourceId: string;
-    onCreateNoteFromSelection: (selection: ReaderTextSelection) => void;
-    onActivateNote: (noteId: string) => void;
+    onSelectPassage: (selection: ReaderTextSelection) => void;
+    onOpenThread: (threadId: string) => void;
   } = $props();
 
   let pageElement = $state<HTMLElement | null>(null);
@@ -44,8 +42,10 @@
   let pendingNote = $state<PendingNote | null>(null);
 
   const pageIndex = $derived(pageNumber - 1);
-  const pageNotes = $derived(notes.filter((note) => note.pageIndex === pageIndex));
-  const draftRects = $derived(noteDraft?.pageIndex === pageIndex ? rectsFromJson(noteDraft.rectsJson) : []);
+  const pageMarks = $derived(
+    marks.filter((mark) => mark.anchor.kind === "pdfRect" && mark.anchor.pageIndex === pageIndex),
+  );
+  const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
 
   $effect(() => {
     const document = pdfDocument;
@@ -107,18 +107,6 @@
     };
   });
 
-  $effect(() => {
-    const noteId = activeNoteId;
-    const root = pageElement;
-    if (!noteId || !root || !pageNotes.some((note) => note.id === noteId)) {
-      return;
-    }
-
-    tick().then(() => {
-      root.scrollIntoView({ behavior: "smooth", block: "center" });
-    });
-  });
-
   function renderCanvas(page: PDFPageProxy, viewport: PageViewport, canvas: HTMLCanvasElement) {
     const context = canvas.getContext("2d");
     if (!context) {
@@ -157,7 +145,7 @@
   }
 
   function updateSelectionAffordance() {
-    if (!notesEnabled || !pageElement) {
+    if (!chatEnabled || !pageElement) {
       pendingNote = null;
       return;
     }
@@ -232,12 +220,14 @@
     return rects;
   }
 
-  function createNote() {
+  // Both popover actions open this passage's thread; Note vs. Ask is chosen in
+  // the thread composer (RFC 0034).
+  function startThread() {
     if (!pendingNote) {
       return;
     }
 
-    onCreateNoteFromSelection({
+    onSelectPassage({
       sourceId: pendingNote.sourceId,
       startOffset: pendingNote.startOffset,
       endOffset: pendingNote.endOffset,
@@ -250,8 +240,8 @@
     pendingNote = null;
   }
 
-  function noteRects(note: PaperNote): PdfRect[] {
-    return rectsFromJson(note.rectsJson);
+  function markRects(mark: ChatThreadSummary): PdfRect[] {
+    return mark.anchor.kind === "pdfRect" ? rectsFromJson(mark.anchor.rectsJson) : [];
   }
 
   function rectsFromJson(rectsJson?: string): PdfRect[] {
@@ -283,17 +273,16 @@
   <canvas bind:this={canvasElement} aria-label={`PDF page ${pageNumber}`}></canvas>
   <div bind:this={textLayerElement} class="textLayer text-layer" aria-hidden="true"></div>
   <div class="annotation-layer" role="presentation">
-    {#each pageNotes as note}
-      {#each noteRects(note) as rect}
+    {#each pageMarks as mark}
+      {#each markRects(mark) as rect}
         <button
           class="pdf-note-anchor"
-          class:active={activeNoteId === note.id}
           type="button"
-          aria-label="Show note"
+          aria-label="Open thread"
           style={rectStyle(rect)}
           onclick={(event) => {
             event.stopPropagation();
-            onActivateNote(note.id);
+            onOpenThread(mark.id);
           }}
         ></button>
       {/each}
@@ -314,22 +303,16 @@
 </article>
 
 {#if pendingNote}
-  <button
-    class="comment-button"
-    type="button"
-    title="Add note"
-    aria-label="Add note"
+  <div
+    class="selection-popover"
     style={`left: ${pendingNote.x}px; top: ${pendingNote.y}px;`}
     onmousedown={(event) => event.preventDefault()}
-    onclick={createNote}
+    role="presentation"
   >
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M6 6.5h12v8H9.8L6 18.2V6.5Zm1.5 1.5v6.6l1.7-1.6h7.3V8h-9Z"
-        fill="currentColor"
-      />
-    </svg>
-  </button>
+    <button class="popover-action" type="button" onclick={startThread}>✎ Note</button>
+    <span class="popover-divider" aria-hidden="true"></span>
+    <button class="popover-action" type="button" onclick={startThread}>💬 Ask</button>
+  </div>
 {/if}
 
 <style>
@@ -416,12 +399,6 @@
     pointer-events: auto;
   }
 
-  .pdf-note-anchor.active {
-    border-color: rgba(107, 160, 168, 0.95);
-    background: rgba(107, 160, 168, 0.22);
-    box-shadow: 0 0 0 2px rgba(107, 160, 168, 0.18);
-  }
-
   .pdf-note-draft-anchor {
     position: absolute;
     border: 1px solid rgba(107, 160, 168, 0.95);
@@ -445,27 +422,35 @@
     color: var(--red);
   }
 
-  .comment-button {
+  .selection-popover {
     position: fixed;
     z-index: 40;
-    width: 28px;
-    height: 28px;
-    display: grid;
-    place-items: center;
+    display: flex;
+    align-items: stretch;
     border: 1px solid var(--amber);
     border-radius: 3px;
     background: var(--bg-1);
-    color: var(--amber);
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
-    cursor: pointer;
+    overflow: hidden;
   }
 
-  .comment-button:hover {
+  .popover-action {
+    border: 0;
+    background: transparent;
+    color: var(--amber);
+    font: inherit;
+    font-size: 11px;
+    padding: 5px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .popover-action:hover {
     background: rgba(242, 169, 59, 0.12);
   }
 
-  .comment-button svg {
-    width: 17px;
-    height: 17px;
+  .popover-divider {
+    width: 1px;
+    background: var(--amber-dim);
   }
 </style>

@@ -31,7 +31,10 @@ pub struct Paper {
     pub year: i32,
     pub citations: i32,
     pub tags: Vec<String>,
-    pub note_count: i32,
+    /// Count of pinned chat entries across this paper's threads (RFC 0034).
+    /// Computed on read from the chat tables; the legacy `note_count` column is
+    /// no longer surfaced.
+    pub highlight_count: i32,
     pub annotation_count: i32,
     pub status: String,
     #[serde(rename = "abstract")]
@@ -62,39 +65,6 @@ pub struct PaperDraft {
 pub struct PaperSourceDraft {
     pub source_kind: String,
     pub source_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PaperNote {
-    pub id: String,
-    pub paper_id: String,
-    pub source_id: String,
-    pub start_offset: i64,
-    pub end_offset: i64,
-    pub selected_text: String,
-    pub anchor_kind: String,
-    pub page_index: Option<i32>,
-    pub rects_json: Option<String>,
-    pub quote_context: Option<String>,
-    pub body: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PaperNoteDraft {
-    pub paper_id: String,
-    pub source_id: String,
-    pub start_offset: i64,
-    pub end_offset: i64,
-    pub selected_text: String,
-    pub anchor_kind: Option<String>,
-    pub page_index: Option<i32>,
-    pub rects_json: Option<String>,
-    pub quote_context: Option<String>,
-    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -112,7 +112,7 @@ function makeVaultWorkspace(snapshot: LibrarySnapshot, vaultId: string): VaultWo
     .sort((left, right) => right[1] - left[1])
     .slice(0, 6)
     .map(([tag, count]) => `${tag} x${count}`);
-  const noteCount = papers.reduce((sum, paper) => sum + paper.noteCount, 0);
+  const highlightCount = papers.reduce((sum, paper) => sum + paper.highlightCount, 0);
   const annotationCount = papers.reduce((sum, paper) => sum + paper.annotationCount, 0);
   const unreadCount = papers.filter((paper) => paper.status === "UNREAD").length;
 
@@ -123,7 +123,7 @@ function makeVaultWorkspace(snapshot: LibrarySnapshot, vaultId: string): VaultWo
     summary: `${papers.length} papers / ${unreadCount} unread / local`,
     tabs: [
       { label: "Papers", count: papers.length },
-      { label: "Notes", count: noteCount },
+      { label: "Highlights", count: highlightCount },
       { label: "Annotations", count: annotationCount },
       { label: "Graph" },
       { label: "Q&A" },
@@ -157,7 +157,7 @@ function candidateToPaper(candidateId: string): Paper | undefined {
     year: candidate.year,
     citations: candidate.citations,
     tags: [...candidate.tags],
-    noteCount: 0,
+    highlightCount: 0,
     annotationCount: 0,
     status: candidate.owned ? "READ" : "UNREAD",
     abstract: candidate.abstract ?? candidate.why,
@@ -305,24 +305,6 @@ export function isPaperInLibrary(paperId: string) {
 
 export function getCandidateVaultTargets(candidateId: string) {
   return library.vaults.filter((workspace) => workspace.papers.some((paper) => paper.id === candidateId));
-}
-
-export function incrementPaperNoteCount(paperId: string) {
-  for (const workspace of library.vaults) {
-    const paper = workspace.papers.find((item) => item.id === paperId);
-    if (paper) {
-      paper.noteCount += 1;
-    }
-  }
-}
-
-export function decrementPaperNoteCount(paperId: string) {
-  for (const workspace of library.vaults) {
-    const paper = workspace.papers.find((item) => item.id === paperId);
-    if (paper) {
-      paper.noteCount = Math.max(paper.noteCount - 1, 0);
-    }
-  }
 }
 
 export function paperFromDiscoverCandidate(candidateId: string) {

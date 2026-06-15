@@ -33,35 +33,22 @@ pub async fn get_chat_thread(
     chat_service.get_thread(&thread_id).await
 }
 
-/// Open (creating if needed) the scope's whole-paper thread.
+/// Add a self-authored note at an anchor, creating the thread lazily.
 #[tauri::command]
-pub async fn open_chat_document_thread(
-    chat_service: tauri::State<'_, ChatService>,
-    scope: ChatScope,
-) -> Result<ChatThreadView, String> {
-    chat_log(format!(
-        "open_chat_document_thread scope={}:{}",
-        scope.kind(),
-        scope.id()
-    ));
-    chat_service.open_document_thread(&scope).await
-}
-
-/// Create a thread for an anchor (e.g. a reader selection).
-#[tauri::command]
-pub async fn create_chat_thread(
+pub async fn add_note_at_anchor(
     chat_service: tauri::State<'_, ChatService>,
     scope: ChatScope,
     anchor: ThreadAnchor,
-    title: Option<String>,
+    body: String,
 ) -> Result<ChatThreadView, String> {
     chat_log(format!(
-        "create_chat_thread scope={}:{} anchor={}",
+        "add_note_at_anchor scope={}:{} anchor={} body_len={}",
         scope.kind(),
         scope.id(),
-        anchor.storage_kind()
+        anchor.storage_kind(),
+        body.len()
     ));
-    chat_service.create_thread(&scope, anchor, title).await
+    chat_service.add_note_at_anchor(&scope, anchor, body).await
 }
 
 /// Append a self-authored note (pinned by default) to a thread.
@@ -111,6 +98,43 @@ pub async fn ask_chat_thread_streamed(
     let deltas = on_event.clone();
     let result = chat_service
         .ask_in_thread_streamed(&thread_id, body, move |text| {
+            let _ = deltas.send(ChatStreamEvent::Delta { text });
+        })
+        .await;
+
+    match result {
+        Ok(thread) => {
+            let _ = on_event.send(ChatStreamEvent::Done { thread });
+        }
+        Err(message) => {
+            let _ = on_event.send(ChatStreamEvent::Error { message });
+        }
+    }
+    Ok(())
+}
+
+/// Ask at an anchor, streaming reply deltas; the thread is created lazily on
+/// success (RFC 0034). Like `ask_chat_thread_streamed`, always resolves
+/// `Ok(())` and reports the outcome via `Done` / `Error` events.
+#[tauri::command]
+pub async fn ask_at_anchor_streamed(
+    chat_service: tauri::State<'_, ChatService>,
+    scope: ChatScope,
+    anchor: ThreadAnchor,
+    body: String,
+    on_event: Channel<ChatStreamEvent>,
+) -> Result<(), String> {
+    chat_log(format!(
+        "ask_at_anchor_streamed scope={}:{} anchor={} body_len={}",
+        scope.kind(),
+        scope.id(),
+        anchor.storage_kind(),
+        body.len()
+    ));
+
+    let deltas = on_event.clone();
+    let result = chat_service
+        .ask_at_anchor_streamed(&scope, anchor, body, move |text| {
             let _ = deltas.send(ChatStreamEvent::Delta { text });
         })
         .await;
