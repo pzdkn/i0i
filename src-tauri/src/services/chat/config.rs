@@ -16,6 +16,9 @@ pub struct ChatConfig {
     api_key_env: String,
     pub model: String,
     pub max_context_chars: usize,
+    pub title_model: Option<String>,
+    pub title_max_tokens: u32,
+    pub title_timeout_ms: u64,
 }
 
 impl ChatConfig {
@@ -38,6 +41,24 @@ impl ChatConfig {
             api_key_env: app_config.chat.provider.api_key,
             model: app_config.chat.provider.model,
             max_context_chars: app_config.chat.provider.max_context_chars,
+            title_model: app_config
+                .chat
+                .provider
+                .title_model
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty()),
+            title_max_tokens: app_config
+                .chat
+                .provider
+                .title_max_tokens
+                .unwrap_or(24)
+                .max(1),
+            title_timeout_ms: app_config
+                .chat
+                .provider
+                .title_timeout_ms
+                .unwrap_or(5_000)
+                .max(1),
         })
     }
 
@@ -81,6 +102,12 @@ struct ChatProviderConfig {
     api_key: String,
     model: String,
     max_context_chars: usize,
+    #[serde(default)]
+    title_model: Option<String>,
+    #[serde(default)]
+    title_max_tokens: Option<u32>,
+    #[serde(default)]
+    title_timeout_ms: Option<u64>,
 }
 
 #[cfg(test)]
@@ -105,6 +132,34 @@ mod tests {
         assert_eq!(config.url, "https://openrouter.ai/api/v1/chat/completions");
         assert_eq!(config.model, "anthropic/claude-sonnet-4.5");
         assert_eq!(config.max_context_chars, 60000);
+        assert!(config.title_model.is_none());
+        assert_eq!(config.title_max_tokens, 24);
+        assert_eq!(config.title_timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn parses_optional_title_generation_config() {
+        let fixture = r#"{
+            "chat": {
+                "provider": {
+                    "url": "https://openrouter.ai/api/v1/chat/completions",
+                    "api_key": "OPENROUTER_API_KEY",
+                    "model": "anthropic/claude-sonnet-4.5",
+                    "max_context_chars": 60000,
+                    "title_model": "anthropic/claude-sonnet-4.5",
+                    "title_max_tokens": 18,
+                    "title_timeout_ms": 2500
+                }
+            }
+        }"#;
+        let config = ChatConfig::from_json(fixture).expect("chat block parses");
+
+        assert_eq!(
+            config.title_model.as_deref(),
+            Some("anthropic/claude-sonnet-4.5")
+        );
+        assert_eq!(config.title_max_tokens, 18);
+        assert_eq!(config.title_timeout_ms, 2500);
     }
 
     #[test]
@@ -114,6 +169,9 @@ mod tests {
             api_key_env: "   ".to_string(),
             model: "m".to_string(),
             max_context_chars: 10,
+            title_model: None,
+            title_max_tokens: 24,
+            title_timeout_ms: 5_000,
         };
         let error = config
             .resolve_api_key()
@@ -128,6 +186,9 @@ mod tests {
             api_key_env: "I0I_CHAT_KEY_DEFINITELY_MISSING_XYZ".to_string(),
             model: "m".to_string(),
             max_context_chars: 10,
+            title_model: None,
+            title_max_tokens: 24,
+            title_timeout_ms: 5_000,
         };
         let error = config
             .resolve_api_key()

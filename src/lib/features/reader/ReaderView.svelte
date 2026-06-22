@@ -43,22 +43,60 @@
   const hasCachedPdf = $derived(Boolean(readerDocument?.pdfLocalPath));
 
   onMount(() => {
-    let unlisten: (() => void) | undefined;
+    let unlistenSource: (() => void) | undefined;
+    let unlistenExtraction: (() => void) | undefined;
+    let unlistenChatThread: (() => void) | undefined;
 
     listen("document_source_updated", (event) => {
-      const payload = event.payload as { paper_id: string };
-      if (payload.paper_id === paper.id) {
+      const payload = event.payload as { paperId?: string; paper_id?: string };
+      if ((payload.paperId ?? payload.paper_id) === paper.id) {
         refreshTick += 1;
       }
     })
       .then((nextUnlisten) => {
-        unlisten = nextUnlisten;
+        unlistenSource = nextUnlisten;
       })
       .catch((error) => {
         console.error("Failed to listen for document_source_updated:", error);
       });
 
-    return () => unlisten?.();
+    listen("document_extraction_updated", (event) => {
+      const payload = event.payload as { paperId?: string; paper_id?: string };
+      if ((payload.paperId ?? payload.paper_id) === paper.id) {
+        refreshTick += 1;
+      }
+    })
+      .then((nextUnlisten) => {
+        unlistenExtraction = nextUnlisten;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for document_extraction_updated:", error);
+      });
+
+    listen("chat_thread_updated", (event) => {
+      const payload = event.payload as { threadId?: string; thread_id?: string; title?: string };
+      const threadId = payload.threadId ?? payload.thread_id;
+      const title = payload.title;
+      if (!threadId || !title) {
+        return;
+      }
+      threads = threads.map((thread) => (thread.id === threadId ? { ...thread, title } : thread));
+      pins = pins.map((pin) =>
+        pin.entry.threadId === threadId ? { ...pin, threadTitle: title } : pin,
+      );
+    })
+      .then((nextUnlisten) => {
+        unlistenChatThread = nextUnlisten;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for chat_thread_updated:", error);
+      });
+
+    return () => {
+      unlistenSource?.();
+      unlistenExtraction?.();
+      unlistenChatThread?.();
+    };
   });
 
   // Fetch real ReaderDocument from backend whenever paper changes or refreshTick increments

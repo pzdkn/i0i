@@ -209,6 +209,14 @@ pub struct PinnedHighlight {
     pub anchor: ThreadAnchor,
 }
 
+/// Event emitted when background title generation updates a thread title.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThreadUpdated {
+    pub thread_id: String,
+    pub title: String,
+}
+
 /// What the model actually saw, rendered in the UI so context is inspectable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

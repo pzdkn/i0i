@@ -83,7 +83,7 @@
         oncontextmenu={(event) => showContextMenu(event, paper.id)}
       >
         <span class="year">{paper.year}</span>
-        <span class="venue">{paper.venue}</span>
+        <span class="venue truncate" title={paper.venue}>{paper.venue}</span>
         <span class="title truncate">{paper.title}</span>
         <span class="authors truncate">
           {paper.authors.slice(0, 2).join(", ")}{paper.authors.length > 2 ? ` +${paper.authors.length - 2}` : ""}

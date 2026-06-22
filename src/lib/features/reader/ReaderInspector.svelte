@@ -109,6 +109,28 @@
     onConsumeRequestedThread();
   });
 
+  // Background title generation updates the parent `threads` list first; keep
+  // the open thread header in sync without refetching its entries.
+  $effect(() => {
+    if (!openThread || openThread.thread.id === "") {
+      return;
+    }
+    const updated = threads.find((thread) => thread.id === openThread!.thread.id);
+    if (updated && updated.title !== openThread.thread.title) {
+      openThread = {
+        ...openThread,
+        thread: {
+          ...openThread.thread,
+          title: updated.title,
+          updatedAt: updated.updatedAt,
+        },
+      };
+      if (renaming) {
+        renameTitle = updated.title;
+      }
+    }
+  });
+
   function anchorFromSelection(sel: ReaderTextSelection): ThreadAnchor {
     if (sel.anchorKind === "pdf_rect") {
       return {

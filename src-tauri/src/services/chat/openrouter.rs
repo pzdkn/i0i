@@ -19,6 +19,8 @@ pub(super) struct CompletionRequest {
     pub model: String,
     pub messages: Vec<WireMessage>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

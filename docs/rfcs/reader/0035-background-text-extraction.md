@@ -1,10 +1,11 @@
-# RFC 0035: Background Text Extraction (+ Thread-Title Generation)
+# RFC 0035: Background Text Extraction
 
 Status: Draft
 Date: 2026-06-15
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first
 Builds on: RFC 0024 (PDF ingestion + cache), RFC 0025 (extractor evaluation), RFC 0033/0034 (anchored chat threads)
+Related: RFC 0036 (thread-title generation)
 
 ## Summary
 
@@ -21,10 +22,6 @@ real paper text. The richer **MinerU** structured pipeline stays deferred —
 RFC 0025's "PDF mode is the fast path; MinerU is optional enrichment" still
 holds; this is the `PdfiumBasicAdapter` it named.
 
-As a small **side-quest**, a new chat thread gets an auto-generated *topic*
-title from a cheap model on its first message — so the Threads list and the open
-thread show a human label instead of the raw passage.
-
 ## Decisions (settled before drafting)
 
 1. **Scope = text only, to feed chat.** A `pdfium_basic` adapter that produces
@@ -33,10 +30,6 @@ thread show a human label instead of the raw passage.
 2. **Run in the background after a PDF is cached.** Chat is warm the moment a
    paper opens, even before the reader renders. Reuses the existing
    `PdfDownloadManager` queue/worker/event pattern. (Chosen: "A1".)
-3. **Thread titles are auto-generated on first message** by a cheap OpenRouter
-   model, off the critical path, and never overwrite a user's rename. The
-   passage stays as the quote block (RFC 0034); the generated topic becomes the
-   heading.
 
 ## Goals
 
@@ -46,7 +39,6 @@ thread show a human label instead of the raw passage.
   expose a manual re-extract command.
 - Chat's existing `build_context` immediately benefits — no chat changes needed
   beyond what RFC 0034 already does.
-- Auto-title new threads from their first message (cheap model, background).
 
 ## Non-Goals
 
@@ -119,36 +111,17 @@ payload) on every status change.
 
 ### Native library
 
-`pdfium-render` needs a native Pdfium (`libpdfium.dylib` on macOS). We bundle it
-as a Tauri resource and point the loader at the resolved resource path. macOS
-first; Windows/Linux binaries are a packaging follow-up, not a code change.
+`pdfium-render` needs a native Pdfium (`libpdfium.dylib` on macOS). The loader
+tries, in order:
 
-## Design — Thread-Title Generation (side-quest)
+1. `I0I_PDFIUM_LIBRARY_PATH`
+2. `[pdf_extraction].pdfium_library_path` in `i0i.config.toml`
+3. Tauri resource paths (`libpdfium.dylib`, `pdfium/libpdfium.dylib`)
+4. local extractor-spike virtualenv paths, as a developer convenience
+5. the system library path
 
-When a thread's create-or-get **actually creates** the row (its first entry),
-spawn a **background** task that asks a cheap model for a short topic and updates
-the title — off the critical path, so notes stay instant and the first answer
-still streams immediately. The "created vs. continued" signal comes from the
-store's create-or-get (`find_or_create_thread_id` returns whether it inserted),
-so appending later turns to an existing whole-paper thread never re-triggers it.
-
-```text
-input:  first user entry (note body or question) + anchor passage (if any)
-prompt: "Reply with a 3–6 word topic for this thread. Title Case, no quotes,
-         no trailing punctuation."  (small max_tokens)
-write:  set thread.title = topic  ONLY IF the title still equals its auto
-        default (anchor.default_title(): the passage, or "Whole paper")
-emit:   chat_thread_updated { threadId, title }
-```
-
-- **Never clobbers a rename:** the guard "title still equals the auto default"
-  means a user rename (custom title) is left alone. Generation runs once.
-- **Failure is silent:** keep the default title, log only.
-- **Config:** add a cheap `title_model` to the chat provider block (same URL +
-  `OPENROUTER_API_KEY`). Falls back to skipping generation if unset.
-- **Frontend:** `ReaderView` listens for `chat_thread_updated` and refreshes the
-  Threads list + open thread title. With RFC 0034's de-dup, the generated topic
-  now shows as the heading while the passage shows as the quote block.
+Packaging should still bundle Pdfium as a Tauri resource. Windows/Linux binaries
+are a packaging follow-up, not a Reader data-model change.
 
 ## Architecture
 
@@ -164,12 +137,6 @@ flowchart TB
   EX -. document_extraction_updated .-> UI[Reader/Library]
   DB -->|join blocks → source_text| RS[reader_service.get_reader_document]
   RS --> CHAT[ChatService.build_context]
-
-  subgraph ChatSideQuest
-    FIRST[first entry of a new thread] -->|spawn| TITLE[title job: cheap model]
-    TITLE -->|update title if still default| T[(chat_threads.title)]
-    TITLE -. chat_thread_updated .-> UI
-  end
 ```
 
 ## Data Model
@@ -177,11 +144,11 @@ flowchart TB
 No new tables. Reuse `document_extractions` / `document_pages` /
 `document_blocks` (FK `paper_id` cascade already covers deletes). `pdfium_basic`
 writes pages + one block/page; `document_spans` / `document_assets` stay empty.
-`chat_threads.title` is updated in place by the title job. No schema migration.
+No schema migration.
 
 ## Backend Changes
 
-- **New** `services/extraction/` (or `pdf_extraction.rs`): `PdfiumBasicAdapter`
+- **New** `pdf_extraction.rs`: `PdfiumBasicAdapter`
   (PDF → `ExtractedDocument`, text-only) + `ExtractionManager` (queue, worker,
   status, events, startup recovery).
 - **`pdf_ingestion.rs`:** enqueue extraction after a source is cached.
@@ -190,35 +157,14 @@ writes pages + one block/page; `document_spans` / `document_assets` stay empty.
   `ready`, and a "cached sources lacking a ready extraction" query for recovery.
 - **`commands/`:** `extract_paper_document`; register it + manage
   `ExtractionManager` in `lib.rs`; recover on startup.
-- **Chat (side-quest):** `ChatConfig.title_model`; `find_or_create_thread_id`
-  surfaces a `created` flag; a `generate_thread_title` path on `ChatService`
-  spawned from the first-entry commands (`add_note_at_anchor`,
-  `ask_at_anchor_streamed`) only when `created`, emitting `chat_thread_updated`.
 - **`Cargo.toml`:** add `pdfium-render`; bundle `libpdfium.dylib` via Tauri
   resources.
 
 ## Frontend Changes
 
-- Listen for `chat_thread_updated` in `ReaderView` → patch the thread's title in
-  `threads` and in the open thread. (Optionally listen for
-  `document_extraction_updated` to show an "extracting…/ready" hint; not
-  required for chat to work.)
-- No reader-render changes; no inspector changes beyond the title refresh.
-
-## UI (ASCII)
-
-```
-Threads list (after first message on a passage)
-  ┌──────────────────────────────────────────────┐
-  │ Scaled Dot-Product Scaling      ☆ 2          │   ← generated topic (heading)
-  │ Whole paper                     ★ 5          │
-  └──────────────────────────────────────────────┘
-
-Open thread
-  Scaled Dot-Product Scaling                         ← generated topic
-  > we divide the dot products by sqrt(d_k) …        ← the passage (quote block)
-  [ Note ] [ Ask ]
-```
+- Optionally listen for `document_extraction_updated` in `ReaderView` to show an
+  "extracting…/ready" hint; not required for chat to work.
+- No reader-render changes; no required inspector changes.
 
 ## Risks
 
@@ -231,9 +177,6 @@ Open thread
 - **In-process extraction stalls the worker.** A pathological PDF could hang the
   extraction thread; mitigate with the page cap + time budget and `failed` on
   overrun.
-- **Title cost/latency/races.** One cheap call per new thread, backgrounded and
-  capped; the "still default" guard avoids clobbering renames; the event is
-  idempotent (sets a title).
 
 ## Validation Plan
 
@@ -249,24 +192,15 @@ Unit tests (TDD):
   then returns non-empty `source_text`.
 - first `ready` sets `active_extraction_id`; second extraction does not overwrite.
 - idempotency: re-running without `force` is a no-op; `force` replaces.
-- title guard: generated topic applies when title is the default; a renamed
-  thread is left unchanged.
 
 Integration (manual):
 - Add a paper → PDF downloads → shortly after, open it → chat footnote shows
   `Context: N chars` (not "selected passage only").
-- Ask on a fresh passage → a topic heading appears within a moment; the passage
-  remains as the quote block; renaming sticks.
 - Delete the paper → its extraction rows are gone.
 
 ## Open Questions
 
 - **Pdfium bundling location** for the packaged app (Tauri `resources` vs.
   sidecar). Proposal: Tauri resource, resolved via the resource dir.
-- **`title_model` default.** Proposal: a cheap OpenRouter model (e.g.
-  `anthropic/claude-haiku-4.5`), configurable; skip titling if unset.
-- **Auto-title the whole-paper thread too,** or keep "Whole paper"? Proposal:
-  auto-title it (a topic from the first question reads better), still rename-safe.
 - **Reading order for multi-column.** Accept `pdfium` order now; revisit with
   MinerU.
-```

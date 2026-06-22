@@ -6,19 +6,24 @@
 //! inlined once per turn rather than per entry. A turn is persisted only after
 //! the reply succeeds, so a failed request leaves no orphaned entries.
 
+use std::time::Duration;
+
 use reqwest::Client;
+use tauri::{AppHandle, Emitter};
 
 use super::config::ChatConfig;
 use super::context::build_context;
 use super::openrouter::{self, CompletionRequest, WireMessage};
 use crate::domain::chat::{
-    ChatContextSummary, ChatEntry, ChatEntryDraft, ChatScope, ChatThreadSummary, ChatThreadView,
-    PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
+    ChatContextSummary, ChatEntry, ChatEntryDraft, ChatScope, ChatThreadSummary, ChatThreadUpdated,
+    ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
 };
 use crate::services::reader_service::ReaderService;
 use crate::storage::library_store::LibraryStore;
 
+#[derive(Clone)]
 pub struct ChatService {
+    app: AppHandle,
     client: Client,
     config: ChatConfig,
     store: LibraryStore,
@@ -26,7 +31,12 @@ pub struct ChatService {
 }
 
 impl ChatService {
-    pub fn new(config: ChatConfig, store: LibraryStore, reader: ReaderService) -> Self {
+    pub fn new(
+        app: AppHandle,
+        config: ChatConfig,
+        store: LibraryStore,
+        reader: ReaderService,
+    ) -> Self {
         let client = Client::builder()
             .user_agent(concat!(
                 env!("CARGO_PKG_NAME"),
@@ -37,6 +47,7 @@ impl ChatService {
             .build()
             .expect("reqwest client should build");
         Self {
+            app,
             client,
             config,
             store,
@@ -44,8 +55,12 @@ impl ChatService {
         }
     }
 
-    pub fn from_app_config(store: LibraryStore, reader: ReaderService) -> Result<Self, String> {
-        Ok(Self::new(ChatConfig::load()?, store, reader))
+    pub fn from_app_config(
+        app: AppHandle,
+        store: LibraryStore,
+        reader: ReaderService,
+    ) -> Result<Self, String> {
+        Ok(Self::new(app, ChatConfig::load()?, store, reader))
     }
 
     /// List a scope's threads with entry/pin counts (newest activity first).
@@ -72,8 +87,19 @@ impl ChatService {
         if body.is_empty() {
             return Err("Enter a note before saving.".to_string());
         }
-        self.store
-            .add_note_at_anchor(scope.kind(), scope.id(), &anchor, body)
+        let default_title = anchor.default_title();
+        let selected_text = anchor.selected_text().map(ToString::to_string);
+        let write =
+            self.store
+                .add_note_at_anchor_with_creation(scope.kind(), scope.id(), &anchor, body)?;
+        self.spawn_title_generation_if_created(
+            write.created,
+            write.view.thread.id.clone(),
+            default_title,
+            body.to_string(),
+            selected_text,
+        );
+        Ok(write.view)
     }
 
     /// Append a self-authored note (pinned by default) and return the thread.
@@ -119,6 +145,7 @@ impl ChatService {
             model: self.config.model.clone(),
             messages: prep.request_messages,
             stream: false,
+            max_tokens: None,
         };
         let answer =
             openrouter::complete(&self.client, &self.config.url, &prep.api_key, &request).await?;
@@ -141,6 +168,7 @@ impl ChatService {
             model: self.config.model.clone(),
             messages: prep.request_messages,
             stream: true,
+            max_tokens: None,
         };
         let answer = openrouter::complete_streamed(
             &self.client,
@@ -174,6 +202,7 @@ impl ChatService {
             model: self.config.model.clone(),
             messages: prep.request_messages,
             stream: true,
+            max_tokens: None,
         };
         let answer = openrouter::complete_streamed(
             &self.client,
@@ -183,13 +212,23 @@ impl ChatService {
             on_delta,
         )
         .await?;
-        self.store.persist_anchored_turn(
+        let default_title = anchor.default_title();
+        let selected_text = anchor.selected_text().map(ToString::to_string);
+        let write = self.store.persist_anchored_turn_with_creation(
             scope.kind(),
             scope.id(),
             &anchor,
-            &ChatEntryDraft::question(prep.user_body),
+            &ChatEntryDraft::question(prep.user_body.clone()),
             &ChatEntryDraft::answer(answer, self.config.model.clone(), prep.summary),
-        )
+        )?;
+        self.spawn_title_generation_if_created(
+            write.created,
+            write.view.thread.id.clone(),
+            default_title,
+            prep.user_body,
+            selected_text,
+        );
+        Ok(write.view)
     }
 
     /// Assemble the prompt for a brand-new anchored ask — persisting nothing.
@@ -277,6 +316,81 @@ impl ChatService {
         )?;
         self.store.get_chat_thread(thread_id)
     }
+
+    fn spawn_title_generation_if_created(
+        &self,
+        created: bool,
+        thread_id: String,
+        default_title: String,
+        first_entry_body: String,
+        selected_text: Option<String>,
+    ) {
+        if !created || self.config.title_model.is_none() {
+            return;
+        }
+
+        let service = self.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = service
+                .generate_and_apply_thread_title(
+                    thread_id,
+                    default_title,
+                    first_entry_body,
+                    selected_text,
+                )
+                .await
+            {
+                chat_title_log(format!("title generation skipped/failed: {error}"));
+            }
+        });
+    }
+
+    async fn generate_and_apply_thread_title(
+        &self,
+        thread_id: String,
+        default_title: String,
+        first_entry_body: String,
+        selected_text: Option<String>,
+    ) -> Result<(), String> {
+        let Some(model) = self.config.title_model.clone() else {
+            return Ok(());
+        };
+        let api_key = self.config.resolve_api_key()?;
+        let request = CompletionRequest {
+            model,
+            messages: build_title_messages(&first_entry_body, selected_text.as_deref()),
+            stream: false,
+            max_tokens: Some(self.config.title_max_tokens),
+        };
+
+        let raw_title = tokio::time::timeout(
+            Duration::from_millis(self.config.title_timeout_ms),
+            openrouter::complete(&self.client, &self.config.url, &api_key, &request),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "Thread title generation timed out after {} ms",
+                self.config.title_timeout_ms
+            )
+        })??;
+        let title = clean_generated_title(&raw_title)
+            .ok_or_else(|| "Generated title was empty".to_string())?;
+
+        if let Some(thread) =
+            self.store
+                .rename_chat_thread_if_title_is(&thread_id, &default_title, &title)?
+        {
+            let _ = self.app.emit(
+                "chat_thread_updated",
+                ChatThreadUpdated {
+                    thread_id: thread.id,
+                    title: thread.title,
+                },
+            );
+        }
+        Ok(())
+    }
 }
 
 /// A prepared ask: the resolved key, the user's message (persisted only on
@@ -319,6 +433,56 @@ fn build_wire_messages(
     messages
 }
 
+fn build_title_messages(first_entry_body: &str, selected_text: Option<&str>) -> Vec<WireMessage> {
+    let mut prompt = String::from(
+        "Reply with a 3-6 word topic for this research chat thread. \
+         Use Title Case. No quotes. No trailing punctuation.\n\n",
+    );
+    if let Some(selected_text) = selected_text {
+        let selected_text = selected_text.trim();
+        if !selected_text.is_empty() {
+            prompt.push_str("Selected passage:\n");
+            prompt.push_str(selected_text);
+            prompt.push_str("\n\n");
+        }
+    }
+    prompt.push_str("First user entry:\n");
+    prompt.push_str(first_entry_body.trim());
+
+    vec![WireMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }]
+}
+
+fn clean_generated_title(raw: &str) -> Option<String> {
+    let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = one_line
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .trim_end_matches(['.', '!', '?', ':', ';'])
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(
+        trimmed
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn chat_title_log(message: impl AsRef<str>) {
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    eprintln!("[chat-title {timestamp_ms}] {}", message.as_ref());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +519,28 @@ mod tests {
         assert_eq!(wire[3].role, "assistant"); // answer → assistant
         assert_eq!(wire[4].role, "user");
         assert_eq!(wire[4].content, "the new question");
+    }
+
+    #[test]
+    fn generated_title_cleanup_removes_wrapping_and_caps_word_count() {
+        assert_eq!(
+            clean_generated_title(" \"scaled dot-product attention behavior.\" "),
+            Some("scaled dot-product attention behavior".to_string())
+        );
+        assert_eq!(
+            clean_generated_title("one two three four five six seven eight"),
+            Some("one two three four five six".to_string())
+        );
+        assert_eq!(clean_generated_title("   "), None);
+    }
+
+    #[test]
+    fn title_prompt_includes_anchor_passage_and_first_entry() {
+        let messages = build_title_messages("why does this matter?", Some("scaled dot-product"));
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].content.contains("Selected passage"));
+        assert!(messages[0].content.contains("scaled dot-product"));
+        assert!(messages[0].content.contains("why does this matter?"));
     }
 }

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
 use crate::domain::library::DocumentSource;
+use crate::pdf_extraction::PdfExtractionManager;
 use crate::storage::library_store::LibraryStore;
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
@@ -32,6 +33,7 @@ pub struct PdfDownloadManager {
     app: AppHandle,
     store: LibraryStore,
     config: PdfIngestionConfig,
+    pdf_extractions: PdfExtractionManager,
     client: reqwest::Client,
     semaphore: Arc<Semaphore>,
     queued_or_active: Arc<Mutex<HashSet<String>>>,
@@ -127,7 +129,12 @@ impl Default for PdfIngestionConfig {
 }
 
 impl PdfDownloadManager {
-    pub fn new(app: AppHandle, store: LibraryStore, config: PdfIngestionConfig) -> Self {
+    pub fn new(
+        app: AppHandle,
+        store: LibraryStore,
+        config: PdfIngestionConfig,
+        pdf_extractions: PdfExtractionManager,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .user_agent(concat!(
                 env!("CARGO_PKG_NAME"),
@@ -139,6 +146,7 @@ impl PdfDownloadManager {
         Self {
             app,
             store,
+            pdf_extractions,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent_downloads)),
             config,
             client,
@@ -197,6 +205,7 @@ impl PdfDownloadManager {
                 .store
                 .set_document_source_cached(&source.id, local_path)?;
             self.emit_update(&source, None, None);
+            self.pdf_extractions.queue_source(source.id, false);
             return Ok(());
         }
 
@@ -220,6 +229,7 @@ impl PdfDownloadManager {
 
         let source = self.store.get_document_source(&source_id)?;
         if source.status == "cached" {
+            self.pdf_extractions.queue_source(source.id, false);
             return Ok(());
         }
         if source.source_kind != "pdf" {
@@ -357,6 +367,7 @@ impl PdfDownloadManager {
             bytes_downloaded,
             local_path.display()
         ));
+        self.pdf_extractions.queue_source(source.id.clone(), false);
 
         Ok(source)
     }

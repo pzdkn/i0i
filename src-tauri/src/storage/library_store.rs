@@ -24,6 +24,11 @@ pub struct LibraryStore {
     db_path: PathBuf,
 }
 
+pub struct AnchoredThreadWrite {
+    pub view: ChatThreadView,
+    pub created: bool,
+}
+
 #[derive(Clone)]
 struct SeedVault {
     id: &'static str,
@@ -191,6 +196,299 @@ impl LibraryStore {
         )
         .map_err(|error| error.to_string())?;
         read_document_source(&conn, source_id)
+    }
+
+    pub fn resolve_cached_pdf_source(
+        &self,
+        paper_id: &str,
+        source_id: Option<&str>,
+    ) -> StoreResult<DocumentSource> {
+        let conn = self.open_connection()?;
+        if let Some(source_id) = source_id {
+            let source = read_document_source(&conn, source_id)?;
+            if source.paper_id != paper_id {
+                return Err(format!(
+                    "Document source {source_id} does not belong to paper {paper_id}"
+                ));
+            }
+            if source.source_kind != "pdf" || source.status != "cached" {
+                return Err(format!("Document source is not a cached PDF: {source_id}"));
+            }
+            if source.local_path.is_none() {
+                return Err(format!("Cached PDF source has no local path: {source_id}"));
+            }
+            return Ok(source);
+        }
+
+        conn.query_row(
+            "
+            select s.id, s.paper_id, s.source_kind, s.source_url, s.local_path,
+                   s.status, s.error, s.created_at, s.updated_at
+            from document_sources s
+            left join papers p on p.id = s.paper_id
+            where s.paper_id = ?1
+              and s.source_kind = 'pdf'
+              and s.status = 'cached'
+              and s.local_path is not null
+            order by case when p.active_source_id = s.id then 0 else 1 end,
+                     s.updated_at desc,
+                     s.id
+            limit 1
+            ",
+            params![paper_id],
+            document_source_from_row,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn cached_pdf_sources_without_ready_extraction(
+        &self,
+        extractor: &str,
+    ) -> StoreResult<Vec<DocumentSource>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "
+                select s.id, s.paper_id, s.source_kind, s.source_url, s.local_path,
+                       s.status, s.error, s.created_at, s.updated_at
+                from document_sources s
+                where s.source_kind = 'pdf'
+                  and s.status = 'cached'
+                  and s.local_path is not null
+                  and not exists (
+                    select 1 from document_extractions e
+                    where e.source_id = s.id
+                      and e.extractor = ?1
+                      and e.status = 'ready'
+                  )
+                order by s.updated_at asc, s.id
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = stmt
+            .query_map(params![extractor], document_source_from_row)
+            .map_err(|error| error.to_string())?;
+
+        collect_rows(rows)
+    }
+
+    pub fn stale_document_extractions(
+        &self,
+        extractor: &str,
+    ) -> StoreResult<Vec<DocumentExtraction>> {
+        let conn = self.open_connection()?;
+        read_document_extractions_by_status(&conn, extractor, "extracting")
+    }
+
+    pub fn ready_document_extraction_for_source(
+        &self,
+        source_id: &str,
+        extractor: &str,
+    ) -> StoreResult<Option<DocumentExtraction>> {
+        let conn = self.open_connection()?;
+        read_document_extraction_for_source(&conn, source_id, extractor, "ready")
+    }
+
+    pub fn start_document_extraction(
+        &self,
+        source_id: &str,
+        extractor: &str,
+        extractor_version: &str,
+        annotation_source_id: &str,
+        force: bool,
+    ) -> StoreResult<DocumentExtraction> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let source = read_document_source(&tx, source_id)?;
+        if source.source_kind != "pdf" || source.status != "cached" {
+            return Err(format!("Document source is not a cached PDF: {source_id}"));
+        }
+        if source.local_path.is_none() {
+            return Err(format!("Cached PDF source has no local path: {source_id}"));
+        }
+
+        let existing = read_document_extraction_by_annotation_source(&tx, annotation_source_id)?;
+        if let Some(existing) = existing {
+            if existing.status == "ready" && !force {
+                return Ok(existing);
+            }
+
+            if force {
+                tx.execute(
+                    "delete from document_extractions where id = ?1",
+                    params![existing.id],
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                clear_extraction_children(&tx, &existing.id)?;
+                tx.execute(
+                    "
+                    update document_extractions
+                    set extractor_version = ?2,
+                        status = 'extracting',
+                        error = null,
+                        updated_at = datetime('now')
+                    where id = ?1
+                    ",
+                    params![existing.id, extractor_version],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.commit().map_err(|error| error.to_string())?;
+                let conn = self.open_connection()?;
+                return read_document_extraction(&conn, &existing.id);
+            }
+        }
+
+        let extraction_id = document_extraction_id(source_id, extractor);
+        tx.execute(
+            "
+            insert into document_extractions (
+              id, paper_id, source_id, extractor, extractor_version,
+              annotation_source_id, status, error, created_at, updated_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, 'extracting', null, datetime('now'), datetime('now'))
+            ",
+            params![
+                extraction_id,
+                source.paper_id,
+                source.id,
+                extractor,
+                extractor_version,
+                annotation_source_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_document_extraction(&conn, &extraction_id)
+    }
+
+    pub fn finish_document_extraction(
+        &self,
+        extraction_id: &str,
+        pages: &[DocumentPage],
+        blocks: &[DocumentBlock],
+    ) -> StoreResult<DocumentExtraction> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        clear_extraction_children(&tx, extraction_id)?;
+
+        for page in pages {
+            tx.execute(
+                "
+                insert into document_pages (
+                  id, paper_id, source_id, extraction_id, page_index, width, height
+                )
+                values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ",
+                params![
+                    page.id,
+                    page.paper_id,
+                    page.source_id,
+                    page.extraction_id,
+                    page.page_index,
+                    page.width,
+                    page.height,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        for block in blocks {
+            tx.execute(
+                "
+                insert into document_blocks (
+                  id, paper_id, source_id, extraction_id, page_index,
+                  block_index, reading_order, kind, text, asset_id,
+                  source_start, source_end, bbox_json
+                )
+                values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                ",
+                params![
+                    block.id,
+                    block.paper_id,
+                    block.source_id,
+                    block.extraction_id,
+                    block.page_index,
+                    block.block_index,
+                    block.reading_order,
+                    block.kind,
+                    block.text,
+                    block.asset_id,
+                    block.source_start,
+                    block.source_end,
+                    block.bbox_json,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        tx.execute(
+            "
+            update document_extractions
+            set status = 'ready', error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![extraction_id],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "
+            update papers
+            set active_extraction_id = coalesce(active_extraction_id, ?1),
+                updated_at = datetime('now')
+            where id = (
+              select paper_id from document_extractions where id = ?1
+            )
+            ",
+            params![extraction_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_document_extraction(&conn, extraction_id)
+    }
+
+    pub fn set_document_extraction_failed(
+        &self,
+        extraction_id: &str,
+        error: &str,
+    ) -> StoreResult<DocumentExtraction> {
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "
+                update document_extractions
+                set status = 'failed', error = ?2, updated_at = datetime('now')
+                where id = ?1
+                ",
+                params![extraction_id, error],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!("Document extraction not found: {extraction_id}"));
+        }
+        read_document_extraction(&conn, extraction_id)
+    }
+
+    pub fn reset_document_extraction_to_queued(
+        &self,
+        extraction_id: &str,
+    ) -> StoreResult<DocumentExtraction> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "
+            update document_extractions
+            set status = 'queued', error = null, updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![extraction_id],
+        )
+        .map_err(|error| error.to_string())?;
+        read_document_extraction(&conn, extraction_id)
     }
 
     pub fn add_paper_to_vaults(
@@ -492,6 +790,7 @@ impl LibraryStore {
     /// one transaction, so a passage never leaves behind an empty thread. A
     /// `document` anchor reuses the paper's single whole-paper thread; every
     /// other anchor creates a fresh thread (no de-duplication, per RFC 0034).
+    #[allow(dead_code)]
     pub fn add_note_at_anchor(
         &self,
         scope_kind: &str,
@@ -499,18 +798,32 @@ impl LibraryStore {
         anchor: &ThreadAnchor,
         body: &str,
     ) -> StoreResult<ChatThreadView> {
+        self.add_note_at_anchor_with_creation(scope_kind, scope_id, anchor, body)
+            .map(|write| write.view)
+    }
+
+    pub fn add_note_at_anchor_with_creation(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        anchor: &ThreadAnchor,
+        body: &str,
+    ) -> StoreResult<AnchoredThreadWrite> {
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
-        let thread_id = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
+        let thread = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
         let entry_id = timestamped_id("entry")?;
         insert_chat_entry(
             &tx,
             &entry_id,
-            &thread_id,
+            &thread.id,
             &ChatEntryDraft::note(body.to_string()),
         )?;
         tx.commit().map_err(|error| error.to_string())?;
-        self.get_chat_thread(&thread_id)
+        Ok(AnchoredThreadWrite {
+            view: self.get_chat_thread(&thread.id)?,
+            created: thread.created,
+        })
     }
 
     /// Persist a completed ask turn at an anchor, creating the thread lazily.
@@ -519,6 +832,7 @@ impl LibraryStore {
     /// question, and the answer are written in one transaction. Because the
     /// caller invokes this only after the model reply succeeds, a failed ask
     /// persists nothing — no empty thread, no orphaned question.
+    #[allow(dead_code)]
     pub fn persist_anchored_turn(
         &self,
         scope_kind: &str,
@@ -527,16 +841,31 @@ impl LibraryStore {
         question: &ChatEntryDraft,
         answer: &ChatEntryDraft,
     ) -> StoreResult<ChatThreadView> {
+        self.persist_anchored_turn_with_creation(scope_kind, scope_id, anchor, question, answer)
+            .map(|write| write.view)
+    }
+
+    pub fn persist_anchored_turn_with_creation(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        anchor: &ThreadAnchor,
+        question: &ChatEntryDraft,
+        answer: &ChatEntryDraft,
+    ) -> StoreResult<AnchoredThreadWrite> {
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
-        let thread_id = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
+        let thread = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
         // Derive both ids from one base so the question always sorts before the
         // answer even when their `created_at` second is identical.
         let base = timestamped_id("entry")?;
-        insert_chat_entry(&tx, &format!("{base}_1"), &thread_id, question)?;
-        insert_chat_entry(&tx, &format!("{base}_2"), &thread_id, answer)?;
+        insert_chat_entry(&tx, &format!("{base}_1"), &thread.id, question)?;
+        insert_chat_entry(&tx, &format!("{base}_2"), &thread.id, answer)?;
         tx.commit().map_err(|error| error.to_string())?;
-        self.get_chat_thread(&thread_id)
+        Ok(AnchoredThreadWrite {
+            view: self.get_chat_thread(&thread.id)?,
+            created: thread.created,
+        })
     }
 
     /// Set or clear an entry's pin.
@@ -605,6 +934,38 @@ impl LibraryStore {
             return Err(format!("Thread not found: {thread_id}"));
         }
         Ok(())
+    }
+
+    /// Update a generated title only while the thread still has its default.
+    ///
+    /// This is the rename-safety guard for background title generation: if the
+    /// user renamed the thread while the model was thinking, the `where title`
+    /// clause prevents the generated title from clobbering their choice.
+    pub fn rename_chat_thread_if_title_is(
+        &self,
+        thread_id: &str,
+        expected_current_title: &str,
+        generated_title: &str,
+    ) -> StoreResult<Option<ChatThread>> {
+        let generated_title = generated_title.trim();
+        if generated_title.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "
+                update chat_threads
+                set title = ?2, updated_at = datetime('now')
+                where id = ?1 and title = ?3
+                ",
+                params![thread_id, generated_title, expected_current_title],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        read_chat_thread(&conn, thread_id).map(Some)
     }
 
     /// Delete a thread and its entries (entries cascade via FK).
@@ -1116,6 +1477,102 @@ fn read_document_extractions(conn: &Connection) -> StoreResult<Vec<DocumentExtra
     collect_rows(rows)
 }
 
+fn read_document_extractions_by_status(
+    conn: &Connection,
+    extractor: &str,
+    status: &str,
+) -> StoreResult<Vec<DocumentExtraction>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extractor, extractor_version,
+                   annotation_source_id, status, error, created_at, updated_at
+            from document_extractions
+            where extractor = ?1 and status = ?2
+            order by updated_at asc, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![extractor, status], document_extraction_from_row)
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
+}
+
+fn read_document_extraction_for_source(
+    conn: &Connection,
+    source_id: &str,
+    extractor: &str,
+    status: &str,
+) -> StoreResult<Option<DocumentExtraction>> {
+    conn.query_row(
+        "
+        select id, paper_id, source_id, extractor, extractor_version,
+               annotation_source_id, status, error, created_at, updated_at
+        from document_extractions
+        where source_id = ?1 and extractor = ?2 and status = ?3
+        order by updated_at desc, id
+        limit 1
+        ",
+        params![source_id, extractor, status],
+        document_extraction_from_row,
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+}
+
+fn read_document_extraction_by_annotation_source(
+    conn: &Connection,
+    annotation_source_id: &str,
+) -> StoreResult<Option<DocumentExtraction>> {
+    conn.query_row(
+        "
+        select id, paper_id, source_id, extractor, extractor_version,
+               annotation_source_id, status, error, created_at, updated_at
+        from document_extractions
+        where annotation_source_id = ?1
+        ",
+        params![annotation_source_id],
+        document_extraction_from_row,
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+}
+
+fn read_document_extraction(
+    conn: &Connection,
+    extraction_id: &str,
+) -> StoreResult<DocumentExtraction> {
+    conn.query_row(
+        "
+        select id, paper_id, source_id, extractor, extractor_version,
+               annotation_source_id, status, error, created_at, updated_at
+        from document_extractions
+        where id = ?1
+        ",
+        params![extraction_id],
+        document_extraction_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn document_extraction_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentExtraction> {
+    Ok(DocumentExtraction {
+        id: row.get(0)?,
+        paper_id: row.get(1)?,
+        source_id: row.get(2)?,
+        extractor: row.get(3)?,
+        extractor_version: row.get(4)?,
+        annotation_source_id: row.get(5)?,
+        status: row.get(6)?,
+        error: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
 fn read_document_pages(conn: &Connection) -> StoreResult<Vec<DocumentPage>> {
     let mut stmt = conn
         .prepare(
@@ -1472,6 +1929,11 @@ fn insert_chat_entry(
     Ok(())
 }
 
+struct ThreadResolution {
+    id: String,
+    created: bool,
+}
+
 /// Resolve the thread id for an anchor, creating the thread if needed. A
 /// `document` anchor is get-or-create-singular (one whole-paper thread per
 /// paper); every other anchor always creates a fresh thread.
@@ -1480,7 +1942,7 @@ fn find_or_create_thread_id(
     scope_kind: &str,
     scope_id: &str,
     anchor: &ThreadAnchor,
-) -> StoreResult<String> {
+) -> StoreResult<ThreadResolution> {
     if matches!(anchor, ThreadAnchor::Document) {
         let existing: Option<String> = conn
             .query_row(
@@ -1496,13 +1958,13 @@ fn find_or_create_thread_id(
             .optional()
             .map_err(|error| error.to_string())?;
         if let Some(id) = existing {
-            return Ok(id);
+            return Ok(ThreadResolution { id, created: false });
         }
     }
 
     let id = timestamped_id("thread")?;
     insert_chat_thread(conn, &id, scope_kind, scope_id, anchor, None)?;
-    Ok(id)
+    Ok(ThreadResolution { id, created: true })
 }
 
 fn table_exists(conn: &Connection, name: &str) -> StoreResult<bool> {
@@ -1884,6 +2346,34 @@ fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -
 pub fn document_source_id(paper_id: &str, source: &PaperSourceDraft) -> String {
     let hash = short_sha256(&source.source_url);
     format!("{}:{}:{hash}", source.source_kind, paper_id)
+}
+
+fn document_extraction_id(source_id: &str, extractor: &str) -> String {
+    format!("extraction:{extractor}:{source_id}")
+}
+
+fn clear_extraction_children(conn: &Connection, extraction_id: &str) -> StoreResult<()> {
+    conn.execute(
+        "delete from document_spans where extraction_id = ?1",
+        params![extraction_id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "delete from document_assets where extraction_id = ?1",
+        params![extraction_id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "delete from document_blocks where extraction_id = ?1",
+        params![extraction_id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "delete from document_pages where extraction_id = ?1",
+        params![extraction_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn short_sha256(input: &str) -> String {
@@ -2352,6 +2842,36 @@ mod tests {
             .count()
     }
 
+    fn extraction_page(extraction: &DocumentExtraction) -> DocumentPage {
+        DocumentPage {
+            id: format!("{}:page:0", extraction.id),
+            paper_id: extraction.paper_id.clone(),
+            source_id: extraction.source_id.clone(),
+            extraction_id: extraction.id.clone(),
+            page_index: 0,
+            width: 612.0,
+            height: 792.0,
+        }
+    }
+
+    fn extraction_block(extraction: &DocumentExtraction, text: &str) -> DocumentBlock {
+        DocumentBlock {
+            id: format!("{}:block:0:0", extraction.id),
+            paper_id: extraction.paper_id.clone(),
+            source_id: extraction.source_id.clone(),
+            extraction_id: extraction.id.clone(),
+            page_index: 0,
+            block_index: 0,
+            reading_order: 0,
+            kind: "paragraph".to_string(),
+            text: Some(text.to_string()),
+            asset_id: None,
+            source_start: Some(0),
+            source_end: Some(text.chars().count() as i64),
+            bbox_json: None,
+        }
+    }
+
     #[test]
     fn init_seeds_default_library_when_empty() -> StoreResult<()> {
         let db = test_db()?;
@@ -2482,6 +3002,118 @@ mod tests {
         assert!(paper(&snapshot, "pdf-source-paper")
             .active_source_id
             .is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn finish_document_extraction_persists_rows_and_sets_active_extraction() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft_with_pdf("extracted-paper", "https://example.test/extracted.pdf");
+        db.store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])?;
+        let source = db
+            .store
+            .get_document_sources("extracted-paper")?
+            .into_iter()
+            .next()
+            .expect("PDF source should exist");
+        let source = db
+            .store
+            .set_document_source_cached(&source.id, "/tmp/extracted.pdf")?;
+        let annotation_source_id = format!("pdfium_basic:{}", source.id);
+
+        let extraction = db.store.start_document_extraction(
+            &source.id,
+            "pdfium_basic",
+            "0.1.0",
+            &annotation_source_id,
+            false,
+        )?;
+        assert_eq!(extraction.status, "extracting");
+
+        let page = extraction_page(&extraction);
+        let block = extraction_block(&extraction, "Real extracted page text.");
+        let extraction = db.store.finish_document_extraction(
+            &extraction.id,
+            &[page.clone()],
+            &[block.clone()],
+        )?;
+        let snapshot = db.store.get_library()?;
+
+        assert_eq!(extraction.status, "ready");
+        assert_eq!(
+            paper(&snapshot, "extracted-paper")
+                .active_extraction_id
+                .as_deref(),
+            Some(extraction.id.as_str())
+        );
+        assert!(snapshot
+            .document_pages
+            .iter()
+            .any(|row| row.id == page.id && row.extraction_id == extraction.id));
+        assert!(snapshot
+            .document_blocks
+            .iter()
+            .any(|row| row.id == block.id
+                && row.text.as_deref() == Some("Real extracted page text.")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn ready_document_extraction_is_idempotent_until_forced() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft_with_pdf("force-paper", "https://example.test/force.pdf");
+        db.store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])?;
+        let source = db
+            .store
+            .get_document_sources("force-paper")?
+            .into_iter()
+            .next()
+            .expect("PDF source should exist");
+        let source = db
+            .store
+            .set_document_source_cached(&source.id, "/tmp/force.pdf")?;
+        let annotation_source_id = format!("pdfium_basic:{}", source.id);
+
+        let extraction = db.store.start_document_extraction(
+            &source.id,
+            "pdfium_basic",
+            "0.1.0",
+            &annotation_source_id,
+            false,
+        )?;
+        let block = extraction_block(&extraction, "Original text.");
+        db.store.finish_document_extraction(
+            &extraction.id,
+            &[extraction_page(&extraction)],
+            &[block],
+        )?;
+
+        let existing = db.store.start_document_extraction(
+            &source.id,
+            "pdfium_basic",
+            "0.1.0",
+            &annotation_source_id,
+            false,
+        )?;
+        assert_eq!(existing.status, "ready");
+        assert_eq!(
+            db.store.get_library()?.document_blocks[0].text.as_deref(),
+            Some("Original text.")
+        );
+
+        let forced = db.store.start_document_extraction(
+            &source.id,
+            "pdfium_basic",
+            "0.1.0",
+            &annotation_source_id,
+            true,
+        )?;
+        assert_eq!(forced.status, "extracting");
+        assert!(db.store.get_library()?.document_blocks.is_empty());
 
         Ok(())
     }
@@ -2672,6 +3304,61 @@ mod tests {
         assert_eq!(
             db.store.get_chat_thread(&thread.id)?.thread.title,
             "My title"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn anchored_write_reports_whether_thread_was_created() -> StoreResult<()> {
+        let db = test_db()?;
+        let first = db.store.add_note_at_anchor_with_creation(
+            "paper",
+            "vaswani2017",
+            &ThreadAnchor::Document,
+            "first note",
+        )?;
+        let second = db.store.add_note_at_anchor_with_creation(
+            "paper",
+            "vaswani2017",
+            &ThreadAnchor::Document,
+            "second note",
+        )?;
+
+        assert!(first.created);
+        assert!(!second.created);
+        assert_eq!(first.view.thread.id, second.view.thread.id);
+        assert_eq!(second.view.entries.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn generated_thread_title_only_applies_while_default_is_unchanged() -> StoreResult<()> {
+        let db = test_db()?;
+        let view = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &text_anchor(), "n")?;
+
+        let renamed = db.store.rename_chat_thread_if_title_is(
+            &view.thread.id,
+            "scaled dot-product",
+            "Attention Scaling",
+        )?;
+        assert_eq!(
+            renamed.expect("default title should update").title,
+            "Attention Scaling"
+        );
+
+        let skipped = db.store.rename_chat_thread_if_title_is(
+            &view.thread.id,
+            "scaled dot-product",
+            "Model Generated Late",
+        )?;
+        assert!(skipped.is_none());
+        assert_eq!(
+            db.store.get_chat_thread(&view.thread.id)?.thread.title,
+            "Attention Scaling"
         );
 
         Ok(())

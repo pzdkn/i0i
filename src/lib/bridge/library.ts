@@ -85,3 +85,11 @@ export async function getReaderPdfBytes(sourceId: string): Promise<number[]> {
     sourceId,
   });
 }
+
+export async function extractPaperDocument(paperId: string, sourceId?: string, force = false): Promise<void> {
+  return invoke<void>("extract_paper_document", {
+    paperId,
+    sourceId,
+    force,
+  });
+}

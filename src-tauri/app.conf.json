@@ -22,7 +22,10 @@
             "url": "https://openrouter.ai/api/v1/chat/completions",
             "api_key": "OPENROUTER_API_KEY",
             "model": "anthropic/claude-sonnet-4.5",
-            "max_context_chars": 60000
+            "max_context_chars": 60000,
+            "title_model": "anthropic/claude-sonnet-4.5",
+            "title_max_tokens": 24,
+            "title_timeout_ms": 5000
         }
     }
 }

@@ -27,7 +27,9 @@ pub fn add_paper_to_vaults(
     {
         // If the user already opened this paper from Discover, prefer promoting
         // the temporary cached PDF over starting a second network download.
-        if !reader_service.promote_discovery_cached_pdf(&source)? {
+        if reader_service.promote_discovery_cached_pdf(&source)? {
+            pdf_downloads.queue_source(source.id);
+        } else {
             queue_sources.push(source);
         }
     }
