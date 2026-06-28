@@ -13,11 +13,11 @@ use tauri::{AppHandle, Emitter};
 
 use super::config::ChatConfig;
 use super::context::build_context;
-use super::openrouter::{self, CompletionRequest, WireMessage};
 use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatScope, ChatThreadSummary, ChatThreadUpdated,
     ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
 };
+use crate::services::llm::{self as openrouter, CompletionRequest, WireMessage};
 use crate::services::reader_service::ReaderService;
 use crate::storage::library_store::LibraryStore;
 
@@ -146,6 +146,7 @@ impl ChatService {
             messages: prep.request_messages,
             stream: false,
             max_tokens: None,
+            response_format: None,
         };
         let answer =
             openrouter::complete(&self.client, &self.config.url, &prep.api_key, &request).await?;
@@ -169,6 +170,7 @@ impl ChatService {
             messages: prep.request_messages,
             stream: true,
             max_tokens: None,
+            response_format: None,
         };
         let answer = openrouter::complete_streamed(
             &self.client,
@@ -203,6 +205,7 @@ impl ChatService {
             messages: prep.request_messages,
             stream: true,
             max_tokens: None,
+            response_format: None,
         };
         let answer = openrouter::complete_streamed(
             &self.client,
@@ -361,6 +364,7 @@ impl ChatService {
             messages: build_title_messages(&first_entry_body, selected_text.as_deref()),
             stream: false,
             max_tokens: Some(self.config.title_max_tokens),
+            response_format: None,
         };
 
         let raw_title = tokio::time::timeout(

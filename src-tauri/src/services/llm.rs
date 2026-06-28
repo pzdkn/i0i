@@ -9,18 +9,40 @@ use serde::{Deserialize, Serialize};
 
 /// One message in the OpenAI-compatible `messages` array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct WireMessage {
+pub(crate) struct WireMessage {
     pub role: String,
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct CompletionRequest {
+pub(crate) struct CompletionRequest {
     pub model: String,
     pub messages: Vec<WireMessage>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Optional structured-output hint (e.g. JSON mode). Omitted from the wire
+    /// payload when `None`, so the existing chat path is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// OpenAI-compatible `response_format` hint. `ResponseFormat::json_object()`
+/// asks the model to emit a single JSON object.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResponseFormat {
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl ResponseFormat {
+    // Used by the research planner (RFC 0037 seams layer).
+    #[allow(dead_code)]
+    pub(crate) fn json_object() -> Self {
+        Self {
+            kind: "json_object".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,7 +56,7 @@ struct Choice {
 }
 
 /// POST a non-streaming completion and return the assistant's text.
-pub(super) async fn complete(
+pub(crate) async fn complete(
     client: &Client,
     url: &str,
     api_key: &str,
@@ -127,7 +149,7 @@ struct StreamDelta {
 
 /// One decoded server-sent event from the completion stream.
 #[derive(Debug, PartialEq)]
-pub(super) enum SseEvent {
+pub(crate) enum SseEvent {
     Delta(String),
     Done,
 }
@@ -136,17 +158,17 @@ pub(super) enum SseEvent {
 ///
 /// Network reads can split a line mid-bytes (even mid-codepoint), so bytes are
 /// buffered and only decoded once a full `\n`-terminated line is available.
-pub(super) struct SseDecoder {
+pub(crate) struct SseDecoder {
     buffer: Vec<u8>,
 }
 
 impl SseDecoder {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { buffer: Vec::new() }
     }
 
     /// Feed a chunk of bytes; return the events from any now-complete lines.
-    pub(super) fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
 
@@ -188,7 +210,7 @@ fn parse_sse_line(line: &str) -> Option<SseEvent> {
 
 /// POST a streaming completion, forwarding each content delta to `on_delta`,
 /// and return the fully assembled assistant text.
-pub(super) async fn complete_streamed<F>(
+pub(crate) async fn complete_streamed<F>(
     client: &Client,
     url: &str,
     api_key: &str,
@@ -236,6 +258,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_request() -> CompletionRequest {
+        CompletionRequest {
+            model: "anthropic/claude-sonnet-4.5".to_string(),
+            messages: Vec::new(),
+            stream: false,
+            max_tokens: None,
+            response_format: None,
+        }
+    }
+
+    #[test]
+    fn completion_request_omits_response_format_when_none() {
+        let value = serde_json::to_value(empty_request()).unwrap();
+        assert!(value.get("response_format").is_none());
+    }
+
+    #[test]
+    fn completion_request_serializes_json_object_response_format() {
+        let request = CompletionRequest {
+            response_format: Some(ResponseFormat::json_object()),
+            ..empty_request()
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["response_format"]["type"], "json_object");
+    }
 
     #[test]
     fn parses_assistant_text_from_response() {

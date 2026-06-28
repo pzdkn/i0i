@@ -2,7 +2,6 @@
 
 mod config;
 mod context;
-mod openrouter;
 mod service;
 
 pub use service::ChatService;
