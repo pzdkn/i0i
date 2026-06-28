@@ -1,6 +1,6 @@
 //! Paper-scoped chat against an OpenRouter chat-completions provider.
 
-mod config;
+pub(crate) mod config;
 mod context;
 mod service;
 

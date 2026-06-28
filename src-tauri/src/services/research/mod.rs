@@ -10,6 +10,8 @@
 // Pure-core APIs are consumed by the loop/manager layers that land next; the
 // `allow(dead_code)` markers come off once those are wired.
 #[allow(dead_code)]
+pub mod agent;
+#[allow(dead_code)]
 pub mod budget;
 #[allow(dead_code)]
 pub mod clock;
@@ -19,6 +21,7 @@ pub mod dedup;
 pub mod error;
 #[allow(dead_code)]
 pub mod filter;
+pub mod manager;
 #[allow(dead_code)]
 pub mod planner;
 #[allow(dead_code)]

@@ -10,6 +10,7 @@ use pdf_extraction::{PdfExtractionConfig, PdfExtractionManager};
 use pdf_ingestion::{PdfDownloadManager, PdfIngestionConfig};
 use services::chat::ChatService;
 use services::reader_service::ReaderService;
+use services::research::manager::SearchManager;
 use storage::library_store::LibraryStore;
 use tauri::Manager;
 
@@ -45,12 +46,17 @@ pub fn run() {
             .map_err(std::io::Error::other)?;
             let discovery_providers = commands::discovery::DiscoveryProviders::from_app_config()
                 .map_err(std::io::Error::other)?;
+            let search_manager = SearchManager::new(app.handle().clone(), store.clone());
+            search_manager
+                .recover_and_queue_startup_runs()
+                .map_err(std::io::Error::other)?;
             app.manage(store);
             app.manage(pdf_downloads);
             app.manage(pdf_extractions);
             app.manage(reader_service);
             app.manage(chat_service);
             app.manage(discovery_providers);
+            app.manage(search_manager);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -80,6 +86,14 @@ pub fn run() {
             commands::chat::list_pinned_chat_entries,
             commands::chat::rename_chat_thread,
             commands::chat::delete_chat_thread,
+            commands::research::create_search,
+            commands::research::list_searches,
+            commands::research::get_search,
+            commands::research::list_search_candidates,
+            commands::research::run_search,
+            commands::research::cancel_search_run,
+            commands::research::mark_search_candidate_saved,
+            commands::research::mark_search_candidates_seen,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
