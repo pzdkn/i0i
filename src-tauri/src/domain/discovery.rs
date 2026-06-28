@@ -3,9 +3,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryProviderChoice {
+    // Aliases tolerate the LLM planner's natural spellings (RFC 0037).
     #[default]
+    #[serde(alias = "openalex")]
     OpenAlex,
+    #[serde(alias = "arXiv")]
     Arxiv,
+    #[serde(alias = "semanticscholar", alias = "s2")]
     SemanticScholar,
 }
 

@@ -57,6 +57,9 @@
   function handleEvent(payload: SearchUpdated) {
     if (payload.searchId !== activeSearchId) return;
     progress = [...progress.slice(-(PROGRESS_CAP - 1)), payload.message];
+    if (payload.status === "failed") {
+      error = `Run failed: ${payload.message}`;
+    }
     if (isTerminalStatus(payload.status)) {
       running = false;
       activeRunId = null;

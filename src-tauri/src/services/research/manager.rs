@@ -123,6 +123,7 @@ impl SearchManager {
         run_id: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<(), String> {
+        eprintln!("[research] run start search_id={search_id} run_id={run_id}");
         let search = self.store.get_search(search_id)?;
         self.store.set_search_run_status(
             run_id,
@@ -226,6 +227,7 @@ impl SearchManager {
     }
 
     fn fail_run(&self, search_id: &str, run_id: &str, error: &str) {
+        eprintln!("[research] run failed search_id={search_id} run_id={run_id} error={error}");
         let _ = self.store.set_search_run_status(
             run_id,
             SearchRunStatus::Failed,

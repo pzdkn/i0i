@@ -181,7 +181,7 @@ impl OpenRouterPlanner {
 
 const PLAN_SYSTEM: &str = "You are a scholarly search planner. Expand the user's research \
 goal into focused provider queries (synonyms, key methods, datasets). Reply with a single \
-JSON object: {\"queries\":[{\"provider\":\"openalex\"|\"arxiv\",\"text\":\"...\"}]}. No prose.";
+JSON object: {\"queries\":[{\"provider\":\"open_alex\"|\"arxiv\",\"text\":\"...\"}]}. No prose.";
 
 const ASSESS_SYSTEM: &str = "You judge whether a paper search has enough coverage for the \
 goal. Reply with a single JSON object: {\"refine\":true|false,\"gaps\":[\"...\"]}. Set \
@@ -203,7 +203,7 @@ impl Planner for OpenRouterPlanner {
         let user = format!(
             "Goal: {goal}\nAllowed providers: {}\nPropose 2-4 queries.",
             if providers.is_empty() {
-                "openalex, arxiv".to_string()
+                "open_alex, arxiv".to_string()
             } else {
                 providers.join(", ")
             }
@@ -283,7 +283,7 @@ impl Planner for OpenRouterPlanner {
 
 fn provider_name(choice: &DiscoveryProviderChoice) -> &'static str {
     match choice {
-        DiscoveryProviderChoice::OpenAlex => "openalex",
+        DiscoveryProviderChoice::OpenAlex => "open_alex",
         DiscoveryProviderChoice::Arxiv => "arxiv",
         DiscoveryProviderChoice::SemanticScholar => "semantic_scholar",
     }
