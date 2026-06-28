@@ -90,6 +90,11 @@ impl DiscoveryProvider for ArxivProvider {
 /// Build arXiv query parameters from an app-level search request.
 fn arxiv_query_params(request: &DiscoverySearchRequest, limit: i32) -> Vec<(&'static str, String)> {
     let search_query = embed_year_filter(request.query.trim(), request.year_from, request.year_to);
+    // Structured-filter asymmetry (RFC 0037): arXiv supports author search but has
+    // no venue concept, and its field filter is a category *code* (`cat:cs.LG`) that
+    // our free-text `fields_of_study` cannot reliably express — so only authors are
+    // applied here; venues and fields_of_study are honored on OpenAlex instead.
+    let search_query = embed_authors(&search_query, &request.authors);
     let (sort_by, sort_order) = arxiv_sort(request.sort_by.clone());
 
     vec![
@@ -119,6 +124,20 @@ fn embed_year_filter(query: &str, year_from: Option<i32>, year_to: Option<i32>) 
             format!("{query} AND submittedDate:[{from} TO {to}]")
         }
     }
+}
+
+/// Embed author constraints into the arXiv `search_query` as an OR-group of
+/// `au:` clauses ANDed onto the base query. Empty author list leaves it unchanged.
+fn embed_authors(query: &str, authors: &[String]) -> String {
+    if authors.is_empty() {
+        return query.to_string();
+    }
+    let clause = authors
+        .iter()
+        .map(|author| format!("au:\"{author}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("{query} AND ({clause})")
 }
 
 /// Map a shared sort value to arXiv's (sortBy, sortOrder) parameter pair.
@@ -161,6 +180,9 @@ mod tests {
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
             provider: DiscoveryProviderChoice::Arxiv,
+            venues: Vec::new(),
+            authors: Vec::new(),
+            fields_of_study: Vec::new(),
         }
     }
 
@@ -222,6 +244,27 @@ mod tests {
         assert_eq!(
             embed_year_filter("sparse autoencoder", None, Some(2022)),
             "sparse autoencoder AND submittedDate:[* TO 20221231]"
+        );
+    }
+
+    // --- embed_authors ---
+
+    #[test]
+    fn no_authors_leaves_query_unchanged() {
+        assert_eq!(
+            embed_authors("sparse autoencoder", &[]),
+            "sparse autoencoder"
+        );
+    }
+
+    #[test]
+    fn authors_embedded_as_arxiv_au_clause() {
+        assert_eq!(
+            embed_authors(
+                "sparse autoencoder",
+                &["Yoshua Bengio".to_string(), "Geoffrey Hinton".to_string()]
+            ),
+            "sparse autoencoder AND (au:\"Yoshua Bengio\" OR au:\"Geoffrey Hinton\")"
         );
     }
 

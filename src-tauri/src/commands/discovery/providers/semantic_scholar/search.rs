@@ -208,6 +208,9 @@ mod tests {
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
             provider: DiscoveryProviderChoice::SemanticScholar,
+            venues: Vec::new(),
+            authors: Vec::new(),
+            fields_of_study: Vec::new(),
         }
     }
 

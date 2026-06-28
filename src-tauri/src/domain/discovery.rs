@@ -19,6 +19,15 @@ pub struct DiscoverySearchRequest {
     pub sort_by: DiscoverySort,
     #[serde(default)]
     pub provider: DiscoveryProviderChoice,
+    /// Structured filters applied at query time (not post-filters). Support is
+    /// per-provider and asymmetric: OpenAlex honors all three; arXiv supports
+    /// author and category (≈ field) only. See RFC 0037.
+    #[serde(default)]
+    pub venues: Vec<String>,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub fields_of_study: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +36,18 @@ pub enum DiscoverySort {
     Relevance,
     Newest,
     MostCited,
+}
+
+/// Direction of a citation-graph traversal from a seed paper. Naming is by
+/// intent (not by OpenAlex's filter spelling, which is the inverse): `References`
+/// are the works a paper cites; `Citations` are the works that cite it.
+// Consumed by RealCandidateSource in the RFC 0037 seams layer.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lineage {
+    References,
+    Citations,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -13,7 +13,7 @@ use crate::{
         provider::{DiscoveryProvider, DiscoveryProviderId, ProviderSearchResult},
         providers::shared::{build_query_url, clamp_result_limit},
     },
-    domain::discovery::{DiscoverySearchRequest, DiscoverySort},
+    domain::discovery::{DiscoverySearchRequest, DiscoverySort, Lineage},
 };
 
 /// OpenAlex provider adapter.
@@ -152,7 +152,42 @@ fn openalex_filters(request: &DiscoverySearchRequest) -> Vec<String> {
 
     filters.push("is_oa:true".to_string());
 
+    // Structured filters applied at query time. Multiple values for one key are
+    // OR-joined with `|` (OpenAlex's within-key OR); distinct keys are AND-joined
+    // by the caller via the comma-separated `filter` param.
+    if !request.venues.is_empty() {
+        filters.push(format!(
+            "primary_location.source.display_name.search:{}",
+            request.venues.join("|")
+        ));
+    }
+    if !request.authors.is_empty() {
+        filters.push(format!(
+            "authorships.author.display_name.search:{}",
+            request.authors.join("|")
+        ));
+    }
+    if !request.fields_of_study.is_empty() {
+        filters.push(format!(
+            "concepts.display_name.search:{}",
+            request.fields_of_study.join("|")
+        ));
+    }
+
     filters
+}
+
+/// Build the OpenAlex `filter` value that traverses the citation graph from a
+/// seed work. The OpenAlex filter spelling is the inverse of the intent name:
+/// `cited_by:<id>` returns the works a paper *references*, and `cites:<id>`
+/// returns the works that *cite* it.
+// Wired into RealCandidateSource in the RFC 0037 seams layer.
+#[allow(dead_code)]
+fn openalex_lineage_filter(work_id: &str, lineage: Lineage) -> String {
+    match lineage {
+        Lineage::References => format!("cited_by:{work_id}"),
+        Lineage::Citations => format!("cites:{work_id}"),
+    }
 }
 
 /// OpenAlex defaults to relevance for search queries, so relevance needs no
@@ -178,6 +213,9 @@ mod tests {
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
             provider: Default::default(),
+            venues: Vec::new(),
+            authors: Vec::new(),
+            fields_of_study: Vec::new(),
         };
 
         assert_eq!(
@@ -186,6 +224,49 @@ mod tests {
                 "from_publication_date:2023-01-01",
                 "to_publication_date:2026-12-31",
                 "is_oa:true"
+            ]
+        );
+    }
+
+    #[test]
+    fn lineage_references_uses_cited_by_filter() {
+        // References = works this paper cites -> OpenAlex `cited_by:<id>`.
+        assert_eq!(
+            openalex_lineage_filter("W123", Lineage::References),
+            "cited_by:W123"
+        );
+    }
+
+    #[test]
+    fn lineage_citations_uses_cites_filter() {
+        // Citations = works that cite this paper -> OpenAlex `cites:<id>`.
+        assert_eq!(
+            openalex_lineage_filter("W123", Lineage::Citations),
+            "cites:W123"
+        );
+    }
+
+    #[test]
+    fn filters_include_structured_venue_author_and_field() {
+        let request = DiscoverySearchRequest {
+            query: "interpretability".to_string(),
+            year_from: None,
+            year_to: None,
+            result_limit: 25,
+            sort_by: DiscoverySort::Relevance,
+            provider: Default::default(),
+            venues: vec!["NeurIPS".to_string(), "ICML".to_string()],
+            authors: vec!["Yoshua Bengio".to_string()],
+            fields_of_study: vec!["computer science".to_string()],
+        };
+
+        assert_eq!(
+            openalex_filters(&request),
+            vec![
+                "is_oa:true",
+                "primary_location.source.display_name.search:NeurIPS|ICML",
+                "authorships.author.display_name.search:Yoshua Bengio",
+                "concepts.display_name.search:computer science",
             ]
         );
     }
