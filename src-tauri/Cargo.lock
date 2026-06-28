@@ -1706,6 +1706,7 @@ dependencies = [
 name = "i0i"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures-util",
  "pdfium-render",
  "quick-xml 0.36.2",

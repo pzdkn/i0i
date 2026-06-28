@@ -16,4 +16,10 @@ pub mod clock;
 #[allow(dead_code)]
 pub mod dedup;
 #[allow(dead_code)]
+pub mod error;
+#[allow(dead_code)]
 pub mod filter;
+#[allow(dead_code)]
+pub mod planner;
+#[allow(dead_code)]
+pub mod source;
