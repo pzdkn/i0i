@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter};
 use crate::commands::discovery::providers::{
     arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
 };
+use crate::domain::discovery::PaperCandidate;
 use crate::domain::research::{candidate_dedup_key, SearchRunStatus};
 use crate::services::chat::config::ChatConfig;
 use crate::services::research::agent::{self, Progress, RunInputs};
@@ -45,6 +46,15 @@ pub struct SearchUpdated {
     pub found: u32,
     pub unique: u32,
     pub new: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchCandidatesPreview {
+    pub search_id: String,
+    pub run_id: String,
+    pub candidates: Vec<PaperCandidate>,
+    pub unique: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +175,20 @@ impl SearchManager {
         let sid = search_id.to_string();
         let rid = run_id.to_string();
         let on = move |progress: Progress| {
+            if let Progress::CandidatePreview { candidates } = progress {
+                let unique = candidates.len() as u32;
+                let _ = app.emit(
+                    "search_candidates_preview",
+                    SearchCandidatesPreview {
+                        search_id: sid.clone(),
+                        run_id: rid.clone(),
+                        candidates,
+                        unique,
+                    },
+                );
+                return;
+            }
+
             let (status, message, counts) = describe(&progress);
             let _ = app.emit(
                 "search_updated",
@@ -296,6 +320,11 @@ fn describe(progress: &Progress) -> (SearchRunStatus, String, (u32, u32, u32)) {
             SearchRunStatus::Searching,
             format!("deduped → {unique} unique"),
             (0, *unique as u32, 0),
+        ),
+        Progress::CandidatePreview { candidates } => (
+            SearchRunStatus::Searching,
+            format!("preview → {} unique", candidates.len()),
+            (0, candidates.len() as u32, candidates.len() as u32),
         ),
         Progress::Assessing => (
             SearchRunStatus::Assessing,

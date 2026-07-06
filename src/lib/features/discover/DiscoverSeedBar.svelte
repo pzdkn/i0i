@@ -4,15 +4,20 @@
 
   let {
     workspace,
+    discoverWorkspaces,
     onNewSearch,
+    onActivateSearch,
     onRunSearch,
   }: {
     workspace: DiscoverWorkspace;
+    discoverWorkspaces: DiscoverWorkspace[];
     onNewSearch: () => void;
+    onActivateSearch: (discoverId: string) => void;
     onRunSearch: (discoverId: string) => void;
   } = $props();
 
   let queryInput: HTMLInputElement;
+  let settingsOpen = $state(false);
   const isRunning = $derived(workspace.status === "running");
   const statusLabel = $derived(workspace.status === "idle" ? "Idle" : workspace.status);
   const resultLabel = $derived(
@@ -25,6 +30,25 @@
     workspace.provider === "arxiv" || workspace.provider === "semantic_scholar"
   );
   const sortDisabled = $derived(workspace.provider === "semantic_scholar");
+  const nonDefaultFilters = $derived.by(() => {
+    const filters: string[] = [];
+    if (workspace.provider !== "open_alex") {
+      filters.push(providerLabel);
+    }
+    if (!workspace.deep && workspace.sortBy !== "relevance") {
+      filters.push(sortLabel(workspace.sortBy));
+    }
+    if (workspace.resultLimit !== 25) {
+      filters.push(workspace.deep ? `${workspace.resultLimit} target` : `${workspace.resultLimit} max`);
+    }
+    if (workspace.yearFrom || workspace.yearTo) {
+      filters.push(`${workspace.yearFrom || "any"}-${workspace.yearTo || "now"}`);
+    }
+    if (workspace.deep && workspace.deepDepth !== "standard") {
+      filters.push(workspace.deepDepth);
+    }
+    return filters;
+  });
 
   $effect(() => {
     workspace.id;
@@ -56,95 +80,191 @@
 </script>
 
 <header class="discover-search hair-b col">
+  <div class="window-strip row" aria-label="Discover search windows">
+    <button class="new-window" type="button" onclick={onNewSearch} aria-label="New search window">+</button>
+    <div class="window-tabs row">
+      {#each discoverWorkspaces as item}
+        <button
+          class:active={item.id === workspace.id}
+          class="window-tab truncate"
+          type="button"
+          onclick={() => onActivateSearch(item.id)}
+          title={item.title}
+        >
+          {item.title.replace("Discover: ", "")}
+        </button>
+      {/each}
+    </div>
+  </div>
+
   <div class="heading row">
     <div>
       <div class="label">Discover</div>
       <h1>{workspace.title}</h1>
     </div>
-    <button class="new-search-btn" type="button" onclick={onNewSearch}>New Search</button>
-  </div>
-
-  <div class="status-strip row" aria-label="Search status">
-    <span>{providerLabel}</span>
-    <span>Manual run</span>
-    <span>Open access</span>
-    <span>{workspace.resultLimit} max</span>
-    <span>{sortLabel(workspace.sortBy)}</span>
-    <span class:hot={workspace.status === "failed"}>{statusLabel}</span>
-    {#if resultLabel}
-      <span>{resultLabel}</span>
-    {/if}
+    <div class="status-strip row" aria-label="Search status">
+      <span>{workspace.deep ? "Deep" : "Shallow"}</span>
+      <span class:hot={workspace.status === "failed"}>{statusLabel}</span>
+      {#if resultLabel}
+        <span>{resultLabel}</span>
+      {/if}
+    </div>
   </div>
 
   <form class="search-form col" onsubmit={(event) => { event.preventDefault(); runSearch(); }}>
     <div class="query-row row">
+      <span class="prompt">&gt;</span>
       <input
         bind:this={queryInput}
         bind:value={workspace.query}
         aria-label="Search papers"
-        placeholder="search {providerLabel} papers..."
+        placeholder="find papers about..."
         disabled={isRunning}
       />
+      <button
+        class="toggle"
+        class:active={workspace.deep}
+        type="button"
+        aria-pressed={workspace.deep}
+        disabled={isRunning}
+        onclick={() => (workspace.deep = !workspace.deep)}
+      >
+        Deep
+      </button>
       <button class="btn primary" type="submit" disabled={isRunning || !workspace.query.trim()}>
         {isRunning ? "Running" : "Run"}
       </button>
+      <button
+        class="settings-button"
+        class:active={settingsOpen}
+        type="button"
+        aria-expanded={settingsOpen}
+        aria-label="Search settings"
+        onclick={() => (settingsOpen = !settingsOpen)}
+      >
+        settings
+      </button>
     </div>
 
-    <div class="filter-row row">
-      <label>
-        <span>Year From</span>
-        <input
-          bind:value={workspace.yearFrom}
-          inputmode="numeric"
-          pattern="[0-9]*"
-          placeholder="any"
-          disabled={isRunning}
-        />
-      </label>
-      <label>
-        <span>Year To</span>
-        <input
-          bind:value={workspace.yearTo}
-          inputmode="numeric"
-          pattern="[0-9]*"
-          placeholder="any"
-          disabled={isRunning}
-        />
-      </label>
-      <label>
-        <span>Limit</span>
-        <select bind:value={workspace.resultLimit} disabled={isRunning}>
-          <option value={10}>10</option>
-          <option value={25}>25</option>
-          <option value={50}>50</option>
-        </select>
-      </label>
-      <label>
-        <span>Sort</span>
-        <select bind:value={workspace.sortBy} disabled={isRunning || sortDisabled}>
-          <option value="relevance">Relevance</option>
-          <option value="newest" disabled={mostCitedDisabled}>Newest</option>
-          <option value="most_cited" disabled={mostCitedDisabled}>Most cited</option>
-        </select>
-      </label>
-      <label>
-        <span>Provider</span>
-        <select bind:value={workspace.provider} onchange={onProviderChange} disabled={isRunning}>
-          <option value="open_alex">OpenAlex</option>
-          <option value="arxiv">arXiv</option>
-          <option value="semantic_scholar">Semantic Scholar</option>
-        </select>
-      </label>
-    </div>
+    {#if nonDefaultFilters.length > 0 && !settingsOpen}
+      <div class="filter-summary row" aria-label="Active search filters">
+        <span>filters</span>
+        {#each nonDefaultFilters as filter}
+          <span>{filter}</span>
+        {/each}
+      </div>
+    {/if}
+
+    {#if settingsOpen}
+      <div class="settings-panel row">
+        <label>
+          <span>Provider</span>
+          <select bind:value={workspace.provider} onchange={onProviderChange} disabled={isRunning}>
+            <option value="open_alex">OpenAlex</option>
+            <option value="arxiv">arXiv</option>
+            <option value="semantic_scholar">Semantic Scholar</option>
+          </select>
+        </label>
+        {#if workspace.deep}
+          <label>
+            <span>Depth</span>
+            <select bind:value={workspace.deepDepth} disabled={isRunning}>
+              <option value="quick">Quick</option>
+              <option value="standard">Standard</option>
+              <option value="thorough">Thorough</option>
+            </select>
+          </label>
+        {:else}
+          <label>
+            <span>Sort</span>
+            <select bind:value={workspace.sortBy} disabled={isRunning || sortDisabled}>
+              <option value="relevance">Relevance</option>
+              <option value="newest" disabled={mostCitedDisabled}>Newest</option>
+              <option value="most_cited" disabled={mostCitedDisabled}>Most cited</option>
+            </select>
+          </label>
+        {/if}
+        <label>
+          <span>{workspace.deep ? "Target" : "Limit"}</span>
+          <select bind:value={workspace.resultLimit} disabled={isRunning}>
+            <option value={10}>10</option>
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+          </select>
+        </label>
+        <label>
+          <span>From</span>
+          <input
+            bind:value={workspace.yearFrom}
+            inputmode="numeric"
+            pattern="[0-9]*"
+            placeholder="any"
+            disabled={isRunning}
+          />
+        </label>
+        <label>
+          <span>To</span>
+          <input
+            bind:value={workspace.yearTo}
+            inputmode="numeric"
+            pattern="[0-9]*"
+            placeholder="now"
+            disabled={isRunning}
+          />
+        </label>
+      </div>
+    {/if}
   </form>
 </header>
 
 <style>
   .discover-search {
     flex-shrink: 0;
-    gap: 12px;
-    padding: 14px 18px 12px;
+    gap: 10px;
+    padding: 10px 18px 12px;
     background: var(--bg-1);
+  }
+
+  .window-strip {
+    min-width: 0;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .new-window {
+    width: 24px;
+    height: 22px;
+    flex-shrink: 0;
+    border: 1px solid var(--border-2);
+    background: var(--bg);
+    color: var(--amber);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .window-tabs {
+    min-width: 0;
+    gap: 4px;
+    overflow: hidden;
+  }
+
+  .window-tab {
+    height: 22px;
+    max-width: 180px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-3);
+    padding: 0 8px;
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .window-tab.active {
+    border-color: var(--amber-dim);
+    background: var(--bg);
+    color: var(--amber);
   }
 
   .heading {
@@ -166,6 +286,13 @@
 
   .query-row {
     gap: 8px;
+    align-items: center;
+  }
+
+  .prompt {
+    flex-shrink: 0;
+    color: var(--green);
+    font-size: 13px;
   }
 
   .query-row input {
@@ -186,11 +313,12 @@
     border-color: var(--amber-dim);
   }
 
-  .new-search-btn {
+  .toggle,
+  .settings-button {
     height: 30px;
     border: 1px solid var(--border-2);
-    background: var(--bg);
-    color: var(--amber);
+    background: transparent;
+    color: var(--fg-2);
     padding: 0 10px;
     font: inherit;
     font-size: 10px;
@@ -198,9 +326,19 @@
     cursor: pointer;
   }
 
-  .new-search-btn:hover {
+  .toggle:hover,
+  .settings-button:hover,
+  .new-window:hover,
+  .window-tab:hover {
     border-color: var(--amber-dim);
     background: rgba(242, 169, 59, 0.05);
+  }
+
+  .toggle.active,
+  .settings-button.active {
+    border-color: var(--green);
+    color: var(--green);
+    background: rgba(138, 168, 74, 0.06);
   }
 
   .status-strip {
@@ -216,10 +354,26 @@
     text-transform: uppercase;
   }
 
-  .filter-row {
+  .filter-summary {
+    gap: 5px;
+    flex-wrap: wrap;
+    padding-left: 18px;
+  }
+
+  .filter-summary span {
+    border: 1px solid var(--border-2);
+    padding: 1px 6px;
+    color: var(--fg-3);
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+
+  .settings-panel {
     gap: 8px;
     align-items: end;
+    flex-wrap: wrap;
     min-width: 0;
+    padding: 8px 0 0 18px;
   }
 
   label {

@@ -1,6 +1,8 @@
 // Domain types for deep-research agentic search (RFC 0037).
 // Shapes mirror the Rust serde (camelCase) in src-tauri/src/domain/research.rs.
 
+import type { DiscoverySearchResponse } from "$lib/domain/discover";
+
 export type Depth = "quick" | "standard" | "thorough";
 
 export type SearchRunStatus =
@@ -52,19 +54,10 @@ export interface Search {
   updatedAt: string;
 }
 
-// The candidate payload as normalized by the discovery providers.
-export interface ResearchPaper {
-  id: string;
-  title: string;
-  authors: string[];
-  abstract?: string;
-  year?: number;
-  venue?: string;
-  citationCount?: number;
-  doi?: string;
-  externalUrl?: string;
-  pdfUrl?: string;
-}
+// The candidate payload is the same normalized paper shape that shallow
+// discovery returns. Deep research ranks and explains these candidates; it does
+// not invent a second paper model.
+export type ResearchPaper = DiscoverySearchResponse["candidates"][number];
 
 export interface SearchCandidate {
   id: string;
@@ -89,6 +82,13 @@ export interface SearchUpdated {
   found: number;
   unique: number;
   new: number;
+}
+
+export interface SearchCandidatesPreview {
+  searchId: string;
+  runId: string;
+  candidates: ResearchPaper[];
+  unique: number;
 }
 
 // Depth presets — mirror Depth::budget() in research.rs.

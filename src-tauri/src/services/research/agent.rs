@@ -39,13 +39,14 @@ pub struct RunOutcome {
 }
 
 /// Progress signals emitted as the loop runs (mapped to events by the manager).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Progress {
     Planning { iteration: u32 },
     Searching { provider: String, text: String },
     SearchResult { provider: String, count: usize },
     SearchFailed { provider: String, error: String },
     Deduped { unique: usize },
+    CandidatePreview { candidates: Vec<PaperCandidate> },
     Assessing,
     Ranking { count: usize },
 }
@@ -125,6 +126,11 @@ where
         pool = apply_constraints(pool, constraints);
         pool = dedup(pool);
         on(Progress::Deduped { unique: pool.len() });
+        if !pool.is_empty() {
+            on(Progress::CandidatePreview {
+                candidates: pool.clone(),
+            });
+        }
         usage.candidate_count = new_count(&pool, &inputs.existing_keys);
 
         if cancelled.load(Ordering::Relaxed) {
@@ -356,6 +362,46 @@ mod tests {
         assert_eq!(outcome.stop_reason, StopReason::CoverageSufficient);
         assert_eq!(outcome.ranked.len(), 2);
         assert_eq!(outcome.ranked[0].rank, 1);
+    }
+
+    #[tokio::test]
+    async fn emits_preview_after_deduping_candidate_pool() {
+        let batch = vec![
+            candidate("Alpha", "10/a"),
+            candidate("Alpha copy", "10/a"),
+            candidate("Beta", "10/b"),
+        ];
+        let planner = FakePlanner::new(0);
+        let source = FakeSource { batch };
+        let constraints = constraints(20);
+        let strategy = Depth::Standard.budget();
+        let inputs = RunInputs {
+            goal: "goal",
+            constraints: &constraints,
+            strategy: &strategy,
+            existing_keys: HashSet::new(),
+        };
+        let mut events = Vec::new();
+
+        run(
+            &planner,
+            &source,
+            inputs,
+            &AtomicBool::new(false),
+            |progress| events.push(progress),
+        )
+        .await
+        .expect("loop ok");
+
+        let preview_sizes = events
+            .iter()
+            .filter_map(|event| match event {
+                Progress::CandidatePreview { candidates } => Some(candidates.len()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(preview_sizes, vec![2]);
     }
 
     #[tokio::test]

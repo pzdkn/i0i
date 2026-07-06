@@ -65,14 +65,12 @@
 
   <div class="feed-body">
     {#if workspace.status === "idle" && workspace.candidates.length === 0}
-      <div class="empty-state col">
-        <div class="label hot">No Scout run yet</div>
-        <p>Enter a query, adjust filters, then run OpenAlex discovery.</p>
+      <div class="empty-state terminal-empty col">
+        <div class="prompt-line row"><span>&gt;</span><em>find papers about...</em></div>
       </div>
-    {:else if workspace.status === "running"}
-      <div class="empty-state col">
-        <div class="label hot">Running Scout</div>
-        <p>Searching OpenAlex for matching open-access papers...</p>
+    {:else if workspace.status === "running" && workspace.candidates.length === 0}
+      <div class="empty-state terminal-empty col">
+        <div class="prompt-line row"><span>&gt;</span><em>{workspace.deep ? "deep research running" : "search running"}</em></div>
       </div>
     {:else if workspace.status === "failed" && workspace.candidates.length === 0}
       <div class="empty-state col">
@@ -112,6 +110,9 @@
             {#if candidate.owned}
               <em>vault</em>
             {/if}
+            {#if candidate.reviewing}
+              <em>reviewing</em>
+            {/if}
           </span>
           <span class="authors truncate">{candidate.authors.slice(0, 3).join(", ")}</span>
           <span class="why truncate">{candidate.why}</span>
@@ -142,27 +143,17 @@
                 <span class="target-chip">+{targets.length - 2}</span>
               {/if}
             </span>
-            <button
-              class="action"
-              type="button"
-              onclick={(event) => openTargetEditor(event, candidate.id)}
-            >
-              Add to Vault
-            </button>
-          {:else}
-            <button
-              class="action"
-              type="button"
-              onclick={(event) => openTargetEditor(event, candidate.id)}
-            >
-              Add to Vault
-            </button>
           {/if}
-          <button class="action" type="button" title="PDF preview is not downloaded in this slice">Preview</button>
-          <button class="action" type="button">Graph</button>
-          {#if candidate.owned}
-            <button class="action" type="button" onclick={() => onOpenCandidate(candidate.id)}>Open</button>
-          {/if}
+          <button
+            class="action icon-action"
+            type="button"
+            title="Add to vault"
+            aria-label="Add to vault"
+            onclick={(event) => openTargetEditor(event, candidate.id)}
+          >
+            +
+          </button>
+          <button class="action" type="button" onclick={() => onOpenCandidate(candidate.id)}>Open</button>
           {#if editingCandidateId === candidate.id}
             <DiscoverTargetEditor
               {vaults}
@@ -306,16 +297,17 @@
   }
 
   .actions-label {
-    width: 180px;
+    width: 118px;
     flex-shrink: 0;
   }
 
   .row-actions {
     position: relative;
-    width: 214px;
+    width: 150px;
     flex-shrink: 0;
     align-content: flex-start;
     align-items: flex-start;
+    justify-content: flex-end;
     gap: 6px;
     flex-wrap: wrap;
   }
@@ -328,6 +320,13 @@
     color: var(--fg-2);
     font-size: 9px;
     cursor: pointer;
+  }
+
+  .icon-action {
+    width: 22px;
+    padding: 0;
+    color: var(--amber);
+    font-size: 12px;
   }
 
   .action:hover {
@@ -370,6 +369,24 @@
     margin: 0;
     color: var(--fg-2);
     font-size: 12px;
+  }
+
+  .terminal-empty {
+    text-align: left;
+  }
+
+  .prompt-line {
+    gap: 8px;
+    color: var(--fg-3);
+    font-size: 12px;
+  }
+
+  .prompt-line span {
+    color: var(--green);
+  }
+
+  .prompt-line em {
+    font-style: normal;
   }
 
 </style>

@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Search,
   SearchCandidate,
+  SearchCandidatesPreview,
   SearchDraft,
   SearchUpdated,
 } from "$lib/domain/research";
@@ -48,4 +49,13 @@ export async function listenSearchUpdated(
   onEvent: (payload: SearchUpdated) => void,
 ): Promise<UnlistenFn> {
   return listen<SearchUpdated>("search_updated", (event) => onEvent(event.payload));
+}
+
+/** Subscribe to transient deep-search candidate previews. */
+export async function listenSearchCandidatesPreview(
+  onEvent: (payload: SearchCandidatesPreview) => void,
+): Promise<UnlistenFn> {
+  return listen<SearchCandidatesPreview>("search_candidates_preview", (event) =>
+    onEvent(event.payload),
+  );
 }

@@ -30,6 +30,7 @@ export type DiscoverCandidate = {
   owned?: boolean;
   alreadyInLibrary?: boolean;
   isNew?: boolean;
+  reviewing?: boolean;
 };
 
 export type DiscoverSort = "relevance" | "newest" | "most_cited";
@@ -48,11 +49,25 @@ export function providerDisplayName(provider: DiscoveryProviderChoice): string {
 
 export type DiscoverRunStatus = "idle" | "running" | "completed" | "failed";
 
+export type DiscoverRunMode = "shallow" | "deep";
+
+export type DiscoverDepth = "quick" | "standard" | "thorough";
+
+export type DiscoverRunProgress = {
+  message: string;
+  iteration: number;
+  found: number;
+  unique: number;
+  new: number;
+};
+
 export type DiscoverWorkspace = {
   id: string;
   title: string;
   seeds: string[];
   query: string;
+  deep: boolean;
+  deepDepth: DiscoverDepth;
   yearFrom: string;
   yearTo: string;
   resultLimit: 10 | 25 | 50;
@@ -60,11 +75,17 @@ export type DiscoverWorkspace = {
   provider: DiscoveryProviderChoice;
   status: DiscoverRunStatus;
   error: string;
+  activeRunMode?: DiscoverRunMode;
+  researchSearchId?: string;
+  researchRunId?: string;
+  runTrace: string[];
+  runProgress?: DiscoverRunProgress;
   lastRun?: {
     provider: string;
     query: string;
     filters: string[];
     resultCount: number;
+    mode?: DiscoverRunMode;
   };
   selectedCandidateId?: string;
   candidates: DiscoverCandidate[];

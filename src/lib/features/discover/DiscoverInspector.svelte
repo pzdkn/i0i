@@ -10,6 +10,12 @@
   const selectedCandidate = $derived(
     workspace.candidates.find((candidate) => candidate.id === workspace.selectedCandidateId),
   );
+  const runLabel = $derived(workspace.lastRun?.mode === "deep" || workspace.activeRunMode === "deep" ? "Deep" : "Shallow");
+  const providerLabel = $derived(
+    workspace.lastRun?.mode === "deep"
+      ? "Deep"
+      : providerDisplayName((workspace.lastRun?.provider ?? workspace.provider) as DiscoveryProviderChoice),
+  );
 
 
   function statusLabel(status: DiscoverWorkspace["status"]) {
@@ -51,8 +57,8 @@
 
   <section class="panel-section col">
     <div class="row section-title">
-      <span>Current Search</span>
-      <span class="mono-dim">{providerDisplayName((workspace.lastRun?.provider ?? "open_alex") as DiscoveryProviderChoice)}</span>
+      <span>Current Run</span>
+      <span class="mono-dim">{runLabel}</span>
     </div>
     <dl class="kv">
       <div>
@@ -64,6 +70,10 @@
         <dd>{workspace.lastRun?.resultCount ?? workspace.candidates.length}</dd>
       </div>
       <div>
+        <dt>provider</dt>
+        <dd>{providerLabel}</dd>
+      </div>
+      <div>
         <dt>limit</dt>
         <dd>{workspace.resultLimit}</dd>
       </div>
@@ -71,11 +81,28 @@
         <dt>sort</dt>
         <dd>{workspace.sortBy}</dd>
       </div>
-      <div>
-        <dt>open access</dt>
-        <dd>always</dd>
-      </div>
     </dl>
+    {#if workspace.runProgress}
+      <dl class="kv">
+        <div>
+          <dt>queries</dt>
+          <dd>{workspace.runProgress.iteration}</dd>
+        </div>
+        <div>
+          <dt>found</dt>
+          <dd>{workspace.runProgress.found}</dd>
+        </div>
+        <div>
+          <dt>unique</dt>
+          <dd>{workspace.runProgress.unique}</dd>
+        </div>
+        <div>
+          <dt>new</dt>
+          <dd>{workspace.runProgress.new}</dd>
+        </div>
+      </dl>
+      <p class="current-step">{workspace.runProgress.message}</p>
+    {/if}
     {#if workspace.lastRun?.filters.length}
       <div class="chips row">
         {#each workspace.lastRun.filters as filter}
@@ -85,6 +112,16 @@
     {/if}
     {#if workspace.error}
       <p class="error">{workspace.error}</p>
+    {/if}
+    {#if !selectedCandidate && workspace.runTrace.length > 0}
+      <div class="trace col">
+        <div class="section-title">Trace</div>
+        <ol class="trace-lines col">
+          {#each workspace.runTrace.slice(-8) as line}
+            <li>{line}</li>
+          {/each}
+        </ol>
+      </div>
     {/if}
   </section>
 
@@ -97,6 +134,12 @@
     </div>
 
     {#if selectedCandidate}
+      {#if workspace.status === "running" && workspace.runProgress}
+        <div class="active-run row">
+          <span>{runLabel} running</span>
+          <span>{workspace.runProgress.unique} candidates</span>
+        </div>
+      {/if}
       <h3>{selectedCandidate.title}</h3>
       <p class="authors">{selectedCandidate.authors.slice(0, 4).join(", ") || "unknown authors"}</p>
       <dl class="kv">
@@ -230,6 +273,7 @@
   .authors,
   .abstract,
   .empty,
+  .current-step,
   .error {
     margin: 0;
     color: var(--fg-2);
@@ -247,5 +291,27 @@
 
   .signals {
     gap: 6px;
+  }
+
+  .trace {
+    gap: 6px;
+  }
+
+  .trace-lines {
+    gap: 4px;
+    margin: 0;
+    padding-left: 16px;
+    color: var(--fg-3);
+    font-size: 10px;
+    line-height: 1.4;
+  }
+
+  .active-run {
+    justify-content: space-between;
+    border: 1px solid var(--border-2);
+    padding: 4px 6px;
+    color: var(--green);
+    font-size: 9px;
+    text-transform: uppercase;
   }
 </style>
