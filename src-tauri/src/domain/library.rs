@@ -65,6 +65,7 @@ pub struct PaperDraft {
 pub struct PaperSourceDraft {
     pub source_kind: String,
     pub source_url: String,
+    pub landing_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +82,9 @@ pub struct DocumentSource {
     pub paper_id: String,
     pub source_kind: String,
     pub source_url: Option<String>,
+    pub landing_url: Option<String>,
+    pub final_url: Option<String>,
+    pub acquisition_method: Option<String>,
     pub local_path: Option<String>,
     pub status: String,
     pub error: Option<String>,

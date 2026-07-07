@@ -11,6 +11,7 @@ use pdf_ingestion::{PdfDownloadManager, PdfIngestionConfig};
 use services::chat::ChatService;
 use services::reader_service::ReaderService;
 use services::research::manager::SearchManager;
+use services::source_acquisition::SourceAcquisitionService;
 use storage::library_store::LibraryStore;
 use tauri::Manager;
 
@@ -24,12 +25,23 @@ pub fn run() {
             let extraction_config = PdfExtractionConfig::load(&app.handle());
             let pdf_extractions =
                 PdfExtractionManager::new(app.handle().clone(), store.clone(), extraction_config);
+            let source_client = reqwest::Client::builder()
+                .user_agent(concat!(
+                    env!("CARGO_PKG_NAME"),
+                    "/",
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .build()
+                .expect("reqwest client should build");
+            let source_acquisition =
+                SourceAcquisitionService::from_app_config(&app.handle(), source_client);
             let pdf_config = PdfIngestionConfig::load(&app.handle());
             let pdf_downloads = PdfDownloadManager::new(
                 app.handle().clone(),
                 store.clone(),
                 pdf_config,
                 pdf_extractions.clone(),
+                source_acquisition.clone(),
             );
             pdf_downloads
                 .recover_and_queue_startup_downloads()
@@ -53,6 +65,7 @@ pub fn run() {
             app.manage(store);
             app.manage(pdf_downloads);
             app.manage(pdf_extractions);
+            app.manage(source_acquisition);
             app.manage(reader_service);
             app.manage(chat_service);
             app.manage(discovery_providers);
@@ -94,6 +107,8 @@ pub fn run() {
             commands::research::cancel_search_run,
             commands::research::mark_search_candidate_saved,
             commands::research::mark_search_candidates_seen,
+            commands::source_acquisition::debug_obscura_start,
+            commands::source_acquisition::debug_obscura_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

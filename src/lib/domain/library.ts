@@ -25,6 +25,9 @@ export type DocumentSource = {
   paperId: string;
   sourceKind: string;
   sourceUrl?: string;
+  landingUrl?: string;
+  finalUrl?: string;
+  acquisitionMethod?: string;
   localPath?: string;
   status: string;
   error?: string;
@@ -114,6 +117,7 @@ export type PaperDraft = {
 export type PaperSourceDraft = {
   sourceKind: "pdf";
   sourceUrl: string;
+  landingUrl?: string;
 };
 
 export type LibrarySnapshot = {

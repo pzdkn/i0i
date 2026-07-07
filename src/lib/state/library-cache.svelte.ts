@@ -451,6 +451,7 @@ export function paperDraftFromDiscoverCandidate(candidateId: string): PaperDraft
           {
             sourceKind: "pdf",
             sourceUrl: candidate.pdfUrl,
+            landingUrl: candidate.externalUrl,
           },
         ]
       : [],

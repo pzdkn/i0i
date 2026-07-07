@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::StatusCode;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
 use crate::domain::library::DocumentSource;
 use crate::pdf_extraction::PdfExtractionManager;
+use crate::services::source_acquisition::SourceAcquisitionService;
 use crate::storage::library_store::LibraryStore;
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 2;
@@ -34,7 +34,7 @@ pub struct PdfDownloadManager {
     store: LibraryStore,
     config: PdfIngestionConfig,
     pdf_extractions: PdfExtractionManager,
-    client: reqwest::Client,
+    source_acquisition: SourceAcquisitionService,
     semaphore: Arc<Semaphore>,
     queued_or_active: Arc<Mutex<HashSet<String>>>,
 }
@@ -134,22 +134,15 @@ impl PdfDownloadManager {
         store: LibraryStore,
         config: PdfIngestionConfig,
         pdf_extractions: PdfExtractionManager,
+        source_acquisition: SourceAcquisitionService,
     ) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .expect("reqwest client should build");
         Self {
             app,
             store,
             pdf_extractions,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent_downloads)),
             config,
-            client,
+            source_acquisition,
             queued_or_active: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -298,73 +291,44 @@ impl PdfDownloadManager {
         local_path: &Path,
         source: &DocumentSource,
     ) -> PdfResult<DocumentSource> {
-        let response = self
-            .client
-            .get(source_url)
-            .header("Accept", "application/pdf,*/*;q=0.8")
-            .send()
+        let acquired = self
+            .source_acquisition
+            .acquire_pdf(
+                source_url,
+                source.landing_url.as_deref(),
+                self.config.max_pdf_bytes,
+            )
             .await
             .map_err(|error| error.to_string())?;
-        let status = response.status();
-        let final_url = response.url().to_string();
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("unknown")
-            .to_string();
+
         pdf_log(format!(
-            "response source_id={} status={} content_type={} final_url={}",
-            source.id, status, content_type, final_url
+            "acquired source_id={} method={} final_url={} content_type={:?}",
+            source.id,
+            acquired.method.as_str(),
+            acquired.final_url,
+            acquired.content_type
         ));
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(status_error(status, &final_url, &content_type, &body));
-        }
 
-        let content_length = response.content_length();
-        pdf_log(format!(
-            "headers source_id={} content_length={:?}",
-            source.id, content_length
-        ));
-        if let Some(content_length) = content_length {
-            if content_length > self.config.max_pdf_bytes {
-                return Err(format!(
-                    "PDF is too large: {content_length} bytes exceeds {} bytes",
-                    self.config.max_pdf_bytes
-                ));
-            }
-        }
+        self.emit_update(source, Some(0), None);
 
-        self.emit_update(source, Some(0), content_length);
-
-        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+        let bytes = acquired.bytes;
         let bytes_downloaded = bytes.len() as u64;
-        if bytes_downloaded > self.config.max_pdf_bytes {
-            return Err(format!(
-                "PDF is too large: {bytes_downloaded} bytes exceeds {} bytes",
-                self.config.max_pdf_bytes
-            ));
-        }
-        if !bytes.starts_with(b"%PDF-") {
-            pdf_log(format!(
-                "invalid magic source_id={} bytes_downloaded={} content_type={} final_url={}",
-                source.id, bytes_downloaded, content_type, final_url
-            ));
-            return Err("Downloaded file was not a PDF".to_string());
-        }
 
         fs::write(partial_path, &bytes).map_err(|error| error.to_string())?;
         fs::rename(partial_path, local_path).map_err(|error| error.to_string())?;
 
-        let source = self
-            .store
-            .set_document_source_cached(&source.id, &local_path.to_string_lossy())?;
-        self.emit_update(&source, Some(bytes_downloaded), content_length);
+        let source = self.store.set_document_source_cached_with_acquisition(
+            &source.id,
+            &local_path.to_string_lossy(),
+            Some(&acquired.final_url),
+            Some(acquired.method.as_str()),
+        )?;
+        self.emit_update(&source, Some(bytes_downloaded), None);
         pdf_log(format!(
-            "cached source_id={} bytes={} path={}",
+            "cached source_id={} bytes={} method={} path={}",
             source.id,
             bytes_downloaded,
+            acquired.method.as_str(),
             local_path.display()
         ));
         self.pdf_extractions.queue_source(source.id.clone(), false);
@@ -438,28 +402,6 @@ fn pdf_log(message: impl AsRef<str>) {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     eprintln!("[pdf-ingestion {timestamp_ms}] {}", message.as_ref());
-}
-
-fn status_error(status: StatusCode, final_url: &str, content_type: &str, body: &str) -> String {
-    let snippet = body_snippet(body);
-    if snippet.is_empty() {
-        return format!(
-            "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type})"
-        );
-    }
-
-    format!(
-        "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type}; body: {snippet})"
-    )
-}
-
-fn body_snippet(body: &str) -> String {
-    body.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(220)
-        .collect()
 }
 
 fn validate_cached_pdf(path: &Path) -> bool {

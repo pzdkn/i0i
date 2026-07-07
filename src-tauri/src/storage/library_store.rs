@@ -133,15 +133,30 @@ impl LibraryStore {
         source_id: &str,
         local_path: &str,
     ) -> StoreResult<DocumentSource> {
+        self.set_document_source_cached_with_acquisition(source_id, local_path, None, None)
+    }
+
+    pub fn set_document_source_cached_with_acquisition(
+        &self,
+        source_id: &str,
+        local_path: &str,
+        final_url: Option<&str>,
+        acquisition_method: Option<&str>,
+    ) -> StoreResult<DocumentSource> {
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
         tx.execute(
             "
             update document_sources
-            set status = 'cached', local_path = ?2, error = null, updated_at = datetime('now')
+            set status = 'cached',
+                local_path = ?2,
+                final_url = ?3,
+                acquisition_method = ?4,
+                error = null,
+                updated_at = datetime('now')
             where id = ?1
             ",
-            params![source_id, local_path],
+            params![source_id, local_path, final_url, acquisition_method],
         )
         .map_err(|error| error.to_string())?;
         tx.execute(
@@ -226,8 +241,8 @@ impl LibraryStore {
 
         conn.query_row(
             "
-            select s.id, s.paper_id, s.source_kind, s.source_url, s.local_path,
-                   s.status, s.error, s.created_at, s.updated_at
+            select s.id, s.paper_id, s.source_kind, s.source_url, s.landing_url,
+                   s.final_url, s.acquisition_method, s.local_path, s.status, s.error, s.created_at, s.updated_at
             from document_sources s
             left join papers p on p.id = s.paper_id
             where s.paper_id = ?1
@@ -253,8 +268,8 @@ impl LibraryStore {
         let mut stmt = conn
             .prepare(
                 "
-                select s.id, s.paper_id, s.source_kind, s.source_url, s.local_path,
-                       s.status, s.error, s.created_at, s.updated_at
+                select s.id, s.paper_id, s.source_kind, s.source_url, s.landing_url,
+                       s.final_url, s.acquisition_method, s.local_path, s.status, s.error, s.created_at, s.updated_at
                 from document_sources s
                 where s.source_kind = 'pdf'
                   and s.status = 'cached'
@@ -1030,6 +1045,9 @@ impl LibraryStore {
               paper_id text not null,
               source_kind text not null,
               source_url text,
+              landing_url text,
+              final_url text,
+              acquisition_method text,
               local_path text,
               status text not null,
               error text,
@@ -1256,7 +1274,10 @@ impl LibraryStore {
         .map_err(|error| error.to_string())?;
 
         add_column_if_missing(conn, "papers", "active_source_id", "text")?;
-        add_column_if_missing(conn, "papers", "active_extraction_id", "text")
+        add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
+        add_column_if_missing(conn, "document_sources", "landing_url", "text")?;
+        add_column_if_missing(conn, "document_sources", "final_url", "text")?;
+        add_column_if_missing(conn, "document_sources", "acquisition_method", "text")
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -1423,8 +1444,8 @@ fn read_document_sources(conn: &Connection) -> StoreResult<Vec<DocumentSource>> 
     let mut stmt = conn
         .prepare(
             "
-            select id, paper_id, source_kind, source_url, local_path,
-                   status, error, created_at, updated_at
+            select id, paper_id, source_kind, source_url, landing_url,
+                   final_url, acquisition_method, local_path, status, error, created_at, updated_at
             from document_sources
             order by updated_at desc, id
             ",
@@ -1438,11 +1459,14 @@ fn read_document_sources(conn: &Connection) -> StoreResult<Vec<DocumentSource>> 
                 paper_id: row.get(1)?,
                 source_kind: row.get(2)?,
                 source_url: row.get(3)?,
-                local_path: row.get(4)?,
-                status: row.get(5)?,
-                error: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                landing_url: row.get(4)?,
+                final_url: row.get(5)?,
+                acquisition_method: row.get(6)?,
+                local_path: row.get(7)?,
+                status: row.get(8)?,
+                error: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1457,8 +1481,8 @@ fn read_document_sources_for_paper(
     let mut stmt = conn
         .prepare(
             "
-            select id, paper_id, source_kind, source_url, local_path,
-                   status, error, created_at, updated_at
+            select id, paper_id, source_kind, source_url, landing_url,
+                   final_url, acquisition_method, local_path, status, error, created_at, updated_at
             from document_sources
             where paper_id = ?1
             order by updated_at desc, id
@@ -1480,8 +1504,8 @@ fn read_document_sources_by_status(
     let mut stmt = conn
         .prepare(
             "
-            select id, paper_id, source_kind, source_url, local_path,
-                   status, error, created_at, updated_at
+            select id, paper_id, source_kind, source_url, landing_url,
+                   final_url, acquisition_method, local_path, status, error, created_at, updated_at
             from document_sources
             where source_kind = 'pdf' and status = ?1 and source_url is not null
             order by updated_at asc, id
@@ -1499,8 +1523,8 @@ fn read_document_sources_by_status(
 fn read_document_source(conn: &Connection, source_id: &str) -> StoreResult<DocumentSource> {
     conn.query_row(
         "
-        select id, paper_id, source_kind, source_url, local_path,
-               status, error, created_at, updated_at
+        select id, paper_id, source_kind, source_url, landing_url,
+               final_url, acquisition_method, local_path, status, error, created_at, updated_at
         from document_sources
         where id = ?1
         ",
@@ -1516,11 +1540,14 @@ fn document_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Documen
         paper_id: row.get(1)?,
         source_kind: row.get(2)?,
         source_url: row.get(3)?,
-        local_path: row.get(4)?,
-        status: row.get(5)?,
-        error: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        landing_url: row.get(4)?,
+        final_url: row.get(5)?,
+        acquisition_method: row.get(6)?,
+        local_path: row.get(7)?,
+        status: row.get(8)?,
+        error: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
@@ -2720,17 +2747,31 @@ fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -
         }
 
         let source_url = source.source_url.trim();
+        let landing_url = source
+            .landing_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
         let source_id = document_source_id(&paper.id, source);
 
         tx.execute(
             "
             insert into document_sources (
-              id, paper_id, source_kind, source_url, local_path, status, error,
+              id, paper_id, source_kind, source_url, landing_url, final_url, acquisition_method, local_path, status, error,
               created_at, updated_at
             )
-            values (?1, ?2, ?3, ?4, null, 'remote_available', null, datetime('now'), datetime('now'))
+            values (?1, ?2, ?3, ?4, ?5, null, null, null, 'remote_available', null, datetime('now'), datetime('now'))
             on conflict(id) do update set
               source_url = excluded.source_url,
+              landing_url = excluded.landing_url,
+              final_url = case
+                when document_sources.status = 'cached' then document_sources.final_url
+                else null
+              end,
+              acquisition_method = case
+                when document_sources.status = 'cached' then document_sources.acquisition_method
+                else null
+              end,
               status = case
                 when document_sources.status = 'cached' then document_sources.status
                 else 'remote_available'
@@ -2745,7 +2786,13 @@ fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -
               end,
               updated_at = datetime('now')
             ",
-            params![source_id, paper.id, source.source_kind, source_url],
+            params![
+                source_id,
+                paper.id,
+                source.source_kind,
+                source_url,
+                landing_url
+            ],
         )
         .map_err(|error| error.to_string())?;
     }
@@ -3201,6 +3248,7 @@ mod tests {
         draft.sources = vec![PaperSourceDraft {
             source_kind: "pdf".to_string(),
             source_url: pdf_url.to_string(),
+            landing_url: Some("https://example.test/landing".to_string()),
         }];
         draft
     }
@@ -3407,11 +3455,48 @@ mod tests {
             source.source_url.as_deref(),
             Some("https://example.test/paper.pdf")
         );
+        assert_eq!(
+            source.landing_url.as_deref(),
+            Some("https://example.test/landing")
+        );
         assert_eq!(source.status, "remote_available");
         assert!(source.local_path.is_none());
         assert!(paper(&snapshot, "pdf-source-paper")
             .active_source_id
             .is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn cached_document_source_persists_acquisition_provenance() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft_with_pdf("provenance-paper", "https://example.test/blocked.pdf");
+        db.store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])?;
+        let source = db
+            .store
+            .get_document_sources("provenance-paper")?
+            .into_iter()
+            .next()
+            .expect("PDF source should exist");
+
+        let source = db.store.set_document_source_cached_with_acquisition(
+            &source.id,
+            "/tmp/provenance.pdf",
+            Some("https://cdn.example.test/provenance.pdf"),
+            Some("obscura_browser_stealth"),
+        )?;
+
+        assert_eq!(source.status, "cached");
+        assert_eq!(
+            source.final_url.as_deref(),
+            Some("https://cdn.example.test/provenance.pdf")
+        );
+        assert_eq!(
+            source.acquisition_method.as_deref(),
+            Some("obscura_browser_stealth")
+        );
 
         Ok(())
     }

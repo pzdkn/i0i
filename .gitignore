@@ -15,3 +15,5 @@ vite.config.ts.timestamp-*
 
 # Native app resources installed locally by setup scripts.
 src-tauri/resources/pdfium/libpdfium.dylib
+src-tauri/resources/obscura/obscura
+src-tauri/resources/obscura/obscura-worker
