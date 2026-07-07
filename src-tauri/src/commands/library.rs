@@ -1,6 +1,5 @@
 use crate::domain::library::{
-    DocumentSource, LibrarySnapshot, PaperDraft, PaperNote, PaperNoteDraft, VaultDraft,
-    VaultRenameDraft,
+    DocumentSource, LibrarySnapshot, PaperDraft, VaultDraft, VaultRenameDraft,
 };
 use crate::pdf_ingestion::PdfDownloadManager;
 use crate::services::reader_service::ReaderService;
@@ -28,7 +27,9 @@ pub fn add_paper_to_vaults(
     {
         // If the user already opened this paper from Discover, prefer promoting
         // the temporary cached PDF over starting a second network download.
-        if !reader_service.promote_discovery_cached_pdf(&source)? {
+        if reader_service.promote_discovery_cached_pdf(&source)? {
+            pdf_downloads.queue_source(source.id);
+        } else {
             queue_sources.push(source);
         }
     }
@@ -114,41 +115,4 @@ pub fn delete_paper_globally(
     paper_id: String,
 ) -> Result<LibrarySnapshot, String> {
     store.delete_paper_globally(&paper_id)
-}
-
-#[tauri::command]
-pub fn get_paper_notes(
-    store: tauri::State<'_, LibraryStore>,
-    paper_id: String,
-) -> Result<Vec<PaperNote>, String> {
-    store.get_paper_notes(&paper_id)
-}
-
-#[tauri::command]
-pub fn create_paper_note(
-    store: tauri::State<'_, LibraryStore>,
-    draft: PaperNoteDraft,
-) -> Result<Vec<PaperNote>, String> {
-    store.create_paper_note(&draft)
-}
-
-#[tauri::command]
-pub fn delete_paper_note(
-    store: tauri::State<'_, LibraryStore>,
-    paper_id: String,
-    note_id: String,
-) -> Result<Vec<PaperNote>, String> {
-    store.delete_paper_note(&note_id)?;
-    store.get_paper_notes(&paper_id)
-}
-
-#[tauri::command]
-pub fn update_paper_note(
-    store: tauri::State<'_, LibraryStore>,
-    paper_id: String,
-    note_id: String,
-    body: String,
-) -> Result<Vec<PaperNote>, String> {
-    store.update_paper_note(&note_id, &body)?;
-    store.get_paper_notes(&paper_id)
 }

@@ -127,7 +127,10 @@ fn apply_text_field(entry: &mut ArxivEntry, field: TextField, text: &str) {
 /// Strip the XML namespace prefix and return just the local element name.
 fn local_name(raw: &[u8]) -> String {
     let s = std::str::from_utf8(raw).unwrap_or_default();
-    s.rsplit_once(':').map(|(_, local)| local).unwrap_or(s).to_string()
+    s.rsplit_once(':')
+        .map(|(_, local)| local)
+        .unwrap_or(s)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -155,8 +158,14 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let e = &entries[0];
         assert_eq!(e.id, "http://arxiv.org/abs/2309.08600v2");
-        assert_eq!(e.title, "Sparse Autoencoders Find Highly Interpretable Features in Language Models");
-        assert_eq!(e.summary.as_deref(), Some("We show that sparse autoencoders can find interpretable features."));
+        assert_eq!(
+            e.title,
+            "Sparse Autoencoders Find Highly Interpretable Features in Language Models"
+        );
+        assert_eq!(
+            e.summary.as_deref(),
+            Some("We show that sparse autoencoders can find interpretable features.")
+        );
         assert_eq!(e.published.as_deref(), Some("2023-09-15T17:48:05Z"));
     }
 

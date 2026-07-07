@@ -1,6 +1,7 @@
 import type { Paper } from "$lib/domain/paper";
-import { providerDisplayName, type DiscoverCandidate, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
+import { providerDisplayName, type DiscoverCandidate, type DiscoverRunProgress, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
 import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
+import type { ResearchPaper, SearchCandidate, SearchUpdated } from "$lib/domain/research";
 
 type LibraryState = {
   vaults: VaultWorkspace[];
@@ -38,6 +39,8 @@ function cloneDiscoverWorkspace(workspace: DiscoverWorkspace): DiscoverWorkspace
   return {
     ...workspace,
     seeds: [...workspace.seeds],
+    runTrace: [...workspace.runTrace],
+    runProgress: workspace.runProgress ? { ...workspace.runProgress } : undefined,
     lastRun: workspace.lastRun
       ? {
           ...workspace.lastRun,
@@ -72,6 +75,8 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     title: "Discover: Untitled",
     seeds: [],
     query: "",
+    deep: false,
+    deepDepth: "standard",
     yearFrom: "",
     yearTo: "",
     resultLimit: 25,
@@ -79,6 +84,7 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     provider: "open_alex",
     status: "idle",
     error: "",
+    runTrace: [],
     candidates: [],
   };
 }
@@ -112,7 +118,7 @@ function makeVaultWorkspace(snapshot: LibrarySnapshot, vaultId: string): VaultWo
     .sort((left, right) => right[1] - left[1])
     .slice(0, 6)
     .map(([tag, count]) => `${tag} x${count}`);
-  const noteCount = papers.reduce((sum, paper) => sum + paper.noteCount, 0);
+  const highlightCount = papers.reduce((sum, paper) => sum + paper.highlightCount, 0);
   const annotationCount = papers.reduce((sum, paper) => sum + paper.annotationCount, 0);
   const unreadCount = papers.filter((paper) => paper.status === "UNREAD").length;
 
@@ -123,7 +129,7 @@ function makeVaultWorkspace(snapshot: LibrarySnapshot, vaultId: string): VaultWo
     summary: `${papers.length} papers / ${unreadCount} unread / local`,
     tabs: [
       { label: "Papers", count: papers.length },
-      { label: "Notes", count: noteCount },
+      { label: "Highlights", count: highlightCount },
       { label: "Annotations", count: annotationCount },
       { label: "Graph" },
       { label: "Q&A" },
@@ -157,7 +163,7 @@ function candidateToPaper(candidateId: string): Paper | undefined {
     year: candidate.year,
     citations: candidate.citations,
     tags: [...candidate.tags],
-    noteCount: 0,
+    highlightCount: 0,
     annotationCount: 0,
     status: candidate.owned ? "READ" : "UNREAD",
     abstract: candidate.abstract ?? candidate.why,
@@ -176,10 +182,33 @@ export function getDiscoverWorkspace(discoverId: string) {
   return library.discoverWorkspaces.find((workspace) => workspace.id === discoverId) ?? library.discoverWorkspaces[0];
 }
 
+export function getDiscoverWorkspaces() {
+  return library.discoverWorkspaces;
+}
+
 export function createDiscoverWorkspace() {
   const workspace = makeDiscoverWorkspace();
   library.discoverWorkspaces = [...library.discoverWorkspaces, workspace];
   return workspace;
+}
+
+export function createDiscoverWorkspaceFrom(source: DiscoverWorkspace) {
+  const workspace = makeDiscoverWorkspace();
+  workspace.query = source.query;
+  workspace.deep = source.deep;
+  workspace.deepDepth = source.deepDepth;
+  workspace.yearFrom = source.yearFrom;
+  workspace.yearTo = source.yearTo;
+  workspace.resultLimit = source.resultLimit;
+  workspace.sortBy = source.sortBy;
+  workspace.provider = source.provider;
+  library.discoverWorkspaces = [...library.discoverWorkspaces, workspace];
+  return workspace;
+}
+
+export function removeDiscoverWorkspace(discoverId: string) {
+  const remaining = library.discoverWorkspaces.filter((workspace) => workspace.id !== discoverId);
+  library.discoverWorkspaces = remaining.length > 0 ? remaining : [makeDiscoverWorkspace()];
 }
 
 export function setDiscoverStatus(discoverId: string, status: DiscoverWorkspace["status"], error = "") {
@@ -191,7 +220,34 @@ export function setDiscoverStatus(discoverId: string, status: DiscoverWorkspace[
     workspace.candidates = [];
     workspace.selectedCandidateId = undefined;
     workspace.lastRun = undefined;
+    workspace.runTrace = [];
+    workspace.runProgress = undefined;
   }
+}
+
+export function setDiscoverRunStarted(
+  discoverId: string,
+  mode: DiscoverWorkspace["activeRunMode"],
+  researchSearchId?: string,
+  researchRunId?: string,
+) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.activeRunMode = mode;
+  workspace.researchSearchId = researchSearchId;
+  workspace.researchRunId = researchRunId;
+}
+
+export function appendDiscoverRunTrace(discoverId: string, event: SearchUpdated) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  const nextProgress: DiscoverRunProgress = {
+    message: event.message,
+    iteration: event.iteration,
+    found: event.found,
+    unique: event.unique,
+    new: event.new,
+  };
+  workspace.runProgress = nextProgress;
+  workspace.runTrace = [...workspace.runTrace.slice(-79), event.message];
 }
 
 export function setDiscoverSelectedCandidate(discoverId: string, candidateId: string) {
@@ -203,14 +259,51 @@ export function applyDiscoverSearchResponse(discoverId: string, response: Discov
   const workspace = getDiscoverWorkspace(discoverId);
   workspace.status = "completed";
   workspace.error = "";
+  workspace.activeRunMode = "shallow";
+  workspace.researchSearchId = undefined;
+  workspace.researchRunId = undefined;
   workspace.lastRun = {
     provider: response.provider,
     query: response.query,
     filters: [...response.filters],
     resultCount: response.resultCount,
+    mode: "shallow",
   };
   workspace.candidates = response.candidates.map(toDiscoverCandidate);
   workspace.selectedCandidateId = workspace.candidates[0]?.id;
+  markDiscoverOwnership();
+}
+
+export function applyDiscoverResearchCandidates(
+  discoverId: string,
+  query: string,
+  candidates: SearchCandidate[],
+) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.status = "completed";
+  workspace.error = "";
+  workspace.activeRunMode = "deep";
+  workspace.lastRun = {
+    provider: "Deep",
+    query,
+    filters: ["deep research"],
+    resultCount: candidates.length,
+    mode: "deep",
+  };
+  workspace.candidates = candidates.map(toDiscoverCandidateFromResearch);
+  workspace.selectedCandidateId = workspace.candidates[0]?.id;
+  markDiscoverOwnership();
+}
+
+export function applyDiscoverResearchPreview(
+  discoverId: string,
+  candidates: ResearchPaper[],
+) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.candidates = candidates.map(toDiscoverCandidateFromResearchPreview);
+  if (!workspace.candidates.some((candidate) => candidate.id === workspace.selectedCandidateId)) {
+    workspace.selectedCandidateId = workspace.candidates[0]?.id;
+  }
   markDiscoverOwnership();
 }
 
@@ -248,6 +341,7 @@ function candidateSignalSummary(candidate: DiscoverySearchResponse["candidates"]
 function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][number]): DiscoverCandidate {
   const score = candidate.matchSummary.score ?? 0;
   const openAccessTags = candidate.openAccess?.isOpenAccess ? ["open-access"] : [];
+  const providerTag = candidate.sourceProvider ?? "openalex";
 
   return {
     id: candidate.id,
@@ -260,7 +354,7 @@ function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][nu
     citations: candidate.citationCount ?? 0,
     score,
     why: candidateSignalSummary(candidate),
-    tags: ["openalex", ...openAccessTags],
+    tags: [providerTag, ...openAccessTags],
     abstract: candidate.abstract,
     publicationDate: candidate.publicationDate,
     doi: candidate.doi,
@@ -277,6 +371,29 @@ function toDiscoverCandidate(candidate: DiscoverySearchResponse["candidates"][nu
     },
     owned: candidate.alreadyInLibrary,
     alreadyInLibrary: candidate.alreadyInLibrary,
+  };
+}
+
+function toDiscoverCandidateFromResearch(item: SearchCandidate): DiscoverCandidate {
+  const candidate = toDiscoverCandidate(item.candidate);
+  return {
+    ...candidate,
+    score: item.score ?? candidate.score,
+    why: item.rationale || "Deep · via agentic search",
+    tags: ["deep", ...candidate.tags.filter((tag) => tag === "open-access")],
+    isNew: !item.seen,
+    owned: item.alreadyInLibrary || item.saved,
+    alreadyInLibrary: item.alreadyInLibrary,
+  };
+}
+
+function toDiscoverCandidateFromResearchPreview(candidate: ResearchPaper): DiscoverCandidate {
+  const normalized = toDiscoverCandidate(candidate);
+  return {
+    ...normalized,
+    why: "Deep · reviewing",
+    tags: ["deep", "reviewing", ...normalized.tags.filter((tag) => tag === "open-access")],
+    reviewing: true,
   };
 }
 
@@ -305,24 +422,6 @@ export function isPaperInLibrary(paperId: string) {
 
 export function getCandidateVaultTargets(candidateId: string) {
   return library.vaults.filter((workspace) => workspace.papers.some((paper) => paper.id === candidateId));
-}
-
-export function incrementPaperNoteCount(paperId: string) {
-  for (const workspace of library.vaults) {
-    const paper = workspace.papers.find((item) => item.id === paperId);
-    if (paper) {
-      paper.noteCount += 1;
-    }
-  }
-}
-
-export function decrementPaperNoteCount(paperId: string) {
-  for (const workspace of library.vaults) {
-    const paper = workspace.papers.find((item) => item.id === paperId);
-    if (paper) {
-      paper.noteCount = Math.max(paper.noteCount - 1, 0);
-    }
-  }
 }
 
 export function paperFromDiscoverCandidate(candidateId: string) {

@@ -120,16 +120,23 @@ mod tests {
     fn abstract_used_when_present() {
         let mut paper = minimal_paper("x");
         paper.abstract_text = Some("The real abstract.".to_string());
-        paper.tldr = Some(Tldr { text: Some("TLDR summary.".to_string()) });
+        paper.tldr = Some(Tldr {
+            text: Some("TLDR summary.".to_string()),
+        });
         let candidate = normalize_paper(paper, "test");
-        assert_eq!(candidate.abstract_text.as_deref(), Some("The real abstract."));
+        assert_eq!(
+            candidate.abstract_text.as_deref(),
+            Some("The real abstract.")
+        );
     }
 
     #[test]
     fn tldr_used_as_abstract_when_abstract_absent() {
         let mut paper = minimal_paper("x");
         paper.abstract_text = None;
-        paper.tldr = Some(Tldr { text: Some("TLDR summary.".to_string()) });
+        paper.tldr = Some(Tldr {
+            text: Some("TLDR summary.".to_string()),
+        });
         let candidate = normalize_paper(paper, "test");
         assert_eq!(candidate.abstract_text.as_deref(), Some("TLDR summary."));
     }
@@ -145,9 +152,13 @@ mod tests {
     fn authors_with_none_name_are_skipped() {
         let mut paper = minimal_paper("x");
         paper.authors = Some(vec![
-            Author { name: Some("Alice".to_string()) },
+            Author {
+                name: Some("Alice".to_string()),
+            },
             Author { name: None },
-            Author { name: Some("Bob".to_string()) },
+            Author {
+                name: Some("Bob".to_string()),
+            },
         ]);
         let candidate = normalize_paper(paper, "test");
         assert_eq!(candidate.authors, vec!["Alice", "Bob"]);
@@ -188,7 +199,10 @@ mod tests {
             url: Some("https://arxiv.org/pdf/2309.08600".to_string()),
         });
         let candidate = normalize_paper(paper, "test");
-        assert_eq!(candidate.pdf_url.as_deref(), Some("https://arxiv.org/pdf/2309.08600"));
+        assert_eq!(
+            candidate.pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2309.08600")
+        );
     }
 
     #[test]
@@ -205,7 +219,10 @@ mod tests {
         let mut paper = minimal_paper("x");
         paper.influential_citation_count = Some(38);
         let candidate = normalize_paper(paper, "test");
-        assert_eq!(candidate.match_summary.reasons, vec!["38 influential citations (Semantic Scholar)."]);
+        assert_eq!(
+            candidate.match_summary.reasons,
+            vec!["38 influential citations (Semantic Scholar)."]
+        );
     }
 
     #[test]

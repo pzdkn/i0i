@@ -6,7 +6,9 @@
 use reqwest::Client;
 use tokio::time::{sleep, Duration};
 
-use super::{config::SemanticScholarConfig, normalize::normalize_paper, remote::SemanticScholarResponse};
+use super::{
+    config::SemanticScholarConfig, normalize::normalize_paper, remote::SemanticScholarResponse,
+};
 use crate::{
     commands::discovery::{
         error::DiscoveryError,
@@ -33,7 +35,6 @@ impl SemanticScholarProvider {
             config: SemanticScholarConfig::load()?,
         })
     }
-
 }
 
 impl DiscoveryProvider for SemanticScholarProvider {
@@ -100,9 +101,10 @@ async fn ss_fetch_with_retry(
             builder = builder.header("x-api-key", api_key);
         }
 
-        let response = builder.send().await.map_err(|e| {
-            DiscoveryError::new(format!("Semantic Scholar request failed: {e}"))
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| DiscoveryError::new(format!("Semantic Scholar request failed: {e}")))?;
 
         let status = response.status();
 
@@ -159,10 +161,7 @@ fn ss_fields() -> &'static str {
 }
 
 /// Build Semantic Scholar query parameters from an app-level search request.
-fn ss_query_params(
-    request: &DiscoverySearchRequest,
-    limit: i32,
-) -> Vec<(&'static str, String)> {
+fn ss_query_params(request: &DiscoverySearchRequest, limit: i32) -> Vec<(&'static str, String)> {
     let mut params = vec![
         ("query", request.query.trim().to_string()),
         ("limit", limit.to_string()),
@@ -209,6 +208,9 @@ mod tests {
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
             provider: DiscoveryProviderChoice::SemanticScholar,
+            venues: Vec::new(),
+            authors: Vec::new(),
+            fields_of_study: Vec::new(),
         }
     }
 
@@ -226,7 +228,10 @@ mod tests {
 
     #[test]
     fn year_filter_to_only() {
-        assert_eq!(ss_year_filter(None, Some(2024)), Some("1000-2024".to_string()));
+        assert_eq!(
+            ss_year_filter(None, Some(2024)),
+            Some("1000-2024".to_string())
+        );
     }
 
     #[test]
@@ -277,7 +282,10 @@ mod tests {
         req.year_from = Some(2020);
         req.year_to = Some(2024);
         let params = ss_query_params(&req, 25);
-        let year = params.iter().find(|(k, _)| *k == "year").map(|(_, v)| v.as_str());
+        let year = params
+            .iter()
+            .find(|(k, _)| *k == "year")
+            .map(|(_, v)| v.as_str());
         assert_eq!(year, Some("2020-2024"));
     }
 
@@ -290,14 +298,21 @@ mod tests {
     #[test]
     fn query_params_respect_limit() {
         let params = ss_query_params(&base_request(), 10);
-        let limit = params.iter().find(|(k, _)| *k == "limit").map(|(_, v)| v.as_str());
+        let limit = params
+            .iter()
+            .find(|(k, _)| *k == "limit")
+            .map(|(_, v)| v.as_str());
         assert_eq!(limit, Some("10"));
     }
 
     #[test]
     fn fields_param_includes_essential_fields() {
         let params = ss_query_params(&base_request(), 25);
-        let fields = params.iter().find(|(k, _)| *k == "fields").map(|(_, v)| v.as_str()).unwrap_or("");
+        let fields = params
+            .iter()
+            .find(|(k, _)| *k == "fields")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
         assert!(fields.contains("paperId"));
         assert!(fields.contains("abstract"));
         assert!(fields.contains("tldr"));

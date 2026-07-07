@@ -1,4 +1,5 @@
 use crate::domain::reader::DiscoveryReaderCandidate;
+use crate::pdf_extraction::PdfExtractionManager;
 use crate::services::reader_service::ReaderService;
 
 /// Load a Reader document for a durable library paper.
@@ -72,6 +73,22 @@ pub fn get_reader_pdf_bytes(
         bytes.len()
     ));
     Ok(bytes)
+}
+
+/// Queue text extraction for a saved paper's cached PDF.
+#[tauri::command]
+pub fn extract_paper_document(
+    pdf_extractions: tauri::State<'_, PdfExtractionManager>,
+    paper_id: String,
+    source_id: Option<String>,
+    force: Option<bool>,
+) -> Result<(), String> {
+    let force = force.unwrap_or(false);
+    reader_log(format!(
+        "extract_paper_document queued paper_id={paper_id} source_id={:?} force={force}",
+        source_id
+    ));
+    pdf_extractions.queue_paper(paper_id, source_id, force)
 }
 
 fn reader_log(message: impl AsRef<str>) {

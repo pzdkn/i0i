@@ -67,7 +67,7 @@
     <span class="title">Title</span>
     <span class="authors">Authors</span>
     <span class="metric">Cites</span>
-    <span class="metric">Note</span>
+    <span class="metric">Pins</span>
     <span class="metric">Ann</span>
     <span class="status">Status</span>
   </div>
@@ -83,13 +83,13 @@
         oncontextmenu={(event) => showContextMenu(event, paper.id)}
       >
         <span class="year">{paper.year}</span>
-        <span class="venue">{paper.venue}</span>
+        <span class="venue truncate" title={paper.venue}>{paper.venue}</span>
         <span class="title truncate">{paper.title}</span>
         <span class="authors truncate">
           {paper.authors.slice(0, 2).join(", ")}{paper.authors.length > 2 ? ` +${paper.authors.length - 2}` : ""}
         </span>
         <span class="metric">{formatCitations(paper.citations)}</span>
-        <span class="metric">{paper.noteCount ? `#${paper.noteCount}` : "-"}</span>
+        <span class="metric">{paper.highlightCount ? `#${paper.highlightCount}` : "-"}</span>
         <span class="metric">{paper.annotationCount || "-"}</span>
         <span class="status">{paper.status}</span>
       </button>

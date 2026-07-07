@@ -201,18 +201,19 @@ impl ReaderService {
             snapshot
                 .document_extractions
                 .into_iter()
-                .find(|e| e.id == id)
+                .find(|e| e.id == id && e.status == "ready")
         } else {
             // If the caller does not pin an extraction, follow the paper's active
             // extraction first and otherwise fall back to the extraction for the
             // chosen source so older records still remain readable.
             snapshot.document_extractions.into_iter().find(|e| {
-                paper.active_extraction_id.as_deref() == Some(&e.id)
-                    || (paper.active_extraction_id.is_none()
-                        && source
-                            .as_ref()
-                            .map(|s| s.id == e.source_id)
-                            .unwrap_or(false))
+                e.status == "ready"
+                    && (paper.active_extraction_id.as_deref() == Some(&e.id)
+                        || (paper.active_extraction_id.is_none()
+                            && source
+                                .as_ref()
+                                .map(|s| s.id == e.source_id)
+                                .unwrap_or(false)))
             })
         };
 

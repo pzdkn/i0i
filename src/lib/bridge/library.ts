@@ -3,8 +3,6 @@ import type {
   LibrarySnapshot,
   DocumentSource,
   PaperDraft,
-  PaperNote,
-  PaperNoteDraft,
   VaultDraft,
   VaultRenameDraft,
 } from "$lib/domain/library";
@@ -69,26 +67,6 @@ export async function removePaperFromLibrary(paperId: string): Promise<LibrarySn
   });
 }
 
-export async function getPaperNotes(paperId: string): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("get_paper_notes", {
-    paperId,
-  });
-}
-
-export async function createPaperNote(draft: PaperNoteDraft): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("create_paper_note", {
-    draft,
-  });
-}
-
-export async function deletePaperNote(input: { paperId: string; noteId: string }): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("delete_paper_note", input);
-}
-
-export async function updatePaperNote(input: { paperId: string; noteId: string; body: string }): Promise<PaperNote[]> {
-  return invoke<PaperNote[]>("update_paper_note", input);
-}
-
 export async function getReaderDocument(paperId: string, extractionId?: string): Promise<ReaderDocument> {
   return invoke<ReaderDocument>("get_reader_document", {
     paperId,
@@ -105,5 +83,13 @@ export async function getDiscoveryReaderDocument(candidate: DiscoveryReaderCandi
 export async function getReaderPdfBytes(sourceId: string): Promise<number[]> {
   return invoke<number[]>("get_reader_pdf_bytes", {
     sourceId,
+  });
+}
+
+export async function extractPaperDocument(paperId: string, sourceId?: string, force = false): Promise<void> {
+  return invoke<void>("extract_paper_document", {
+    paperId,
+    sourceId,
+    force,
   });
 }

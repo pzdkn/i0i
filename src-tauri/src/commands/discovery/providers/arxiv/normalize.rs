@@ -91,9 +91,7 @@ fn extract_year(published: Option<&str>) -> Option<i32> {
 
 /// Parse the `YYYY-MM-DD` date prefix from an ISO 8601 timestamp.
 fn extract_date(published: Option<&str>) -> Option<String> {
-    published
-        .and_then(|s| s.get(..10))
-        .map(str::to_string)
+    published.and_then(|s| s.get(..10)).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -102,28 +100,43 @@ mod tests {
 
     #[test]
     fn arxiv_id_extracted_from_http_url_with_version() {
-        assert_eq!(extract_arxiv_id("http://arxiv.org/abs/2309.08600v2"), "2309.08600");
+        assert_eq!(
+            extract_arxiv_id("http://arxiv.org/abs/2309.08600v2"),
+            "2309.08600"
+        );
     }
 
     #[test]
     fn arxiv_id_extracted_from_https_url_without_version() {
-        assert_eq!(extract_arxiv_id("https://arxiv.org/abs/1706.03762"), "1706.03762");
+        assert_eq!(
+            extract_arxiv_id("https://arxiv.org/abs/1706.03762"),
+            "1706.03762"
+        );
     }
 
     #[test]
     fn arxiv_id_extracted_from_old_category_format() {
         // Old-style IDs like cs/0401023v1 should also strip the version.
-        assert_eq!(extract_arxiv_id("http://arxiv.org/abs/cs/0401023v1"), "cs/0401023");
+        assert_eq!(
+            extract_arxiv_id("http://arxiv.org/abs/cs/0401023v1"),
+            "cs/0401023"
+        );
     }
 
     #[test]
     fn pdf_url_constructed_from_arxiv_id() {
-        assert_eq!(arxiv_pdf_url("2309.08600"), "https://arxiv.org/pdf/2309.08600");
+        assert_eq!(
+            arxiv_pdf_url("2309.08600"),
+            "https://arxiv.org/pdf/2309.08600"
+        );
     }
 
     #[test]
     fn landing_url_constructed_from_arxiv_id() {
-        assert_eq!(arxiv_landing_url("2309.08600"), "https://arxiv.org/abs/2309.08600");
+        assert_eq!(
+            arxiv_landing_url("2309.08600"),
+            "https://arxiv.org/abs/2309.08600"
+        );
     }
 
     #[test]
@@ -177,8 +190,14 @@ mod tests {
     fn normalized_entry_has_correct_pdf_and_landing_urls() {
         let entry = make_minimal_entry("http://arxiv.org/abs/2309.08600v2");
         let candidate = normalize_entry(entry, "test");
-        assert_eq!(candidate.pdf_url, Some("https://arxiv.org/pdf/2309.08600".to_string()));
-        assert_eq!(candidate.external_url, Some("https://arxiv.org/abs/2309.08600".to_string()));
+        assert_eq!(
+            candidate.pdf_url,
+            Some("https://arxiv.org/pdf/2309.08600".to_string())
+        );
+        assert_eq!(
+            candidate.external_url,
+            Some("https://arxiv.org/abs/2309.08600".to_string())
+        );
     }
 
     fn make_minimal_entry(id: &str) -> ArxivEntry {

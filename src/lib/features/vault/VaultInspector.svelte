@@ -34,7 +34,7 @@
       <div class="meta">
         <div><span>authors</span>{selectedPaper.authors.slice(0, 4).join(", ")}</div>
         <div><span>cites</span>{selectedPaper.citations.toLocaleString()}</div>
-        <div><span>notes</span>{selectedPaper.noteCount}</div>
+        <div><span>highlights</span>{selectedPaper.highlightCount}</div>
         <div><span>ann</span>{selectedPaper.annotationCount}</div>
       </div>
       <div class="tags row">

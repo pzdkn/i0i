@@ -7,8 +7,10 @@
 
   let {
     workspace,
+    discoverWorkspaces,
     vaults,
     onNewSearch,
+    onActivateSearch,
     onRunSearch,
     onSelectCandidate,
     onOpenCandidate,
@@ -16,8 +18,10 @@
     getCandidateVaultTargets,
   }: {
     workspace: DiscoverWorkspace;
+    discoverWorkspaces: DiscoverWorkspace[];
     vaults: VaultWorkspace[];
     onNewSearch: () => void;
+    onActivateSearch: (discoverId: string) => void;
     onRunSearch: (discoverId: string) => void;
     onSelectCandidate: (discoverId: string, candidateId: string) => void;
     onOpenCandidate: (candidateId: string) => void;
@@ -27,7 +31,7 @@
 </script>
 
 <section class="discover-workspace col">
-  <DiscoverSeedBar {workspace} {onNewSearch} {onRunSearch} />
+  <DiscoverSeedBar {workspace} {discoverWorkspaces} {onNewSearch} {onActivateSearch} {onRunSearch} />
   <div class="discover-body row">
     <DiscoverFeed
       {workspace}

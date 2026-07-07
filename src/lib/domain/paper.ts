@@ -8,7 +8,7 @@ export type Paper = {
   year: number;
   citations: number;
   tags: string[];
-  noteCount: number;
+  highlightCount: number;
   annotationCount: number;
   status: PaperStatus;
   abstract?: string;

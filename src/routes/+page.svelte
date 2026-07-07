@@ -5,6 +5,13 @@
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
   import { searchPapers } from "$lib/bridge/discovery";
   import {
+    createSearch,
+    listSearchCandidates,
+    listenSearchCandidatesPreview,
+    listenSearchUpdated,
+    runSearch as runResearchSearch,
+  } from "$lib/bridge/research";
+  import {
     addPaperToVaults,
     createVault,
     getLibrary,
@@ -27,20 +34,28 @@
     getCandidateVaultTargets,
     getDiscoverCandidate,
     getDiscoverWorkspace,
+    getDiscoverWorkspaces,
     getPaperById,
     getPaperTitle,
     getVaultWorkspace,
     getVaultWorkspaces,
     hydrateLibrary,
     isPaperInLibrary,
+    appendDiscoverRunTrace,
+    applyDiscoverResearchPreview,
+    applyDiscoverResearchCandidates,
     applyDiscoverSearchResponse,
     createDiscoverWorkspace,
+    createDiscoverWorkspaceFrom,
     discoverTitleFromQuery,
     paperDraftFromDiscoverCandidate,
     paperFromDiscoverCandidate,
+    removeDiscoverWorkspace,
+    setDiscoverRunStarted,
     setDiscoverStatus,
     setDiscoverSelectedCandidate,
   } from "$lib/state/library-cache.svelte";
+  import { depthStrategy, isTerminalStatus, type SearchCandidatesPreview, type SearchUpdated } from "$lib/domain/research";
 
   let vaultStatus = $state<VaultStatus | null>(null);
   let bridgeError = $state("");
@@ -53,6 +68,7 @@
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
   const vaultWorkspaces = $derived(getVaultWorkspaces());
+  const discoverWorkspaces = $derived(getDiscoverWorkspaces());
   const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "discover-1"));
   const activePaper = $derived.by<Paper | null>(() => {
     if (activeTab?.kind !== "reader") {
@@ -104,6 +120,34 @@
         bridgeError = String(error);
       }
     })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listenSearchUpdated(handleResearchUpdate)
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listenSearchCandidatesPreview(handleResearchPreview)
       .then((nextUnlisten) => {
         unlisten = nextUnlisten;
       })
@@ -181,6 +225,12 @@
     activeTabId = discoverTab.id;
   }
 
+  function openDiscoverWorkspace(workspace: ReturnType<typeof getDiscoverWorkspace>) {
+    const discoverTab = makeDiscoverTab(workspace);
+    tabs = [...tabs.filter((tab) => tab.id !== discoverTab.id), discoverTab];
+    activeTabId = discoverTab.id;
+  }
+
   function updateDiscoverTabTitle(discoverId: string, title: string) {
     tabs = tabs.map((tab) => (tab.discoverId === discoverId ? { ...tab, title } : tab));
   }
@@ -195,15 +245,32 @@
     return Number.isInteger(year) ? year : undefined;
   }
 
-  async function runDiscoverSearch(discoverId: string) {
+  function workspaceForNewRun(discoverId: string) {
     const workspace = getDiscoverWorkspace(discoverId);
+    if (workspace.candidates.length === 0 || workspace.status === "running") {
+      return workspace;
+    }
+
+    const nextWorkspace = createDiscoverWorkspaceFrom(workspace);
+    openDiscoverWorkspace(nextWorkspace);
+    return nextWorkspace;
+  }
+
+  async function runDiscoverSearch(discoverId: string) {
+    const workspace = workspaceForNewRun(discoverId);
     const query = workspace.query.trim();
     if (!query) {
-      setDiscoverStatus(discoverId, "failed", "Enter a search query before running discovery.");
+      setDiscoverStatus(workspace.id, "failed", "Enter a search query before running discovery.");
       return;
     }
 
-    setDiscoverStatus(discoverId, "running");
+    if (workspace.deep) {
+      await runDeepDiscoverSearch(workspace.id, query);
+      return;
+    }
+
+    setDiscoverStatus(workspace.id, "running");
+    setDiscoverRunStarted(workspace.id, "shallow");
 
     try {
       const response = await searchPapers({
@@ -214,13 +281,86 @@
         sortBy: workspace.sortBy,
         provider: workspace.provider,
       });
-      applyDiscoverSearchResponse(discoverId, response);
+      applyDiscoverSearchResponse(workspace.id, response);
       const title = discoverTitleFromQuery(query);
       workspace.title = title;
-      updateDiscoverTabTitle(discoverId, title);
+      updateDiscoverTabTitle(workspace.id, title);
+    } catch (error) {
+      setDiscoverStatus(workspace.id, "failed", String(error));
+    }
+  }
+
+  async function runDeepDiscoverSearch(discoverId: string, query: string) {
+    const workspace = getDiscoverWorkspace(discoverId);
+    const title = discoverTitleFromQuery(query);
+    workspace.title = title;
+    updateDiscoverTabTitle(discoverId, title);
+    setDiscoverStatus(discoverId, "running");
+    setDiscoverRunStarted(discoverId, "deep");
+
+    try {
+      const search = await createSearch({
+        title,
+        goal: query,
+        constraints: {
+          yearFrom: parseOptionalYear(workspace.yearFrom),
+          yearTo: parseOptionalYear(workspace.yearTo),
+          providers: [workspace.provider],
+          openAccess: true,
+          targetCount: Number(workspace.resultLimit),
+          venues: [],
+          authors: [],
+          fieldsOfStudy: [],
+          seedPaperIds: [],
+        },
+        strategy: depthStrategy(workspace.deepDepth),
+      });
+      setDiscoverRunStarted(discoverId, "deep", search.id);
+      const runId = await runResearchSearch(search.id);
+      setDiscoverRunStarted(discoverId, "deep", search.id, runId);
     } catch (error) {
       setDiscoverStatus(discoverId, "failed", String(error));
     }
+  }
+
+  async function handleResearchUpdate(event: SearchUpdated) {
+    const workspace = getDiscoverWorkspaces().find((item) => item.researchSearchId === event.searchId);
+    if (!workspace) {
+      return;
+    }
+
+    appendDiscoverRunTrace(workspace.id, event);
+
+    if (!isTerminalStatus(event.status)) {
+      return;
+    }
+
+    if (event.status === "failed") {
+      setDiscoverStatus(workspace.id, "failed", event.message || "Deep research failed.");
+      return;
+    }
+
+    if (event.status === "cancelled") {
+      setDiscoverStatus(workspace.id, "failed", "Deep research was cancelled.");
+      return;
+    }
+
+    try {
+      const candidates = await listSearchCandidates(event.searchId);
+      applyDiscoverResearchCandidates(workspace.id, workspace.query, candidates);
+      updateDiscoverTabTitle(workspace.id, workspace.title);
+    } catch (error) {
+      setDiscoverStatus(workspace.id, "failed", String(error));
+    }
+  }
+
+  function handleResearchPreview(event: SearchCandidatesPreview) {
+    const workspace = getDiscoverWorkspaces().find((item) => item.researchSearchId === event.searchId);
+    if (!workspace || workspace.status !== "running") {
+      return;
+    }
+
+    applyDiscoverResearchPreview(workspace.id, event.candidates);
   }
 
   function selectDiscoverCandidate(discoverId: string, candidateId: string) {
@@ -357,8 +497,12 @@
   }
 
   function closeTab(tabId: string) {
+    const closedTab = tabs.find((tab) => tab.id === tabId);
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     tabs = nextTabs;
+    if (closedTab?.discoverId) {
+      removeDiscoverWorkspace(closedTab.discoverId);
+    }
 
     if (activeTabId === tabId) {
       activeTabId = nextTabs[0]?.id ?? "";
@@ -431,8 +575,10 @@
     {:else if activeTab?.kind === "discover"}
       <DiscoverView
         workspace={activeDiscoverWorkspace}
+        discoverWorkspaces={discoverWorkspaces}
         vaults={vaultWorkspaces}
         onNewSearch={openNewDiscover}
+        onActivateSearch={openDiscover}
         onRunSearch={runDiscoverSearch}
         onSelectCandidate={selectDiscoverCandidate}
         onOpenCandidate={openCandidate}

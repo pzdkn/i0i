@@ -84,15 +84,24 @@ mod tests {
     fn full_paper_deserializes_all_fields() {
         let paper: SemanticScholarPaper = serde_json::from_str(FULL_PAPER_JSON).unwrap();
         assert_eq!(paper.paper_id, "a23b4c5d6e7f8g9h");
-        assert_eq!(paper.title.as_deref(), Some("Sparse Autoencoders Find Highly Interpretable Features"));
-        assert_eq!(paper.abstract_text.as_deref(), Some("We show that sparse autoencoders can find interpretable features."));
+        assert_eq!(
+            paper.title.as_deref(),
+            Some("Sparse Autoencoders Find Highly Interpretable Features")
+        );
+        assert_eq!(
+            paper.abstract_text.as_deref(),
+            Some("We show that sparse autoencoders can find interpretable features.")
+        );
         assert_eq!(paper.year, Some(2023));
         assert_eq!(paper.publication_date.as_deref(), Some("2023-09-15"));
         assert_eq!(paper.venue.as_deref(), Some("ICLR"));
         assert_eq!(paper.citation_count, Some(412));
         assert_eq!(paper.influential_citation_count, Some(38));
         assert_eq!(paper.is_open_access, Some(true));
-        assert_eq!(paper.url.as_deref(), Some("https://www.semanticscholar.org/paper/a23b4c5d"));
+        assert_eq!(
+            paper.url.as_deref(),
+            Some("https://www.semanticscholar.org/paper/a23b4c5d")
+        );
     }
 
     #[test]
@@ -123,7 +132,10 @@ mod tests {
     fn tldr_text_parses() {
         let paper: SemanticScholarPaper = serde_json::from_str(FULL_PAPER_JSON).unwrap();
         let tldr = paper.tldr.unwrap();
-        assert_eq!(tldr.text.as_deref(), Some("Sparse autoencoders recover interpretable features."));
+        assert_eq!(
+            tldr.text.as_deref(),
+            Some("Sparse autoencoders recover interpretable features.")
+        );
     }
 
     #[test]
