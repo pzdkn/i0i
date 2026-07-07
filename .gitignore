@@ -12,3 +12,6 @@ vite.config.ts.timestamp-*
 # Local/generated tool state
 .cocoindex_code/
 .pnpm-store/
+
+# Native app resources installed locally by setup scripts.
+src-tauri/resources/pdfium/libpdfium.dylib

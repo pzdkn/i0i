@@ -451,6 +451,11 @@ impl PdfiumBasicAdapter {
         }
 
         if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join("resources/pdfium/libpdfium.dylib"));
+            if let Some(repo_root) = cwd.parent() {
+                candidates.push(repo_root.join("src-tauri/resources/pdfium/libpdfium.dylib"));
+            }
+
             // Developer convenience for the extractor spike environments.
             candidates.push(
                 cwd.join("scripts/extractor_spike/.venvs/mineru/lib/python3.12/site-packages/pypdfium2_raw/libpdfium.dylib"),
@@ -474,9 +479,15 @@ fn bind_pdfium_library(path: &Path) -> ExtractionResult<Pdfium> {
         path.to_path_buf()
     };
 
-    Pdfium::bind_to_library(library_path)
-        .map(Pdfium::new)
-        .map_err(|error| error.to_string())
+    if !library_path.exists() {
+        return Err("library path does not exist".to_string());
+    }
+
+    match Pdfium::bind_to_library(library_path) {
+        Ok(bindings) => Ok(Pdfium::new(bindings)),
+        Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Ok(Pdfium::default()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn annotation_source_id(source_id: &str) -> String {
@@ -500,4 +511,23 @@ fn extraction_log(message: impl AsRef<str>) {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     eprintln!("[pdf-extraction {timestamp_ms}] {}", message.as_ref());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_pdfium_can_be_reused_after_first_bind() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/pdfium/libpdfium.dylib");
+        if !path.exists() {
+            return;
+        }
+
+        bind_pdfium_library(&path)
+            .unwrap_or_else(|error| panic!("failed to bind {}: {error}", path.display()));
+        bind_pdfium_library(&path)
+            .unwrap_or_else(|error| panic!("failed to reuse {}: {error}", path.display()));
+    }
 }
