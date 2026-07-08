@@ -10,7 +10,8 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::domain::discovery::PaperCandidate;
+use crate::commands::discovery::orchestrator::rank_candidates;
+use crate::domain::discovery::{DiscoveryProviderChoice, PaperCandidate};
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, SearchConstraints, SearchStrategy,
 };
@@ -97,10 +98,11 @@ where
                 stop_reason = StopReason::Cancelled;
                 break 'run;
             }
-            if usage.provider_queries >= strategy.max_provider_queries {
+            let provider_call_cost = provider_call_cost(&query.provider, constraints);
+            if usage.provider_queries + provider_call_cost > strategy.max_provider_queries {
                 break;
             }
-            let provider = format!("{:?}", query.provider);
+            let provider = provider_label(&query.provider, constraints);
             on(Progress::Searching {
                 provider: provider.clone(),
                 text: query.text.clone(),
@@ -120,7 +122,7 @@ where
                     });
                 }
             }
-            usage.provider_queries += 1;
+            usage.provider_queries += provider_call_cost;
         }
 
         pool = apply_constraints(pool, constraints);
@@ -154,7 +156,18 @@ where
     on(Progress::Ranking {
         count: new_candidates.len(),
     });
-    let ranked = planner.rank(inputs.goal, &new_candidates).await?;
+    let ranked = rank_candidates(new_candidates, inputs.goal, constraints.target_count)
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| RankedCandidate {
+            score: candidate.match_summary.score,
+            rationale: Some("ranked by deterministic search signals".to_string()),
+            rank_signals_json: None,
+            provider_hits_json: None,
+            candidate,
+            rank: (index + 1) as i32,
+        })
+        .collect();
 
     Ok(RunOutcome {
         ranked,
@@ -171,6 +184,37 @@ fn new_count(pool: &[PaperCandidate], existing: &HashSet<String>) -> u32 {
     pool.iter()
         .filter(|c| !existing.contains(&candidate_dedup_key(c)))
         .count() as u32
+}
+
+fn provider_call_cost(
+    _query_provider: &DiscoveryProviderChoice,
+    constraints: &SearchConstraints,
+) -> u32 {
+    constraints.providers.len().max(1) as u32
+}
+
+fn provider_label(
+    query_provider: &DiscoveryProviderChoice,
+    constraints: &SearchConstraints,
+) -> String {
+    if constraints.providers.is_empty() {
+        return provider_name(query_provider).to_string();
+    }
+
+    constraints
+        .providers
+        .iter()
+        .map(provider_name)
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn provider_name(provider: &DiscoveryProviderChoice) -> &'static str {
+    match provider {
+        DiscoveryProviderChoice::OpenAlex => "open_alex",
+        DiscoveryProviderChoice::Arxiv => "arxiv",
+        DiscoveryProviderChoice::SemanticScholar => "semantic_scholar",
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +331,8 @@ mod tests {
                     rank: (i + 1) as i32,
                     score: Some(1.0),
                     rationale: Some("ok".to_string()),
+                    rank_signals_json: None,
+                    provider_hits_json: None,
                 })
                 .collect())
         }
@@ -456,6 +502,52 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.stop_reason, StopReason::MaxIterations);
+    }
+
+    #[tokio::test]
+    async fn provider_budget_counts_selected_provider_fanout() {
+        let batch = vec![candidate("Alpha", "10/a")];
+        let planner = FakePlanner::new(0);
+        let source = FakeSource { batch };
+        let mut constraints = constraints(20);
+        constraints.providers = vec![
+            DiscoveryProviderChoice::OpenAlex,
+            DiscoveryProviderChoice::Arxiv,
+            DiscoveryProviderChoice::SemanticScholar,
+        ];
+        let strategy = SearchStrategy {
+            depth: Depth::Quick,
+            max_iterations: 1,
+            max_provider_queries: 2,
+            max_llm_calls: 4,
+        };
+        let inputs = RunInputs {
+            goal: "goal",
+            constraints: &constraints,
+            strategy: &strategy,
+            existing_keys: HashSet::new(),
+        };
+        let mut searched = false;
+
+        let outcome = run(
+            &planner,
+            &source,
+            inputs,
+            &AtomicBool::new(false),
+            |progress| {
+                if matches!(progress, Progress::Searching { .. }) {
+                    searched = true;
+                }
+            },
+        )
+        .await
+        .expect("loop ok");
+
+        assert!(
+            !searched,
+            "three selected providers exceed the budget of two"
+        );
+        assert!(outcome.ranked.is_empty());
     }
 
     #[tokio::test]

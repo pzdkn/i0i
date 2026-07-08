@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::commands::discovery::orchestrator::DiscoveryOrchestrator;
 use crate::commands::discovery::providers::{
     arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
 };
-use crate::commands::discovery::service::DiscoveryService;
 use crate::domain::discovery::{
     DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
 };
@@ -64,6 +64,8 @@ impl RealCandidateSource {
             result_limit: PER_QUERY_LIMIT,
             sort_by: DiscoverySort::Relevance,
             provider: query.provider.clone(),
+            providers: constraints.providers.clone(),
+            open_access: constraints.open_access,
             venues: constraints.venues.clone(),
             authors: constraints.authors.clone(),
             fields_of_study: constraints.fields_of_study.clone(),
@@ -86,25 +88,22 @@ impl CandidateSource for RealCandidateSource {
         query: &Query,
         constraints: &SearchConstraints,
     ) -> Result<Vec<PaperCandidate>, ResearchError> {
-        tokio::time::sleep(Self::throttle_delay(&query.provider)).await;
         let request = Self::request_for(query, constraints);
-        let response = match query.provider {
-            DiscoveryProviderChoice::OpenAlex => {
-                DiscoveryService::new(self.openalex.clone())
-                    .search(request)
-                    .await
-            }
-            DiscoveryProviderChoice::Arxiv => {
-                DiscoveryService::new(self.arxiv.clone())
-                    .search(request)
-                    .await
-            }
-            DiscoveryProviderChoice::SemanticScholar => {
-                DiscoveryService::new(self.semantic_scholar.clone())
-                    .search(request)
-                    .await
-            }
+        let providers = if constraints.providers.is_empty() {
+            vec![query.provider.clone()]
+        } else {
+            constraints.providers.clone()
+        };
+        for provider in &providers {
+            tokio::time::sleep(Self::throttle_delay(provider)).await;
         }
+        let response = DiscoveryOrchestrator::new(
+            self.openalex.clone(),
+            self.arxiv.clone(),
+            self.semantic_scholar.clone(),
+        )
+        .search(request)
+        .await
         .map_err(|e| ResearchError::new(e.to_string()))?;
         Ok(response.candidates)
     }

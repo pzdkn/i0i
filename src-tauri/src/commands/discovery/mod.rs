@@ -1,19 +1,18 @@
 //! Discovery command-side modules.
 
 pub mod error;
+pub mod orchestrator;
 pub mod provider;
 pub mod providers;
 pub mod service;
 
-use crate::domain::discovery::{
-    DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySearchResponse,
-};
+use crate::domain::discovery::{DiscoverySearchRequest, DiscoverySearchResponse};
 
 use self::{
+    orchestrator::DiscoveryOrchestrator,
     providers::{
         arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
     },
-    service::DiscoveryService,
 };
 
 use super::discovery::error::DiscoveryError;
@@ -45,22 +44,12 @@ pub async fn search_papers(
     providers: tauri::State<'_, DiscoveryProviders>,
     request: DiscoverySearchRequest,
 ) -> Result<DiscoverySearchResponse, String> {
-    match request.provider {
-        DiscoveryProviderChoice::OpenAlex => {
-            DiscoveryService::new(providers.openalex.clone())
-                .search(request)
-                .await
-        }
-        DiscoveryProviderChoice::Arxiv => {
-            DiscoveryService::new(providers.arxiv.clone())
-                .search(request)
-                .await
-        }
-        DiscoveryProviderChoice::SemanticScholar => {
-            DiscoveryService::new(providers.semantic_scholar.clone())
-                .search(request)
-                .await
-        }
-    }
+    DiscoveryOrchestrator::new(
+        providers.openalex.clone(),
+        providers.arxiv.clone(),
+        providers.semantic_scholar.clone(),
+    )
+    .search(request)
+    .await
     .map_err(|e| e.to_string())
 }

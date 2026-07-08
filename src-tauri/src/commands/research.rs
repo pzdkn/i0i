@@ -39,8 +39,9 @@ pub fn list_search_candidates(
 pub fn run_search(
     manager: tauri::State<'_, SearchManager>,
     search_id: String,
+    mode: Option<String>,
 ) -> Result<String, String> {
-    manager.run_search(search_id)
+    manager.run_search(search_id, mode)
 }
 
 #[tauri::command]

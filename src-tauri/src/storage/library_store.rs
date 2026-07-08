@@ -11,6 +11,7 @@ use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatThread, ChatThreadSummary, ChatThreadView,
     PinnedHighlight, ThreadAnchor, ENTRY_ANSWER, ENTRY_NOTE, ENTRY_QUESTION,
 };
+use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
     DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
     LibrarySnapshot, Paper, PaperDraft, PaperSourceDraft, Vault, VaultDraft, VaultPaper,
@@ -1213,6 +1214,9 @@ impl LibraryStore {
             create table if not exists search_runs (
               id text primary key,
               search_id text not null,
+              mode text not null default 'deep',
+              provider_set text,
+              query_expansions text,
               status text not null,
               stop_reason text,
               iteration integer not null default 0,
@@ -1253,6 +1257,8 @@ impl LibraryStore {
               rank integer not null,
               score real,
               rationale text,
+              rank_signals_json text,
+              provider_hits_json text,
               doi text,
               arxiv_id text,
               title text not null,
@@ -1277,7 +1283,12 @@ impl LibraryStore {
         add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
         add_column_if_missing(conn, "document_sources", "landing_url", "text")?;
         add_column_if_missing(conn, "document_sources", "final_url", "text")?;
-        add_column_if_missing(conn, "document_sources", "acquisition_method", "text")
+        add_column_if_missing(conn, "document_sources", "acquisition_method", "text")?;
+        add_column_if_missing(conn, "search_runs", "mode", "text not null default 'deep'")?;
+        add_column_if_missing(conn, "search_runs", "provider_set", "text")?;
+        add_column_if_missing(conn, "search_runs", "query_expansions", "text")?;
+        add_column_if_missing(conn, "search_candidates", "rank_signals_json", "text")?;
+        add_column_if_missing(conn, "search_candidates", "provider_hits_json", "text")
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -2141,13 +2152,15 @@ impl LibraryStore {
     }
 
     /// Start a new run for a search (status `queued`).
-    pub fn create_search_run(&self, search_id: &str) -> StoreResult<SearchRun> {
+    pub fn create_search_run(&self, search_id: &str, mode: &str) -> StoreResult<SearchRun> {
         let conn = self.open_connection()?;
         let id = timestamped_id("run")?;
+        let provider_set = search_provider_set_json(&conn, search_id)?;
         conn.execute(
-            "insert into search_runs (id, search_id, status, created_at, started_at)
-             values (?1, ?2, 'queued', datetime('now'), datetime('now'))",
-            params![id, search_id],
+            "insert into search_runs
+               (id, search_id, mode, provider_set, query_expansions, status, created_at, started_at)
+             values (?1, ?2, ?3, ?4, '[]', 'queued', datetime('now'), datetime('now'))",
+            params![id, search_id, mode, provider_set],
         )
         .map_err(|e| e.to_string())?;
         read_search_run(&conn, &id)
@@ -2183,6 +2196,21 @@ impl LibraryStore {
                  where id = ?1"
             ),
             params![run_id, status.as_str(), iteration, stop_reason, error],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Persist the concrete query strings Scout attempted for this run.
+    pub fn set_search_run_query_expansions(
+        &self,
+        run_id: &str,
+        query_expansions: &str,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update search_runs set query_expansions = ?2 where id = ?1",
+            params![run_id, query_expansions],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -2242,15 +2270,24 @@ impl LibraryStore {
             let candidate_json = serde_json::to_string(candidate).map_err(|e| e.to_string())?;
             let seeds = serde_json::to_string(&candidate.match_summary.from_seed_paper_ids)
                 .map_err(|e| e.to_string())?;
+            let rank_signals_json = item
+                .rank_signals_json
+                .clone()
+                .or_else(|| default_rank_signals_json(item).ok());
+            let provider_hits_json = item
+                .provider_hits_json
+                .clone()
+                .or_else(|| default_provider_hits_json(candidate).ok());
             let id = timestamped_id("sc")?;
             let changed = tx
                 .execute(
                     "insert or ignore into search_candidates
                        (id, search_id, first_seen_run_id, dedup_key, rank, score, rationale,
-                        doi, arxiv_id, title, candidate_json, from_seed_paper_ids,
+                        rank_signals_json, provider_hits_json, doi, arxiv_id, title,
+                        candidate_json, from_seed_paper_ids,
                         already_in_library, saved, seen, first_seen_at, created_at)
-                     values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, 0,
-                             datetime('now'), datetime('now'))",
+                     values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                             0, 0, datetime('now'), datetime('now'))",
                     params![
                         id,
                         search_id,
@@ -2259,6 +2296,8 @@ impl LibraryStore {
                         item.rank,
                         item.score,
                         item.rationale,
+                        rank_signals_json,
+                        provider_hits_json,
                         candidate.doi,
                         candidate.arxiv_id,
                         candidate.title,
@@ -2280,6 +2319,7 @@ impl LibraryStore {
         let mut stmt = conn
             .prepare(
                 "select id, search_id, first_seen_run_id, rank, score, rationale,
+                        rank_signals_json, provider_hits_json,
                         candidate_json, already_in_library, saved, seen, first_seen_at
                  from search_candidates
                  where search_id = ?1
@@ -2360,8 +2400,9 @@ fn search_from_row(row: &rusqlite::Row) -> rusqlite::Result<Search> {
 
 fn read_search_run(conn: &Connection, id: &str) -> StoreResult<SearchRun> {
     conn.query_row(
-        "select id, search_id, status, stop_reason, iteration, added_count,
-                total_count, started_at, finished_at, error, created_at
+        "select id, search_id, mode, provider_set, query_expansions, status,
+                stop_reason, iteration, added_count, total_count, started_at,
+                finished_at, error, created_at
          from search_runs where id = ?1",
         params![id],
         search_run_from_row,
@@ -2373,20 +2414,36 @@ fn search_run_from_row(row: &rusqlite::Row) -> rusqlite::Result<SearchRun> {
     Ok(SearchRun {
         id: row.get(0)?,
         search_id: row.get(1)?,
-        status: row.get(2)?,
-        stop_reason: row.get(3)?,
-        iteration: row.get(4)?,
-        added_count: row.get(5)?,
-        total_count: row.get(6)?,
-        started_at: row.get(7)?,
-        finished_at: row.get(8)?,
-        error: row.get(9)?,
-        created_at: row.get(10)?,
+        mode: row.get(2)?,
+        provider_set: row.get(3)?,
+        query_expansions: row.get(4)?,
+        status: row.get(5)?,
+        stop_reason: row.get(6)?,
+        iteration: row.get(7)?,
+        added_count: row.get(8)?,
+        total_count: row.get(9)?,
+        started_at: row.get(10)?,
+        finished_at: row.get(11)?,
+        error: row.get(12)?,
+        created_at: row.get(13)?,
     })
 }
 
+fn search_provider_set_json(conn: &Connection, search_id: &str) -> StoreResult<String> {
+    let constraints_json: String = conn
+        .query_row(
+            "select constraints from searches where id = ?1",
+            params![search_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let constraints: crate::domain::research::SearchConstraints =
+        serde_json::from_str(&constraints_json).map_err(|e| e.to_string())?;
+    serde_json::to_string(&constraints.providers).map_err(|e| e.to_string())
+}
+
 fn search_candidate_from_row(row: &rusqlite::Row) -> rusqlite::Result<SearchCandidate> {
-    let candidate_json: String = row.get(6)?;
+    let candidate_json: String = row.get(8)?;
     Ok(SearchCandidate {
         id: row.get(0)?,
         search_id: row.get(1)?,
@@ -2394,14 +2451,35 @@ fn search_candidate_from_row(row: &rusqlite::Row) -> rusqlite::Result<SearchCand
         rank: row.get(3)?,
         score: row.get(4)?,
         rationale: row.get(5)?,
+        rank_signals_json: row.get(6)?,
+        provider_hits_json: row.get(7)?,
         candidate: serde_json::from_str(&candidate_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
         })?,
-        already_in_library: row.get::<_, i32>(7)? != 0,
-        saved: row.get::<_, i32>(8)? != 0,
-        seen: row.get::<_, i32>(9)? != 0,
-        first_seen_at: row.get(10)?,
+        already_in_library: row.get::<_, i32>(9)? != 0,
+        saved: row.get::<_, i32>(10)? != 0,
+        seen: row.get::<_, i32>(11)? != 0,
+        first_seen_at: row.get(12)?,
     })
+}
+
+fn default_rank_signals_json(item: &RankedCandidate) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&serde_json::json!({
+        "score": item.score,
+        "rationale": item.rationale,
+        "candidateScore": item.candidate.match_summary.score,
+        "reasons": item.candidate.match_summary.reasons,
+    }))
+}
+
+fn default_provider_hits_json(candidate: &PaperCandidate) -> Result<String, serde_json::Error> {
+    let providers = candidate
+        .match_summary
+        .reasons
+        .iter()
+        .filter_map(|reason| reason.strip_prefix("found_by:"))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&serde_json::json!({ "providers": providers }))
 }
 
 fn table_exists(conn: &Connection, name: &str) -> StoreResult<bool> {
@@ -4218,6 +4296,8 @@ mod tests {
             rank,
             score: Some(1.0 / rank as f64),
             rationale: Some(format!("rationale for {title}")),
+            rank_signals_json: None,
+            provider_hits_json: None,
         }
     }
 
@@ -4243,8 +4323,14 @@ mod tests {
     fn run_lifecycle_sets_status_and_finish() -> StoreResult<()> {
         let db = test_db()?;
         let search = db.store.create_search(&sample_search_draft())?;
-        let run = db.store.create_search_run(&search.id)?;
+        let run = db.store.create_search_run(&search.id, "deep")?;
         assert_eq!(run.status, "queued");
+        assert_eq!(run.mode, "deep");
+        assert!(run.provider_set.is_some());
+        assert_eq!(run.query_expansions.as_deref(), Some("[]"));
+
+        db.store
+            .set_search_run_query_expansions(&run.id, "[\"query one\"]")?;
 
         db.store.set_search_run_status(
             &run.id,
@@ -4258,6 +4344,7 @@ mod tests {
         assert_eq!(updated.status, "ready");
         assert_eq!(updated.iteration, 2);
         assert_eq!(updated.stop_reason.as_deref(), Some("target_reached"));
+        assert_eq!(updated.query_expansions.as_deref(), Some("[\"query one\"]"));
         assert!(updated.finished_at.is_some());
         Ok(())
     }
@@ -4266,7 +4353,7 @@ mod tests {
     fn appending_candidates_stacks_only_new_ones() -> StoreResult<()> {
         let db = test_db()?;
         let search = db.store.create_search(&sample_search_draft())?;
-        let run1 = db.store.create_search_run(&search.id)?;
+        let run1 = db.store.create_search_run(&search.id, "deep")?;
 
         let added = db.store.append_new_candidates(
             &search.id,
@@ -4279,7 +4366,7 @@ mod tests {
         assert_eq!(added, 2);
 
         // A second run that re-finds Alpha (same DOI) and a new Gamma adds only Gamma.
-        let run2 = db.store.create_search_run(&search.id)?;
+        let run2 = db.store.create_search_run(&search.id, "improve")?;
         let added2 = db.store.append_new_candidates(
             &search.id,
             &run2.id,
@@ -4295,6 +4382,8 @@ mod tests {
         // Newest batch (run2) sorts first.
         assert_eq!(pool[0].first_seen_run_id, run2.id);
         assert_eq!(pool[0].candidate.title, "Gamma");
+        assert!(pool[0].rank_signals_json.is_some());
+        assert!(pool[0].provider_hits_json.is_some());
         Ok(())
     }
 
@@ -4326,7 +4415,7 @@ mod tests {
     fn marking_candidates_seen_and_saved() -> StoreResult<()> {
         let db = test_db()?;
         let search = db.store.create_search(&sample_search_draft())?;
-        let run = db.store.create_search_run(&search.id)?;
+        let run = db.store.create_search_run(&search.id, "deep")?;
         db.store.append_new_candidates(
             &search.id,
             &run.id,

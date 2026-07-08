@@ -25,8 +25,8 @@ export async function listSearchCandidates(searchId: string): Promise<SearchCand
 }
 
 /** Enqueue a run; resolves with the run id. Progress arrives via events. */
-export async function runSearch(searchId: string): Promise<string> {
-  return invoke<string>("run_search", { searchId });
+export async function runSearch(searchId: string, mode = "deep"): Promise<string> {
+  return invoke<string>("run_search", { searchId, mode });
 }
 
 export async function cancelSearchRun(runId: string): Promise<void> {

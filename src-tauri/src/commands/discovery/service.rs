@@ -3,6 +3,12 @@
 //! The service sits between the Tauri command and provider implementations. It
 //! should stay small: validate the app-level request, call the provider, and
 //! assemble the app-level response returned to Svelte.
+//!
+//! RFC 0043 routes production search through `DiscoveryOrchestrator`, which
+//! handles multi-provider merge/dedupe/rank. Keep this small wrapper around as
+//! a readable single-provider scaffold for provider tests and future spikes.
+
+#![allow(dead_code)]
 
 use super::error::DiscoveryError;
 use super::provider::{DiscoveryProvider, ProviderSearchResult};

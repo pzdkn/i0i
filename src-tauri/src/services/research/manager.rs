@@ -82,8 +82,9 @@ impl SearchManager {
     }
 
     /// Enqueue a run for a search and return its run id immediately.
-    pub fn run_search(&self, search_id: String) -> Result<String, String> {
-        let run = self.store.create_search_run(&search_id)?;
+    pub fn run_search(&self, search_id: String, mode: Option<String>) -> Result<String, String> {
+        let mode = mode.unwrap_or_else(|| "deep".to_string());
+        let run = self.store.create_search_run(&search_id, &mode)?;
         let run_id = run.id.clone();
 
         if !self.mark_queued(&search_id) {
@@ -174,7 +175,18 @@ impl SearchManager {
         let app = self.app.clone();
         let sid = search_id.to_string();
         let rid = run_id.to_string();
+        let query_expansions = Arc::new(Mutex::new(Vec::<String>::new()));
+        let query_expansions_for_progress = query_expansions.clone();
         let on = move |progress: Progress| {
+            if let Progress::Searching { text, .. } = &progress {
+                let mut expansions = query_expansions_for_progress
+                    .lock()
+                    .expect("query expansions lock");
+                if !expansions.iter().any(|existing| existing == text) {
+                    expansions.push(text.clone());
+                }
+            }
+
             if let Progress::CandidatePreview { candidates } = progress {
                 let unique = candidates.len() as u32;
                 let _ = app.emit(
@@ -208,6 +220,12 @@ impl SearchManager {
         let outcome = agent::run(&planner, &source, inputs, &cancel, on)
             .await
             .map_err(|e| e.to_string())?;
+        let query_expansions_json = {
+            let expansions = query_expansions.lock().expect("query expansions lock");
+            serde_json::to_string(&*expansions).map_err(|e| e.to_string())?
+        };
+        self.store
+            .set_search_run_query_expansions(run_id, &query_expansions_json)?;
 
         let added = self
             .store

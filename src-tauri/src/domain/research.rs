@@ -12,7 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::discovery::{DiscoveryProviderChoice, PaperCandidate};
+use crate::domain::discovery::{
+    paper_candidate_dedup_key, DiscoveryProviderChoice, PaperCandidate,
+};
 
 /// How often a saved search re-runs on its schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +173,11 @@ impl SearchRunStatus {
 pub struct SearchRun {
     pub id: String,
     pub search_id: String,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider_set: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub query_expansions: Option<String>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stop_reason: Option<String>,
@@ -196,6 +203,10 @@ pub struct RankedCandidate {
     pub score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub rationale: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rank_signals_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider_hits_json: Option<String>,
 }
 
 /// A persisted candidate in a search's stacked pool.
@@ -210,6 +221,10 @@ pub struct SearchCandidate {
     pub score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub rationale: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rank_signals_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider_hits_json: Option<String>,
     pub candidate: PaperCandidate,
     pub already_in_library: bool,
     pub saved: bool,
@@ -220,11 +235,5 @@ pub struct SearchCandidate {
 /// Normalized dedup key for a candidate: prefer DOI, then arXiv id, then a
 /// lowercased/trimmed title. Used by stacking (`diff`) and within-run dedup.
 pub fn candidate_dedup_key(candidate: &PaperCandidate) -> String {
-    if let Some(doi) = candidate.doi.as_ref().filter(|d| !d.trim().is_empty()) {
-        return format!("doi:{}", doi.trim().to_lowercase());
-    }
-    if let Some(arxiv) = candidate.arxiv_id.as_ref().filter(|a| !a.trim().is_empty()) {
-        return format!("arxiv:{}", arxiv.trim().to_lowercase());
-    }
-    format!("title:{}", candidate.title.trim().to_lowercase())
+    paper_candidate_dedup_key(candidate)
 }

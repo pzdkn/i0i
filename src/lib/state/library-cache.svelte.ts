@@ -39,6 +39,7 @@ function cloneDiscoverWorkspace(workspace: DiscoverWorkspace): DiscoverWorkspace
   return {
     ...workspace,
     seeds: [...workspace.seeds],
+    providers: [...workspace.providers],
     runTrace: [...workspace.runTrace],
     runProgress: workspace.runProgress ? { ...workspace.runProgress } : undefined,
     lastRun: workspace.lastRun
@@ -82,6 +83,9 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     resultLimit: 25,
     sortBy: "relevance",
     provider: "open_alex",
+    providers: ["open_alex", "arxiv", "semantic_scholar"],
+    venue: "",
+    openAccess: true,
     status: "idle",
     error: "",
     runTrace: [],
@@ -202,6 +206,9 @@ export function createDiscoverWorkspaceFrom(source: DiscoverWorkspace) {
   workspace.resultLimit = source.resultLimit;
   workspace.sortBy = source.sortBy;
   workspace.provider = source.provider;
+  workspace.providers = [...source.providers];
+  workspace.venue = source.venue;
+  workspace.openAccess = source.openAccess;
   library.discoverWorkspaces = [...library.discoverWorkspaces, workspace];
   return workspace;
 }
@@ -235,6 +242,17 @@ export function setDiscoverRunStarted(
   workspace.activeRunMode = mode;
   workspace.researchSearchId = researchSearchId;
   workspace.researchRunId = researchRunId;
+}
+
+export function setDiscoverImproveStarted(discoverId: string, researchSearchId?: string, researchRunId?: string) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.status = "running";
+  workspace.error = "";
+  workspace.activeRunMode = "improve";
+  workspace.researchSearchId = researchSearchId;
+  workspace.researchRunId = researchRunId;
+  workspace.runTrace = [];
+  workspace.runProgress = undefined;
 }
 
 export function appendDiscoverRunTrace(discoverId: string, event: SearchUpdated) {
@@ -282,15 +300,22 @@ export function applyDiscoverResearchCandidates(
   const workspace = getDiscoverWorkspace(discoverId);
   workspace.status = "completed";
   workspace.error = "";
-  workspace.activeRunMode = "deep";
+  const wasImprove = workspace.activeRunMode === "improve";
+  workspace.activeRunMode = wasImprove ? "improve" : "deep";
   workspace.lastRun = {
-    provider: "Deep",
+    provider: wasImprove ? "Improve" : "Deep",
     query,
-    filters: ["deep research"],
-    resultCount: candidates.length,
-    mode: "deep",
+    filters: [wasImprove ? "improve search" : "deep research"],
+    resultCount: wasImprove ? workspace.candidates.length + candidates.length : candidates.length,
+    mode: wasImprove ? "improve" : "deep",
   };
-  workspace.candidates = candidates.map(toDiscoverCandidateFromResearch);
+  workspace.candidates = wasImprove
+    ? mergeDiscoverCandidates([
+        ...workspace.candidates,
+        ...candidates.map(toDiscoverCandidateFromResearch),
+      ])
+    : candidates.map(toDiscoverCandidateFromResearch);
+  workspace.lastRun.resultCount = workspace.candidates.length;
   workspace.selectedCandidateId = workspace.candidates[0]?.id;
   markDiscoverOwnership();
 }
@@ -300,7 +325,11 @@ export function applyDiscoverResearchPreview(
   candidates: ResearchPaper[],
 ) {
   const workspace = getDiscoverWorkspace(discoverId);
-  workspace.candidates = candidates.map(toDiscoverCandidateFromResearchPreview);
+  const preview = candidates.map(toDiscoverCandidateFromResearchPreview);
+  workspace.candidates =
+    workspace.activeRunMode === "improve"
+      ? mergeDiscoverCandidates([...workspace.candidates, ...preview])
+      : preview;
   if (!workspace.candidates.some((candidate) => candidate.id === workspace.selectedCandidateId)) {
     workspace.selectedCandidateId = workspace.candidates[0]?.id;
   }
@@ -395,6 +424,46 @@ function toDiscoverCandidateFromResearchPreview(candidate: ResearchPaper): Disco
     tags: ["deep", "reviewing", ...normalized.tags.filter((tag) => tag === "open-access")],
     reviewing: true,
   };
+}
+
+function discoverCandidateDedupKey(candidate: DiscoverCandidate) {
+  if (candidate.doi) {
+    return `doi:${candidate.doi.trim().toLowerCase()}`;
+  }
+  if (candidate.arxivId) {
+    return `arxiv:${candidate.arxivId.trim().toLowerCase()}`;
+  }
+  if (candidate.openalexId) {
+    return `openalex:${candidate.openalexId.trim().toLowerCase()}`;
+  }
+  return `title:${candidate.title.trim().replace(/\s+/g, " ").toLowerCase()}`;
+}
+
+function mergeDiscoverCandidates(candidates: DiscoverCandidate[]) {
+  const byKey = new Map<string, DiscoverCandidate>();
+  for (const candidate of candidates) {
+    const key = discoverCandidateDedupKey(candidate);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, candidate);
+      continue;
+    }
+    byKey.set(key, {
+      ...existing,
+      score: Math.max(existing.score, candidate.score),
+      why: candidate.reviewing ? existing.why : candidate.why,
+      citations: Math.max(existing.citations, candidate.citations),
+      pdfUrl: existing.pdfUrl ?? candidate.pdfUrl,
+      externalUrl: existing.externalUrl ?? candidate.externalUrl,
+      abstract: existing.abstract ?? candidate.abstract,
+      tags: [...new Set([...existing.tags, ...candidate.tags])],
+      reviewing: existing.reviewing && candidate.reviewing,
+      isNew: existing.isNew || candidate.isNew,
+      owned: existing.owned || candidate.owned,
+      alreadyInLibrary: existing.alreadyInLibrary || candidate.alreadyInLibrary,
+    });
+  }
+  return [...byKey.values()].sort((left, right) => right.score - left.score);
 }
 
 export function getPaperById(paperId: string): Paper | undefined {

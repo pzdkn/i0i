@@ -51,6 +51,7 @@
     paperDraftFromDiscoverCandidate,
     paperFromDiscoverCandidate,
     removeDiscoverWorkspace,
+    setDiscoverImproveStarted,
     setDiscoverRunStarted,
     setDiscoverStatus,
     setDiscoverSelectedCandidate,
@@ -256,6 +257,15 @@
     return nextWorkspace;
   }
 
+  function selectedProviders(workspace: ReturnType<typeof getDiscoverWorkspace>) {
+    return workspace.providers.length > 0 ? [...workspace.providers] : [workspace.provider];
+  }
+
+  function selectedVenues(workspace: ReturnType<typeof getDiscoverWorkspace>) {
+    const venue = workspace.venue.trim();
+    return venue ? [venue] : [];
+  }
+
   async function runDiscoverSearch(discoverId: string) {
     const workspace = workspaceForNewRun(discoverId);
     const query = workspace.query.trim();
@@ -280,6 +290,9 @@
         resultLimit: Number(workspace.resultLimit),
         sortBy: workspace.sortBy,
         provider: workspace.provider,
+        providers: selectedProviders(workspace),
+        openAccess: workspace.openAccess,
+        venues: selectedVenues(workspace),
       });
       applyDiscoverSearchResponse(workspace.id, response);
       const title = discoverTitleFromQuery(query);
@@ -305,10 +318,10 @@
         constraints: {
           yearFrom: parseOptionalYear(workspace.yearFrom),
           yearTo: parseOptionalYear(workspace.yearTo),
-          providers: [workspace.provider],
-          openAccess: true,
+          providers: selectedProviders(workspace),
+          openAccess: workspace.openAccess,
           targetCount: Number(workspace.resultLimit),
-          venues: [],
+          venues: selectedVenues(workspace),
           authors: [],
           fieldsOfStudy: [],
           seedPaperIds: [],
@@ -316,8 +329,47 @@
         strategy: depthStrategy(workspace.deepDepth),
       });
       setDiscoverRunStarted(discoverId, "deep", search.id);
-      const runId = await runResearchSearch(search.id);
+      const runId = await runResearchSearch(search.id, "deep");
       setDiscoverRunStarted(discoverId, "deep", search.id, runId);
+    } catch (error) {
+      setDiscoverStatus(discoverId, "failed", String(error));
+    }
+  }
+
+  async function improveDiscoverSearch(discoverId: string) {
+    const workspace = getDiscoverWorkspace(discoverId);
+    const query = workspace.query.trim();
+    if (!query || workspace.status === "running") {
+      return;
+    }
+
+    const topTitles = workspace.candidates
+      .slice(0, 8)
+      .map((candidate, index) => `${index + 1}. ${candidate.title}`)
+      .join("\n");
+    const title = workspace.title || discoverTitleFromQuery(query);
+    setDiscoverImproveStarted(discoverId);
+
+    try {
+      const search = await createSearch({
+        title: `${title} · improve`,
+        goal: `Improve this literature search.\nOriginal query: ${query}\nCurrent top results:\n${topTitles}`,
+        constraints: {
+          yearFrom: parseOptionalYear(workspace.yearFrom),
+          yearTo: parseOptionalYear(workspace.yearTo),
+          providers: selectedProviders(workspace),
+          openAccess: workspace.openAccess,
+          targetCount: Number(workspace.resultLimit),
+          venues: selectedVenues(workspace),
+          authors: [],
+          fieldsOfStudy: [],
+          seedPaperIds: [],
+        },
+        strategy: depthStrategy(workspace.deepDepth),
+      });
+      setDiscoverImproveStarted(discoverId, search.id);
+      const runId = await runResearchSearch(search.id, "improve");
+      setDiscoverImproveStarted(discoverId, search.id, runId);
     } catch (error) {
       setDiscoverStatus(discoverId, "failed", String(error));
     }
@@ -580,6 +632,7 @@
         onNewSearch={openNewDiscover}
         onActivateSearch={openDiscover}
         onRunSearch={runDiscoverSearch}
+        onImproveSearch={improveDiscoverSearch}
         onSelectCandidate={selectDiscoverCandidate}
         onOpenCandidate={openCandidate}
         onAddCandidate={addCandidate}

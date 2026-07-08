@@ -12,6 +12,7 @@
     onNewSearch,
     onActivateSearch,
     onRunSearch,
+    onImproveSearch,
     onSelectCandidate,
     onOpenCandidate,
     onAddCandidate,
@@ -23,6 +24,7 @@
     onNewSearch: () => void;
     onActivateSearch: (discoverId: string) => void;
     onRunSearch: (discoverId: string) => void;
+    onImproveSearch: (discoverId: string) => void;
     onSelectCandidate: (discoverId: string, candidateId: string) => void;
     onOpenCandidate: (candidateId: string) => void;
     onAddCandidate: (candidateId: string, vaultIds: string[]) => void;
@@ -31,7 +33,14 @@
 </script>
 
 <section class="discover-workspace col">
-  <DiscoverSeedBar {workspace} {discoverWorkspaces} {onNewSearch} {onActivateSearch} {onRunSearch} />
+  <DiscoverSeedBar
+    {workspace}
+    {discoverWorkspaces}
+    {onNewSearch}
+    {onActivateSearch}
+    {onRunSearch}
+    {onImproveSearch}
+  />
   <div class="discover-body row">
     <DiscoverFeed
       {workspace}

@@ -8,12 +8,14 @@
     onNewSearch,
     onActivateSearch,
     onRunSearch,
+    onImproveSearch,
   }: {
     workspace: DiscoverWorkspace;
     discoverWorkspaces: DiscoverWorkspace[];
     onNewSearch: () => void;
     onActivateSearch: (discoverId: string) => void;
     onRunSearch: (discoverId: string) => void;
+    onImproveSearch: (discoverId: string) => void;
   } = $props();
 
   let queryInput: HTMLInputElement;
@@ -23,7 +25,11 @@
   const resultLabel = $derived(
     workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
   );
-  const providerLabel = $derived(providerDisplayName(workspace.provider));
+  const providerLabel = $derived(
+    workspace.providers.length === 3
+      ? "All providers"
+      : workspace.providers.map(providerDisplayName).join(", ") || providerDisplayName(workspace.provider),
+  );
   // arXiv and Semantic Scholar have no citation-count sort.
   // Semantic Scholar has no sort at all — all options fall back to relevance.
   const mostCitedDisabled = $derived(
@@ -32,7 +38,7 @@
   const sortDisabled = $derived(workspace.provider === "semantic_scholar");
   const nonDefaultFilters = $derived.by(() => {
     const filters: string[] = [];
-    if (workspace.provider !== "open_alex") {
+    if (workspace.providers.length !== 3) {
       filters.push(providerLabel);
     }
     if (!workspace.deep && workspace.sortBy !== "relevance") {
@@ -43,6 +49,12 @@
     }
     if (workspace.yearFrom || workspace.yearTo) {
       filters.push(`${workspace.yearFrom || "any"}-${workspace.yearTo || "now"}`);
+    }
+    if (workspace.venue.trim()) {
+      filters.push(workspace.venue.trim());
+    }
+    if (!workspace.openAccess) {
+      filters.push("all access");
     }
     if (workspace.deep && workspace.deepDepth !== "standard") {
       filters.push(workspace.deepDepth);
@@ -61,13 +73,16 @@
     }
   }
 
-  function onProviderChange() {
-    if (
-      (workspace.provider === "arxiv" || workspace.provider === "semantic_scholar") &&
-      workspace.sortBy === "most_cited"
-    ) {
-      workspace.sortBy = "relevance";
+  function toggleProvider(provider: DiscoverWorkspace["provider"]) {
+    if (workspace.providers.includes(provider)) {
+      if (workspace.providers.length === 1) {
+        return;
+      }
+      workspace.providers = workspace.providers.filter((item) => item !== provider);
+    } else {
+      workspace.providers = [...workspace.providers, provider];
     }
+    workspace.provider = workspace.providers[0] ?? "open_alex";
   }
 
   function sortLabel(sortBy: DiscoverWorkspace["sortBy"]) {
@@ -134,6 +149,16 @@
       <button class="btn primary" type="submit" disabled={isRunning || !workspace.query.trim()}>
         {isRunning ? "Running" : "Run"}
       </button>
+      {#if workspace.candidates.length > 0}
+        <button
+          class="btn"
+          type="button"
+          disabled={isRunning}
+          onclick={() => onImproveSearch(workspace.id)}
+        >
+          Improve
+        </button>
+      {/if}
       <button
         class="settings-button"
         class:active={settingsOpen}
@@ -157,14 +182,36 @@
 
     {#if settingsOpen}
       <div class="settings-panel row">
-        <label>
-          <span>Provider</span>
-          <select bind:value={workspace.provider} onchange={onProviderChange} disabled={isRunning}>
-            <option value="open_alex">OpenAlex</option>
-            <option value="arxiv">arXiv</option>
-            <option value="semantic_scholar">Semantic Scholar</option>
-          </select>
-        </label>
+        <fieldset class="provider-set">
+          <legend>Providers</legend>
+          <label>
+            <input
+              type="checkbox"
+              checked={workspace.providers.includes("open_alex")}
+              disabled={isRunning}
+              onchange={() => toggleProvider("open_alex")}
+            />
+            <span>OpenAlex</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={workspace.providers.includes("arxiv")}
+              disabled={isRunning}
+              onchange={() => toggleProvider("arxiv")}
+            />
+            <span>arXiv</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={workspace.providers.includes("semantic_scholar")}
+              disabled={isRunning}
+              onchange={() => toggleProvider("semantic_scholar")}
+            />
+            <span>Semantic Scholar</span>
+          </label>
+        </fieldset>
         {#if workspace.deep}
           <label>
             <span>Depth</span>
@@ -211,6 +258,22 @@
             placeholder="now"
             disabled={isRunning}
           />
+        </label>
+        <label>
+          <span>Venue</span>
+          <input
+            bind:value={workspace.venue}
+            placeholder="any"
+            disabled={isRunning}
+          />
+        </label>
+        <label class="inline-setting">
+          <input
+            type="checkbox"
+            bind:checked={workspace.openAccess}
+            disabled={isRunning}
+          />
+          <span>Open access</span>
         </label>
       </div>
     {/if}
@@ -374,6 +437,49 @@
     flex-wrap: wrap;
     min-width: 0;
     padding: 8px 0 0 18px;
+  }
+
+  .provider-set {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    min-height: 36px;
+    margin: 0;
+    border: 1px solid var(--border-2);
+    padding: 4px 8px;
+  }
+
+  .provider-set legend {
+    color: var(--fg-3);
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+
+  .provider-set label {
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .provider-set input {
+    width: 12px;
+    height: 12px;
+    min-width: 12px;
+    accent-color: var(--green);
+  }
+
+  .inline-setting {
+    flex-direction: row;
+    align-items: center;
+    min-height: 22px;
+    padding-bottom: 1px;
+  }
+
+  .inline-setting input {
+    width: 12px;
+    height: 12px;
+    min-width: 12px;
+    accent-color: var(--green);
   }
 
   label {

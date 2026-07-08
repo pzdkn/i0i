@@ -7,7 +7,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SemanticScholarResponse {
-    pub total: Option<u32>,
+    #[serde(rename = "total")]
+    pub _total: Option<u32>,
     pub data: Vec<SemanticScholarPaper>,
 }
 
@@ -159,7 +160,7 @@ mod tests {
             "data": [{ "paperId": "abc" }]
         }"#;
         let resp: SemanticScholarResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.total, Some(1234));
+        assert_eq!(resp._total, Some(1234));
         assert_eq!(resp.data.len(), 1);
     }
 }

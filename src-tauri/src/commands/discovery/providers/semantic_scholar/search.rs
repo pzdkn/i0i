@@ -70,7 +70,7 @@ impl DiscoveryProvider for SemanticScholarProvider {
         let candidates = payload
             .data
             .into_iter()
-            .filter(|paper| paper.is_open_access.unwrap_or(false))
+            .filter(|paper| !request.open_access || paper.is_open_access.unwrap_or(false))
             .map(|paper| normalize_paper(paper, request.query.trim()))
             .collect();
 
@@ -190,7 +190,9 @@ fn ss_active_filters(request: &DiscoverySearchRequest) -> Vec<String> {
         filters.push(format!("to_year:{year_to}"));
     }
 
-    filters.push("is_oa:true".to_string());
+    if request.open_access {
+        filters.push("is_oa:true".to_string());
+    }
 
     filters
 }
@@ -208,6 +210,8 @@ mod tests {
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
             provider: DiscoveryProviderChoice::SemanticScholar,
+            providers: Vec::new(),
+            open_access: true,
             venues: Vec::new(),
             authors: Vec::new(),
             fields_of_study: Vec::new(),

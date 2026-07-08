@@ -107,6 +107,8 @@ fn ranked_from_indices(
                 rank: 0,
                 score: item.score,
                 rationale: item.rationale,
+                rank_signals_json: None,
+                provider_hits_json: None,
             })
         })
         .enumerate()
@@ -181,7 +183,7 @@ impl OpenRouterPlanner {
 
 const PLAN_SYSTEM: &str = "You are a scholarly search planner. Expand the user's research \
 goal into focused provider queries (synonyms, key methods, datasets). Reply with a single \
-JSON object: {\"queries\":[{\"provider\":\"open_alex\"|\"arxiv\",\"text\":\"...\"}]}. No prose.";
+JSON object: {\"queries\":[{\"provider\":\"open_alex\"|\"arxiv\"|\"semantic_scholar\",\"text\":\"...\"}]}. No prose.";
 
 const ASSESS_SYSTEM: &str = "You judge whether a paper search has enough coverage for the \
 goal. Reply with a single JSON object: {\"refine\":true|false,\"gaps\":[\"...\"]}. Set \
@@ -201,9 +203,9 @@ impl Planner for OpenRouterPlanner {
     ) -> Result<Vec<Query>, ResearchError> {
         let providers: Vec<&str> = constraints.providers.iter().map(provider_name).collect();
         let user = format!(
-            "Goal: {goal}\nAllowed providers: {}\nPropose 2-4 queries.",
+            "Goal: {goal}\nAllowed providers: {}\nPropose 3-5 queries.",
             if providers.is_empty() {
-                "open_alex, arxiv".to_string()
+                "open_alex, arxiv, semantic_scholar".to_string()
             } else {
                 providers.join(", ")
             }
@@ -222,7 +224,7 @@ impl Planner for OpenRouterPlanner {
     ) -> Result<Vec<Query>, ResearchError> {
         let user = format!(
             "Goal: {goal}\nCoverage gaps: {}\nAlready found ({} papers): {}\n\
-             Propose 1-3 NEW queries targeting the gaps.",
+             Propose 3-5 NEW queries targeting the gaps.",
             gaps.join("; "),
             pool_titles.len(),
             preview_titles(pool_titles),
@@ -330,13 +332,17 @@ mod tests {
     #[test]
     fn queries_response_deserializes_provider_and_text() {
         let value = extract_json_object(
-            r#"{"queries":[{"provider":"arxiv","text":"sparse autoencoder"}]}"#,
+            r#"{"queries":[{"provider":"arxiv","text":"sparse autoencoder"},{"provider":"semantic_scholar","text":"dictionary learning features"}]}"#,
         )
         .unwrap();
         let parsed: QueriesResponse = serde_json::from_value(value).unwrap();
-        assert_eq!(parsed.queries.len(), 1);
+        assert_eq!(parsed.queries.len(), 2);
         assert_eq!(parsed.queries[0].provider, DiscoveryProviderChoice::Arxiv);
         assert_eq!(parsed.queries[0].text, "sparse autoencoder");
+        assert_eq!(
+            parsed.queries[1].provider,
+            DiscoveryProviderChoice::SemanticScholar
+        );
     }
 
     #[test]

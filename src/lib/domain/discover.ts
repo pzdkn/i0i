@@ -37,19 +37,21 @@ export type DiscoverSort = "relevance" | "newest" | "most_cited";
 
 export type DiscoveryProviderChoice = "open_alex" | "arxiv" | "semantic_scholar";
 
-const PROVIDER_DISPLAY_NAMES: Record<DiscoveryProviderChoice, string> = {
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   open_alex: "OpenAlex",
+  openalex: "OpenAlex",
   arxiv: "arXiv",
   semantic_scholar: "Semantic Scholar",
+  semanticscholar: "Semantic Scholar",
 };
 
-export function providerDisplayName(provider: DiscoveryProviderChoice): string {
+export function providerDisplayName(provider: DiscoveryProviderChoice | string): string {
   return PROVIDER_DISPLAY_NAMES[provider] ?? "Unknown";
 }
 
 export type DiscoverRunStatus = "idle" | "running" | "completed" | "failed";
 
-export type DiscoverRunMode = "shallow" | "deep";
+export type DiscoverRunMode = "shallow" | "deep" | "improve";
 
 export type DiscoverDepth = "quick" | "standard" | "thorough";
 
@@ -73,6 +75,9 @@ export type DiscoverWorkspace = {
   resultLimit: 10 | 25 | 50;
   sortBy: DiscoverSort;
   provider: DiscoveryProviderChoice;
+  providers: DiscoveryProviderChoice[];
+  venue: string;
+  openAccess: boolean;
   status: DiscoverRunStatus;
   error: string;
   activeRunMode?: DiscoverRunMode;
@@ -98,6 +103,9 @@ export type DiscoverySearchRequest = {
   resultLimit: number;
   sortBy: DiscoverSort;
   provider: DiscoveryProviderChoice;
+  providers?: DiscoveryProviderChoice[];
+  openAccess?: boolean;
+  venues?: string[];
 };
 
 export type DiscoverySearchResponse = {

@@ -54,6 +54,23 @@ export interface Search {
   updatedAt: string;
 }
 
+export interface SearchRun {
+  id: string;
+  searchId: string;
+  mode: "quick" | "deep" | "improve" | string;
+  providerSet?: string;
+  queryExpansions?: string;
+  status: string;
+  stopReason?: string;
+  iteration: number;
+  addedCount: number;
+  totalCount: number;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  createdAt: string;
+}
+
 // The candidate payload is the same normalized paper shape that shallow
 // discovery returns. Deep research ranks and explains these candidates; it does
 // not invent a second paper model.
@@ -66,6 +83,8 @@ export interface SearchCandidate {
   rank: number;
   score?: number;
   rationale?: string;
+  rankSignalsJson?: string;
+  providerHitsJson?: string;
   candidate: ResearchPaper;
   alreadyInLibrary: boolean;
   saved: boolean;

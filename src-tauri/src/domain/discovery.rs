@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryProviderChoice {
     // Aliases tolerate the LLM planner's natural spellings (RFC 0037).
@@ -23,6 +23,10 @@ pub struct DiscoverySearchRequest {
     pub sort_by: DiscoverySort,
     #[serde(default)]
     pub provider: DiscoveryProviderChoice,
+    #[serde(default)]
+    pub providers: Vec<DiscoveryProviderChoice>,
+    #[serde(default)]
+    pub open_access: bool,
     /// Structured filters applied at query time (not post-filters). Support is
     /// per-provider and asymmetric: OpenAlex honors all three; arXiv supports
     /// author and category (≈ field) only. See RFC 0037.
@@ -104,4 +108,31 @@ pub struct CandidateMatch {
     pub reasons: Vec<String>,
     pub matched_keywords: Vec<String>,
     pub from_seed_paper_ids: Vec<String>,
+}
+
+/// Normalized dedup key for a candidate: prefer external scholarly identifiers
+/// before falling back to a normalized title.
+pub fn paper_candidate_dedup_key(candidate: &PaperCandidate) -> String {
+    if let Some(doi) = candidate.doi.as_ref().filter(|d| !d.trim().is_empty()) {
+        return format!("doi:{}", doi.trim().to_lowercase());
+    }
+    if let Some(arxiv) = candidate.arxiv_id.as_ref().filter(|a| !a.trim().is_empty()) {
+        return format!("arxiv:{}", arxiv.trim().to_lowercase());
+    }
+    if let Some(openalex) = candidate
+        .openalex_id
+        .as_ref()
+        .filter(|id| !id.trim().is_empty())
+    {
+        return format!("openalex:{}", openalex.trim().to_lowercase());
+    }
+    format!(
+        "title:{}",
+        candidate
+            .title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    )
 }

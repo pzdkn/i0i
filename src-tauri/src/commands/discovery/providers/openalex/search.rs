@@ -150,7 +150,9 @@ fn openalex_filters(request: &DiscoverySearchRequest) -> Vec<String> {
         filters.push(format!("to_publication_date:{year_to}-12-31"));
     }
 
-    filters.push("is_oa:true".to_string());
+    if request.open_access {
+        filters.push("is_oa:true".to_string());
+    }
 
     // Structured filters applied at query time. Multiple values for one key are
     // OR-joined with `|` (OpenAlex's within-key OR); distinct keys are AND-joined
@@ -213,6 +215,8 @@ mod tests {
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
             provider: Default::default(),
+            providers: Vec::new(),
+            open_access: true,
             venues: Vec::new(),
             authors: Vec::new(),
             fields_of_study: Vec::new(),
@@ -255,6 +259,8 @@ mod tests {
             result_limit: 25,
             sort_by: DiscoverySort::Relevance,
             provider: Default::default(),
+            providers: Vec::new(),
+            open_access: true,
             venues: vec!["NeurIPS".to_string(), "ICML".to_string()],
             authors: vec!["Yoshua Bengio".to_string()],
             fields_of_study: vec!["computer science".to_string()],
