@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
@@ -10,6 +9,7 @@ use crate::domain::reader::{
     DiscoveryReaderCandidate, ReaderAsset, ReaderBlock, ReaderDocument, ReaderPage,
     ReaderParagraph, ReaderSpan, ReaderTextBlock,
 };
+use crate::services::source_acquisition::SourceAcquisitionService;
 use crate::storage::library_store::LibraryStore;
 
 const DISCOVERY_PDF_SOURCE_PREFIX: &str = "temp-pdf";
@@ -25,7 +25,7 @@ const READER_MAX_PDF_BYTES: u64 = 104_857_600;
 pub struct ReaderService {
     app: AppHandle,
     store: LibraryStore,
-    client: reqwest::Client,
+    source_acquisition: SourceAcquisitionService,
 }
 
 enum ReaderTarget<'a> {
@@ -38,17 +38,16 @@ enum ReaderTarget<'a> {
 
 impl ReaderService {
     /// Create a Reader service with access to durable storage and app-local cache paths.
-    pub fn new(app: AppHandle, store: LibraryStore) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION"),
-                " reader"
-            ))
-            .build()
-            .expect("reqwest client should build");
-        Self { app, store, client }
+    pub fn new(
+        app: AppHandle,
+        store: LibraryStore,
+        source_acquisition: SourceAcquisitionService,
+    ) -> Self {
+        Self {
+            app,
+            store,
+            source_acquisition,
+        }
     }
 
     /// Load a Reader document for a saved library paper.
@@ -356,7 +355,10 @@ impl ReaderService {
         let (source_id, pdf_local_path, pdf_error) =
             if let Some(pdf_url) = candidate.pdf_url.as_deref() {
                 let source_id = discovery_pdf_source_id(&candidate.id, pdf_url);
-                let local_path = match self.cache_discovery_pdf(&source_id, pdf_url).await {
+                let local_path = match self
+                    .cache_discovery_pdf(&source_id, pdf_url, candidate.external_url.as_deref())
+                    .await
+                {
                     Ok(path) => Some(path.to_string_lossy().to_string()),
                     Err(error) => {
                         // Discovery open is intentionally forgiving: no PDF yet should
@@ -420,7 +422,12 @@ impl ReaderService {
 
     /// Cache a discovery PDF into the app cache area using the same basic
     /// validation rules as the durable PDF ingestion flow.
-    async fn cache_discovery_pdf(&self, source_id: &str, pdf_url: &str) -> Result<PathBuf, String> {
+    async fn cache_discovery_pdf(
+        &self,
+        source_id: &str,
+        pdf_url: &str,
+        landing_url: Option<&str>,
+    ) -> Result<PathBuf, String> {
         let local_path = self.discovery_pdf_path(source_id)?;
         if validate_cached_pdf(&local_path) {
             return Ok(local_path);
@@ -431,48 +438,15 @@ impl ReaderService {
         }
 
         let partial_path = PathBuf::from(format!("{}.part", local_path.display()));
-        let response = self
-            .client
-            .get(pdf_url)
-            .header("Accept", "application/pdf,*/*;q=0.8")
-            .send()
+        let acquired = self
+            .source_acquisition
+            .acquire_pdf(pdf_url, landing_url, READER_MAX_PDF_BYTES)
             .await
             .map_err(|error| error.to_string())?;
-        let status = response.status();
-        let final_url = response.url().to_string();
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("unknown")
-            .to_string();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(status_error(status, &final_url, &content_type, &body));
-        }
-
-        if let Some(content_length) = response.content_length() {
-            if content_length > READER_MAX_PDF_BYTES {
-                return Err(format!(
-                    "PDF is too large: {content_length} bytes exceeds {READER_MAX_PDF_BYTES} bytes"
-                ));
-            }
-        }
-
-        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
-        if bytes.len() as u64 > READER_MAX_PDF_BYTES {
-            return Err(format!(
-                "PDF is too large: {} bytes exceeds {READER_MAX_PDF_BYTES} bytes",
-                bytes.len()
-            ));
-        }
-        if !bytes.starts_with(b"%PDF-") {
-            return Err("Downloaded file was not a PDF".to_string());
-        }
 
         // Write through a temporary file so partial downloads do not look like a
         // valid cached PDF to later Reader opens.
-        fs::write(&partial_path, &bytes).map_err(|error| error.to_string())?;
+        fs::write(&partial_path, &acquired.bytes).map_err(|error| error.to_string())?;
         fs::rename(&partial_path, &local_path).map_err(|error| error.to_string())?;
         Ok(local_path)
     }
@@ -560,30 +534,6 @@ fn text_fallback(source_text: &str) -> (Vec<ReaderTextBlock>, Vec<ReaderParagrap
             highlight: None,
         }],
     )
-}
-
-/// Build a readable download error from HTTP status and response metadata.
-fn status_error(status: StatusCode, final_url: &str, content_type: &str, body: &str) -> String {
-    let snippet = body_snippet(body);
-    if snippet.is_empty() {
-        return format!(
-            "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type})"
-        );
-    }
-
-    format!(
-        "PDF download returned HTTP status {status} from {final_url} (content-type: {content_type}; body: {snippet})"
-    )
-}
-
-/// Trim an HTML or text response body to a short loggable snippet.
-fn body_snippet(body: &str) -> String {
-    body.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(220)
-        .collect()
 }
 
 /// Check whether a cached file looks like a PDF by validating the magic header.

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { listen } from "@tauri-apps/api/event";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { getDiscoveryReaderDocument, getReaderDocument } from "$lib/bridge/library";
   import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
@@ -41,6 +42,7 @@
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
   const activeCandidate = $derived(candidate && !chatEnabled ? candidate : undefined);
   const hasCachedPdf = $derived(Boolean(readerDocument?.pdfLocalPath));
+  const fallbackSourceUrl = $derived(activeCandidate?.externalUrl ?? readerDocument?.pdfSourceUrl);
 
   onMount(() => {
     let unlistenSource: (() => void) | undefined;
@@ -198,6 +200,22 @@
     window.getSelection()?.removeAllRanges();
   }
 
+  function retryDocumentLoad() {
+    refreshTick += 1;
+  }
+
+  async function openSourceUrl() {
+    if (!fallbackSourceUrl) {
+      return;
+    }
+
+    try {
+      await openUrl(fallbackSourceUrl);
+    } catch (error) {
+      readerLog("open-source-error", { url: fallbackSourceUrl, error: errorDetail(error) }, "error");
+    }
+  }
+
   function openThreadFromMark(threadId: string) {
     requestedThreadId = threadId;
   }
@@ -266,14 +284,22 @@
             />
           {:else}
             <div class="missing-pdf col">
-              <div class="label hot">PDF not available</div>
-              {#if readerDocument?.pdfError}
-                <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
-              {:else}
-                <p>This paper has no cached PDF.</p>
+              <div class="label hot">PDF could not be opened automatically</div>
+              <p>The publisher may require login, browser verification, or manual access.</p>
+              <div class="fallback-actions row">
+                {#if fallbackSourceUrl}
+                  <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
+                {/if}
+                <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
+              </div>
+              {#if fallbackSourceUrl}
+                <div class="source-line mono-dim">{fallbackSourceUrl}</div>
               {/if}
-              {#if readerDocument?.pdfSourceUrl}
-                <pre class="debug-block mono-dim">Source: {readerDocument.pdfSourceUrl}</pre>
+              {#if readerDocument?.pdfError}
+                <details class="error-details">
+                  <summary>Details</summary>
+                  <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
+                </details>
               {/if}
             </div>
           {/if}
@@ -354,6 +380,33 @@
 
   .missing-pdf p {
     margin: 0;
+    max-width: 460px;
+    text-align: center;
+    line-height: 1.45;
+  }
+
+  .fallback-actions {
+    gap: 8px;
+    align-items: center;
+  }
+
+  .source-line {
+    max-width: min(680px, 100%);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+  }
+
+  .error-details {
+    width: min(760px, 100%);
+  }
+
+  .error-details summary {
+    cursor: pointer;
+    color: var(--fg-2);
+    font-size: 12px;
+    text-align: center;
   }
 
   .progress-shell {

@@ -49,7 +49,11 @@ pub fn run() {
             pdf_extractions
                 .recover_and_queue_startup_extractions()
                 .map_err(std::io::Error::other)?;
-            let reader_service = ReaderService::new(app.handle().clone(), store.clone());
+            let reader_service = ReaderService::new(
+                app.handle().clone(),
+                store.clone(),
+                source_acquisition.clone(),
+            );
             let chat_service = ChatService::from_app_config(
                 app.handle().clone(),
                 store.clone(),
