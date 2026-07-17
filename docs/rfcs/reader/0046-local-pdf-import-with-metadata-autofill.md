@@ -15,12 +15,12 @@ The decision is:
 - The user imports PDFs from the Vault view.
 - i0i copies each selected PDF into app-managed document storage immediately.
 - i0i creates a paper draft linked to that local PDF.
-- Metadata autofill runs as enrichment, not as a blocker.
+- Metadata autofill is available as an explicit enrichment command, not as a blocker.
 - The user can confirm/edit important metadata before or after saving.
 - The reader should be able to open the imported PDF immediately.
 
 Plain English version: "Import PDF" should get the document into the vault now;
-metadata can become smarter in the background.
+metadata can become smarter when the user asks for it.
 
 ## Problem
 
@@ -43,8 +43,8 @@ The app needs a direct local import path. Without it, i0i is not a real vault.
 - Copy imported PDFs into the same app-controlled document storage model used
   by downloaded PDFs.
 - Create paper records and attach them to the active vault.
-- Open imported PDFs in the reader immediately.
-- Autofill metadata from structured evidence when possible.
+- Let the user open imported PDFs in the reader immediately after import.
+- Autofill metadata from structured evidence when the user explicitly requests it.
 - Let the user edit/confirm metadata instead of trusting guesses blindly.
 
 ## Non-Goals
@@ -65,10 +65,10 @@ Vault view
   -> user selects one or more PDFs
   -> backend copies PDFs into app storage
   -> backend creates paper drafts / records
-  -> metadata autofill starts
-  -> user reviews metadata
   -> paper appears in vault
-  -> reader opens PDF immediately
+  -> user can right-click paper and choose Autofill metadata
+  -> user reviews metadata
+  -> user opens PDF when ready
 ```
 
 ## UX Placement
@@ -196,6 +196,9 @@ canonical source.
 ## Metadata Enrichment Design
 
 Add a background enrichment worker or reuse an existing background-job shape.
+
+RFC 0047 changes the trigger from automatic import-time enrichment to an
+explicit paper context-menu action.
 
 Potential extraction inputs:
 
@@ -342,10 +345,13 @@ Implemented in the first slice:
 - local cached `document_sources` row with `acquisition_method = local_import`,
 - active source assignment so the reader opens the imported PDF immediately,
 - fallback metadata from filename with `local` and `needs-review` tags.
-- concurrent background metadata enrichment after import,
+- manual metadata enrichment from the paper row context menu,
 - PDF embedded metadata / first-page text evidence extraction,
 - DOI, arXiv id, and title-based provider lookup,
 - `paper_metadata_updated` event that refreshes the frontend snapshot.
+- import no longer opens a Reader tab automatically,
+- removal of the inert Vault `+ Add` button; local import is now the only
+  implemented Vault-level ingest action in this slice.
 
 Not implemented yet:
 

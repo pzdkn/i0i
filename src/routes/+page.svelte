@@ -14,6 +14,7 @@
   } from "$lib/bridge/research";
   import {
     addPaperToVaults,
+    autofillPaperMetadata,
     createVault,
     getLibrary,
     importLocalPdfs,
@@ -65,6 +66,7 @@
   let activeVaultId = $state("");
   let selectedPaperId = $state("");
   let selectedReaderPaper = $state<Paper | null>(null);
+  let autofillingMetadataPaperIds = $state<string[]>([]);
   let activeTabId = $state("");
   let tabs = $state<WorkspaceTab[]>([]);
 
@@ -136,11 +138,15 @@
   onMount(() => {
     let unlisten: (() => void) | undefined;
 
-    listen<{ paperId: string }>("paper_metadata_updated", async (event) => {
+    listen<{ paperId: string; status: string; error?: string }>("paper_metadata_updated", async (event) => {
       try {
         const snapshot = await getLibrary();
         hydrateLibrary(snapshot);
         syncPaperMetadata(event.payload.paperId);
+        autofillingMetadataPaperIds = autofillingMetadataPaperIds.filter((paperId) => paperId !== event.payload.paperId);
+        if (event.payload.status === "failed" && event.payload.error) {
+          bridgeError = event.payload.error;
+        }
       } catch (error) {
         bridgeError = String(error);
       }
@@ -503,11 +509,21 @@
     try {
       const result = await importLocalPdfs(vaultId, paths);
       hydrateLibrary(result.snapshot);
-
-      if (result.importedPaperIds.length === 1) {
-        openPaper(result.importedPaperIds[0]);
-      }
     } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
+  async function autofillMetadataForPaper(paperId: string) {
+    if (autofillingMetadataPaperIds.includes(paperId)) {
+      return;
+    }
+
+    autofillingMetadataPaperIds = [...autofillingMetadataPaperIds, paperId];
+    try {
+      await autofillPaperMetadata(paperId);
+    } catch (error) {
+      autofillingMetadataPaperIds = autofillingMetadataPaperIds.filter((id) => id !== paperId);
       bridgeError = String(error);
     }
   }
@@ -703,6 +719,8 @@
               workspace={activeVaultWorkspace}
               onOpenPaper={openPaper}
               onImportPdfs={importPdfsToVault}
+              onAutofillMetadata={autofillMetadataForPaper}
+              {autofillingMetadataPaperIds}
               onRemovePaperFromVault={removePaperFromActiveVault}
               onRemovePaperFromLibrary={removePaperFromLibrary}
             />

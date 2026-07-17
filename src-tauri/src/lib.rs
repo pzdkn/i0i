@@ -95,6 +95,7 @@ pub fn run() {
             commands::library::get_library,
             commands::library::add_paper_to_vaults,
             commands::library::import_local_pdfs,
+            commands::library::autofill_paper_metadata,
             commands::library::download_paper_pdf,
             commands::library::get_document_sources,
             commands::library::create_vault,

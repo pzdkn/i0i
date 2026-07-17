@@ -51,7 +51,6 @@ pub fn add_paper_to_vaults(
 pub fn import_local_pdfs(
     app: tauri::AppHandle,
     store: tauri::State<'_, LibraryStore>,
-    metadata_enrichment: tauri::State<'_, MetadataEnrichmentService>,
     vault_id: String,
     files: Vec<LocalPdfImport>,
 ) -> Result<LocalPdfImportResult, String> {
@@ -103,12 +102,19 @@ pub fn import_local_pdfs(
         imported_paper_ids.push(paper_id);
     }
 
-    metadata_enrichment.queue_papers(imported_paper_ids.clone());
-
     Ok(LocalPdfImportResult {
         snapshot: store.get_library()?,
         imported_paper_ids,
     })
+}
+
+#[tauri::command]
+pub fn autofill_paper_metadata(
+    metadata_enrichment: tauri::State<'_, MetadataEnrichmentService>,
+    paper_id: String,
+) -> Result<(), String> {
+    metadata_enrichment.queue_paper(paper_id);
+    Ok(())
 }
 
 #[tauri::command]

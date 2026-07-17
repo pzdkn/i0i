@@ -4,15 +4,19 @@
   let {
     papers,
     selectedPaperId,
+    autofillingMetadataPaperIds,
     onSelect,
     onOpen,
+    onAutofillMetadata,
     onRemoveFromVault,
     onRemoveFromLibrary,
   }: {
     papers: Paper[];
     selectedPaperId: string;
+    autofillingMetadataPaperIds: string[];
     onSelect: (paperId: string) => void;
     onOpen: (paperId: string) => void;
+    onAutofillMetadata: (paperId: string) => void | Promise<void>;
     onRemoveFromVault: (paperId: string) => void;
     onRemoveFromLibrary: (paperId: string) => void;
   } = $props();
@@ -56,6 +60,11 @@
     closeContextMenu();
     onRemoveFromLibrary(paperId);
   }
+
+  function autofillMetadata(paperId: string) {
+    closeContextMenu();
+    onAutofillMetadata(paperId);
+  }
 </script>
 
 <svelte:window onclick={closeContextMenu} onkeydown={handleWindowKeydown} />
@@ -98,6 +107,9 @@
 
   {#if contextMenu}
     {@const menuPaperId = contextMenu.paperId}
+    {@const menuPaper = papers.find((paper) => paper.id === menuPaperId)}
+    {@const canAutofillMetadata = menuPaper?.tags.includes("needs-review") ?? false}
+    {@const isAutofillingMetadata = autofillingMetadataPaperIds.includes(menuPaperId)}
     <div
       class="context-menu col"
       role="menu"
@@ -106,6 +118,16 @@
       onclick={(event) => event.stopPropagation()}
       onkeydown={(event) => event.stopPropagation()}
     >
+      {#if canAutofillMetadata}
+        <button
+          role="menuitem"
+          type="button"
+          disabled={isAutofillingMetadata}
+          onclick={() => autofillMetadata(menuPaperId)}
+        >
+          {isAutofillingMetadata ? "Autofilling..." : "Autofill metadata"}
+        </button>
+      {/if}
       <button role="menuitem" type="button" onclick={() => removeFromVault(menuPaperId)}>
         Remove from vault
       </button>
@@ -243,6 +265,17 @@
   .context-menu button:hover {
     background: rgba(242, 169, 59, 0.08);
     color: var(--amber);
+  }
+
+  .context-menu button:disabled {
+    cursor: default;
+    color: var(--fg-3);
+    opacity: 0.72;
+  }
+
+  .context-menu button:disabled:hover {
+    background: transparent;
+    color: var(--fg-3);
   }
 
   .context-menu .danger {

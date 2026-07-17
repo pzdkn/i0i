@@ -30,6 +30,12 @@ export async function importLocalPdfs(vaultId: string, paths: string[]): Promise
   });
 }
 
+export async function autofillPaperMetadata(paperId: string): Promise<void> {
+  return invoke<void>("autofill_paper_metadata", {
+    paperId,
+  });
+}
+
 export async function getDocumentSources(paperId: string): Promise<DocumentSource[]> {
   return invoke<DocumentSource[]>("get_document_sources", {
     paperId,

@@ -75,12 +75,6 @@ impl MetadataEnrichmentService {
         }
     }
 
-    pub fn queue_papers(&self, paper_ids: Vec<String>) {
-        for paper_id in paper_ids {
-            self.queue_paper(paper_id);
-        }
-    }
-
     pub fn queue_paper(&self, paper_id: String) {
         if !self.mark_queued(&paper_id) {
             return;

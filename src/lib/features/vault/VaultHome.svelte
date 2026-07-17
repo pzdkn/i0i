@@ -9,12 +9,16 @@
     workspace,
     onOpenPaper,
     onImportPdfs,
+    onAutofillMetadata,
+    autofillingMetadataPaperIds,
     onRemovePaperFromVault,
     onRemovePaperFromLibrary,
   }: {
     workspace: VaultWorkspace;
     onOpenPaper: (paperId: string) => void;
     onImportPdfs: (vaultId: string, paths: string[]) => void | Promise<void>;
+    onAutofillMetadata: (paperId: string) => void | Promise<void>;
+    autofillingMetadataPaperIds: string[];
     onRemovePaperFromVault: (vaultId: string, paperId: string) => void;
     onRemovePaperFromLibrary: (paperId: string) => void;
   } = $props();
@@ -76,7 +80,6 @@
                 <span class="mono-dim">{workspace.summary}</span>
                 <div class="flex1"></div>
                 <div class="actions row">
-                  <button class="btn" type="button">+ Add</button>
                   <button class="btn" type="button" disabled={isImporting} onclick={chooseLocalPdfs}>
                     {isImporting ? "Importing" : "Import PDF"}
                   </button>
@@ -111,11 +114,13 @@
             <PaperList
               papers={workspace.papers}
               {selectedPaperId}
+              {autofillingMetadataPaperIds}
               onSelect={(paperId) => (selectedPaperId = paperId)}
               onOpen={(paperId) => {
                 selectedPaperId = paperId;
                 onOpenPaper(paperId);
               }}
+              {onAutofillMetadata}
               onRemoveFromVault={(paperId) => onRemovePaperFromVault(workspace.id, paperId)}
               onRemoveFromLibrary={onRemovePaperFromLibrary}
             />
