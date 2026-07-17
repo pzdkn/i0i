@@ -17,9 +17,13 @@
   let {
     paper,
     candidate,
+    layoutMode = "normal",
+    onToggleFocus,
   }: {
     paper: Paper;
     candidate?: DiscoveryReaderCandidate;
+    layoutMode?: "normal" | "focus";
+    onToggleFocus: () => void;
   } = $props();
 
   // Anchored chat state (RFC 0034). ReaderView owns the thread/pin lists so the
@@ -38,12 +42,15 @@
   let isLoadingDoc = $state(false);
   let refreshTick = $state(0);
   let documentLoadSequence = 0;
+  let focusThreadsMode = $state<"open" | "collapsed">("open");
 
   const document = $derived<ReaderDocument | null>(readerDocument);
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
   const activeCandidate = $derived(candidate && !chatEnabled ? candidate : undefined);
   const hasCachedPdf = $derived(Boolean(readerDocument?.pdfLocalPath));
   const fallbackSourceUrl = $derived(activeCandidate?.externalUrl ?? readerDocument?.pdfSourceUrl);
+  const isFocusMode = $derived(layoutMode === "focus");
+  const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
 
   onMount(() => {
     let unlistenSource: (() => void) | undefined;
@@ -194,6 +201,7 @@
 
   function selectPassage(next: ReaderTextSelection) {
     selection = next;
+    openThreadsPanel();
   }
 
   function clearSelection() {
@@ -219,10 +227,21 @@
 
   function openThreadFromMark(threadId: string) {
     requestedThreadId = threadId;
+    openThreadsPanel();
   }
 
   function consumeRequestedThread() {
     requestedThreadId = null;
+  }
+
+  function toggleThreadsPanel() {
+    focusThreadsMode = focusThreadsMode === "open" ? "collapsed" : "open";
+  }
+
+  function openThreadsPanel() {
+    if (isFocusMode) {
+      focusThreadsMode = "open";
+    }
   }
 
   function readerLog(stage: string, payload: Record<string, unknown>, level: "info" | "error" = "info") {
@@ -253,95 +272,162 @@
 
 <section class="reader-workspace col">
   <div class="reader-body row">
-    <ResizableSplit
-      storageKey="i0i.reader-split"
-      panes={document
-        ? [
-            { id: "reader", min: 520, default: 980 },
-            { id: "inspector", min: 280, max: 560, default: 340 },
-          ]
-        : [{ id: "reader", min: 520, default: 1200 }]}
-    >
-      {#snippet pane(id: string)}
-        {#if id === "reader"}
-          <main class="reader-main col">
-            {#if isLoadingDoc}
-              <div class="loading col">
-                <div class="label">Loading document…</div>
-                <div class="progress-shell" aria-hidden="true">
-                  <div class="progress-bar"></div>
-                </div>
-              </div>
-            {:else if docError}
-              <div class="doc-error col">
-                <div class="label hot">Failed to load document</div>
-                <pre class="debug-block mono-dim">{docError}</pre>
-                {#if docErrorDebug}
-                  <pre class="debug-block mono-dim">{docErrorDebug}</pre>
-                {/if}
-              </div>
-            {:else if document}
-              <ReaderHeader {document} />
+    {#snippet readerPane()}
+      <main class="reader-main col">
+        {#if isFocusMode && !document}
+          <div class="focus-fallback-toolbar row hair-b">
+            <span class="label hot">Reader Focus</span>
+            <div class="flex1"></div>
+            <button class="btn primary" type="button" title="Exit reader focus" onclick={onToggleFocus}>
+              Exit Focus
+            </button>
+          </div>
+        {/if}
 
-              <div class="reading-surface row">
-                {#if hasCachedPdf}
-                  <PdfPage
-                    pdfUrl={readerDocument!.pdfLocalPath!}
-                    sourceId={document.sourceId}
-                    {threads}
-                    {selection}
-                    {chatEnabled}
-                    onSelectPassage={selectPassage}
-                    onOpenThread={openThreadFromMark}
-                  />
-                {:else}
-                  <div class="missing-pdf col">
-                    <div class="label hot">PDF could not be opened automatically</div>
-                    <p>The publisher may require login, browser verification, or manual access.</p>
-                    <div class="fallback-actions row">
-                      {#if fallbackSourceUrl}
-                        <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
-                      {/if}
-                      <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
-                    </div>
-                    {#if fallbackSourceUrl}
-                      <div class="source-line mono-dim">{fallbackSourceUrl}</div>
-                    {/if}
-                    {#if readerDocument?.pdfError}
-                      <details class="error-details">
-                        <summary>Details</summary>
-                        <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
-                      </details>
-                    {/if}
-                  </div>
-                {/if}
-              </div>
+        {#if isLoadingDoc}
+          <div class="loading col">
+            <div class="label">Loading document…</div>
+            <div class="progress-shell" aria-hidden="true">
+              <div class="progress-bar"></div>
+            </div>
+          </div>
+        {:else if docError}
+          <div class="doc-error col">
+            <div class="label hot">Failed to load document</div>
+            <pre class="debug-block mono-dim">{docError}</pre>
+            {#if docErrorDebug}
+              <pre class="debug-block mono-dim">{docErrorDebug}</pre>
+            {/if}
+          </div>
+        {:else if document}
+          <ReaderHeader
+            {document}
+            {layoutMode}
+            {threadsCollapsed}
+            threadCount={threads.length}
+            pinCount={pins.length}
+            {onToggleFocus}
+            onToggleThreads={toggleThreadsPanel}
+          />
 
-              <ReaderFooter />
+          <div class="reading-surface row">
+            {#if hasCachedPdf}
+              <PdfPage
+                pdfUrl={readerDocument!.pdfLocalPath!}
+                sourceId={document.sourceId}
+                {threads}
+                {selection}
+                {chatEnabled}
+                onSelectPassage={selectPassage}
+                onOpenThread={openThreadFromMark}
+              />
             {:else}
               <div class="missing-pdf col">
-                <div class="label hot">Document not found</div>
-                <p>This paper is not in the library database.</p>
+                <div class="label hot">PDF could not be opened automatically</div>
+                <p>The publisher may require login, browser verification, or manual access.</p>
+                <div class="fallback-actions row">
+                  {#if fallbackSourceUrl}
+                    <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
+                  {/if}
+                  <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
+                </div>
+                {#if fallbackSourceUrl}
+                  <div class="source-line mono-dim">{fallbackSourceUrl}</div>
+                {/if}
+                {#if readerDocument?.pdfError}
+                  <details class="error-details">
+                    <summary>Details</summary>
+                    <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
+                  </details>
+                {/if}
               </div>
             {/if}
-          </main>
-        {:else if document}
-          <ReaderInspector
-            {document}
-            {chatEnabled}
-            {threads}
-            {pins}
-            {selection}
-            {requestedThreadId}
-            {isLoadingChat}
-            {chatError}
-            onReloadChat={reloadChat}
-            onClearSelection={clearSelection}
-            onConsumeRequestedThread={consumeRequestedThread}
-          />
+          </div>
+
+          <ReaderFooter />
+        {:else}
+          <div class="missing-pdf col">
+            <div class="label hot">Document not found</div>
+            <p>This paper is not in the library database.</p>
+          </div>
         {/if}
-      {/snippet}
-    </ResizableSplit>
+      </main>
+    {/snippet}
+
+    {#snippet inspectorPane()}
+      {#if document}
+        <ReaderInspector
+          {document}
+          {chatEnabled}
+          {threads}
+          {pins}
+          {selection}
+          {requestedThreadId}
+          {isLoadingChat}
+          {chatError}
+          onReloadChat={reloadChat}
+          onClearSelection={clearSelection}
+          onConsumeRequestedThread={consumeRequestedThread}
+        />
+      {/if}
+    {/snippet}
+
+    {#if isFocusMode}
+      {#if document && !threadsCollapsed}
+        <ResizableSplit
+          storageKey="i0i.reader-focus-split"
+          panes={[
+            { id: "reader", min: 680, default: 1180 },
+            { id: "inspector", min: 300, max: 520, default: 360 },
+          ]}
+        >
+          {#snippet pane(id: string)}
+            {#if id === "reader"}
+              {@render readerPane()}
+            {:else}
+              {@render inspectorPane()}
+            {/if}
+          {/snippet}
+        </ResizableSplit>
+      {:else}
+        <div class="focus-collapsed-layout">
+          {@render readerPane()}
+          {#if document}
+            <button
+              class="threads-rail hair-l"
+              type="button"
+              aria-label="Open threads panel"
+              title="Open threads"
+              onclick={openThreadsPanel}
+            >
+              <span>Threads</span>
+              <strong>{threads.length}</strong>
+              {#if pins.length}
+                <em>{pins.length}</em>
+              {/if}
+            </button>
+          {/if}
+        </div>
+      {/if}
+    {:else}
+      <ResizableSplit
+        storageKey="i0i.reader-split"
+        panes={document
+          ? [
+              { id: "reader", min: 520, default: 980 },
+              { id: "inspector", min: 280, max: 560, default: 340 },
+            ]
+          : [{ id: "reader", min: 520, default: 1200 }]}
+      >
+        {#snippet pane(id: string)}
+          {#if id === "reader"}
+            {@render readerPane()}
+          {:else}
+            {@render inspectorPane()}
+          {/if}
+        {/snippet}
+      </ResizableSplit>
+    {/if}
   </div>
 </section>
 
@@ -363,6 +449,67 @@
     flex: 1;
     min-width: 0;
     min-height: 0;
+  }
+
+  .focus-fallback-toolbar {
+    height: 42px;
+    flex-shrink: 0;
+    gap: 10px;
+    padding: 0 14px;
+    background: var(--bg-1);
+  }
+
+  .focus-collapsed-layout {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 42px;
+    overflow: hidden;
+  }
+
+  .threads-rail {
+    width: 42px;
+    min-width: 42px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+    border-top: 0;
+    border-right: 0;
+    border-bottom: 0;
+    background: var(--panel);
+    color: var(--fg-3);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .threads-rail:hover,
+  .threads-rail:focus-visible {
+    background: rgba(242, 169, 59, 0.08);
+    color: var(--amber);
+    outline: none;
+  }
+
+  .threads-rail span {
+    writing-mode: vertical-rl;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 9px;
+  }
+
+  .threads-rail strong,
+  .threads-rail em {
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--border-2);
+    border-radius: 50%;
+    color: var(--fg-2);
+    font-size: 10px;
+    font-style: normal;
   }
 
   .reading-surface {

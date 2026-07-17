@@ -10,6 +10,7 @@
     currentPath = "/transformers/attention",
     vaultStatus = null,
     bridgeError = "",
+    readerFocusMode = false,
     onSelectMode = () => {},
     children,
   }: {
@@ -17,6 +18,7 @@
     currentPath?: string;
     vaultStatus?: VaultStatus | null;
     bridgeError?: string;
+    readerFocusMode?: boolean;
     onSelectMode?: (mode: string) => void;
     children: Snippet;
   } = $props();
@@ -25,7 +27,9 @@
 <div class="crt app-shell">
   <TitleBar {vaultStatus} {currentPath} />
   <div class="app-body row">
-    <ActivityRail active={activeMode} {onSelectMode} />
+    {#if !readerFocusMode}
+      <ActivityRail active={activeMode} {onSelectMode} />
+    {/if}
     {@render children()}
   </div>
   <StatusBar {vaultStatus} {bridgeError} />

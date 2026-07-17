@@ -69,6 +69,7 @@
   let autofillingMetadataPaperIds = $state<string[]>([]);
   let activeTabId = $state("");
   let tabs = $state<WorkspaceTab[]>([]);
+  let readerLayoutMode = $state<"normal" | "focus">("normal");
 
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
@@ -95,6 +96,7 @@
   });
   const currentPath = $derived(activeTab?.title ?? "no workspace");
   const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "V");
+  const isReaderFocusMode = $derived(readerLayoutMode === "focus" && activeTab?.kind === "reader" && Boolean(activePaper));
 
   function makeVaultTab(vault: Pick<Vault, "id" | "path">): WorkspaceTab {
     return {
@@ -221,6 +223,24 @@
 
     tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
     activeTabId = readerTab.id;
+  }
+
+  function enterReaderFocus() {
+    readerLayoutMode = "focus";
+  }
+
+  function exitReaderFocus() {
+    readerLayoutMode = "normal";
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    const target = event.target as HTMLElement | null;
+    const isEditing =
+      target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
+    if (event.key === "Escape" && isReaderFocusMode && !isEditing) {
+      event.preventDefault();
+      exitReaderFocus();
+    }
   }
 
   function syncPaperMetadata(paperId: string) {
@@ -676,65 +696,83 @@
   }
 </script>
 
-<AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} onSelectMode={handleModeSelect}>
-  <ResizableSplit
-    storageKey="i0i.main-split"
-    panes={[
-      { id: "explorer", min: 240, max: 560, default: 320 },
-      { id: "workspace", min: 640, default: 1040 },
-    ]}
-  >
-    {#snippet pane(id: string)}
-      {#if id === "explorer"}
-        <VaultExplorer
-          {activeVaultId}
-          vaults={vaultWorkspaces}
-          onOpenVault={openVault}
-          onCreateVault={createVaultFromExplorer}
-          onRenameVault={renameVaultFromExplorer}
-          onRemoveVault={removeVaultFromExplorer}
-        />
-      {:else}
-        <section class="workspace col">
-          <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
+<svelte:window onkeydown={handleWindowKeydown} />
 
-          {#if activeTab?.kind === "reader" && activePaper}
-            <ReaderView paper={activePaper} candidate={activeReaderCandidate} />
-          {:else if activeTab?.kind === "discover"}
-            <DiscoverView
-              workspace={activeDiscoverWorkspace}
-              discoverWorkspaces={discoverWorkspaces}
-              vaults={vaultWorkspaces}
-              onNewSearch={openNewDiscover}
-              onActivateSearch={openDiscover}
-              onRunSearch={runDiscoverSearch}
-              onImproveSearch={improveDiscoverSearch}
-              onSelectCandidate={selectDiscoverCandidate}
-              onOpenCandidate={openCandidate}
-              onAddCandidate={addCandidate}
-              {getCandidateVaultTargets}
-            />
-          {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
-            <VaultHome
-              workspace={activeVaultWorkspace}
-              onOpenPaper={openPaper}
-              onImportPdfs={importPdfsToVault}
-              onAutofillMetadata={autofillMetadataForPaper}
-              {autofillingMetadataPaperIds}
-              onRemovePaperFromVault={removePaperFromActiveVault}
-              onRemovePaperFromLibrary={removePaperFromLibrary}
-            />
-          {:else}
-            <div class="empty-workspace col">
-              <div class="label hot">No workspace open</div>
-              <h1>Open a vault folder from the Explorer.</h1>
-              <p>The shell is still active; the center workspace is empty.</p>
-            </div>
-          {/if}
-        </section>
-      {/if}
-    {/snippet}
-  </ResizableSplit>
+<AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} readerFocusMode={isReaderFocusMode} onSelectMode={handleModeSelect}>
+  {#if isReaderFocusMode && activePaper}
+    <section class="workspace focus-workspace col">
+      <ReaderView
+        paper={activePaper}
+        candidate={activeReaderCandidate}
+        layoutMode="focus"
+        onToggleFocus={exitReaderFocus}
+      />
+    </section>
+  {:else}
+    <ResizableSplit
+      storageKey="i0i.main-split"
+      panes={[
+        { id: "explorer", min: 240, max: 560, default: 320 },
+        { id: "workspace", min: 640, default: 1040 },
+      ]}
+    >
+      {#snippet pane(id: string)}
+        {#if id === "explorer"}
+          <VaultExplorer
+            {activeVaultId}
+            vaults={vaultWorkspaces}
+            onOpenVault={openVault}
+            onCreateVault={createVaultFromExplorer}
+            onRenameVault={renameVaultFromExplorer}
+            onRemoveVault={removeVaultFromExplorer}
+          />
+        {:else}
+          <section class="workspace col">
+            <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
+
+            {#if activeTab?.kind === "reader" && activePaper}
+              <ReaderView
+                paper={activePaper}
+                candidate={activeReaderCandidate}
+                layoutMode="normal"
+                onToggleFocus={enterReaderFocus}
+              />
+            {:else if activeTab?.kind === "discover"}
+              <DiscoverView
+                workspace={activeDiscoverWorkspace}
+                discoverWorkspaces={discoverWorkspaces}
+                vaults={vaultWorkspaces}
+                onNewSearch={openNewDiscover}
+                onActivateSearch={openDiscover}
+                onRunSearch={runDiscoverSearch}
+                onImproveSearch={improveDiscoverSearch}
+                onSelectCandidate={selectDiscoverCandidate}
+                onOpenCandidate={openCandidate}
+                onAddCandidate={addCandidate}
+                {getCandidateVaultTargets}
+              />
+            {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
+              <VaultHome
+                workspace={activeVaultWorkspace}
+                onOpenPaper={openPaper}
+                onImportPdfs={importPdfsToVault}
+                onAutofillMetadata={autofillMetadataForPaper}
+                {autofillingMetadataPaperIds}
+                onRemovePaperFromVault={removePaperFromActiveVault}
+                onRemovePaperFromLibrary={removePaperFromLibrary}
+              />
+            {:else}
+              <div class="empty-workspace col">
+                <div class="label hot">No workspace open</div>
+                <h1>Open a vault folder from the Explorer.</h1>
+                <p>The shell is still active; the center workspace is empty.</p>
+              </div>
+            {/if}
+          </section>
+        {/if}
+      {/snippet}
+    </ResizableSplit>
+  {/if}
 </AppShell>
 
 <style>
@@ -743,6 +781,10 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+  }
+
+  .focus-workspace {
+    overflow: hidden;
   }
 
   .empty-workspace {

@@ -3,8 +3,20 @@
 
   let {
     document,
+    layoutMode = "normal",
+    threadsCollapsed = false,
+    threadCount = 0,
+    pinCount = 0,
+    onToggleFocus,
+    onToggleThreads,
   }: {
     document: ReaderDocument;
+    layoutMode?: "normal" | "focus";
+    threadsCollapsed?: boolean;
+    threadCount?: number;
+    pinCount?: number;
+    onToggleFocus: () => void;
+    onToggleThreads: () => void;
   } = $props();
 </script>
 
@@ -24,10 +36,18 @@
   </div>
 
   <div class="row action-line">
-    <button class="btn" type="button">Graph</button>
-    <button class="btn" type="button">Ask</button>
+    <button class="btn" type="button" title="Graph">Graph</button>
+    <button class="btn" type="button" title="Ask about paper">Ask</button>
 
     <div class="flex1"></div>
+    {#if layoutMode === "focus"}
+      <button class="btn" type="button" title="Toggle threads panel" onclick={onToggleThreads}>
+        {threadsCollapsed ? "Threads" : "Hide Threads"} · {threadCount}{pinCount ? ` / ${pinCount}` : ""}
+      </button>
+      <button class="btn primary" type="button" title="Exit reader focus" onclick={onToggleFocus}>Exit Focus</button>
+    {:else}
+      <button class="btn primary" type="button" title="Focus reader" onclick={onToggleFocus}>Focus</button>
+    {/if}
   </div>
 </header>
 
