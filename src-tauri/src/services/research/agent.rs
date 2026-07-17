@@ -213,7 +213,6 @@ fn provider_name(provider: &DiscoveryProviderChoice) -> &'static str {
     match provider {
         DiscoveryProviderChoice::OpenAlex => "open_alex",
         DiscoveryProviderChoice::Arxiv => "arxiv",
-        DiscoveryProviderChoice::SemanticScholar => "semantic_scholar",
     }
 }
 
@@ -513,12 +512,11 @@ mod tests {
         constraints.providers = vec![
             DiscoveryProviderChoice::OpenAlex,
             DiscoveryProviderChoice::Arxiv,
-            DiscoveryProviderChoice::SemanticScholar,
         ];
         let strategy = SearchStrategy {
             depth: Depth::Quick,
             max_iterations: 1,
-            max_provider_queries: 2,
+            max_provider_queries: 1,
             max_llm_calls: 4,
         };
         let inputs = RunInputs {
@@ -543,10 +541,7 @@ mod tests {
         .await
         .expect("loop ok");
 
-        assert!(
-            !searched,
-            "three selected providers exceed the budget of two"
-        );
+        assert!(!searched, "two selected providers exceed the budget of one");
         assert!(outcome.ranked.is_empty());
     }
 

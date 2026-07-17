@@ -13,9 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::commands::discovery::orchestrator::DiscoveryOrchestrator;
-use crate::commands::discovery::providers::{
-    arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
-};
+use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
     DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
 };
@@ -40,20 +38,11 @@ pub trait CandidateSource: Send + Sync {
 pub struct RealCandidateSource {
     openalex: OpenAlexProvider,
     arxiv: ArxivProvider,
-    semantic_scholar: SemanticScholarProvider,
 }
 
 impl RealCandidateSource {
-    pub fn new(
-        openalex: OpenAlexProvider,
-        arxiv: ArxivProvider,
-        semantic_scholar: SemanticScholarProvider,
-    ) -> Self {
-        Self {
-            openalex,
-            arxiv,
-            semantic_scholar,
-        }
+    pub fn new(openalex: OpenAlexProvider, arxiv: ArxivProvider) -> Self {
+        Self { openalex, arxiv }
     }
 
     fn request_for(query: &Query, constraints: &SearchConstraints) -> DiscoverySearchRequest {
@@ -94,17 +83,16 @@ impl CandidateSource for RealCandidateSource {
         } else {
             constraints.providers.clone()
         };
-        for provider in &providers {
-            tokio::time::sleep(Self::throttle_delay(provider)).await;
+        // The orchestrator now fans the providers out concurrently (RFC 0044),
+        // so a single politeness gate of the slowest provider's delay preserves
+        // arXiv's ~3s spacing without serializing one delay per provider.
+        if let Some(delay) = providers.iter().map(Self::throttle_delay).max() {
+            tokio::time::sleep(delay).await;
         }
-        let response = DiscoveryOrchestrator::new(
-            self.openalex.clone(),
-            self.arxiv.clone(),
-            self.semantic_scholar.clone(),
-        )
-        .search(request)
-        .await
-        .map_err(|e| ResearchError::new(e.to_string()))?;
+        let response = DiscoveryOrchestrator::new(self.openalex.clone(), self.arxiv.clone())
+            .search(request)
+            .await
+            .map_err(|e| ResearchError::new(e.to_string()))?;
         Ok(response.candidates)
     }
 }

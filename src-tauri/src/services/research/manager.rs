@@ -13,9 +13,7 @@ use reqwest::Client;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::commands::discovery::providers::{
-    arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
-};
+use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::research::{candidate_dedup_key, SearchRunStatus};
 use crate::services::chat::config::ChatConfig;
@@ -155,7 +153,6 @@ impl SearchManager {
         let source = RealCandidateSource::new(
             OpenAlexProvider::from_app_config().map_err(|e| e.to_string())?,
             ArxivProvider::from_app_config().map_err(|e| e.to_string())?,
-            SemanticScholarProvider::from_app_config().map_err(|e| e.to_string())?,
         );
 
         let existing_keys: HashSet<String> = self

@@ -10,9 +10,7 @@ use crate::domain::discovery::{DiscoverySearchRequest, DiscoverySearchResponse};
 
 use self::{
     orchestrator::DiscoveryOrchestrator,
-    providers::{
-        arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
-    },
+    providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider},
 };
 
 use super::discovery::error::DiscoveryError;
@@ -26,7 +24,6 @@ use super::discovery::error::DiscoveryError;
 pub struct DiscoveryProviders {
     pub openalex: OpenAlexProvider,
     pub arxiv: ArxivProvider,
-    pub semantic_scholar: SemanticScholarProvider,
 }
 
 impl DiscoveryProviders {
@@ -34,7 +31,6 @@ impl DiscoveryProviders {
         Ok(Self {
             openalex: OpenAlexProvider::from_app_config()?,
             arxiv: ArxivProvider::from_app_config()?,
-            semantic_scholar: SemanticScholarProvider::from_app_config()?,
         })
     }
 }
@@ -44,12 +40,8 @@ pub async fn search_papers(
     providers: tauri::State<'_, DiscoveryProviders>,
     request: DiscoverySearchRequest,
 ) -> Result<DiscoverySearchResponse, String> {
-    DiscoveryOrchestrator::new(
-        providers.openalex.clone(),
-        providers.arxiv.clone(),
-        providers.semantic_scholar.clone(),
-    )
-    .search(request)
-    .await
-    .map_err(|e| e.to_string())
+    DiscoveryOrchestrator::new(providers.openalex.clone(), providers.arxiv.clone())
+        .search(request)
+        .await
+        .map_err(|e| e.to_string())
 }

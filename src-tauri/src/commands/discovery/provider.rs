@@ -18,7 +18,6 @@ use crate::domain::discovery::{DiscoverySearchRequest, PaperCandidate};
 pub enum DiscoveryProviderId {
     OpenAlex,
     Arxiv,
-    SemanticScholar,
 }
 
 impl DiscoveryProviderId {
@@ -26,7 +25,6 @@ impl DiscoveryProviderId {
         match self {
             Self::OpenAlex => "openalex",
             Self::Arxiv => "arxiv",
-            Self::SemanticScholar => "semantic_scholar",
         }
     }
 }

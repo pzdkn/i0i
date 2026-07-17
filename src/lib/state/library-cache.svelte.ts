@@ -1,5 +1,5 @@
 import type { Paper } from "$lib/domain/paper";
-import { providerDisplayName, type DiscoverCandidate, type DiscoverRunProgress, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
+import { providerDisplayName, sanitizeProviders, type DiscoverCandidate, type DiscoverRunProgress, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
 import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
 import type { ResearchPaper, SearchCandidate, SearchUpdated } from "$lib/domain/research";
 
@@ -39,7 +39,7 @@ function cloneDiscoverWorkspace(workspace: DiscoverWorkspace): DiscoverWorkspace
   return {
     ...workspace,
     seeds: [...workspace.seeds],
-    providers: [...workspace.providers],
+    providers: sanitizeProviders(workspace.providers),
     runTrace: [...workspace.runTrace],
     runProgress: workspace.runProgress ? { ...workspace.runProgress } : undefined,
     lastRun: workspace.lastRun
@@ -83,7 +83,7 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     resultLimit: 25,
     sortBy: "relevance",
     provider: "open_alex",
-    providers: ["open_alex", "arxiv", "semantic_scholar"],
+    providers: ["open_alex", "arxiv"],
     venue: "",
     openAccess: true,
     status: "idle",
@@ -205,8 +205,8 @@ export function createDiscoverWorkspaceFrom(source: DiscoverWorkspace) {
   workspace.yearTo = source.yearTo;
   workspace.resultLimit = source.resultLimit;
   workspace.sortBy = source.sortBy;
-  workspace.provider = source.provider;
-  workspace.providers = [...source.providers];
+  workspace.providers = sanitizeProviders(source.providers);
+  workspace.provider = workspace.providers[0] ?? "open_alex";
   workspace.venue = source.venue;
   workspace.openAccess = source.openAccess;
   library.discoverWorkspaces = [...library.discoverWorkspaces, workspace];

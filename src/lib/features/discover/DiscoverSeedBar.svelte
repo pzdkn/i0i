@@ -26,19 +26,15 @@
     workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
   );
   const providerLabel = $derived(
-    workspace.providers.length === 3
+    workspace.providers.length === 2
       ? "All providers"
       : workspace.providers.map(providerDisplayName).join(", ") || providerDisplayName(workspace.provider),
   );
-  // arXiv and Semantic Scholar have no citation-count sort.
-  // Semantic Scholar has no sort at all — all options fall back to relevance.
-  const mostCitedDisabled = $derived(
-    workspace.provider === "arxiv" || workspace.provider === "semantic_scholar"
-  );
-  const sortDisabled = $derived(workspace.provider === "semantic_scholar");
+  // arXiv has no citation-count sort.
+  const mostCitedDisabled = $derived(workspace.provider === "arxiv");
   const nonDefaultFilters = $derived.by(() => {
     const filters: string[] = [];
-    if (workspace.providers.length !== 3) {
+    if (workspace.providers.length !== 2) {
       filters.push(providerLabel);
     }
     if (!workspace.deep && workspace.sortBy !== "relevance") {
@@ -202,15 +198,6 @@
             />
             <span>arXiv</span>
           </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={workspace.providers.includes("semantic_scholar")}
-              disabled={isRunning}
-              onchange={() => toggleProvider("semantic_scholar")}
-            />
-            <span>Semantic Scholar</span>
-          </label>
         </fieldset>
         {#if workspace.deep}
           <label>
@@ -224,7 +211,7 @@
         {:else}
           <label>
             <span>Sort</span>
-            <select bind:value={workspace.sortBy} disabled={isRunning || sortDisabled}>
+            <select bind:value={workspace.sortBy} disabled={isRunning}>
               <option value="relevance">Relevance</option>
               <option value="newest" disabled={mostCitedDisabled}>Newest</option>
               <option value="most_cited" disabled={mostCitedDisabled}>Most cited</option>

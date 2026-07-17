@@ -35,18 +35,28 @@ export type DiscoverCandidate = {
 
 export type DiscoverSort = "relevance" | "newest" | "most_cited";
 
-export type DiscoveryProviderChoice = "open_alex" | "arxiv" | "semantic_scholar";
+export type DiscoveryProviderChoice = "open_alex" | "arxiv";
+
+// Supported providers (RFC 0044). Semantic Scholar was removed.
+export const SUPPORTED_PROVIDERS: DiscoveryProviderChoice[] = ["open_alex", "arxiv"];
 
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   open_alex: "OpenAlex",
   openalex: "OpenAlex",
   arxiv: "arXiv",
-  semantic_scholar: "Semantic Scholar",
-  semanticscholar: "Semantic Scholar",
 };
 
 export function providerDisplayName(provider: DiscoveryProviderChoice | string): string {
   return PROVIDER_DISPLAY_NAMES[provider] ?? "Unknown";
+}
+
+/// Drop stale/removed provider values (e.g. `semantic_scholar` from RFC 0043
+/// state); fall back to the full supported set if nothing valid remains.
+export function sanitizeProviders(providers: readonly string[]): DiscoveryProviderChoice[] {
+  const valid = providers.filter((provider): provider is DiscoveryProviderChoice =>
+    (SUPPORTED_PROVIDERS as string[]).includes(provider),
+  );
+  return valid.length > 0 ? valid : [...SUPPORTED_PROVIDERS];
 }
 
 export type DiscoverRunStatus = "idle" | "running" | "completed" | "failed";

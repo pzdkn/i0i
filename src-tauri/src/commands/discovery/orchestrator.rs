@@ -7,11 +7,11 @@
 
 use std::collections::HashMap;
 
+use futures_util::future::join_all;
+
 use super::error::DiscoveryError;
 use super::provider::{DiscoveryProvider, DiscoveryProviderId, ProviderSearchResult};
-use super::providers::{
-    arxiv::ArxivProvider, openalex::OpenAlexProvider, semantic_scholar::SemanticScholarProvider,
-};
+use super::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
     paper_candidate_dedup_key, CandidateMatch, DiscoveryProviderChoice, DiscoverySearchRequest,
     DiscoverySearchResponse, OpenAccessSummary, PaperCandidate,
@@ -28,20 +28,11 @@ const PROVIDER_SCORE_WEIGHT: f64 = 0.35;
 pub struct DiscoveryOrchestrator {
     openalex: OpenAlexProvider,
     arxiv: ArxivProvider,
-    semantic_scholar: SemanticScholarProvider,
 }
 
 impl DiscoveryOrchestrator {
-    pub fn new(
-        openalex: OpenAlexProvider,
-        arxiv: ArxivProvider,
-        semantic_scholar: SemanticScholarProvider,
-    ) -> Self {
-        Self {
-            openalex,
-            arxiv,
-            semantic_scholar,
-        }
+    pub fn new(openalex: OpenAlexProvider, arxiv: ArxivProvider) -> Self {
+        Self { openalex, arxiv }
     }
 
     pub async fn search(
@@ -50,12 +41,21 @@ impl DiscoveryOrchestrator {
     ) -> Result<DiscoverySearchResponse, DiscoveryError> {
         let query = validated_query(&request)?;
         let providers = selected_providers(&request);
+
+        // Fan out selected providers concurrently (RFC 0044): total latency is
+        // ~max(provider latencies) instead of the sum. `join_all` preserves
+        // input order, so both error attribution below and the deterministic
+        // merge/rank order stay tied to `providers`.
+        let dispatched = join_all(providers.iter().map(|&provider| {
+            let provider_request = request_for_provider(&request, provider);
+            self.search_one(provider, provider_request)
+        }))
+        .await;
+
         let mut results = Vec::new();
         let mut errors = Vec::new();
-
-        for provider in providers {
-            let provider_request = request_for_provider(&request, provider);
-            match self.search_one(provider, provider_request).await {
+        for (provider, result) in providers.iter().zip(dispatched) {
+            match result {
                 Ok(result) => results.push(result),
                 Err(error) => errors.push(format!("{provider:?}: {error}")),
             }
@@ -91,9 +91,6 @@ impl DiscoveryOrchestrator {
         match provider {
             DiscoveryProviderChoice::OpenAlex => self.openalex.search(&request).await,
             DiscoveryProviderChoice::Arxiv => self.arxiv.search(&request).await,
-            DiscoveryProviderChoice::SemanticScholar => {
-                self.semantic_scholar.search(&request).await
-            }
         }
     }
 }

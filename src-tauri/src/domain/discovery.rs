@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -9,8 +9,50 @@ pub enum DiscoveryProviderChoice {
     OpenAlex,
     #[serde(alias = "arXiv")]
     Arxiv,
-    #[serde(alias = "semanticscholar", alias = "s2")]
-    SemanticScholar,
+}
+
+impl DiscoveryProviderChoice {
+    /// Map a wire string to a supported provider. Unknown or removed values
+    /// (e.g. a stale `semantic_scholar` from RFC 0043 state) return `None` so
+    /// callers can drop them instead of failing (RFC 0044).
+    fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "open_alex" | "openalex" => Some(Self::OpenAlex),
+            "arxiv" | "arXiv" => Some(Self::Arxiv),
+            _ => None,
+        }
+    }
+}
+
+/// Tolerant single-provider deserialize: an unknown/removed value falls back to
+/// the default (OpenAlex) rather than failing deserialization (RFC 0044). This
+/// keeps stored search constraints and LLM-planned queries from crashing when
+/// they still mention `semantic_scholar`.
+pub fn deserialize_provider_lenient<'de, D>(
+    deserializer: D,
+) -> Result<DiscoveryProviderChoice, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(DiscoveryProviderChoice::from_wire(&raw).unwrap_or_default())
+}
+
+/// Tolerant provider-list deserialize: silently drops unknown/removed values
+/// (e.g. a stale `semantic_scholar`) instead of failing (RFC 0044). An empty or
+/// fully-stale list deserializes to an empty vec; callers apply their own
+/// default provider set.
+pub fn deserialize_providers_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Vec<DiscoveryProviderChoice>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Vec::<String>::deserialize(deserializer)?;
+    Ok(raw
+        .iter()
+        .filter_map(|value| DiscoveryProviderChoice::from_wire(value))
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,9 +63,9 @@ pub struct DiscoverySearchRequest {
     pub year_to: Option<i32>,
     pub result_limit: i32,
     pub sort_by: DiscoverySort,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_provider_lenient")]
     pub provider: DiscoveryProviderChoice,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_providers_lenient")]
     pub providers: Vec<DiscoveryProviderChoice>,
     #[serde(default)]
     pub open_access: bool,

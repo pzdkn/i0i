@@ -91,7 +91,10 @@ pub struct SearchConstraints {
     pub year_from: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub year_to: Option<i32>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::domain::discovery::deserialize_providers_lenient"
+    )]
     pub providers: Vec<DiscoveryProviderChoice>,
     #[serde(default)]
     pub open_access: bool,

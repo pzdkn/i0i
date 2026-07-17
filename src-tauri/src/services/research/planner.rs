@@ -17,7 +17,10 @@ use crate::services::research::error::ResearchError;
 /// One planned provider query.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Query {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::domain::discovery::deserialize_provider_lenient"
+    )]
     pub provider: DiscoveryProviderChoice,
     pub text: String,
 }
@@ -183,7 +186,7 @@ impl OpenRouterPlanner {
 
 const PLAN_SYSTEM: &str = "You are a scholarly search planner. Expand the user's research \
 goal into focused provider queries (synonyms, key methods, datasets). Reply with a single \
-JSON object: {\"queries\":[{\"provider\":\"open_alex\"|\"arxiv\"|\"semantic_scholar\",\"text\":\"...\"}]}. No prose.";
+JSON object: {\"queries\":[{\"provider\":\"open_alex\"|\"arxiv\",\"text\":\"...\"}]}. No prose.";
 
 const ASSESS_SYSTEM: &str = "You judge whether a paper search has enough coverage for the \
 goal. Reply with a single JSON object: {\"refine\":true|false,\"gaps\":[\"...\"]}. Set \
@@ -205,7 +208,7 @@ impl Planner for OpenRouterPlanner {
         let user = format!(
             "Goal: {goal}\nAllowed providers: {}\nPropose 3-5 queries.",
             if providers.is_empty() {
-                "open_alex, arxiv, semantic_scholar".to_string()
+                "open_alex, arxiv".to_string()
             } else {
                 providers.join(", ")
             }
@@ -287,7 +290,6 @@ fn provider_name(choice: &DiscoveryProviderChoice) -> &'static str {
     match choice {
         DiscoveryProviderChoice::OpenAlex => "open_alex",
         DiscoveryProviderChoice::Arxiv => "arxiv",
-        DiscoveryProviderChoice::SemanticScholar => "semantic_scholar",
     }
 }
 
@@ -332,7 +334,7 @@ mod tests {
     #[test]
     fn queries_response_deserializes_provider_and_text() {
         let value = extract_json_object(
-            r#"{"queries":[{"provider":"arxiv","text":"sparse autoencoder"},{"provider":"semantic_scholar","text":"dictionary learning features"}]}"#,
+            r#"{"queries":[{"provider":"arxiv","text":"sparse autoencoder"},{"provider":"open_alex","text":"dictionary learning features"}]}"#,
         )
         .unwrap();
         let parsed: QueriesResponse = serde_json::from_value(value).unwrap();
@@ -341,7 +343,22 @@ mod tests {
         assert_eq!(parsed.queries[0].text, "sparse autoencoder");
         assert_eq!(
             parsed.queries[1].provider,
-            DiscoveryProviderChoice::SemanticScholar
+            DiscoveryProviderChoice::OpenAlex
+        );
+    }
+
+    #[test]
+    fn stale_semantic_scholar_provider_falls_back_to_default() {
+        // RFC 0044: a removed/stale provider must not crash deserialization.
+        let value = extract_json_object(
+            r#"{"queries":[{"provider":"semantic_scholar","text":"legacy state"}]}"#,
+        )
+        .unwrap();
+        let parsed: QueriesResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.queries.len(), 1);
+        assert_eq!(
+            parsed.queries[0].provider,
+            DiscoveryProviderChoice::OpenAlex
         );
     }
 

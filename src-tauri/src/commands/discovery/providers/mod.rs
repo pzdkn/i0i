@@ -4,5 +4,4 @@
 
 pub mod arxiv;
 pub mod openalex;
-pub mod semantic_scholar;
 pub(crate) mod shared;
