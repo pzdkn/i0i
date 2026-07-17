@@ -19,7 +19,7 @@ use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::Open
 use crate::domain::discovery::{
     DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
 };
-use crate::domain::library::PaperMetadataEnrichment;
+use crate::domain::library::{Paper, PaperMetadataEnrichment};
 use crate::pdf_extraction::PdfExtractionConfig;
 use crate::storage::library_store::LibraryStore;
 
@@ -109,6 +109,10 @@ impl MetadataEnrichmentService {
             .acquire_owned()
             .await
             .map_err(|error| error.to_string())?;
+        let current_paper = self
+            .store
+            .get_paper(&paper_id)?
+            .ok_or_else(|| format!("Paper disappeared before metadata enrichment: {paper_id}"))?;
         let source = self.store.resolve_cached_pdf_source(&paper_id, None)?;
         let local_path = source
             .local_path
@@ -129,7 +133,9 @@ impl MetadataEnrichmentService {
         .await
         .map_err(|error| error.to_string())??;
 
-        let enrichment = self.enrichment_from_evidence(&evidence).await?;
+        let enrichment = self
+            .enrichment_from_evidence(&evidence, &current_paper)
+            .await?;
         let Some(enrichment) = enrichment else {
             metadata_log(format!("skip paper_id={paper_id} no metadata evidence"));
             self.emit_update(&paper_id, "skipped", None);
@@ -156,8 +162,19 @@ impl MetadataEnrichmentService {
     async fn enrichment_from_evidence(
         &self,
         evidence: &PdfEvidence,
+        current_paper: &Paper,
     ) -> MetadataResult<Option<PaperMetadataEnrichment>> {
-        if let Some(doi) = &evidence.doi {
+        let doi = evidence
+            .doi
+            .clone()
+            .or_else(|| extract_doi(&current_paper.title));
+        let arxiv_id = evidence
+            .arxiv_id
+            .clone()
+            .or_else(|| extract_arxiv_id(&current_paper.title))
+            .or_else(|| extract_bare_arxiv_id(&current_paper.title));
+
+        if let Some(doi) = &doi {
             match self.lookup_openalex_by_doi(doi).await {
                 Ok(Some(candidate)) => {
                     return Ok(Some(enrichment_from_candidate(candidate, true)));
@@ -169,7 +186,7 @@ impl MetadataEnrichmentService {
             }
         }
 
-        if let Some(arxiv_id) = &evidence.arxiv_id {
+        if let Some(arxiv_id) = &arxiv_id {
             match self.lookup_arxiv_by_id(arxiv_id).await {
                 Ok(Some(candidate)) => {
                     return Ok(Some(enrichment_from_candidate(candidate, true)));
@@ -179,12 +196,8 @@ impl MetadataEnrichmentService {
             }
         }
 
-        if let Some(title) = evidence
-            .title
-            .as_deref()
-            .filter(|title| plausible_title(title))
-        {
-            match self.lookup_openalex_by_title(title).await {
+        for title in title_queries(evidence, current_paper) {
+            match self.lookup_openalex_by_title(&title).await {
                 Ok(Some(candidate)) => {
                     return Ok(Some(enrichment_from_candidate(candidate, true)));
                 }
@@ -412,6 +425,28 @@ fn enrichment_from_pdf_evidence(evidence: &PdfEvidence) -> Option<PaperMetadataE
     })
 }
 
+fn title_queries(evidence: &PdfEvidence, current_paper: &Paper) -> Vec<String> {
+    let mut queries = Vec::new();
+    let mut seen = HashSet::new();
+
+    for title in [
+        evidence.title.as_deref(),
+        Some(current_paper.title.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(clean_metadata_text)
+    .filter(|title| plausible_title(title))
+    {
+        let normalized = normalize_title(&title);
+        if seen.insert(normalized) {
+            queries.push(title);
+        }
+    }
+
+    queries
+}
+
 fn extract_doi(text: &str) -> Option<String> {
     let pattern = Regex::new(r"(?i)\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b").ok()?;
     pattern
@@ -423,6 +458,13 @@ fn extract_arxiv_id(text: &str) -> Option<String> {
     let pattern =
         Regex::new(r"(?i)\barxiv(?:\.org/abs/|:|\s+)([a-z-]+/\d{7}|\d{4}\.\d{4,5})(v\d+)?\b")
             .ok()?;
+    pattern
+        .captures(text)
+        .and_then(|captures| captures.get(1).map(|match_| match_.as_str().to_string()))
+}
+
+fn extract_bare_arxiv_id(text: &str) -> Option<String> {
+    let pattern = Regex::new(r"\b([a-z-]+/\d{7}|\d{4}\.\d{4,5})(v\d+)?\b").ok()?;
     pattern
         .captures(text)
         .and_then(|captures| captures.get(1).map(|match_| match_.as_str().to_string()))
@@ -442,16 +484,34 @@ fn clean_metadata_text(raw: &str) -> String {
 fn plausible_title(title: &str) -> bool {
     let title = title.trim();
     title.len() >= 8
+        && title
+            .chars()
+            .any(|character| character.is_ascii_alphabetic())
         && !title.eq_ignore_ascii_case("untitled")
+        && !title.eq_ignore_ascii_case("imported pdf")
+        && !title.eq_ignore_ascii_case("local pdf")
         && !title.to_ascii_lowercase().contains("microsoft word")
 }
 
 fn titles_similar(left: &str, right: &str) -> bool {
     let left = normalize_title(left);
     let right = normalize_title(right);
-    !left.is_empty()
-        && !right.is_empty()
-        && (left == right || left.contains(&right) || right.contains(&left))
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right || left.contains(&right) || right.contains(&left) {
+        return true;
+    }
+
+    let left_tokens = title_token_set(&left);
+    let right_tokens = title_token_set(&right);
+    let smaller_len = left_tokens.len().min(right_tokens.len());
+    if smaller_len < 3 {
+        return false;
+    }
+
+    let overlap = left_tokens.intersection(&right_tokens).count();
+    overlap as f64 / smaller_len as f64 >= 0.7
 }
 
 fn normalize_title(title: &str) -> String {
@@ -463,6 +523,14 @@ fn normalize_title(title: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+fn title_token_set(title: &str) -> HashSet<String> {
+    title
+        .split_whitespace()
+        .filter(|token| token.len() > 2)
+        .map(str::to_string)
+        .collect()
 }
 
 fn normalize_doi(doi: &str) -> String {
@@ -506,6 +574,25 @@ fn metadata_log(message: impl AsRef<str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::library::Paper;
+
+    fn paper_with_title(title: &str) -> Paper {
+        Paper {
+            id: "local:test".to_string(),
+            title: title.to_string(),
+            authors: Vec::new(),
+            venue: "Local PDF".to_string(),
+            year: 0,
+            citations: 0,
+            tags: vec!["local".to_string(), "needs-review".to_string()],
+            highlight_count: 0,
+            annotation_count: 0,
+            status: "UNREAD".to_string(),
+            abstract_text: None,
+            active_source_id: None,
+            active_extraction_id: None,
+        }
+    }
 
     #[test]
     fn extracts_doi_from_text() {
@@ -524,11 +611,38 @@ mod tests {
     }
 
     #[test]
+    fn extracts_bare_arxiv_id_from_filename_title() {
+        assert_eq!(
+            extract_bare_arxiv_id("1706.03762 attention is all you need"),
+            Some("1706.03762".to_string())
+        );
+    }
+
+    #[test]
     fn title_similarity_ignores_case_and_punctuation() {
         assert!(titles_similar(
             "Attention Is All You Need",
             "Attention is all you need."
         ));
+    }
+
+    #[test]
+    fn title_similarity_allows_filename_noise() {
+        assert!(titles_similar(
+            "Attention Is All You Need",
+            "attention is all you need vaswani 2017 final"
+        ));
+    }
+
+    #[test]
+    fn title_queries_fall_back_to_current_import_title() {
+        let evidence = PdfEvidence::default();
+        let paper = paper_with_title("attention is all you need vaswani 2017");
+
+        assert_eq!(
+            title_queries(&evidence, &paper),
+            vec!["attention is all you need vaswani 2017".to_string()]
+        );
     }
 
     #[test]

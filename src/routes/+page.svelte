@@ -136,9 +136,11 @@
   onMount(() => {
     let unlisten: (() => void) | undefined;
 
-    listen("paper_metadata_updated", async () => {
+    listen<{ paperId: string }>("paper_metadata_updated", async (event) => {
       try {
-        hydrateLibrary(await getLibrary());
+        const snapshot = await getLibrary();
+        hydrateLibrary(snapshot);
+        syncPaperMetadata(event.payload.paperId);
       } catch (error) {
         bridgeError = String(error);
       }
@@ -213,6 +215,19 @@
 
     tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
     activeTabId = readerTab.id;
+  }
+
+  function syncPaperMetadata(paperId: string) {
+    const paper = getPaperById(paperId);
+    if (!paper) {
+      return;
+    }
+
+    if (selectedReaderPaper?.id === paperId) {
+      selectedReaderPaper = paper;
+    }
+
+    tabs = tabs.map((tab) => (tab.paperId === paperId ? { ...tab, title: getPaperTitle(paperId) } : tab));
   }
 
   function makeDiscoverTab(workspace: ReturnType<typeof getDiscoverWorkspace>): WorkspaceTab {

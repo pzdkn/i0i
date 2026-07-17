@@ -95,6 +95,11 @@ impl LibraryStore {
         self.read_library(&conn)
     }
 
+    pub fn get_paper(&self, paper_id: &str) -> StoreResult<Option<Paper>> {
+        let conn = self.open_connection()?;
+        read_paper(&conn, paper_id)
+    }
+
     pub fn get_document_sources(&self, paper_id: &str) -> StoreResult<Vec<DocumentSource>> {
         let conn = self.open_connection()?;
         read_document_sources_for_paper(&conn, paper_id)
