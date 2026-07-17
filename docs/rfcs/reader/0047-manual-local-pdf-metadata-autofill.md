@@ -1,10 +1,36 @@
 # RFC 0047: Manual Local PDF Metadata Autofill
 
-Status: Accepted
+Status: Deferred / Not Implemented
 Date: 2026-07-17
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first
 Builds on: RFC 0046 (Local PDF Import With Metadata Autofill)
+
+## Deferral Note
+
+This RFC is deferred.
+
+The UI trigger and backend queue path were prototyped, but the actual metadata
+autofill capability is not good enough to count as implemented. In the observed
+case, the worker reached the PDF and then produced:
+
+```text
+[metadata-enrichment ...] skip paper_id=... no metadata evidence
+```
+
+That means the manual command can start the worker, but the worker cannot
+reliably recover title/authors/year/venue from local PDFs yet. Keeping this RFC
+as "implemented" would be misleading.
+
+Before reviving this RFC, i0i needs a stronger metadata strategy, likely one or
+more of:
+
+- better first-page/front-matter text extraction,
+- DOI/arXiv/title detection from more pages,
+- PDF filename plus visible text heuristics,
+- LLM-assisted cleanup over extracted evidence,
+- external metadata lookup from DOI/arXiv/title candidates,
+- a review UI for low-confidence suggestions.
 
 ## Summary
 
@@ -129,4 +155,3 @@ source of truth remains the paper metadata stored in SQLite.
 - Clicking it produces `[metadata-enrichment ...] queued` and `start` logs.
 - Successful enrichment updates title/authors/year/venue in the Vault row.
 - `cargo test`, `pnpm check`, and `git diff --check` pass.
-

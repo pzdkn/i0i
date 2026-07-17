@@ -1,6 +1,6 @@
 # RFC 0046: Local PDF Import With Metadata Autofill
 
-Status: Partially Implemented
+Status: Partially Implemented; Metadata Autofill Deferred
 Date: 2026-07-17
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first
@@ -15,12 +15,12 @@ The decision is:
 - The user imports PDFs from the Vault view.
 - i0i copies each selected PDF into app-managed document storage immediately.
 - i0i creates a paper draft linked to that local PDF.
-- Metadata autofill is available as an explicit enrichment command, not as a blocker.
+- Metadata autofill is deferred; imported PDFs currently keep fallback metadata.
 - The user can confirm/edit important metadata before or after saving.
 - The reader should be able to open the imported PDF immediately.
 
-Plain English version: "Import PDF" should get the document into the vault now;
-metadata can become smarter when the user asks for it.
+Plain English version: "Import PDF" should get the document into the vault now.
+Metadata repair needs a stronger follow-up design before it can be trusted.
 
 ## Problem
 
@@ -44,7 +44,7 @@ The app needs a direct local import path. Without it, i0i is not a real vault.
   by downloaded PDFs.
 - Create paper records and attach them to the active vault.
 - Let the user open imported PDFs in the reader immediately after import.
-- Autofill metadata from structured evidence when the user explicitly requests it.
+- Defer metadata autofill until structured evidence extraction is reliable.
 - Let the user edit/confirm metadata instead of trusting guesses blindly.
 
 ## Non-Goals
@@ -66,8 +66,7 @@ Vault view
   -> backend copies PDFs into app storage
   -> backend creates paper drafts / records
   -> paper appears in vault
-  -> user can right-click paper and choose Autofill metadata
-  -> user reviews metadata
+  -> user can review fallback metadata
   -> user opens PDF when ready
 ```
 
@@ -197,8 +196,9 @@ canonical source.
 
 Add a background enrichment worker or reuse an existing background-job shape.
 
-RFC 0047 changes the trigger from automatic import-time enrichment to an
-explicit paper context-menu action.
+RFC 0047 explored changing the trigger from automatic import-time enrichment to
+an explicit paper context-menu action, but it is deferred because the enrichment
+worker often has no usable metadata evidence.
 
 Potential extraction inputs:
 
@@ -345,9 +345,9 @@ Implemented in the first slice:
 - local cached `document_sources` row with `acquisition_method = local_import`,
 - active source assignment so the reader opens the imported PDF immediately,
 - fallback metadata from filename with `local` and `needs-review` tags.
-- manual metadata enrichment from the paper row context menu,
-- PDF embedded metadata / first-page text evidence extraction,
-- DOI, arXiv id, and title-based provider lookup,
+- experimental manual metadata enrichment trigger from the paper row context menu,
+- partial PDF embedded metadata / first-page text evidence extraction,
+- partial DOI, arXiv id, and title-based provider lookup,
 - `paper_metadata_updated` event that refreshes the frontend snapshot.
 - import no longer opens a Reader tab automatically,
 - removal of the inert Vault `+ Add` button; local import is now the only
@@ -355,6 +355,7 @@ Implemented in the first slice:
 
 Not implemented yet:
 
+- reliable metadata autofill,
 - LLM metadata cleanup,
 - metadata review/editor UI.
 
