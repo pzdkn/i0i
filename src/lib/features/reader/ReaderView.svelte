@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import { getDiscoveryReaderDocument, getReaderDocument } from "$lib/bridge/library";
   import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
+  import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import type { ChatThreadSummary, PinnedHighlight } from "$lib/domain/chat";
   import type { Paper } from "$lib/domain/paper";
   import type { DiscoveryReaderCandidate, ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
@@ -252,83 +253,95 @@
 
 <section class="reader-workspace col">
   <div class="reader-body row">
-    <main class="reader-main col">
-      {#if isLoadingDoc}
-        <div class="loading col">
-          <div class="label">Loading document…</div>
-          <div class="progress-shell" aria-hidden="true">
-            <div class="progress-bar"></div>
-          </div>
-        </div>
-      {:else if docError}
-        <div class="doc-error col">
-          <div class="label hot">Failed to load document</div>
-          <pre class="debug-block mono-dim">{docError}</pre>
-          {#if docErrorDebug}
-            <pre class="debug-block mono-dim">{docErrorDebug}</pre>
-          {/if}
-        </div>
-      {:else if document}
-        <ReaderHeader {document} />
-
-        <div class="reading-surface row">
-          {#if hasCachedPdf}
-            <PdfPage
-              pdfUrl={readerDocument!.pdfLocalPath!}
-              sourceId={document.sourceId}
-              {threads}
-              {selection}
-              {chatEnabled}
-              onSelectPassage={selectPassage}
-              onOpenThread={openThreadFromMark}
-            />
-          {:else}
-            <div class="missing-pdf col">
-              <div class="label hot">PDF could not be opened automatically</div>
-              <p>The publisher may require login, browser verification, or manual access.</p>
-              <div class="fallback-actions row">
-                {#if fallbackSourceUrl}
-                  <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
-                {/if}
-                <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
+    <ResizableSplit
+      storageKey="i0i.reader-split"
+      panes={document
+        ? [
+            { id: "reader", min: 520, default: 980 },
+            { id: "inspector", min: 280, max: 560, default: 340 },
+          ]
+        : [{ id: "reader", min: 520, default: 1200 }]}
+    >
+      {#snippet pane(id: string)}
+        {#if id === "reader"}
+          <main class="reader-main col">
+            {#if isLoadingDoc}
+              <div class="loading col">
+                <div class="label">Loading document…</div>
+                <div class="progress-shell" aria-hidden="true">
+                  <div class="progress-bar"></div>
+                </div>
               </div>
-              {#if fallbackSourceUrl}
-                <div class="source-line mono-dim">{fallbackSourceUrl}</div>
-              {/if}
-              {#if readerDocument?.pdfError}
-                <details class="error-details">
-                  <summary>Details</summary>
-                  <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
-                </details>
-              {/if}
-            </div>
-          {/if}
-        </div>
+            {:else if docError}
+              <div class="doc-error col">
+                <div class="label hot">Failed to load document</div>
+                <pre class="debug-block mono-dim">{docError}</pre>
+                {#if docErrorDebug}
+                  <pre class="debug-block mono-dim">{docErrorDebug}</pre>
+                {/if}
+              </div>
+            {:else if document}
+              <ReaderHeader {document} />
 
-        <ReaderFooter />
-      {:else}
-        <div class="missing-pdf col">
-          <div class="label hot">Document not found</div>
-          <p>This paper is not in the library database.</p>
-        </div>
-      {/if}
-    </main>
+              <div class="reading-surface row">
+                {#if hasCachedPdf}
+                  <PdfPage
+                    pdfUrl={readerDocument!.pdfLocalPath!}
+                    sourceId={document.sourceId}
+                    {threads}
+                    {selection}
+                    {chatEnabled}
+                    onSelectPassage={selectPassage}
+                    onOpenThread={openThreadFromMark}
+                  />
+                {:else}
+                  <div class="missing-pdf col">
+                    <div class="label hot">PDF could not be opened automatically</div>
+                    <p>The publisher may require login, browser verification, or manual access.</p>
+                    <div class="fallback-actions row">
+                      {#if fallbackSourceUrl}
+                        <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
+                      {/if}
+                      <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
+                    </div>
+                    {#if fallbackSourceUrl}
+                      <div class="source-line mono-dim">{fallbackSourceUrl}</div>
+                    {/if}
+                    {#if readerDocument?.pdfError}
+                      <details class="error-details">
+                        <summary>Details</summary>
+                        <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
+                      </details>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
 
-    {#if document}
-      <ReaderInspector
-        {document}
-        {chatEnabled}
-        {threads}
-        {pins}
-        {selection}
-        {requestedThreadId}
-        {isLoadingChat}
-        {chatError}
-        onReloadChat={reloadChat}
-        onClearSelection={clearSelection}
-        onConsumeRequestedThread={consumeRequestedThread}
-      />
-    {/if}
+              <ReaderFooter />
+            {:else}
+              <div class="missing-pdf col">
+                <div class="label hot">Document not found</div>
+                <p>This paper is not in the library database.</p>
+              </div>
+            {/if}
+          </main>
+        {:else if document}
+          <ReaderInspector
+            {document}
+            {chatEnabled}
+            {threads}
+            {pins}
+            {selection}
+            {requestedThreadId}
+            {isLoadingChat}
+            {chatError}
+            onReloadChat={reloadChat}
+            onClearSelection={clearSelection}
+            onConsumeRequestedThread={consumeRequestedThread}
+          />
+        {/if}
+      {/snippet}
+    </ResizableSplit>
   </div>
 </section>
 

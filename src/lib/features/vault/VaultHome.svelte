@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import PaperList from "$lib/features/vault/PaperList.svelte";
   import VaultInspector from "$lib/features/vault/VaultInspector.svelte";
   import type { VaultWorkspace } from "$lib/domain/library";
@@ -30,60 +31,72 @@
 
 <section class="workspace col">
   <div class="vault-home row">
-    <main class="vault-main col">
-      <header class="folder-header hair-b">
-        <div class="row heading-line">
-          <div>
-            <div class="label">Folder</div>
-            <h1>{workspace.title}</h1>
-          </div>
-          <span class="mono-dim">{workspace.summary}</span>
-          <div class="flex1"></div>
-          <div class="actions row">
-            <button class="btn" type="button">+ Add</button>
-            <button class="btn" type="button">Import</button>
-            <button class="btn" type="button">Export .bib</button>
-          </div>
-        </div>
+    <ResizableSplit
+      storageKey="i0i.vault-split"
+      panes={[
+        { id: "papers", min: 500, default: 900 },
+        { id: "inspector", min: 280, max: 520, default: 320 },
+      ]}
+    >
+      {#snippet pane(id: string)}
+        {#if id === "papers"}
+          <main class="vault-main col">
+            <header class="folder-header hair-b">
+              <div class="row heading-line">
+                <div>
+                  <div class="label">Folder</div>
+                  <h1>{workspace.title}</h1>
+                </div>
+                <span class="mono-dim">{workspace.summary}</span>
+                <div class="flex1"></div>
+                <div class="actions row">
+                  <button class="btn" type="button">+ Add</button>
+                  <button class="btn" type="button">Import</button>
+                  <button class="btn" type="button">Export .bib</button>
+                </div>
+              </div>
 
-        <div class="row chip-row">
-          {#each workspace.chips as chip, index}
-            <span class:hot={index === 0} class="chip">{chip}</span>
-          {/each}
-          <div class="flex1"></div>
-          <label class="inline-filter row">
-            <span>filter</span>
-            <input bind:value={localFilter} aria-label="Paper filter" placeholder="type..." />
-          </label>
-          <span class="mono-dim">sort recent</span>
-        </div>
-      </header>
+              <div class="row chip-row">
+                {#each workspace.chips as chip, index}
+                  <span class:hot={index === 0} class="chip">{chip}</span>
+                {/each}
+                <div class="flex1"></div>
+                <label class="inline-filter row">
+                  <span>filter</span>
+                  <input bind:value={localFilter} aria-label="Paper filter" placeholder="type..." />
+                </label>
+                <span class="mono-dim">sort recent</span>
+              </div>
+            </header>
 
-      <nav class="view-tabs row hair-b">
-        {#each workspace.tabs as tab, index}
-          <span class:active={index === 0}>
-            {tab.label}
-            {#if tab.count !== undefined}
-              <strong>{tab.count}</strong>
-            {/if}
-          </span>
-        {/each}
-      </nav>
+            <nav class="view-tabs row hair-b">
+              {#each workspace.tabs as tab, index}
+                <span class:active={index === 0}>
+                  {tab.label}
+                  {#if tab.count !== undefined}
+                    <strong>{tab.count}</strong>
+                  {/if}
+                </span>
+              {/each}
+            </nav>
 
-      <PaperList
-        papers={workspace.papers}
-        {selectedPaperId}
-        onSelect={(paperId) => (selectedPaperId = paperId)}
-        onOpen={(paperId) => {
-          selectedPaperId = paperId;
-          onOpenPaper(paperId);
-        }}
-        onRemoveFromVault={(paperId) => onRemovePaperFromVault(workspace.id, paperId)}
-        onRemoveFromLibrary={onRemovePaperFromLibrary}
-      />
-    </main>
-
-    <VaultInspector papers={workspace.papers} {selectedPaper} />
+            <PaperList
+              papers={workspace.papers}
+              {selectedPaperId}
+              onSelect={(paperId) => (selectedPaperId = paperId)}
+              onOpen={(paperId) => {
+                selectedPaperId = paperId;
+                onOpenPaper(paperId);
+              }}
+              onRemoveFromVault={(paperId) => onRemovePaperFromVault(workspace.id, paperId)}
+              onRemoveFromLibrary={onRemovePaperFromLibrary}
+            />
+          </main>
+        {:else}
+          <VaultInspector papers={workspace.papers} {selectedPaper} />
+        {/if}
+      {/snippet}
+    </ResizableSplit>
   </div>
 </section>
 

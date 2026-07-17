@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { DiscoverWorkspace } from "$lib/domain/discover";
   import type { VaultWorkspace } from "$lib/domain/library";
+  import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import DiscoverFeed from "$lib/features/discover/DiscoverFeed.svelte";
   import DiscoverInspector from "$lib/features/discover/DiscoverInspector.svelte";
   import DiscoverSeedBar from "$lib/features/discover/DiscoverSeedBar.svelte";
@@ -42,15 +43,28 @@
     {onImproveSearch}
   />
   <div class="discover-body row">
-    <DiscoverFeed
-      {workspace}
-      {vaults}
-      {onSelectCandidate}
-      {onOpenCandidate}
-      {onAddCandidate}
-      {getCandidateVaultTargets}
-    />
-    <DiscoverInspector {workspace} />
+    <ResizableSplit
+      storageKey="i0i.discover-split"
+      panes={[
+        { id: "feed", min: 460, default: 900 },
+        { id: "inspector", min: 260, max: 520, default: 300 },
+      ]}
+    >
+      {#snippet pane(id: string)}
+        {#if id === "feed"}
+          <DiscoverFeed
+            {workspace}
+            {vaults}
+            {onSelectCandidate}
+            {onOpenCandidate}
+            {onAddCandidate}
+            {getCandidateVaultTargets}
+          />
+        {:else}
+          <DiscoverInspector {workspace} />
+        {/if}
+      {/snippet}
+    </ResizableSplit>
   </div>
 </section>
 

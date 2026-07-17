@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
+  import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import { searchPapers } from "$lib/bridge/discovery";
   import {
     createSearch,
@@ -611,48 +612,61 @@
 </script>
 
 <AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} onSelectMode={handleModeSelect}>
-  <VaultExplorer
-    {activeVaultId}
-    vaults={vaultWorkspaces}
-    onOpenVault={openVault}
-    onCreateVault={createVaultFromExplorer}
-    onRenameVault={renameVaultFromExplorer}
-    onRemoveVault={removeVaultFromExplorer}
-  />
-  <section class="workspace col">
-    <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
+  <ResizableSplit
+    storageKey="i0i.main-split"
+    panes={[
+      { id: "explorer", min: 240, max: 560, default: 320 },
+      { id: "workspace", min: 640, default: 1040 },
+    ]}
+  >
+    {#snippet pane(id: string)}
+      {#if id === "explorer"}
+        <VaultExplorer
+          {activeVaultId}
+          vaults={vaultWorkspaces}
+          onOpenVault={openVault}
+          onCreateVault={createVaultFromExplorer}
+          onRenameVault={renameVaultFromExplorer}
+          onRemoveVault={removeVaultFromExplorer}
+        />
+      {:else}
+        <section class="workspace col">
+          <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
 
-    {#if activeTab?.kind === "reader" && activePaper}
-      <ReaderView paper={activePaper} candidate={activeReaderCandidate} />
-    {:else if activeTab?.kind === "discover"}
-      <DiscoverView
-        workspace={activeDiscoverWorkspace}
-        discoverWorkspaces={discoverWorkspaces}
-        vaults={vaultWorkspaces}
-        onNewSearch={openNewDiscover}
-        onActivateSearch={openDiscover}
-        onRunSearch={runDiscoverSearch}
-        onImproveSearch={improveDiscoverSearch}
-        onSelectCandidate={selectDiscoverCandidate}
-        onOpenCandidate={openCandidate}
-        onAddCandidate={addCandidate}
-        {getCandidateVaultTargets}
-      />
-    {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
-      <VaultHome
-        workspace={activeVaultWorkspace}
-        onOpenPaper={openPaper}
-        onRemovePaperFromVault={removePaperFromActiveVault}
-        onRemovePaperFromLibrary={removePaperFromLibrary}
-      />
-    {:else}
-      <div class="empty-workspace col">
-        <div class="label hot">No workspace open</div>
-        <h1>Open a vault folder from the Explorer.</h1>
-        <p>The shell is still active; the center workspace is empty.</p>
-      </div>
-    {/if}
-  </section>
+          {#if activeTab?.kind === "reader" && activePaper}
+            <ReaderView paper={activePaper} candidate={activeReaderCandidate} />
+          {:else if activeTab?.kind === "discover"}
+            <DiscoverView
+              workspace={activeDiscoverWorkspace}
+              discoverWorkspaces={discoverWorkspaces}
+              vaults={vaultWorkspaces}
+              onNewSearch={openNewDiscover}
+              onActivateSearch={openDiscover}
+              onRunSearch={runDiscoverSearch}
+              onImproveSearch={improveDiscoverSearch}
+              onSelectCandidate={selectDiscoverCandidate}
+              onOpenCandidate={openCandidate}
+              onAddCandidate={addCandidate}
+              {getCandidateVaultTargets}
+            />
+          {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
+            <VaultHome
+              workspace={activeVaultWorkspace}
+              onOpenPaper={openPaper}
+              onRemovePaperFromVault={removePaperFromActiveVault}
+              onRemovePaperFromLibrary={removePaperFromLibrary}
+            />
+          {:else}
+            <div class="empty-workspace col">
+              <div class="label hot">No workspace open</div>
+              <h1>Open a vault folder from the Explorer.</h1>
+              <p>The shell is still active; the center workspace is empty.</p>
+            </div>
+          {/if}
+        </section>
+      {/if}
+    {/snippet}
+  </ResizableSplit>
 </AppShell>
 
 <style>

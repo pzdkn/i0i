@@ -191,7 +191,8 @@
 
 <style>
   .discover-inspector {
-    width: 280px;
+    width: 100%;
+    height: 100%;
     flex-shrink: 0;
     min-height: 0;
     background: var(--panel);
