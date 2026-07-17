@@ -70,6 +70,30 @@ pub struct PaperSourceDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LocalPdfImport {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalPdfImportResult {
+    pub snapshot: LibrarySnapshot,
+    pub imported_paper_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaperMetadataEnrichment {
+    pub title: Option<String>,
+    pub authors: Option<Vec<String>>,
+    pub venue: Option<String>,
+    pub year: Option<i32>,
+    pub citations: Option<i32>,
+    pub abstract_text: Option<String>,
+    pub confident: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VaultPaper {
     pub vault_id: String,
     pub paper_id: String,

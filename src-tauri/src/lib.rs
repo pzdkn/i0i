@@ -9,6 +9,7 @@ mod storage;
 use pdf_extraction::{PdfExtractionConfig, PdfExtractionManager};
 use pdf_ingestion::{PdfDownloadManager, PdfIngestionConfig};
 use services::chat::ChatService;
+use services::metadata_enrichment::MetadataEnrichmentService;
 use services::reader_service::ReaderService;
 use services::research::manager::SearchManager;
 use services::source_acquisition::SourceAcquisitionService;
@@ -18,13 +19,17 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let store = LibraryStore::new(&app.handle()).map_err(std::io::Error::other)?;
             store.init().map_err(std::io::Error::other)?;
             let extraction_config = PdfExtractionConfig::load(&app.handle());
-            let pdf_extractions =
-                PdfExtractionManager::new(app.handle().clone(), store.clone(), extraction_config);
+            let pdf_extractions = PdfExtractionManager::new(
+                app.handle().clone(),
+                store.clone(),
+                extraction_config.clone(),
+            );
             let source_client = reqwest::Client::builder()
                 .user_agent(concat!(
                     env!("CARGO_PKG_NAME"),
@@ -62,6 +67,13 @@ pub fn run() {
             .map_err(std::io::Error::other)?;
             let discovery_providers = commands::discovery::DiscoveryProviders::from_app_config()
                 .map_err(std::io::Error::other)?;
+            let metadata_enrichment = MetadataEnrichmentService::new(
+                app.handle().clone(),
+                store.clone(),
+                extraction_config.clone(),
+                discovery_providers.openalex.clone(),
+                discovery_providers.arxiv.clone(),
+            );
             let search_manager = SearchManager::new(app.handle().clone(), store.clone());
             search_manager
                 .recover_and_queue_startup_runs()
@@ -72,6 +84,7 @@ pub fn run() {
             app.manage(source_acquisition);
             app.manage(reader_service);
             app.manage(chat_service);
+            app.manage(metadata_enrichment);
             app.manage(discovery_providers);
             app.manage(search_manager);
             Ok(())
@@ -81,6 +94,7 @@ pub fn run() {
             commands::discovery::search_papers,
             commands::library::get_library,
             commands::library::add_paper_to_vaults,
+            commands::library::import_local_pdfs,
             commands::library::download_paper_pdf,
             commands::library::get_document_sources,
             commands::library::create_vault,

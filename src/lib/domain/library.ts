@@ -120,6 +120,15 @@ export type PaperSourceDraft = {
   landingUrl?: string;
 };
 
+export type LocalPdfImport = {
+  path: string;
+};
+
+export type LocalPdfImportResult = {
+  snapshot: LibrarySnapshot;
+  importedPaperIds: string[];
+};
+
 export type LibrarySnapshot = {
   vaults: Vault[];
   papers: Paper[];

@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   LibrarySnapshot,
   DocumentSource,
+  LocalPdfImport,
+  LocalPdfImportResult,
   PaperDraft,
   VaultDraft,
   VaultRenameDraft,
@@ -16,6 +18,15 @@ export async function addPaperToVaults(paper: PaperDraft, vaultIds: string[]): P
   return invoke<LibrarySnapshot>("add_paper_to_vaults", {
     paper,
     vaultIds,
+  });
+}
+
+export async function importLocalPdfs(vaultId: string, paths: string[]): Promise<LocalPdfImportResult> {
+  const files: LocalPdfImport[] = paths.map((path) => ({ path }));
+
+  return invoke<LocalPdfImportResult>("import_local_pdfs", {
+    vaultId,
+    files,
   });
 }
 

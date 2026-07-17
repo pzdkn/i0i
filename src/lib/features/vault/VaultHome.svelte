@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { open } from "@tauri-apps/plugin-dialog";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import PaperList from "$lib/features/vault/PaperList.svelte";
   import VaultInspector from "$lib/features/vault/VaultInspector.svelte";
@@ -7,17 +8,20 @@
   let {
     workspace,
     onOpenPaper,
+    onImportPdfs,
     onRemovePaperFromVault,
     onRemovePaperFromLibrary,
   }: {
     workspace: VaultWorkspace;
     onOpenPaper: (paperId: string) => void;
+    onImportPdfs: (vaultId: string, paths: string[]) => void | Promise<void>;
     onRemovePaperFromVault: (vaultId: string, paperId: string) => void;
     onRemovePaperFromLibrary: (paperId: string) => void;
   } = $props();
 
   let selectedPaperId = $state("");
   let localFilter = $state("");
+  let isImporting = $state(false);
   const selectedPaper = $derived(
     workspace.papers.find((paper) => paper.id === selectedPaperId) ?? workspace.papers[0],
   );
@@ -27,6 +31,28 @@
       selectedPaperId = workspace.papers[0]?.id ?? "";
     }
   });
+
+  async function chooseLocalPdfs() {
+    if (isImporting) {
+      return;
+    }
+
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+    if (paths.length === 0) {
+      return;
+    }
+
+    isImporting = true;
+    try {
+      await onImportPdfs(workspace.id, paths);
+    } finally {
+      isImporting = false;
+    }
+  }
 </script>
 
 <section class="workspace col">
@@ -51,7 +77,9 @@
                 <div class="flex1"></div>
                 <div class="actions row">
                   <button class="btn" type="button">+ Add</button>
-                  <button class="btn" type="button">Import</button>
+                  <button class="btn" type="button" disabled={isImporting} onclick={chooseLocalPdfs}>
+                    {isImporting ? "Importing" : "Import PDF"}
+                  </button>
                   <button class="btn" type="button">Export .bib</button>
                 </div>
               </div>

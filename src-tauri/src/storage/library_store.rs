@@ -14,8 +14,8 @@ use crate::domain::chat::{
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
     DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
-    LibrarySnapshot, Paper, PaperDraft, PaperSourceDraft, Vault, VaultDraft, VaultPaper,
-    VaultRenameDraft,
+    LibrarySnapshot, Paper, PaperDraft, PaperMetadataEnrichment, PaperSourceDraft, Vault,
+    VaultDraft, VaultPaper, VaultRenameDraft,
 };
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, Search, SearchCandidate, SearchDraft, SearchRun,
@@ -569,6 +569,162 @@ impl LibraryStore {
 
         tx.commit().map_err(|error| error.to_string())?;
         self.get_library()
+    }
+
+    pub fn add_local_pdf_to_vault(
+        &self,
+        paper: &PaperDraft,
+        vault_id: &str,
+        source_id: &str,
+        source_url: &str,
+        local_path: &str,
+    ) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let authors_json = to_json(&paper.authors)?;
+        let tags_json = to_json(&paper.tags)?;
+
+        tx.execute(
+            "
+            insert into papers (
+              id, title, authors_json, venue, year, citations, tags_json,
+              note_count, annotation_count, status, abstract, active_source_id,
+              created_at, updated_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?9, ?10, datetime('now'), datetime('now'))
+            on conflict(id) do update set
+              title = excluded.title,
+              authors_json = excluded.authors_json,
+              venue = excluded.venue,
+              year = excluded.year,
+              citations = excluded.citations,
+              tags_json = excluded.tags_json,
+              status = excluded.status,
+              abstract = excluded.abstract,
+              active_source_id = excluded.active_source_id,
+              updated_at = datetime('now')
+            ",
+            params![
+                paper.id,
+                paper.title,
+                authors_json,
+                paper.venue,
+                paper.year,
+                paper.citations,
+                tags_json,
+                paper.status,
+                paper.abstract_text,
+                source_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.execute(
+            "
+            insert into document_sources (
+              id, paper_id, source_kind, source_url, landing_url, final_url, acquisition_method,
+              local_path, status, error, created_at, updated_at
+            )
+            values (?1, ?2, 'pdf', ?3, null, ?3, 'local_import', ?4, 'cached', null, datetime('now'), datetime('now'))
+            on conflict(id) do update set
+              source_url = excluded.source_url,
+              final_url = excluded.final_url,
+              acquisition_method = excluded.acquisition_method,
+              local_path = excluded.local_path,
+              status = 'cached',
+              error = null,
+              updated_at = datetime('now')
+            ",
+            params![source_id, paper.id, source_url, local_path],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.execute(
+            "
+            insert into vault_papers (vault_id, paper_id, added_at)
+            values (?1, ?2, datetime('now'))
+            on conflict(vault_id, paper_id) do nothing
+            ",
+            params![vault_id, paper.id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    pub fn apply_paper_metadata_enrichment(
+        &self,
+        paper_id: &str,
+        enrichment: &PaperMetadataEnrichment,
+    ) -> StoreResult<Option<Paper>> {
+        let conn = self.open_connection()?;
+        let Some(current) = read_paper(&conn, paper_id)? else {
+            return Ok(None);
+        };
+        if !current.tags.iter().any(|tag| tag == "needs-review") {
+            return Ok(None);
+        }
+
+        let mut tags = current.tags.clone();
+        if enrichment.confident {
+            tags.retain(|tag| tag != "needs-review");
+        }
+        if !tags.iter().any(|tag| tag == "metadata-enriched") {
+            tags.push("metadata-enriched".to_string());
+        }
+
+        let title = enrichment
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(&current.title);
+        let authors = enrichment
+            .authors
+            .as_ref()
+            .filter(|authors| !authors.is_empty())
+            .unwrap_or(&current.authors);
+        let venue = enrichment
+            .venue
+            .as_deref()
+            .map(str::trim)
+            .filter(|venue| !venue.is_empty())
+            .unwrap_or(&current.venue);
+        let year = enrichment.year.unwrap_or(current.year);
+        let citations = enrichment.citations.unwrap_or(current.citations);
+        let abstract_text = enrichment
+            .abstract_text
+            .as_ref()
+            .filter(|abstract_text| !abstract_text.trim().is_empty())
+            .or(current.abstract_text.as_ref());
+
+        conn.execute(
+            "
+            update papers
+            set title = ?2,
+                authors_json = ?3,
+                venue = ?4,
+                year = ?5,
+                citations = ?6,
+                tags_json = ?7,
+                abstract = ?8,
+                updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![
+                paper_id,
+                title,
+                to_json(authors)?,
+                venue,
+                year,
+                citations,
+                to_json(&tags)?,
+                abstract_text,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        read_paper(&conn, paper_id)
     }
 
     pub fn create_vault(&self, draft: &VaultDraft) -> StoreResult<LibrarySnapshot> {
@@ -1432,6 +1588,46 @@ fn read_papers(conn: &Connection) -> StoreResult<Vec<Paper>> {
         .map_err(|error| error.to_string())?;
 
     collect_rows(rows)
+}
+
+fn read_paper(conn: &Connection, paper_id: &str) -> StoreResult<Option<Paper>> {
+    conn.query_row(
+        "
+        select id, title, authors_json, venue, year, citations, tags_json,
+               (select count(*)
+                  from chat_entries e
+                  join chat_threads t on e.thread_id = t.id
+                 where t.scope_kind = 'paper' and t.scope_id = papers.id
+                   and e.pinned = 1) as highlight_count,
+               annotation_count, status, abstract,
+               active_source_id, active_extraction_id
+        from papers
+        where id = ?1
+        ",
+        params![paper_id],
+        |row| {
+            let authors_json: String = row.get(2)?;
+            let tags_json: String = row.get(6)?;
+
+            Ok(Paper {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                authors: from_json(&authors_json),
+                venue: row.get(3)?,
+                year: row.get(4)?,
+                citations: row.get(5)?,
+                tags: from_json(&tags_json),
+                highlight_count: row.get(7)?,
+                annotation_count: row.get(8)?,
+                status: row.get(9)?,
+                abstract_text: row.get(10)?,
+                active_source_id: row.get(11)?,
+                active_extraction_id: row.get(12)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| error.to_string())
 }
 
 fn read_vault_papers(conn: &Connection) -> StoreResult<Vec<VaultPaper>> {
@@ -3542,6 +3738,88 @@ mod tests {
         assert!(paper(&snapshot, "pdf-source-paper")
             .active_source_id
             .is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_local_pdf_to_vault_persists_cached_active_source() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft("local-pdf-paper");
+        let source_id = "pdf:local-pdf-paper:abc123";
+
+        db.store.add_local_pdf_to_vault(
+            &draft,
+            "attention",
+            source_id,
+            "local://sha256/abc123",
+            "/tmp/i0i/local-paper.pdf",
+        )?;
+        let snapshot = db.store.get_library()?;
+        let source = snapshot
+            .document_sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .expect("local PDF source should exist");
+
+        assert!(has_membership(&snapshot, "attention", "local-pdf-paper"));
+        assert_eq!(source.source_kind, "pdf");
+        assert_eq!(source.status, "cached");
+        assert_eq!(source.acquisition_method.as_deref(), Some("local_import"));
+        assert_eq!(
+            source.local_path.as_deref(),
+            Some("/tmp/i0i/local-paper.pdf")
+        );
+        assert_eq!(
+            paper(&snapshot, "local-pdf-paper")
+                .active_source_id
+                .as_deref(),
+            Some(source_id)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_enrichment_updates_needs_review_paper() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut draft = paper_draft("needs-metadata-paper");
+        draft.tags = vec!["local".to_string(), "needs-review".to_string()];
+        db.store.add_local_pdf_to_vault(
+            &draft,
+            "attention",
+            "pdf:needs-metadata-paper:abc123",
+            "local://sha256/abc123",
+            "/tmp/i0i/needs-metadata-paper.pdf",
+        )?;
+
+        let updated = db
+            .store
+            .apply_paper_metadata_enrichment(
+                "needs-metadata-paper",
+                &PaperMetadataEnrichment {
+                    title: Some("Recovered Paper Title".to_string()),
+                    authors: Some(vec!["Ada Lovelace".to_string()]),
+                    venue: Some("Journal of Useful Machines".to_string()),
+                    year: Some(1843),
+                    citations: Some(12),
+                    abstract_text: Some("A recovered abstract.".to_string()),
+                    confident: true,
+                },
+            )?
+            .expect("paper should be updated");
+
+        assert_eq!(updated.title, "Recovered Paper Title");
+        assert_eq!(updated.authors, vec!["Ada Lovelace"]);
+        assert_eq!(updated.venue, "Journal of Useful Machines");
+        assert_eq!(updated.year, 1843);
+        assert_eq!(updated.citations, 12);
+        assert_eq!(
+            updated.abstract_text.as_deref(),
+            Some("A recovered abstract.")
+        );
+        assert!(updated.tags.contains(&"metadata-enriched".to_string()));
+        assert!(!updated.tags.contains(&"needs-review".to_string()));
 
         Ok(())
     }

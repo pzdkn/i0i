@@ -16,6 +16,7 @@
     addPaperToVaults,
     createVault,
     getLibrary,
+    importLocalPdfs,
     removeVault,
     removePaperFromLibrary as removePaperFromLibraryCommand,
     removePaperFromVault,
@@ -116,6 +117,26 @@
     let unlisten: (() => void) | undefined;
 
     listen("document_source_updated", async () => {
+      try {
+        hydrateLibrary(await getLibrary());
+      } catch (error) {
+        bridgeError = String(error);
+      }
+    })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen("paper_metadata_updated", async () => {
       try {
         hydrateLibrary(await getLibrary());
       } catch (error) {
@@ -463,6 +484,19 @@
     }
   }
 
+  async function importPdfsToVault(vaultId: string, paths: string[]) {
+    try {
+      const result = await importLocalPdfs(vaultId, paths);
+      hydrateLibrary(result.snapshot);
+
+      if (result.importedPaperIds.length === 1) {
+        openPaper(result.importedPaperIds[0]);
+      }
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
   async function createVaultFromExplorer(path: string) {
     try {
       const snapshot = await createVault(path);
@@ -653,6 +687,7 @@
             <VaultHome
               workspace={activeVaultWorkspace}
               onOpenPaper={openPaper}
+              onImportPdfs={importPdfsToVault}
               onRemovePaperFromVault={removePaperFromActiveVault}
               onRemovePaperFromLibrary={removePaperFromLibrary}
             />
