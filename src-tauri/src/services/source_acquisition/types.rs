@@ -129,6 +129,16 @@ impl std::error::Error for SourceAcquisitionError {}
 #[async_trait]
 pub trait HttpFetcher: Send + Sync {
     async fn fetch(&self, url: &str) -> AcquisitionResult<FetchResponse>;
+
+    /// Cheaply check whether a URL serves a PDF without downloading it fully.
+    ///
+    /// Returns `Ok(true)` when the first bytes sniff as `%PDF-`. The default
+    /// implementation falls back to a full fetch, which keeps test fakes
+    /// simple; the real fetcher overrides this with a Range request.
+    async fn probe(&self, url: &str) -> AcquisitionResult<bool> {
+        let response = self.fetch(url).await?;
+        Ok(response.bytes.starts_with(b"%PDF-"))
+    }
 }
 
 #[async_trait]

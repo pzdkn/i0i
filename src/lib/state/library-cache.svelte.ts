@@ -273,6 +273,18 @@ export function setDiscoverSelectedCandidate(discoverId: string, candidateId: st
   workspace.selectedCandidateId = candidateId;
 }
 
+/// Record the probed PDF availability for one candidate (RFC 0051).
+export function setDiscoverCandidateAvailability(
+  discoverId: string,
+  candidateId: string,
+  availability: "verified" | "browser_required" | "unavailable",
+) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  workspace.candidates = workspace.candidates.map((candidate) =>
+    candidate.id === candidateId ? { ...candidate, pdfAvailability: availability } : candidate,
+  );
+}
+
 export function applyDiscoverSearchResponse(discoverId: string, response: DiscoverySearchResponse) {
   const workspace = getDiscoverWorkspace(discoverId);
   workspace.status = "completed";

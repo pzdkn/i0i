@@ -32,24 +32,31 @@ pub async fn get_reader_document(
 }
 
 /// Load a Reader document directly from a transient discovery candidate.
+///
+/// Returns immediately: when the PDF is not cached yet, acquisition runs in
+/// the background and progress arrives via `reader_pdf_acquisition_progress`
+/// events (RFC 0051). `force` bypasses the negative cache on Retry.
 #[tauri::command]
 pub async fn get_discovery_reader_document(
     reader_service: tauri::State<'_, ReaderService>,
     candidate: DiscoveryReaderCandidate,
+    force: Option<bool>,
 ) -> Result<crate::domain::reader::ReaderDocument, String> {
+    let force = force.unwrap_or(false);
     reader_log(format!(
-        "get_discovery_reader_document start paper_id={} pdf_url={:?}",
-        candidate.id, candidate.pdf_url
+        "get_discovery_reader_document start paper_id={} pdf_url={:?} doi={:?} arxiv_id={:?} force={force}",
+        candidate.id, candidate.pdf_url, candidate.doi, candidate.arxiv_id
     ));
     let result = reader_service
-        .get_discovery_reader_document(&candidate)
+        .get_discovery_reader_document(&candidate, force)
         .await;
     match &result {
         Ok(document) => reader_log(format!(
-            "get_discovery_reader_document ok paper_id={} source_id={} has_pdf={} pdf_error={:?}",
+            "get_discovery_reader_document ok paper_id={} source_id={} has_pdf={} pdf_status={:?} pdf_error={:?}",
             document.paper_id,
             document.source_id,
             document.pdf_local_path.is_some(),
+            document.pdf_status,
             document.pdf_error
         )),
         Err(error) => reader_log(format!(
@@ -58,6 +65,35 @@ pub async fn get_discovery_reader_document(
         )),
     }
     result
+}
+
+/// Cancel an in-flight background discovery PDF acquisition.
+#[tauri::command]
+pub fn cancel_discovery_pdf_acquisition(
+    reader_service: tauri::State<'_, ReaderService>,
+    source_id: String,
+    paper_id: String,
+) -> Result<(), String> {
+    reader_log(format!(
+        "cancel_discovery_pdf_acquisition source_id={source_id} paper_id={paper_id}"
+    ));
+    reader_service.cancel_discovery_pdf_acquisition(&source_id, &paper_id)
+}
+
+/// Cheaply classify a discovery candidate's PDF availability (RFC 0051).
+#[tauri::command]
+pub async fn probe_discovery_candidate_pdf(
+    reader_service: tauri::State<'_, ReaderService>,
+    candidate: DiscoveryReaderCandidate,
+) -> Result<String, String> {
+    let availability = reader_service
+        .probe_discovery_candidate_pdf(&candidate)
+        .await;
+    reader_log(format!(
+        "probe_discovery_candidate_pdf paper_id={} availability={availability}",
+        candidate.id
+    ));
+    Ok(availability.to_string())
 }
 
 /// Read PDF bytes for either a durable or temporary Reader source id.

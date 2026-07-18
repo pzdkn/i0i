@@ -1,20 +1,36 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::library::DocumentSource;
 use crate::domain::reader::{
     DiscoveryReaderCandidate, ReaderAsset, ReaderBlock, ReaderDocument, ReaderPage,
     ReaderParagraph, ReaderSpan, ReaderTextBlock,
 };
-use crate::services::source_acquisition::SourceAcquisitionService;
+use crate::services::source_acquisition::{PdfLocationHints, SourceAcquisitionService};
 use crate::storage::library_store::LibraryStore;
 
 const DISCOVERY_PDF_SOURCE_PREFIX: &str = "temp-pdf";
 const DISCOVERY_NO_SOURCE_PREFIX: &str = "temp-meta";
 const READER_MAX_PDF_BYTES: u64 = 104_857_600;
+
+/// Reader-side status values for RFC 0051 background PDF acquisition.
+const PDF_STATUS_ACQUIRING: &str = "acquiring";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfAcquisitionProgress {
+    source_id: String,
+    paper_id: String,
+    status: String,
+    message: String,
+    error: Option<String>,
+}
 
 /// Builds Reader documents from either saved papers or transient discovery candidates.
 ///
@@ -26,6 +42,10 @@ pub struct ReaderService {
     app: AppHandle,
     store: LibraryStore,
     source_acquisition: SourceAcquisitionService,
+    /// In-flight background discovery acquisitions, keyed by source id, so
+    /// re-opening a tab never starts a duplicate download and Cancel can
+    /// abort the task (RFC 0051).
+    acquisitions: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 enum ReaderTarget<'a> {
@@ -47,6 +67,7 @@ impl ReaderService {
             app,
             store,
             source_acquisition,
+            acquisitions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -80,9 +101,67 @@ impl ReaderService {
     pub async fn get_discovery_reader_document(
         &self,
         candidate: &DiscoveryReaderCandidate,
+        force: bool,
     ) -> Result<ReaderDocument, String> {
-        self.get_reader_document_for_target(ReaderTarget::DiscoveryCandidate(candidate))
+        match self
+            .get_reader_document_for_target(ReaderTarget::DiscoveryCandidate(candidate))
             .await
+        {
+            Ok(mut document) => {
+                if force && document.pdf_local_path.is_none() {
+                    // Retry bypasses the negative cache in the spawned task.
+                    let hints = discovery_location_hints(candidate);
+                    if hints.has_any_location() {
+                        self.spawn_discovery_pdf_acquisition(
+                            candidate,
+                            &document.source_id,
+                            hints,
+                            true,
+                        );
+                        document.pdf_status = Some(PDF_STATUS_ACQUIRING.to_string());
+                    }
+                }
+                Ok(document)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Cancel an in-flight background discovery PDF acquisition.
+    pub fn cancel_discovery_pdf_acquisition(
+        &self,
+        source_id: &str,
+        paper_id: &str,
+    ) -> Result<(), String> {
+        let handle = self
+            .acquisitions
+            .lock()
+            .expect("acquisitions lock")
+            .remove(source_id);
+        if let Some(handle) = handle {
+            handle.abort();
+            self.emit_acquisition_progress(
+                source_id,
+                paper_id,
+                "failed",
+                "PDF download cancelled.",
+                Some("Cancelled by user".to_string()),
+            );
+        }
+        Ok(())
+    }
+
+    /// Classify PDF availability for a discovery candidate without downloading
+    /// it (RFC 0051 discover-time verification).
+    pub async fn probe_discovery_candidate_pdf(
+        &self,
+        candidate: &DiscoveryReaderCandidate,
+    ) -> &'static str {
+        let hints = discovery_location_hints(candidate);
+        if !hints.has_any_location() {
+            return "unavailable";
+        }
+        self.source_acquisition.probe_pdf_availability(&hints).await
     }
 
     /// Read PDF bytes for a Reader source id.
@@ -333,6 +412,7 @@ impl ReaderService {
             pdf_local_path,
             pdf_source_url,
             pdf_error,
+            pdf_status: None,
             source_text,
             pages,
             blocks,
@@ -352,35 +432,106 @@ impl ReaderService {
         &self,
         candidate: &DiscoveryReaderCandidate,
     ) -> Result<ReaderDocument, String> {
-        let (source_id, pdf_local_path, pdf_error) =
-            if let Some(pdf_url) = candidate.pdf_url.as_deref() {
-                let source_id = discovery_pdf_source_id(&candidate.id, pdf_url);
-                let local_path = match self
-                    .cache_discovery_pdf(&source_id, pdf_url, candidate.external_url.as_deref())
-                    .await
-                {
-                    Ok(path) => Some(path.to_string_lossy().to_string()),
-                    Err(error) => {
-                        // Discovery open is intentionally forgiving: no PDF yet should
-                        // degrade to metadata + abstract text, not block the Reader.
-                        return Ok(self.discovery_reader_document(
-                            candidate,
-                            source_id,
-                            None,
-                            Some(error),
-                        ));
-                    }
-                };
-                (source_id, local_path, None)
-            } else {
-                (
-                    format!("{DISCOVERY_NO_SOURCE_PREFIX}:{}", candidate.id),
-                    None,
-                    None,
-                )
-            };
+        let hints = discovery_location_hints(candidate);
+        if !hints.has_any_location() {
+            let source_id = format!("{DISCOVERY_NO_SOURCE_PREFIX}:{}", candidate.id);
+            return Ok(self.discovery_reader_document(candidate, source_id, None, None, None));
+        }
 
-        Ok(self.discovery_reader_document(candidate, source_id, pdf_local_path, pdf_error))
+        let source_id = discovery_pdf_source_id(&candidate.id, &acquisition_key(&hints));
+        let local_path = self.discovery_pdf_path(&source_id)?;
+        if validate_cached_pdf(&local_path) {
+            return Ok(self.discovery_reader_document(
+                candidate,
+                source_id,
+                Some(local_path.to_string_lossy().to_string()),
+                None,
+                None,
+            ));
+        }
+
+        // RFC 0051: return the metadata document immediately and fetch the
+        // PDF in the background, so the Reader never blocks on a slow source.
+        self.spawn_discovery_pdf_acquisition(candidate, &source_id, hints, false);
+        Ok(self.discovery_reader_document(
+            candidate,
+            source_id,
+            None,
+            None,
+            Some(PDF_STATUS_ACQUIRING.to_string()),
+        ))
+    }
+
+    /// Start (or join) the background acquisition task for a discovery PDF.
+    fn spawn_discovery_pdf_acquisition(
+        &self,
+        candidate: &DiscoveryReaderCandidate,
+        source_id: &str,
+        hints: PdfLocationHints,
+        force: bool,
+    ) {
+        let mut tasks = self.acquisitions.lock().expect("acquisitions lock");
+        if tasks.contains_key(source_id) {
+            return;
+        }
+
+        let service = self.clone();
+        let task_source_id = source_id.to_string();
+        let paper_id = candidate.id.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            service.emit_acquisition_progress(
+                &task_source_id,
+                &paper_id,
+                "running",
+                "Fetching PDF…",
+                None,
+            );
+            let result = service
+                .cache_discovery_pdf(&task_source_id, &hints, force)
+                .await;
+            service
+                .acquisitions
+                .lock()
+                .expect("acquisitions lock")
+                .remove(&task_source_id);
+            match result {
+                Ok(_) => service.emit_acquisition_progress(
+                    &task_source_id,
+                    &paper_id,
+                    "ready",
+                    "PDF ready.",
+                    None,
+                ),
+                Err(error) => service.emit_acquisition_progress(
+                    &task_source_id,
+                    &paper_id,
+                    "failed",
+                    "PDF could not be fetched automatically.",
+                    Some(error),
+                ),
+            }
+        });
+        tasks.insert(source_id.to_string(), handle);
+    }
+
+    fn emit_acquisition_progress(
+        &self,
+        source_id: &str,
+        paper_id: &str,
+        status: &str,
+        message: &str,
+        error: Option<String>,
+    ) {
+        let _ = self.app.emit(
+            "reader_pdf_acquisition_progress",
+            PdfAcquisitionProgress {
+                source_id: source_id.to_string(),
+                paper_id: paper_id.to_string(),
+                status: status.to_string(),
+                message: message.to_string(),
+                error,
+            },
+        );
     }
 
     /// Adapt a discovery candidate into the standard `ReaderDocument` shape.
@@ -390,6 +541,7 @@ impl ReaderService {
         source_id: String,
         pdf_local_path: Option<String>,
         pdf_error: Option<String>,
+        pdf_status: Option<String>,
     ) -> ReaderDocument {
         let source_text = candidate.abstract_text.clone().unwrap_or_default();
         let (text_blocks, paragraphs) = text_fallback(&source_text);
@@ -409,6 +561,7 @@ impl ReaderService {
             pdf_local_path,
             pdf_source_url: candidate.pdf_url.clone(),
             pdf_error,
+            pdf_status,
             source_text,
             pages: Vec::new(),
             blocks: Vec::new(),
@@ -425,8 +578,8 @@ impl ReaderService {
     async fn cache_discovery_pdf(
         &self,
         source_id: &str,
-        pdf_url: &str,
-        landing_url: Option<&str>,
+        hints: &PdfLocationHints,
+        force: bool,
     ) -> Result<PathBuf, String> {
         let local_path = self.discovery_pdf_path(source_id)?;
         if validate_cached_pdf(&local_path) {
@@ -440,7 +593,7 @@ impl ReaderService {
         let partial_path = PathBuf::from(format!("{}.part", local_path.display()));
         let acquired = self
             .source_acquisition
-            .acquire_pdf(pdf_url, landing_url, READER_MAX_PDF_BYTES)
+            .acquire_pdf_with_hints(hints, READER_MAX_PDF_BYTES, force)
             .await
             .map_err(|error| error.to_string())?;
 
@@ -479,6 +632,32 @@ impl ReaderService {
             .join(sanitize_path_component(&source.id))
             .join("source.pdf"))
     }
+}
+
+/// Build acquisition hints from everything a discovery candidate knows.
+fn discovery_location_hints(candidate: &DiscoveryReaderCandidate) -> PdfLocationHints {
+    PdfLocationHints {
+        pdf_url: candidate.pdf_url.clone(),
+        landing_url: candidate.external_url.clone(),
+        doi: candidate.doi.clone(),
+        arxiv_id: candidate.arxiv_id.clone(),
+    }
+}
+
+/// Stable cache key for a hint set: the strongest known location wins, so a
+/// candidate keeps the same temporary source id across opens.
+fn acquisition_key(hints: &PdfLocationHints) -> String {
+    hints
+        .pdf_url
+        .clone()
+        .or_else(|| {
+            hints
+                .arxiv_id
+                .as_ref()
+                .map(|id| format!("https://arxiv.org/pdf/{id}"))
+        })
+        .or_else(|| hints.doi.clone())
+        .unwrap_or_default()
 }
 
 /// Returns whether a source id belongs to the temporary discovery-reader path.

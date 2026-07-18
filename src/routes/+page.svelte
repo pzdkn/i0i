@@ -19,6 +19,7 @@
     createVault,
     getLibrary,
     importLocalPdfs,
+    probeDiscoveryCandidatePdf,
     removeVault,
     removePaperFromLibrary as removePaperFromLibraryCommand,
     removePaperFromVault,
@@ -65,6 +66,7 @@
     setDiscoverImproveStarted,
     setDiscoverRunStarted,
     setDiscoverStatus,
+    setDiscoverCandidateAvailability,
     setDiscoverSelectedCandidate,
   } from "$lib/state/library-cache.svelte";
   import { depthStrategy, isTerminalStatus, type SearchCandidatesPreview, type SearchUpdated } from "$lib/domain/research";
@@ -509,8 +511,41 @@
     applyDiscoverResearchPreview(workspace.id, event.candidates);
   }
 
+  function readerCandidateFrom(candidate: NonNullable<ReturnType<typeof getDiscoverCandidate>>): DiscoveryReaderCandidate {
+    return {
+      id: candidate.id,
+      sourceProvider: candidate.sourceProvider,
+      sourceId: candidate.sourceId,
+      title: candidate.title,
+      authors: [...candidate.authors],
+      venue: candidate.venue,
+      year: candidate.year,
+      citations: candidate.citations,
+      tags: [...candidate.tags],
+      abstract: candidate.abstract,
+      externalUrl: candidate.externalUrl,
+      pdfUrl: candidate.pdfUrl,
+      doi: candidate.doi,
+      arxivId: candidate.arxivId,
+    };
+  }
+
   function selectDiscoverCandidate(discoverId: string, candidateId: string) {
     setDiscoverSelectedCandidate(discoverId, candidateId);
+
+    // RFC 0051: verify PDF availability in the background on selection so the
+    // chip reflects reality before the user commits to opening the Reader.
+    const candidate = getDiscoverCandidate(candidateId);
+    if (!candidate || candidate.pdfAvailability) {
+      return;
+    }
+    probeDiscoveryCandidatePdf(readerCandidateFrom(candidate))
+      .then((availability) => {
+        setDiscoverCandidateAvailability(discoverId, candidateId, availability);
+      })
+      .catch(() => {
+        // Probe failures leave the chip in its unverified state.
+      });
   }
 
   function openCandidate(candidateId: string) {
@@ -527,20 +562,7 @@
       kind: "reader",
       title: paper.title,
       paperId: paper.id,
-      readerCandidate: {
-        id: candidate.id,
-        sourceProvider: candidate.sourceProvider,
-        sourceId: candidate.sourceId,
-        title: candidate.title,
-        authors: [...candidate.authors],
-        venue: candidate.venue,
-        year: candidate.year,
-        citations: candidate.citations,
-        tags: [...candidate.tags],
-        abstract: candidate.abstract,
-        externalUrl: candidate.externalUrl,
-        pdfUrl: candidate.pdfUrl,
-      },
+      readerCandidate: readerCandidateFrom(candidate),
     };
 
     tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];

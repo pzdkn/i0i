@@ -113,8 +113,29 @@ export async function getReaderDocument(paperId: string, extractionId?: string):
   });
 }
 
-export async function getDiscoveryReaderDocument(candidate: DiscoveryReaderCandidate): Promise<ReaderDocument> {
+export async function getDiscoveryReaderDocument(
+  candidate: DiscoveryReaderCandidate,
+  force = false,
+): Promise<ReaderDocument> {
   return invoke<ReaderDocument>("get_discovery_reader_document", {
+    candidate,
+    force,
+  });
+}
+
+export async function cancelDiscoveryPdfAcquisition(sourceId: string, paperId: string): Promise<void> {
+  return invoke<void>("cancel_discovery_pdf_acquisition", {
+    sourceId,
+    paperId,
+  });
+}
+
+export type PdfAvailability = "verified" | "browser_required" | "unavailable";
+
+export async function probeDiscoveryCandidatePdf(
+  candidate: DiscoveryReaderCandidate,
+): Promise<PdfAvailability> {
+  return invoke<PdfAvailability>("probe_discovery_candidate_pdf", {
     candidate,
   });
 }

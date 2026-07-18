@@ -31,6 +31,8 @@ export type DiscoverCandidate = {
   alreadyInLibrary?: boolean;
   isNew?: boolean;
   reviewing?: boolean;
+  /** Probed PDF availability (RFC 0051); unset until a probe has run. */
+  pdfAvailability?: "verified" | "browser_required" | "unavailable";
 };
 
 export type DiscoverSort = "relevance" | "newest" | "most_cited";

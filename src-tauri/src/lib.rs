@@ -30,12 +30,16 @@ pub fn run() {
                 store.clone(),
                 extraction_config.clone(),
             );
+            // RFC 0051: reqwest's default has no request timeout at all, which
+            // let a stalled publisher server hang PDF opens forever.
             let source_client = reqwest::Client::builder()
                 .user_agent(concat!(
                     env!("CARGO_PKG_NAME"),
                     "/",
                     env!("CARGO_PKG_VERSION")
                 ))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client should build");
             let source_acquisition =
@@ -107,6 +111,8 @@ pub fn run() {
             commands::library::delete_paper_globally,
             commands::reader::get_reader_document,
             commands::reader::get_discovery_reader_document,
+            commands::reader::cancel_discovery_pdf_acquisition,
+            commands::reader::probe_discovery_candidate_pdf,
             commands::reader::get_reader_pdf_bytes,
             commands::reader::extract_paper_document,
             commands::chat::list_chat_threads,

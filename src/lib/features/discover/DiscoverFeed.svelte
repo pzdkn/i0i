@@ -120,7 +120,13 @@
             {#each candidate.tags as tag}
               <span>{tag}</span>
             {/each}
-            {#if candidate.pdfUrl}
+            {#if candidate.pdfAvailability === "verified"}
+              <span class="pdf-tag">PDF ready</span>
+            {:else if candidate.pdfAvailability === "browser_required"}
+              <span class="pdf-tag">PDF needs browser</span>
+            {:else if candidate.pdfAvailability === "unavailable"}
+              <span class="pdf-tag">no PDF found</span>
+            {:else if candidate.pdfUrl}
               <span class="pdf-tag">PDF</span>
             {/if}
           </span>

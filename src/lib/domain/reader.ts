@@ -11,6 +11,8 @@ export type DiscoveryReaderCandidate = {
   abstract?: string;
   externalUrl?: string;
   pdfUrl?: string;
+  doi?: string;
+  arxivId?: string;
 };
 
 export type ReaderExtractor = "docling" | "mineru" | "marker" | "grobid" | "pdfium_basic";
@@ -127,6 +129,8 @@ export type ReaderDocument = {
   pdfLocalPath?: string;
   pdfSourceUrl?: string;
   pdfError?: string;
+  /** "acquiring" while a background download is in flight (RFC 0051). */
+  pdfStatus?: string;
   pages: ReaderPage[];
   blocks: ReaderBlock[];
   spans: ReaderSpan[];

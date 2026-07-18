@@ -2,7 +2,11 @@
   import { listen } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
-  import { getDiscoveryReaderDocument, getReaderDocument } from "$lib/bridge/library";
+  import {
+    cancelDiscoveryPdfAcquisition,
+    getDiscoveryReaderDocument,
+    getReaderDocument,
+  } from "$lib/bridge/library";
   import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import type { ChatThreadSummary, PinnedHighlight } from "$lib/domain/chat";
@@ -57,6 +61,9 @@
   let isLoadingDoc = $state(false);
   let refreshTick = $state(0);
   let documentLoadSequence = 0;
+  // RFC 0051: background PDF acquisition status for discovery opens.
+  let acquisitionMessage = $state("");
+  let forceNextLoad = false;
   let focusThreadsMode = $state<"open" | "collapsed">("open");
   let pdfScale = $state(1.15);
 
@@ -64,6 +71,7 @@
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
   const activeCandidate = $derived(candidate && !chatEnabled ? candidate : undefined);
   const hasCachedPdf = $derived(Boolean(readerDocument?.pdfLocalPath));
+  const isAcquiringPdf = $derived(readerDocument?.pdfStatus === "acquiring");
   const fallbackSourceUrl = $derived(activeCandidate?.externalUrl ?? readerDocument?.pdfSourceUrl);
   const isFocusMode = $derived(layoutMode === "focus");
   const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
@@ -73,6 +81,39 @@
     let unlistenExtraction: (() => void) | undefined;
     let unlistenChatThread: (() => void) | undefined;
     let unlistenMetadata: (() => void) | undefined;
+    let unlistenAcquisition: (() => void) | undefined;
+
+    // RFC 0051: background PDF acquisition progress for discovery opens.
+    listen("reader_pdf_acquisition_progress", (event) => {
+      const payload = event.payload as {
+        sourceId?: string;
+        paperId?: string;
+        status?: string;
+        message?: string;
+        error?: string;
+      };
+      if (payload.paperId !== paper.id) {
+        return;
+      }
+      readerLog("pdf-acquisition-progress", { ...payload });
+      if (payload.status === "running") {
+        acquisitionMessage = payload.message ?? "Fetching PDF…";
+      } else if (payload.status === "ready") {
+        refreshTick += 1;
+      } else if (payload.status === "failed" && readerDocument) {
+        readerDocument = {
+          ...readerDocument,
+          pdfStatus: undefined,
+          pdfError: payload.error ?? payload.message,
+        };
+      }
+    })
+      .then((nextUnlisten) => {
+        unlistenAcquisition = nextUnlisten;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for reader_pdf_acquisition_progress:", error);
+      });
 
     // Applied/edited metadata must refresh the open Reader too, not just the
     // Vault rows (RFC 0049: update every visible surface).
@@ -139,6 +180,7 @@
       unlistenExtraction?.();
       unlistenChatThread?.();
       unlistenMetadata?.();
+      unlistenAcquisition?.();
     };
   });
 
@@ -153,7 +195,11 @@
     isLoadingDoc = true;
     readerLog("document-load-start", { loadId, paperId, refreshTick });
 
-    const loadDocument = activeCandidate ? getDiscoveryReaderDocument(activeCandidate) : getReaderDocument(paperId);
+    const force = forceNextLoad;
+    forceNextLoad = false;
+    const loadDocument = activeCandidate
+      ? getDiscoveryReaderDocument(activeCandidate, force)
+      : getReaderDocument(paperId);
 
     loadDocument
       .then((doc) => {
@@ -243,7 +289,19 @@
   }
 
   function retryDocumentLoad() {
+    // Retry bypasses the acquisition negative cache (RFC 0051).
+    forceNextLoad = true;
     refreshTick += 1;
+  }
+
+  function cancelPdfAcquisition() {
+    const sourceId = readerDocument?.sourceId;
+    if (!sourceId) {
+      return;
+    }
+    cancelDiscoveryPdfAcquisition(sourceId, paper.id).catch((error) => {
+      readerLog("cancel-acquisition-error", { sourceId, error: errorDetail(error) }, "error");
+    });
   }
 
   async function openSourceUrl() {
@@ -379,6 +437,23 @@
                         onSelectPassage={selectPassage}
                         onOpenThread={openThreadFromMark}
                       />
+                    {:else if isAcquiringPdf}
+                      <div class="missing-pdf col">
+                        <div class="label hot">Fetching PDF</div>
+                        <div class="progress-shell" aria-hidden="true">
+                          <div class="progress-bar"></div>
+                        </div>
+                        <p>{acquisitionMessage || "Fetching PDF…"}</p>
+                        <div class="fallback-actions row">
+                          {#if fallbackSourceUrl}
+                            <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open in Browser</button>
+                          {/if}
+                          <button class="btn" type="button" onclick={cancelPdfAcquisition}>Cancel</button>
+                        </div>
+                        {#if fallbackSourceUrl}
+                          <div class="source-line mono-dim">{fallbackSourceUrl}</div>
+                        {/if}
+                      </div>
                     {:else}
                       <div class="missing-pdf col">
                         <div class="label hot">PDF could not be opened automatically</div>

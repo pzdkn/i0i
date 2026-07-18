@@ -58,6 +58,40 @@ impl HttpFetcher for DirectHttpFetcher {
             content_type,
         })
     }
+
+    async fn probe(&self, url: &str) -> AcquisitionResult<bool> {
+        // Range request keeps availability probes cheap: a kilobyte is enough
+        // to sniff `%PDF-`, and servers that ignore Range still stream from
+        // the start, so reading the first chunk stays bounded either way.
+        let response = self
+            .client
+            .get(url)
+            .header("Accept", "application/pdf,text/html,*/*;q=0.8")
+            .header("Range", "bytes=0-1023")
+            .send()
+            .await
+            .map_err(|error| SourceAcquisitionError::Http(error.to_string()))?;
+
+        let status = response.status();
+        let final_url = response.url().to_string();
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SourceAcquisitionError::DirectHttpForbidden(format!(
+                "{status} from {final_url}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(SourceAcquisitionError::Http(format!(
+                "{status} from {final_url}"
+            )));
+        }
+
+        let mut response = response;
+        match response.chunk().await {
+            Ok(Some(chunk)) => Ok(chunk.starts_with(b"%PDF-")),
+            Ok(None) => Ok(false),
+            Err(error) => Err(SourceAcquisitionError::Http(error.to_string())),
+        }
+    }
 }
 
 fn body_snippet(body: &str) -> String {

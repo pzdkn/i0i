@@ -37,7 +37,13 @@
       signals.push("Open access");
     }
 
-    if (candidate.pdfUrl) {
+    if (candidate.pdfAvailability === "verified") {
+      signals.push("PDF verified");
+    } else if (candidate.pdfAvailability === "browser_required") {
+      signals.push("PDF needs browser");
+    } else if (candidate.pdfAvailability === "unavailable") {
+      signals.push("No PDF found");
+    } else if (candidate.pdfUrl) {
       signals.push("PDF available");
     }
 
@@ -157,7 +163,17 @@
         </div>
         <div>
           <dt>pdf</dt>
-          <dd>{selectedCandidate.pdfUrl ? "available" : "not found"}</dd>
+          <dd>
+            {selectedCandidate.pdfAvailability === "verified"
+              ? "verified"
+              : selectedCandidate.pdfAvailability === "browser_required"
+                ? "needs browser"
+                : selectedCandidate.pdfAvailability === "unavailable"
+                  ? "not found"
+                  : selectedCandidate.pdfUrl
+                    ? "checking…"
+                    : "not found"}
+          </dd>
         </div>
       </dl>
       <div class="signals col">

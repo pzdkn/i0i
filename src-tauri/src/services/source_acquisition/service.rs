@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use futures_util::stream::{self, StreamExt};
 use tauri::Manager;
 
+use super::locations::{build_location_plan, PdfLocation, PdfLocationHints};
 use super::types::{
     AcquiredSource, AcquisitionMethod, AcquisitionResult, BrowserPageSnapshot, BrowserRuntime,
     FetchResponse, HttpFetcher, PageInspection, SourceAcquisitionConfig, SourceAcquisitionError,
@@ -12,12 +16,41 @@ use crate::services::source_acquisition::http::DirectHttpFetcher;
 use crate::services::source_acquisition::obscura::{ObscuraBrowserRuntime, ObscuraManager};
 use crate::services::source_acquisition::types::ObscuraConfig;
 
+// RFC 0051: every stage of acquisition is bounded so a bad URL can never hang
+// the Reader. The overall deadline caps the full plan including the browser
+// fallback; per-attempt timeouts keep the hedged loop moving.
+const ACQUIRE_OVERALL_DEADLINE: Duration = Duration::from_secs(60);
+const DIRECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+const HEDGED_IN_FLIGHT: usize = 2;
+const LANDING_CANDIDATE_LIMIT: usize = 5;
+const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(600);
+const PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_LOCATION_LIMIT: usize = 4;
+
+#[derive(Debug, Clone)]
+struct NegativeEntry {
+    at: Instant,
+}
+
+#[derive(Debug, Default, Clone)]
+struct HostStats {
+    successes: u32,
+    failures: u32,
+}
+
 #[derive(Clone)]
 pub struct SourceAcquisitionService {
     config: SourceAcquisitionConfig,
     http: Arc<dyn HttpFetcher>,
     browser: Arc<dyn BrowserRuntime>,
     browser_method: AcquisitionMethod,
+    /// Dedicated client for location resolvers (Unpaywall); short timeout,
+    /// independent from the download client.
+    resolver_client: reqwest::Client,
+    /// URLs that recently failed, so re-opens skip known-dead locations.
+    negative_cache: Arc<Mutex<HashMap<String, NegativeEntry>>>,
+    /// Per-host success/failure counts; hosts that keep failing sink in rank.
+    host_stats: Arc<Mutex<HashMap<String, HostStats>>>,
 }
 
 impl SourceAcquisitionService {
@@ -41,11 +74,18 @@ impl SourceAcquisitionService {
         browser: Arc<dyn BrowserRuntime>,
         browser_method: AcquisitionMethod,
     ) -> Self {
+        let resolver_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             config,
             http,
             browser,
             browser_method,
+            resolver_client,
+            negative_cache: Arc::new(Mutex::new(HashMap::new())),
+            host_stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -55,42 +95,216 @@ impl SourceAcquisitionService {
         landing_page_url: Option<&str>,
         max_bytes: u64,
     ) -> AcquisitionResult<AcquiredSource> {
-        match self.http.fetch(source_url).await {
-            Ok(response) => {
-                match self.pdf_from_response(response, AcquisitionMethod::DirectHttp, max_bytes) {
-                    Ok(source) => return Ok(source),
-                    Err(SourceAcquisitionError::DownloadedBytesNotPdf(_))
-                    | Err(SourceAcquisitionError::BrowserReturnedHtml(_)) => {}
-                    Err(error) => return Err(error),
+        self.acquire_pdf_with_hints(
+            &PdfLocationHints::from_url(source_url, landing_page_url),
+            max_bytes,
+            false,
+        )
+        .await
+    }
+
+    /// Acquire a PDF from every location the hints can resolve (RFC 0051).
+    ///
+    /// Direct downloads are hedged (two in flight, bounded per attempt); the
+    /// browser runs once as a last resort. The whole call is capped by an
+    /// overall deadline so callers can never hang.
+    pub async fn acquire_pdf_with_hints(
+        &self,
+        hints: &PdfLocationHints,
+        max_bytes: u64,
+        force: bool,
+    ) -> AcquisitionResult<AcquiredSource> {
+        match tokio::time::timeout(
+            ACQUIRE_OVERALL_DEADLINE,
+            self.acquire_pdf_inner(hints, max_bytes, force),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(SourceAcquisitionError::Http(format!(
+                "Timed out after {}s fetching PDF for {}",
+                ACQUIRE_OVERALL_DEADLINE.as_secs(),
+                hints
+                    .pdf_url
+                    .as_deref()
+                    .or(hints.doi.as_deref())
+                    .or(hints.arxiv_id.as_deref())
+                    .unwrap_or("unknown source")
+            ))),
+        }
+    }
+
+    async fn acquire_pdf_inner(
+        &self,
+        hints: &PdfLocationHints,
+        max_bytes: u64,
+        force: bool,
+    ) -> AcquisitionResult<AcquiredSource> {
+        let full_plan = build_location_plan(&self.resolver_client, hints).await;
+        let total_locations = full_plan.len();
+        let mut plan = if force {
+            full_plan
+        } else {
+            self.without_recent_failures(full_plan)
+        };
+        self.order_by_host_reliability(&mut plan);
+
+        if plan.is_empty() {
+            if total_locations > 0 {
+                return Err(SourceAcquisitionError::Http(
+                    "All known PDF locations failed recently; use Retry to try again".to_string(),
+                ));
+            }
+            return Err(SourceAcquisitionError::Http(
+                "No PDF locations available for this paper".to_string(),
+            ));
+        }
+
+        let mut last_error: Option<SourceAcquisitionError> = None;
+
+        // Hedged direct attempts: first response whose bytes sniff as a PDF
+        // wins; dropping the stream aborts the losers.
+        let mut attempts = stream::iter(plan.clone().into_iter().map(|location| {
+            let http = Arc::clone(&self.http);
+            async move {
+                let outcome =
+                    tokio::time::timeout(DIRECT_ATTEMPT_TIMEOUT, http.fetch(&location.url)).await;
+                (location, outcome)
+            }
+        }))
+        .buffer_unordered(HEDGED_IN_FLIGHT);
+
+        while let Some((location, outcome)) = attempts.next().await {
+            let error = match outcome {
+                Ok(Ok(response)) => {
+                    match self.pdf_from_response(response, AcquisitionMethod::DirectHttp, max_bytes)
+                    {
+                        Ok(source) => {
+                            eprintln!(
+                                "[source_acquisition] pdf acquired via {} location {}",
+                                location.source, location.url
+                            );
+                            self.record_success(&location.url);
+                            return Ok(source);
+                        }
+                        Err(error) => error,
+                    }
+                }
+                Ok(Err(error)) => error,
+                Err(_) => SourceAcquisitionError::Http(format!(
+                    "Timed out after {}s: {}",
+                    DIRECT_ATTEMPT_TIMEOUT.as_secs(),
+                    location.url
+                )),
+            };
+            self.record_failure(&location.url, &error);
+            last_error = Some(error);
+        }
+        drop(attempts);
+
+        if self.config.browser_fallback == "obscura"
+            && self.config.prefer_browser_for_blocked_sources
+        {
+            // Last resort, one browser fetch on the best-ranked location.
+            if let Some(location) = plan.first() {
+                if let Ok(response) = self.browser_fetch_original(&location.url).await {
+                    match self.pdf_from_response(response, self.browser_method.clone(), max_bytes) {
+                        Ok(source) => {
+                            self.record_success(&location.url);
+                            return Ok(source);
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
                 }
             }
-            Err(error) if !self.config.prefer_browser_for_blocked_sources => return Err(error),
-            Err(error) if self.config.browser_fallback != "obscura" => return Err(error),
-            Err(_) => {}
-        }
 
-        let browser_response = self.browser_fetch_original(source_url).await;
-        match browser_response {
-            Ok(response) => {
-                match self.pdf_from_response(response, self.browser_method.clone(), max_bytes) {
+            if let Some(landing_page_url) = hints.landing_url.as_deref() {
+                match self
+                    .acquire_pdf_from_landing_page(landing_page_url, max_bytes)
+                    .await
+                {
                     Ok(source) => return Ok(source),
-                    Err(SourceAcquisitionError::DownloadedBytesNotPdf(_))
-                    | Err(SourceAcquisitionError::BrowserReturnedHtml(_)) => {}
-                    Err(error) => return Err(error),
+                    Err(error) => last_error = Some(error),
                 }
             }
-            Err(_) => {}
         }
 
-        if let Some(landing_page_url) = landing_page_url {
-            return self
-                .acquire_pdf_from_landing_page(landing_page_url, max_bytes)
-                .await;
+        Err(last_error.unwrap_or_else(|| {
+            SourceAcquisitionError::Http("No PDF locations available".to_string())
+        }))
+    }
+
+    /// Cheaply classify whether a PDF is obtainable for these hints without
+    /// downloading it (RFC 0051 discover-time verification).
+    pub async fn probe_pdf_availability(&self, hints: &PdfLocationHints) -> &'static str {
+        let plan = build_location_plan(&self.resolver_client, hints).await;
+        if plan.is_empty() {
+            return "unavailable";
         }
 
-        Err(SourceAcquisitionError::BrowserReturnedHtml(format!(
-            "Browser fallback did not return a PDF for {source_url}"
-        )))
+        let mut saw_blocked = false;
+        for location in plan.iter().take(PROBE_LOCATION_LIMIT) {
+            match tokio::time::timeout(PROBE_ATTEMPT_TIMEOUT, self.http.probe(&location.url)).await
+            {
+                Ok(Ok(true)) => {
+                    self.record_success(&location.url);
+                    return "verified";
+                }
+                // Served something, just not a PDF: a browser might get past it.
+                Ok(Ok(false)) => saw_blocked = true,
+                Ok(Err(SourceAcquisitionError::DirectHttpForbidden(_))) => saw_blocked = true,
+                _ => {}
+            }
+        }
+
+        if saw_blocked {
+            "browser_required"
+        } else {
+            "unavailable"
+        }
+    }
+
+    fn without_recent_failures(&self, plan: Vec<PdfLocation>) -> Vec<PdfLocation> {
+        let mut cache = self.negative_cache.lock().expect("negative cache lock");
+        cache.retain(|_, entry| entry.at.elapsed() < NEGATIVE_CACHE_TTL);
+        plan.into_iter()
+            .filter(|location| !cache.contains_key(&location.url))
+            .collect()
+    }
+
+    /// Stable-sort by plan rank, demoting hosts with a bad session record.
+    fn order_by_host_reliability(&self, plan: &mut [PdfLocation]) {
+        let stats = self.host_stats.lock().expect("host stats lock");
+        plan.sort_by_key(|location| {
+            let penalty = url_host(&location.url)
+                .and_then(|host| stats.get(&host))
+                .map(|entry| entry.failures.saturating_sub(entry.successes))
+                .unwrap_or(0);
+            (location.rank, penalty)
+        });
+    }
+
+    fn record_success(&self, url: &str) {
+        self.negative_cache
+            .lock()
+            .expect("negative cache lock")
+            .remove(url);
+        if let Some(host) = url_host(url) {
+            let mut stats = self.host_stats.lock().expect("host stats lock");
+            stats.entry(host).or_default().successes += 1;
+        }
+    }
+
+    fn record_failure(&self, url: &str, error: &SourceAcquisitionError) {
+        let _ = error;
+        self.negative_cache
+            .lock()
+            .expect("negative cache lock")
+            .insert(url.to_string(), NegativeEntry { at: Instant::now() });
+        if let Some(host) = url_host(url) {
+            let mut stats = self.host_stats.lock().expect("host stats lock");
+            stats.entry(host).or_default().failures += 1;
+        }
     }
 
     pub async fn debug_fetch_url(&self, url: &str) -> AcquisitionResult<BrowserPageSnapshot> {
@@ -117,7 +331,9 @@ impl SourceAcquisitionService {
         let inspection = self.browser.inspect_page(landing_page_url).await?;
         let candidates = pdf_candidates(&inspection);
         for candidate_url in candidates {
-            if let Ok(response) = self.http.fetch(&candidate_url).await {
+            if let Ok(Ok(response)) =
+                tokio::time::timeout(DIRECT_ATTEMPT_TIMEOUT, self.http.fetch(&candidate_url)).await
+            {
                 if let Ok(source) =
                     self.pdf_from_response(response, AcquisitionMethod::DirectHttp, max_bytes)
                 {
@@ -234,7 +450,17 @@ fn candidate_config_paths(app: &tauri::AppHandle) -> Vec<PathBuf> {
     paths
 }
 
+/// Extract the host from a URL for per-host reliability tracking.
+fn url_host(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_lowercase))
+}
+
 fn pdf_candidates(inspection: &PageInspection) -> Vec<String> {
+    // Network URLs first: the page actually requested them, so they are far
+    // more likely to be the real PDF than an arbitrary link. Capped so a
+    // link-heavy publisher page cannot turn the fallback into a crawl.
     let mut candidates = Vec::new();
     for url in inspection
         .network_urls
@@ -243,13 +469,12 @@ fn pdf_candidates(inspection: &PageInspection) -> Vec<String> {
         .chain(inspection.assets.iter())
     {
         let normalized = url.to_lowercase();
-        if normalized.contains(".pdf")
-            || normalized.contains("/pdf")
-            || normalized.contains("download")
+        if (normalized.contains(".pdf") || normalized.contains("/pdf")) && !candidates.contains(url)
         {
-            if !candidates.contains(url) {
-                candidates.push(url.clone());
-            }
+            candidates.push(url.clone());
+        }
+        if candidates.len() >= LANDING_CANDIDATE_LIMIT {
+            break;
         }
     }
     candidates
@@ -519,5 +744,66 @@ mod tests {
         assert_eq!(snapshot.url, url);
         assert_eq!(snapshot.content_type.as_deref(), Some("text/html"));
         assert!(snapshot.html.is_some());
+    }
+
+    #[tokio::test]
+    async fn rfc0051_arxiv_id_hint_expands_to_constructed_url() {
+        let arxiv_url = "https://arxiv.org/pdf/2309.08600";
+        let (service, _) = service(
+            FakeHttp::new(vec![(arxiv_url, Ok(pdf_response(arxiv_url)))]),
+            FakeBrowser::new(vec![], vec![]),
+        );
+
+        let hints = PdfLocationHints {
+            pdf_url: None,
+            landing_url: None,
+            doi: None,
+            arxiv_id: Some("2309.08600".to_string()),
+        };
+        let acquired = service
+            .acquire_pdf_with_hints(&hints, 10_000, false)
+            .await
+            .expect("arxiv pdf via constructed url");
+
+        assert_eq!(acquired.final_url, arxiv_url);
+        assert_eq!(acquired.method, AcquisitionMethod::DirectHttp);
+    }
+
+    #[tokio::test]
+    async fn rfc0051_negative_cache_skips_recent_failures_until_forced() {
+        let pdf_url = "https://publisher.example/paper.pdf";
+        let (service, _) = service(
+            FakeHttp::new(vec![(
+                pdf_url,
+                Err(SourceAcquisitionError::Http("500".to_string())),
+            )]),
+            FakeBrowser::new(vec![], vec![]),
+        );
+        let hints = PdfLocationHints::from_url(pdf_url, None);
+
+        let first = service.acquire_pdf_with_hints(&hints, 10_000, false).await;
+        assert!(first.is_err(), "first attempt should fail");
+
+        // The URL is now negative-cached: a re-open fails fast without retrying.
+        let second = service.acquire_pdf_with_hints(&hints, 10_000, false).await;
+        assert!(
+            second
+                .expect_err("second attempt should fail")
+                .to_string()
+                .contains("failed recently"),
+            "second attempt should be served from the negative cache"
+        );
+
+        // Force (Reader Retry) bypasses the cache and actually re-fetches;
+        // the fake has consumed its scripted response, so the error is the
+        // fake's default rather than the negative-cache message.
+        let forced = service.acquire_pdf_with_hints(&hints, 10_000, true).await;
+        assert!(
+            !forced
+                .expect_err("forced attempt should fail")
+                .to_string()
+                .contains("failed recently"),
+            "force must bypass the negative cache"
+        );
     }
 }

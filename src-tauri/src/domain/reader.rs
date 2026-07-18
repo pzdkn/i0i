@@ -21,6 +21,10 @@ pub struct DiscoveryReaderCandidate {
     pub abstract_text: Option<String>,
     pub external_url: Option<String>,
     pub pdf_url: Option<String>,
+    #[serde(default)]
+    pub doi: Option<String>,
+    #[serde(default)]
+    pub arxiv_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +125,8 @@ pub struct ReaderDocument {
     pub pdf_local_path: Option<String>,
     pub pdf_source_url: Option<String>,
     pub pdf_error: Option<String>,
+    /// "acquiring" while a background download is in flight (RFC 0051).
+    pub pdf_status: Option<String>,
     pub source_text: String,
     pub pages: Vec<ReaderPage>,
     pub blocks: Vec<ReaderBlock>,
