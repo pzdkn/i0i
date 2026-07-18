@@ -3,7 +3,12 @@
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import PaperList from "$lib/features/vault/PaperList.svelte";
   import VaultInspector from "$lib/features/vault/VaultInspector.svelte";
-  import type { VaultWorkspace } from "$lib/domain/library";
+  import type {
+    MetadataAutofillProgress,
+    MetadataCandidate,
+    PaperMetadataUpdate,
+    VaultWorkspace,
+  } from "$lib/domain/library";
 
   let {
     workspace,
@@ -11,6 +16,9 @@
     onImportPdfs,
     onAutofillMetadata,
     autofillingMetadataPaperIds,
+    metadataAutofillProgressByPaperId = {},
+    onApplyMetadataCandidate,
+    onUpdatePaperMetadata,
     onRemovePaperFromVault,
     onRemovePaperFromLibrary,
   }: {
@@ -19,6 +27,9 @@
     onImportPdfs: (vaultId: string, paths: string[]) => void | Promise<void>;
     onAutofillMetadata: (paperId: string) => void | Promise<void>;
     autofillingMetadataPaperIds: string[];
+    metadataAutofillProgressByPaperId?: Record<string, MetadataAutofillProgress>;
+    onApplyMetadataCandidate: (paperId: string, candidate: MetadataCandidate) => void | Promise<void>;
+    onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
     onRemovePaperFromVault: (vaultId: string, paperId: string) => void;
     onRemovePaperFromLibrary: (paperId: string) => void;
   } = $props();
@@ -64,8 +75,8 @@
     <ResizableSplit
       storageKey="i0i.vault-split"
       panes={[
-        { id: "papers", min: 500, default: 900 },
-        { id: "inspector", min: 280, max: 520, default: 320 },
+        { id: "papers", min: 360, default: 900 },
+        { id: "inspector", min: 220, default: 320 },
       ]}
     >
       {#snippet pane(id: string)}
@@ -115,6 +126,7 @@
               papers={workspace.papers}
               {selectedPaperId}
               {autofillingMetadataPaperIds}
+              {metadataAutofillProgressByPaperId}
               onSelect={(paperId) => (selectedPaperId = paperId)}
               onOpen={(paperId) => {
                 selectedPaperId = paperId;
@@ -126,7 +138,15 @@
             />
           </main>
         {:else}
-          <VaultInspector papers={workspace.papers} {selectedPaper} />
+          <VaultInspector
+            papers={workspace.papers}
+            {selectedPaper}
+            {metadataAutofillProgressByPaperId}
+            {autofillingMetadataPaperIds}
+            {onAutofillMetadata}
+            {onApplyMetadataCandidate}
+            {onUpdatePaperMetadata}
+          />
         {/if}
       {/snippet}
     </ResizableSplit>

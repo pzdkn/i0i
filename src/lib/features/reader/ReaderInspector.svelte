@@ -18,7 +18,13 @@
     type PinnedHighlight,
     type ThreadAnchor,
   } from "$lib/domain/chat";
+  import type {
+    MetadataAutofillProgress,
+    MetadataCandidate,
+    PaperMetadataUpdate,
+  } from "$lib/domain/library";
   import type { ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
+  import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
 
   type InspectorTab = "threads" | "pins" | "meta";
 
@@ -31,6 +37,11 @@
     requestedThreadId,
     isLoadingChat,
     chatError,
+    metadataAutofillProgress,
+    isAutofillingMetadata = false,
+    onAutofillMetadata,
+    onApplyMetadataCandidate,
+    onUpdatePaperMetadata,
     onReloadChat,
     onClearSelection,
     onConsumeRequestedThread,
@@ -43,6 +54,11 @@
     requestedThreadId: string | null;
     isLoadingChat: boolean;
     chatError: string;
+    metadataAutofillProgress?: MetadataAutofillProgress;
+    isAutofillingMetadata?: boolean;
+    onAutofillMetadata?: (paperId: string) => void | Promise<void>;
+    onApplyMetadataCandidate: (paperId: string, candidate: MetadataCandidate) => void | Promise<void>;
+    onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
     onReloadChat: () => void;
     onClearSelection: () => void;
     onConsumeRequestedThread: () => void;
@@ -532,13 +548,25 @@
       </section>
     {:else}
       <section class="metadata">
-        <div class="label hot">Metadata</div>
         <div class="meta-grid">
           <span>id</span><strong>{document.identifier}</strong>
-          <span>venue</span><strong>{document.venue} {document.year}</strong>
           <span>cite</span><strong>{document.citationKey}</strong>
           <span>marks</span><strong>{document.marks.length}</strong>
         </div>
+
+        <MetadataPanel
+          paperId={document.paperId}
+          title={document.title}
+          authors={document.authors}
+          venue={document.venue}
+          year={document.year}
+          tags={document.tags}
+          progress={metadataAutofillProgress}
+          isAutofilling={isAutofillingMetadata}
+          onAutofill={onAutofillMetadata}
+          onApplyCandidate={onApplyMetadataCandidate}
+          onSaveMetadata={onUpdatePaperMetadata}
+        />
       </section>
     {/if}
   </div>
@@ -858,6 +886,9 @@
   }
 
   .metadata {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
     padding-bottom: 14px;
   }
 

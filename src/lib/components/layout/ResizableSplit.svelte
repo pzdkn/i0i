@@ -8,7 +8,7 @@
     default: number;
   };
 
-  type Orientation = "horizontal";
+  type Orientation = "horizontal" | "vertical";
   const HANDLE_SIZE = 6;
 
   let {
@@ -25,9 +25,13 @@
 
   let sizes = $state<number[]>([]);
   let splitElement = $state<HTMLElement | undefined>();
-  let dragState = $state<{ handleIndex: number; startX: number; startSizes: number[] } | null>(null);
+  let dragState = $state<{ handleIndex: number; startPos: number; startSizes: number[] } | null>(null);
 
-  const gridTemplate = $derived(sizes.map((size) => `${size}px`).join(" 6px "));
+  const isVertical = $derived(orientation === "vertical");
+  const gridTemplate = $derived.by(() => {
+    const tracks = sizes.map((size) => `${size}px`).join(" 6px ");
+    return isVertical ? `grid-template-rows: ${tracks};` : `grid-template-columns: ${tracks};`;
+  });
 
   onMount(() => {
     sizes = loadSizes();
@@ -85,8 +89,8 @@
   }
 
   function availableSize() {
-    const width = splitElement?.clientWidth ?? 0;
-    return Math.max(0, width - HANDLE_SIZE * Math.max(0, panes.length - 1));
+    const size = (isVertical ? splitElement?.clientHeight : splitElement?.clientWidth) ?? 0;
+    return Math.max(0, size - HANDLE_SIZE * Math.max(0, panes.length - 1));
   }
 
   function clampSizes(nextSizes: number[]) {
@@ -126,6 +130,13 @@
   function dominantPaneIndex() {
     if (panes.length <= 1) {
       return 0;
+    }
+
+    // The content pane (no max cap) should absorb container growth; capped
+    // panes like inspectors keep their size when the window resizes.
+    const flexIndex = panes.findIndex((item) => item.max === undefined);
+    if (flexIndex >= 0) {
+      return flexIndex;
     }
 
     return panes.length > 2 ? 1 : panes.length - 1;
@@ -176,15 +187,15 @@
     return nextSizes;
   }
 
-  function startDrag(event: PointerEvent, handleIndex: number) {
-    if (orientation !== "horizontal") {
-      return;
-    }
+  function pointerPosition(event: PointerEvent) {
+    return isVertical ? event.clientY : event.clientX;
+  }
 
+  function startDrag(event: PointerEvent, handleIndex: number) {
     event.preventDefault();
     dragState = {
       handleIndex,
-      startX: event.clientX,
+      startPos: pointerPosition(event),
       startSizes: [...sizes],
     };
     window.addEventListener("pointermove", drag);
@@ -198,7 +209,7 @@
 
     const leftIndex = dragState.handleIndex;
     const rightIndex = dragState.handleIndex + 1;
-    const delta = event.clientX - dragState.startX;
+    const delta = pointerPosition(event) - dragState.startPos;
     const nextSizes = [...dragState.startSizes];
 
     nextSizes[leftIndex] = dragState.startSizes[leftIndex] + delta;
@@ -252,12 +263,15 @@
   }
 
   function onHandleKeydown(event: KeyboardEvent, handleIndex: number) {
-    if (event.key === "ArrowLeft") {
+    const shrinkKey = isVertical ? "ArrowUp" : "ArrowLeft";
+    const growKey = isVertical ? "ArrowDown" : "ArrowRight";
+
+    if (event.key === shrinkKey) {
       event.preventDefault();
       nudge(handleIndex, -16);
     }
 
-    if (event.key === "ArrowRight") {
+    if (event.key === growKey) {
       event.preventDefault();
       nudge(handleIndex, 16);
     }
@@ -273,7 +287,8 @@
   bind:this={splitElement}
   class="resizable-split"
   class:dragging={dragState !== null}
-  style={`grid-template-columns: ${gridTemplate};`}
+  class:vertical={isVertical}
+  style={gridTemplate}
 >
   {#each panes as paneConfig, index}
     <section class="split-pane" data-pane={paneConfig.id}>
@@ -286,7 +301,7 @@
         class="split-handle"
         role="separator"
         tabindex="0"
-        aria-orientation="vertical"
+        aria-orientation={isVertical ? "horizontal" : "vertical"}
         aria-label="Resize panels"
         onpointerdown={(event) => startDrag(event, index)}
         ondblclick={reset}
@@ -331,6 +346,21 @@
     inset: 0 2px;
     background: transparent;
     content: "";
+  }
+
+  .vertical .split-handle {
+    width: 100%;
+    min-width: 0;
+    height: 6px;
+    min-height: 6px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    cursor: row-resize;
+  }
+
+  .vertical .split-handle::after {
+    inset: 2px 0;
   }
 
   .split-handle:hover,

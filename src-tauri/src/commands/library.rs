@@ -2,12 +2,13 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::domain::library::{
-    DocumentSource, LibrarySnapshot, LocalPdfImport, LocalPdfImportResult, PaperDraft, VaultDraft,
-    VaultRenameDraft,
+    DocumentSource, LibrarySnapshot, LocalPdfImport, LocalPdfImportResult, MetadataCandidate,
+    PaperDraft, PaperMetadataUpdate, VaultDraft, VaultRenameDraft,
 };
 use crate::pdf_ingestion::PdfDownloadManager;
 use crate::services::metadata_enrichment::MetadataEnrichmentService;
@@ -115,6 +116,51 @@ pub fn autofill_paper_metadata(
 ) -> Result<(), String> {
     metadata_enrichment.queue_paper(paper_id);
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaperMetadataUpdatedEvent {
+    paper_id: String,
+    status: String,
+    error: Option<String>,
+}
+
+fn emit_paper_metadata_updated(app: &tauri::AppHandle, paper_id: &str) {
+    let _ = app.emit(
+        "paper_metadata_updated",
+        PaperMetadataUpdatedEvent {
+            paper_id: paper_id.to_string(),
+            status: "ready".to_string(),
+            error: None,
+        },
+    );
+}
+
+#[tauri::command]
+pub fn apply_paper_metadata_candidate(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, LibraryStore>,
+    paper_id: String,
+    candidate: MetadataCandidate,
+) -> Result<LibrarySnapshot, String> {
+    // User-approved apply: bypass the needs-review gate that protects
+    // worker auto-applies, then notify every open surface (RFC 0049).
+    store.apply_paper_metadata_enrichment_with_policy(&paper_id, &candidate.into(), false)?;
+    emit_paper_metadata_updated(&app, &paper_id);
+    store.get_library()
+}
+
+#[tauri::command]
+pub fn update_paper_metadata(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, LibraryStore>,
+    paper_id: String,
+    update: PaperMetadataUpdate,
+) -> Result<LibrarySnapshot, String> {
+    store.update_paper_metadata(&paper_id, &update)?;
+    emit_paper_metadata_updated(&app, &paper_id);
+    store.get_library()
 }
 
 #[tauri::command]

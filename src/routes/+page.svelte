@@ -14,6 +14,7 @@
   } from "$lib/bridge/research";
   import {
     addPaperToVaults,
+    applyPaperMetadataCandidate,
     autofillPaperMetadata,
     createVault,
     getLibrary,
@@ -22,8 +23,15 @@
     removePaperFromLibrary as removePaperFromLibraryCommand,
     removePaperFromVault,
     renameVault,
+    updatePaperMetadata,
   } from "$lib/bridge/library";
-  import type { LibrarySnapshot, Vault } from "$lib/domain/library";
+  import type {
+    LibrarySnapshot,
+    MetadataAutofillProgress,
+    MetadataCandidate,
+    PaperMetadataUpdate,
+    Vault,
+  } from "$lib/domain/library";
   import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
   import type { DiscoveryReaderCandidate } from "$lib/domain/reader";
@@ -67,6 +75,7 @@
   let selectedPaperId = $state("");
   let selectedReaderPaper = $state<Paper | null>(null);
   let autofillingMetadataPaperIds = $state<string[]>([]);
+  let metadataAutofillProgressByPaperId = $state<Record<string, MetadataAutofillProgress>>({});
   let activeTabId = $state("");
   let tabs = $state<WorkspaceTab[]>([]);
   let readerLayoutMode = $state<"normal" | "focus">("normal");
@@ -151,6 +160,28 @@
         }
       } catch (error) {
         bridgeError = String(error);
+      }
+    })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen<MetadataAutofillProgress>("metadata_autofill_progress", (event) => {
+      metadataAutofillProgressByPaperId = {
+        ...metadataAutofillProgressByPaperId,
+        [event.payload.paperId]: event.payload,
+      };
+      if (["applied", "failed", "no_match", "needs_review"].includes(event.payload.status)) {
+        autofillingMetadataPaperIds = autofillingMetadataPaperIds.filter((paperId) => paperId !== event.payload.paperId);
       }
     })
       .then((nextUnlisten) => {
@@ -548,6 +579,32 @@
     }
   }
 
+  // RFC 0050: applying or manually saving metadata dismisses the review
+  // panel — stale candidates must not linger with live Apply buttons.
+  function clearMetadataAutofillState(paperId: string) {
+    autofillingMetadataPaperIds = autofillingMetadataPaperIds.filter((id) => id !== paperId);
+    const { [paperId]: _cleared, ...rest } = metadataAutofillProgressByPaperId;
+    metadataAutofillProgressByPaperId = rest;
+  }
+
+  async function applyMetadataCandidateForPaper(paperId: string, candidate: MetadataCandidate) {
+    try {
+      const snapshot = await applyPaperMetadataCandidate(paperId, candidate);
+      hydrateLibrary(snapshot);
+      syncPaperMetadata(paperId);
+      clearMetadataAutofillState(paperId);
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
+  async function updatePaperMetadataForPaper(paperId: string, update: PaperMetadataUpdate) {
+    const snapshot = await updatePaperMetadata(paperId, update);
+    hydrateLibrary(snapshot);
+    syncPaperMetadata(paperId);
+    clearMetadataAutofillState(paperId);
+  }
+
   async function createVaultFromExplorer(path: string) {
     try {
       const snapshot = await createVault(path);
@@ -705,6 +762,11 @@
         paper={activePaper}
         candidate={activeReaderCandidate}
         layoutMode="focus"
+        metadataAutofillProgress={metadataAutofillProgressByPaperId[activePaper.id]}
+        isAutofillingMetadata={autofillingMetadataPaperIds.includes(activePaper.id)}
+        onAutofillMetadata={autofillMetadataForPaper}
+        onApplyMetadataCandidate={applyMetadataCandidateForPaper}
+        onUpdatePaperMetadata={updatePaperMetadataForPaper}
         onToggleFocus={exitReaderFocus}
       />
     </section>
@@ -712,8 +774,8 @@
     <ResizableSplit
       storageKey="i0i.main-split"
       panes={[
-        { id: "explorer", min: 240, max: 560, default: 320 },
-        { id: "workspace", min: 640, default: 1040 },
+        { id: "explorer", min: 160, max: 720, default: 320 },
+        { id: "workspace", min: 480, default: 1040 },
       ]}
     >
       {#snippet pane(id: string)}
@@ -735,6 +797,11 @@
                 paper={activePaper}
                 candidate={activeReaderCandidate}
                 layoutMode="normal"
+                metadataAutofillProgress={metadataAutofillProgressByPaperId[activePaper.id]}
+                isAutofillingMetadata={autofillingMetadataPaperIds.includes(activePaper.id)}
+                onAutofillMetadata={autofillMetadataForPaper}
+                onApplyMetadataCandidate={applyMetadataCandidateForPaper}
+                onUpdatePaperMetadata={updatePaperMetadataForPaper}
                 onToggleFocus={enterReaderFocus}
               />
             {:else if activeTab?.kind === "discover"}
@@ -758,6 +825,9 @@
                 onImportPdfs={importPdfsToVault}
                 onAutofillMetadata={autofillMetadataForPaper}
                 {autofillingMetadataPaperIds}
+                {metadataAutofillProgressByPaperId}
+                onApplyMetadataCandidate={applyMetadataCandidateForPaper}
+                onUpdatePaperMetadata={updatePaperMetadataForPaper}
                 onRemovePaperFromVault={removePaperFromActiveVault}
                 onRemovePaperFromLibrary={removePaperFromLibrary}
               />

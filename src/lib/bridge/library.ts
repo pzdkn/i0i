@@ -4,6 +4,8 @@ import type {
   DocumentSource,
   LocalPdfImport,
   LocalPdfImportResult,
+  MetadataCandidate,
+  PaperMetadataUpdate,
   PaperDraft,
   VaultDraft,
   VaultRenameDraft,
@@ -33,6 +35,26 @@ export async function importLocalPdfs(vaultId: string, paths: string[]): Promise
 export async function autofillPaperMetadata(paperId: string): Promise<void> {
   return invoke<void>("autofill_paper_metadata", {
     paperId,
+  });
+}
+
+export async function applyPaperMetadataCandidate(
+  paperId: string,
+  candidate: MetadataCandidate,
+): Promise<LibrarySnapshot> {
+  return invoke<LibrarySnapshot>("apply_paper_metadata_candidate", {
+    paperId,
+    candidate,
+  });
+}
+
+export async function updatePaperMetadata(
+  paperId: string,
+  update: PaperMetadataUpdate,
+): Promise<LibrarySnapshot> {
+  return invoke<LibrarySnapshot>("update_paper_metadata", {
+    paperId,
+    update,
   });
 }
 

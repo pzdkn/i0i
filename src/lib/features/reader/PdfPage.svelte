@@ -18,6 +18,7 @@
     threads,
     selection,
     chatEnabled,
+    scale = 1.15,
     onSelectPassage,
     onOpenThread,
   }: {
@@ -26,6 +27,7 @@
     threads: ChatThreadSummary[];
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
+    scale?: number;
     onSelectPassage: (selection: ReaderTextSelection) => void;
     onOpenThread: (threadId: string) => void;
   } = $props();
@@ -34,7 +36,6 @@
   let pageNumbers = $state<number[]>([]);
   let isLoading = $state(false);
   let error = $state("");
-  let scale = $state(1.15);
   let renderSessionSequence = 0;
 
   // Pinned threads anchored to this PDF source become the on-page highlights.
@@ -99,14 +100,6 @@
     };
   });
 
-  function zoomIn() {
-    scale = Math.min(scale + 0.15, 2.2);
-  }
-
-  function zoomOut() {
-    scale = Math.max(scale - 0.15, 0.65);
-  }
-
   function errorDetail(value: unknown) {
     if (value instanceof Error) {
       return {
@@ -124,12 +117,6 @@
 </script>
 
 <section class="pdf-reader col">
-  <div class="pdf-toolbar row hair-b">
-    <button class="tool" type="button" title="Zoom out" aria-label="Zoom out" onclick={zoomOut}>-</button>
-    <span class="zoom-label">{Math.round(scale * 100)}%</span>
-    <button class="tool" type="button" title="Zoom in" aria-label="Zoom in" onclick={zoomIn}>+</button>
-  </div>
-
   <div class="pdf-scroll">
     {#if isLoading}
       <div class="pdf-state col">
@@ -166,37 +153,6 @@
     min-height: 0;
     flex: 1;
     background: #151515;
-  }
-
-  .pdf-toolbar {
-    height: 34px;
-    flex-shrink: 0;
-    align-items: center;
-    gap: 6px;
-    padding: 0 12px;
-    background: var(--bg-1);
-  }
-
-  .tool {
-    width: 24px;
-    height: 24px;
-    border: 1px solid var(--border-2);
-    background: var(--bg);
-    color: var(--fg-2);
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .tool:hover {
-    border-color: var(--amber-dim);
-    color: var(--amber);
-  }
-
-  .zoom-label {
-    width: 44px;
-    color: var(--fg-3);
-    font-size: 10px;
-    text-align: center;
   }
 
   .pdf-scroll {

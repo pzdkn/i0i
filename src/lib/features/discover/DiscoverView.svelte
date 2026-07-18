@@ -46,8 +46,8 @@
     <ResizableSplit
       storageKey="i0i.discover-split"
       panes={[
-        { id: "feed", min: 460, default: 900 },
-        { id: "inspector", min: 260, max: 520, default: 300 },
+        { id: "feed", min: 320, default: 900 },
+        { id: "inspector", min: 220, default: 300 },
       ]}
     >
       {#snippet pane(id: string)}

@@ -92,6 +92,49 @@ pub struct PaperMetadataEnrichment {
     pub confident: bool,
 }
 
+/// Manual metadata edit payload from the right panel (RFC 0049). `None`
+/// leaves a field untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaperMetadataUpdate {
+    pub title: Option<String>,
+    pub authors: Option<Vec<String>>,
+    pub venue: Option<String>,
+    pub year: Option<i32>,
+    #[serde(rename = "abstract")]
+    pub abstract_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataCandidate {
+    pub id: String,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub venue: Option<String>,
+    pub year: Option<i32>,
+    pub doi: Option<String>,
+    pub arxiv_id: Option<String>,
+    pub abstract_text: Option<String>,
+    pub providers: Vec<String>,
+    pub confidence: f64,
+    pub evidence: Vec<String>,
+}
+
+impl From<MetadataCandidate> for PaperMetadataEnrichment {
+    fn from(candidate: MetadataCandidate) -> Self {
+        Self {
+            title: Some(candidate.title),
+            authors: Some(candidate.authors),
+            venue: candidate.venue,
+            year: candidate.year,
+            citations: None,
+            abstract_text: candidate.abstract_text,
+            confident: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultPaper {

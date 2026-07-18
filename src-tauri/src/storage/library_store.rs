@@ -14,8 +14,8 @@ use crate::domain::chat::{
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
     DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
-    LibrarySnapshot, Paper, PaperDraft, PaperMetadataEnrichment, PaperSourceDraft, Vault,
-    VaultDraft, VaultPaper, VaultRenameDraft,
+    LibrarySnapshot, Paper, PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate,
+    PaperSourceDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
 };
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, Search, SearchCandidate, SearchDraft, SearchRun,
@@ -662,11 +662,23 @@ impl LibraryStore {
         paper_id: &str,
         enrichment: &PaperMetadataEnrichment,
     ) -> StoreResult<Option<Paper>> {
+        self.apply_paper_metadata_enrichment_with_policy(paper_id, enrichment, true)
+    }
+
+    /// `require_needs_review: false` is the user-approved path (Apply button /
+    /// manual edit): the worker's auto-apply still requires the tag so it never
+    /// silently overwrites reviewed metadata, but an explicit user action wins.
+    pub fn apply_paper_metadata_enrichment_with_policy(
+        &self,
+        paper_id: &str,
+        enrichment: &PaperMetadataEnrichment,
+        require_needs_review: bool,
+    ) -> StoreResult<Option<Paper>> {
         let conn = self.open_connection()?;
         let Some(current) = read_paper(&conn, paper_id)? else {
             return Ok(None);
         };
-        if !current.tags.iter().any(|tag| tag == "needs-review") {
+        if require_needs_review && !current.tags.iter().any(|tag| tag == "needs-review") {
             return Ok(None);
         }
 
@@ -730,6 +742,80 @@ impl LibraryStore {
         .map_err(|error| error.to_string())?;
 
         read_paper(&conn, paper_id)
+    }
+
+    /// Manual metadata edit from the right panel (RFC 0049). Only provided
+    /// fields are overwritten; saving clears `needs-review`.
+    pub fn update_paper_metadata(
+        &self,
+        paper_id: &str,
+        update: &PaperMetadataUpdate,
+    ) -> StoreResult<Paper> {
+        let conn = self.open_connection()?;
+        let current =
+            read_paper(&conn, paper_id)?.ok_or_else(|| format!("Paper not found: {paper_id}"))?;
+
+        let title = update
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(&current.title);
+        let authors = update
+            .authors
+            .as_ref()
+            .map(|authors| {
+                authors
+                    .iter()
+                    .map(|author| author.trim().to_string())
+                    .filter(|author| !author.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|authors| !authors.is_empty())
+            .unwrap_or_else(|| current.authors.clone());
+        let venue = update
+            .venue
+            .as_deref()
+            .map(str::trim)
+            .filter(|venue| !venue.is_empty())
+            .unwrap_or(&current.venue);
+        let year = update.year.unwrap_or(current.year);
+        let abstract_text = update
+            .abstract_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .or_else(|| current.abstract_text.clone());
+
+        let mut tags = current.tags.clone();
+        tags.retain(|tag| tag != "needs-review");
+
+        conn.execute(
+            "
+            update papers
+            set title = ?2,
+                authors_json = ?3,
+                venue = ?4,
+                year = ?5,
+                tags_json = ?6,
+                abstract = ?7,
+                updated_at = datetime('now')
+            where id = ?1
+            ",
+            params![
+                paper_id,
+                title,
+                to_json(&authors)?,
+                venue,
+                year,
+                to_json(&tags)?,
+                abstract_text,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        read_paper(&conn, paper_id)?.ok_or_else(|| format!("Paper not found: {paper_id}"))
     }
 
     pub fn create_vault(&self, draft: &VaultDraft) -> StoreResult<LibrarySnapshot> {

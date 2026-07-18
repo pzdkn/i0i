@@ -1,12 +1,28 @@
 <script lang="ts">
+  import type {
+    MetadataAutofillProgress,
+    MetadataCandidate,
+    PaperMetadataUpdate,
+  } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
+  import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
 
   let {
     papers,
     selectedPaper,
+    metadataAutofillProgressByPaperId = {},
+    autofillingMetadataPaperIds = [],
+    onAutofillMetadata,
+    onApplyMetadataCandidate,
+    onUpdatePaperMetadata,
   }: {
     papers: Paper[];
     selectedPaper: Paper | undefined;
+    metadataAutofillProgressByPaperId?: Record<string, MetadataAutofillProgress>;
+    autofillingMetadataPaperIds?: string[];
+    onAutofillMetadata: (paperId: string) => void | Promise<void>;
+    onApplyMetadataCandidate: (paperId: string, candidate: MetadataCandidate) => void | Promise<void>;
+    onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
   } = $props();
 
   const readCount = $derived(papers.filter((paper) => paper.status === "READ").length);
@@ -29,18 +45,25 @@
   </header>
 
   {#if selectedPaper}
-    <section>
-      <div class="label hot">Selected paper</div>
+    <section class="metadata-section">
+      <MetadataPanel
+        paperId={selectedPaper.id}
+        title={selectedPaper.title}
+        authors={selectedPaper.authors}
+        venue={selectedPaper.venue}
+        year={selectedPaper.year}
+        abstractText={selectedPaper.abstract}
+        tags={selectedPaper.tags}
+        progress={metadataAutofillProgressByPaperId[selectedPaper.id]}
+        isAutofilling={autofillingMetadataPaperIds.includes(selectedPaper.id)}
+        onAutofill={onAutofillMetadata}
+        onApplyCandidate={onApplyMetadataCandidate}
+        onSaveMetadata={onUpdatePaperMetadata}
+      />
       <div class="meta">
-        <div><span>authors</span>{selectedPaper.authors.slice(0, 4).join(", ")}</div>
         <div><span>cites</span>{selectedPaper.citations.toLocaleString()}</div>
         <div><span>highlights</span>{selectedPaper.highlightCount}</div>
         <div><span>ann</span>{selectedPaper.annotationCount}</div>
-      </div>
-      <div class="tags row">
-        {#each selectedPaper.tags as tag}
-          <span class="chip">{tag}</span>
-        {/each}
       </div>
     </section>
   {/if}
@@ -115,6 +138,12 @@
     padding: 14px 14px 0;
   }
 
+  .metadata-section {
+    overflow-y: auto;
+    max-height: 55%;
+    flex-shrink: 0;
+  }
+
   .stat-row {
     display: grid;
     grid-template-columns: 64px 1fr 52px;
@@ -142,12 +171,6 @@
 
   .meta span {
     color: var(--fg-3);
-  }
-
-  .tags {
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 10px;
   }
 
   .ask-box {

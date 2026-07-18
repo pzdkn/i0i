@@ -129,6 +129,37 @@ export type LocalPdfImportResult = {
   importedPaperIds: string[];
 };
 
+export type MetadataCandidate = {
+  id: string;
+  title: string;
+  authors: string[];
+  venue?: string;
+  year?: number;
+  doi?: string;
+  arxivId?: string;
+  abstractText?: string;
+  providers: string[];
+  confidence: number;
+  evidence: string[];
+};
+
+/** Manual metadata edit payload (RFC 0049); omitted fields stay untouched. */
+export type PaperMetadataUpdate = {
+  title?: string;
+  authors?: string[];
+  venue?: string;
+  year?: number;
+  abstract?: string;
+};
+
+export type MetadataAutofillProgress = {
+  paperId: string;
+  status: string;
+  stage: string;
+  message: string;
+  candidates: MetadataCandidate[];
+};
+
 export type LibrarySnapshot = {
   vaults: Vault[];
   papers: Paper[];

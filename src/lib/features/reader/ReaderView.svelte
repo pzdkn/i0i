@@ -6,6 +6,11 @@
   import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import type { ChatThreadSummary, PinnedHighlight } from "$lib/domain/chat";
+  import type {
+    MetadataAutofillProgress,
+    MetadataCandidate,
+    PaperMetadataUpdate,
+  } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
   import type { DiscoveryReaderCandidate, ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
   import ReaderFooter from "$lib/features/reader/ReaderFooter.svelte";
@@ -18,11 +23,21 @@
     paper,
     candidate,
     layoutMode = "normal",
+    metadataAutofillProgress,
+    isAutofillingMetadata = false,
+    onAutofillMetadata,
+    onApplyMetadataCandidate,
+    onUpdatePaperMetadata,
     onToggleFocus,
   }: {
     paper: Paper;
     candidate?: DiscoveryReaderCandidate;
     layoutMode?: "normal" | "focus";
+    metadataAutofillProgress?: MetadataAutofillProgress;
+    isAutofillingMetadata?: boolean;
+    onAutofillMetadata?: (paperId: string) => void | Promise<void>;
+    onApplyMetadataCandidate: (paperId: string, candidate: MetadataCandidate) => void | Promise<void>;
+    onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
     onToggleFocus: () => void;
   } = $props();
 
@@ -43,6 +58,7 @@
   let refreshTick = $state(0);
   let documentLoadSequence = 0;
   let focusThreadsMode = $state<"open" | "collapsed">("open");
+  let pdfScale = $state(1.15);
 
   const document = $derived<ReaderDocument | null>(readerDocument);
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
@@ -56,6 +72,22 @@
     let unlistenSource: (() => void) | undefined;
     let unlistenExtraction: (() => void) | undefined;
     let unlistenChatThread: (() => void) | undefined;
+    let unlistenMetadata: (() => void) | undefined;
+
+    // Applied/edited metadata must refresh the open Reader too, not just the
+    // Vault rows (RFC 0049: update every visible surface).
+    listen("paper_metadata_updated", (event) => {
+      const payload = event.payload as { paperId?: string; paper_id?: string };
+      if ((payload.paperId ?? payload.paper_id) === paper.id) {
+        refreshTick += 1;
+      }
+    })
+      .then((nextUnlisten) => {
+        unlistenMetadata = nextUnlisten;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for paper_metadata_updated:", error);
+      });
 
     listen("document_source_updated", (event) => {
       const payload = event.payload as { paperId?: string; paper_id?: string };
@@ -106,6 +138,7 @@
       unlistenSource?.();
       unlistenExtraction?.();
       unlistenChatThread?.();
+      unlistenMetadata?.();
     };
   });
 
@@ -234,6 +267,14 @@
     requestedThreadId = null;
   }
 
+  function zoomIn() {
+    pdfScale = Math.min(pdfScale + 0.15, 2.2);
+  }
+
+  function zoomOut() {
+    pdfScale = Math.max(pdfScale - 0.15, 0.65);
+  }
+
   function toggleThreadsPanel() {
     focusThreadsMode = focusThreadsMode === "open" ? "collapsed" : "open";
   }
@@ -300,51 +341,72 @@
             {/if}
           </div>
         {:else if document}
-          <ReaderHeader
-            {document}
-            {layoutMode}
-            {threadsCollapsed}
-            threadCount={threads.length}
-            pinCount={pins.length}
-            {onToggleFocus}
-            onToggleThreads={toggleThreadsPanel}
-          />
-
-          <div class="reading-surface row">
-            {#if hasCachedPdf}
-              <PdfPage
-                pdfUrl={readerDocument!.pdfLocalPath!}
-                sourceId={document.sourceId}
-                {threads}
-                {selection}
-                {chatEnabled}
-                onSelectPassage={selectPassage}
-                onOpenThread={openThreadFromMark}
-              />
-            {:else}
-              <div class="missing-pdf col">
-                <div class="label hot">PDF could not be opened automatically</div>
-                <p>The publisher may require login, browser verification, or manual access.</p>
-                <div class="fallback-actions row">
-                  {#if fallbackSourceUrl}
-                    <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
-                  {/if}
-                  <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
+          <ResizableSplit
+            orientation="vertical"
+            storageKey="i0i.reader-header-split"
+            panes={[
+              { id: "header", min: 64, max: 320, default: 116 },
+              { id: "content", min: 240, default: 620 },
+            ]}
+          >
+            {#snippet pane(id: string)}
+              {#if id === "header"}
+                <div class="header-pane">
+                  <ReaderHeader
+                    {document}
+                    {layoutMode}
+                    {threadsCollapsed}
+                    threadCount={threads.length}
+                    pinCount={pins.length}
+                    zoomScale={hasCachedPdf ? pdfScale : undefined}
+                    onZoomIn={zoomIn}
+                    onZoomOut={zoomOut}
+                    {onToggleFocus}
+                    onToggleThreads={toggleThreadsPanel}
+                  />
                 </div>
-                {#if fallbackSourceUrl}
-                  <div class="source-line mono-dim">{fallbackSourceUrl}</div>
-                {/if}
-                {#if readerDocument?.pdfError}
-                  <details class="error-details">
-                    <summary>Details</summary>
-                    <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
-                  </details>
-                {/if}
-              </div>
-            {/if}
-          </div>
+              {:else}
+                <div class="reader-content col">
+                  <div class="reading-surface row">
+                    {#if hasCachedPdf}
+                      <PdfPage
+                        pdfUrl={readerDocument!.pdfLocalPath!}
+                        sourceId={document.sourceId}
+                        {threads}
+                        {selection}
+                        {chatEnabled}
+                        scale={pdfScale}
+                        onSelectPassage={selectPassage}
+                        onOpenThread={openThreadFromMark}
+                      />
+                    {:else}
+                      <div class="missing-pdf col">
+                        <div class="label hot">PDF could not be opened automatically</div>
+                        <p>The publisher may require login, browser verification, or manual access.</p>
+                        <div class="fallback-actions row">
+                          {#if fallbackSourceUrl}
+                            <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
+                          {/if}
+                          <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
+                        </div>
+                        {#if fallbackSourceUrl}
+                          <div class="source-line mono-dim">{fallbackSourceUrl}</div>
+                        {/if}
+                        {#if readerDocument?.pdfError}
+                          <details class="error-details">
+                            <summary>Details</summary>
+                            <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
+                          </details>
+                        {/if}
+                      </div>
+                    {/if}
+                  </div>
 
-          <ReaderFooter />
+                  <ReaderFooter />
+                </div>
+              {/if}
+            {/snippet}
+          </ResizableSplit>
         {:else}
           <div class="missing-pdf col">
             <div class="label hot">Document not found</div>
@@ -365,6 +427,11 @@
           {requestedThreadId}
           {isLoadingChat}
           {chatError}
+          {metadataAutofillProgress}
+          {isAutofillingMetadata}
+          {onAutofillMetadata}
+          onApplyMetadataCandidate={onApplyMetadataCandidate}
+          {onUpdatePaperMetadata}
           onReloadChat={reloadChat}
           onClearSelection={clearSelection}
           onConsumeRequestedThread={consumeRequestedThread}
@@ -377,8 +444,8 @@
         <ResizableSplit
           storageKey="i0i.reader-focus-split"
           panes={[
-            { id: "reader", min: 680, default: 1180 },
-            { id: "inspector", min: 300, max: 520, default: 360 },
+            { id: "reader", min: 420, default: 1180 },
+            { id: "inspector", min: 240, default: 360 },
           ]}
         >
           {#snippet pane(id: string)}
@@ -414,10 +481,10 @@
         storageKey="i0i.reader-split"
         panes={document
           ? [
-              { id: "reader", min: 520, default: 980 },
-              { id: "inspector", min: 280, max: 560, default: 340 },
+              { id: "reader", min: 360, default: 980 },
+              { id: "inspector", min: 220, default: 340 },
             ]
-          : [{ id: "reader", min: 520, default: 1200 }]}
+          : [{ id: "reader", min: 360, default: 1200 }]}
       >
         {#snippet pane(id: string)}
           {#if id === "reader"}
@@ -510,6 +577,20 @@
     color: var(--fg-2);
     font-size: 10px;
     font-style: normal;
+  }
+
+  .header-pane {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .reader-content {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
   }
 
   .reading-surface {

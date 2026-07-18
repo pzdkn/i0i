@@ -1,10 +1,12 @@
 <script lang="ts">
+  import type { MetadataAutofillProgress } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
 
   let {
     papers,
     selectedPaperId,
     autofillingMetadataPaperIds,
+    metadataAutofillProgressByPaperId = {},
     onSelect,
     onOpen,
     onAutofillMetadata,
@@ -14,6 +16,7 @@
     papers: Paper[];
     selectedPaperId: string;
     autofillingMetadataPaperIds: string[];
+    metadataAutofillProgressByPaperId?: Record<string, MetadataAutofillProgress>;
     onSelect: (paperId: string) => void;
     onOpen: (paperId: string) => void;
     onAutofillMetadata: (paperId: string) => void | Promise<void>;
@@ -65,6 +68,31 @@
     closeContextMenu();
     onAutofillMetadata(paperId);
   }
+
+  // Compact per-row autofill status chip (RFC 0049); hidden once applied.
+  function autofillChip(paperId: string): string | undefined {
+    if (autofillingMetadataPaperIds.includes(paperId)) {
+      return "autofilling";
+    }
+
+    const progress = metadataAutofillProgressByPaperId[paperId];
+    if (!progress) {
+      return undefined;
+    }
+
+    switch (progress.status) {
+      case "running":
+        return "autofilling";
+      case "needs_review":
+        return `review (${progress.candidates.length})`;
+      case "no_match":
+        return "no match";
+      case "failed":
+        return "failed";
+      default:
+        return undefined;
+    }
+  }
 </script>
 
 <svelte:window onclick={closeContextMenu} onkeydown={handleWindowKeydown} />
@@ -93,7 +121,14 @@
       >
         <span class="year">{paper.year}</span>
         <span class="venue truncate" title={paper.venue}>{paper.venue}</span>
-        <span class="title truncate">{paper.title}</span>
+        <span class="title truncate">
+          {paper.title}
+          {#if autofillChip(paper.id)}
+            <em class="autofill-chip" class:review={autofillChip(paper.id)?.startsWith("review")}>
+              {autofillChip(paper.id)}
+            </em>
+          {/if}
+        </span>
         <span class="authors truncate">
           {paper.authors.slice(0, 2).join(", ")}{paper.authors.length > 2 ? ` +${paper.authors.length - 2}` : ""}
         </span>
@@ -211,6 +246,21 @@
     flex: 1;
     min-width: 120px;
     font-weight: 500;
+  }
+
+  .autofill-chip {
+    margin-left: 6px;
+    border: 1px solid var(--border-2);
+    padding: 0 5px;
+    color: var(--fg-3);
+    font-size: 9px;
+    font-style: normal;
+    text-transform: uppercase;
+  }
+
+  .autofill-chip.review {
+    border-color: var(--amber-dim);
+    color: var(--amber);
   }
 
   .authors {
