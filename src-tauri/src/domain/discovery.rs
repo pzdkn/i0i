@@ -9,6 +9,11 @@ pub enum DiscoveryProviderChoice {
     OpenAlex,
     #[serde(alias = "arXiv")]
     Arxiv,
+    // Provider expansion (RFC 0053). Opt-in; defaults stay OpenAlex + arXiv.
+    #[serde(alias = "europepmc", alias = "europe_pmc")]
+    EuropePmc,
+    #[serde(alias = "core")]
+    Core,
 }
 
 impl DiscoveryProviderChoice {
@@ -19,6 +24,8 @@ impl DiscoveryProviderChoice {
         match raw {
             "open_alex" | "openalex" => Some(Self::OpenAlex),
             "arxiv" | "arXiv" => Some(Self::Arxiv),
+            "europe_pmc" | "europepmc" => Some(Self::EuropePmc),
+            "core" => Some(Self::Core),
             _ => None,
         }
     }
@@ -69,6 +76,10 @@ pub struct DiscoverySearchRequest {
     pub providers: Vec<DiscoveryProviderChoice>,
     #[serde(default)]
     pub open_access: bool,
+    /// When set, drop candidates we have no obtainable PDF/HTML view for
+    /// (RFC 0053). Applied after ranking; default off.
+    #[serde(default)]
+    pub only_viewable: bool,
     /// Structured filters applied at query time (not post-filters). Support is
     /// per-provider and asymmetric: OpenAlex honors all three; arXiv supports
     /// author and category (≈ field) only. See RFC 0037.

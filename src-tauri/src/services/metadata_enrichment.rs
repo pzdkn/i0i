@@ -1162,6 +1162,7 @@ fn provider_request(query: &str, provider: DiscoveryProviderChoice) -> Discovery
         provider,
         providers: vec![provider],
         open_access: false,
+        only_viewable: false,
         venues: Vec::new(),
         authors: Vec::new(),
         fields_of_study: Vec::new(),

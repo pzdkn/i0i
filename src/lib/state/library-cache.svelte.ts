@@ -86,6 +86,7 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     providers: ["open_alex", "arxiv"],
     venue: "",
     openAccess: true,
+    onlyViewable: false,
     status: "idle",
     error: "",
     runTrace: [],

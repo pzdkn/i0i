@@ -182,6 +182,7 @@ mod tests {
             provider: DiscoveryProviderChoice::Arxiv,
             providers: Vec::new(),
             open_access: true,
+            only_viewable: false,
             venues: Vec::new(),
             authors: Vec::new(),
             fields_of_study: Vec::new(),

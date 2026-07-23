@@ -11,7 +11,10 @@ use futures_util::future::join_all;
 
 use super::error::DiscoveryError;
 use super::provider::{DiscoveryProvider, DiscoveryProviderId, ProviderSearchResult};
-use super::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
+use super::providers::{
+    arxiv::ArxivProvider, core::CoreProvider, europe_pmc::EuropePmcProvider,
+    openalex::OpenAlexProvider,
+};
 use crate::domain::discovery::{
     paper_candidate_dedup_key, CandidateMatch, DiscoveryProviderChoice, DiscoverySearchRequest,
     DiscoverySearchResponse, OpenAccessSummary, PaperCandidate,
@@ -28,11 +31,33 @@ const PROVIDER_SCORE_WEIGHT: f64 = 0.35;
 pub struct DiscoveryOrchestrator {
     openalex: OpenAlexProvider,
     arxiv: ArxivProvider,
+    // Provider expansion (RFC 0053). Optional so deep research keeps its
+    // OpenAlex + arXiv set without constructing providers it never queries.
+    europe_pmc: Option<EuropePmcProvider>,
+    core: Option<CoreProvider>,
 }
 
 impl DiscoveryOrchestrator {
     pub fn new(openalex: OpenAlexProvider, arxiv: ArxivProvider) -> Self {
-        Self { openalex, arxiv }
+        Self {
+            openalex,
+            arxiv,
+            europe_pmc: None,
+            core: None,
+        }
+    }
+
+    /// Attach the RFC 0053 expansion providers (Europe PMC + CORE) for the
+    /// quick-search path. CORE is only queried when it reports itself
+    /// configured (API key present).
+    pub fn with_expansion_providers(
+        mut self,
+        europe_pmc: EuropePmcProvider,
+        core: CoreProvider,
+    ) -> Self {
+        self.europe_pmc = Some(europe_pmc);
+        self.core = Some(core);
+        self
     }
 
     pub async fn search(
@@ -40,7 +65,20 @@ impl DiscoveryOrchestrator {
         request: DiscoverySearchRequest,
     ) -> Result<DiscoverySearchResponse, DiscoveryError> {
         let query = validated_query(&request)?;
-        let providers = selected_providers(&request);
+        // Drop providers this orchestrator can't serve — an unattached Europe
+        // PMC/CORE (deep research) or a CORE without an API key. Filtering here
+        // (rather than erroring inside `search_one`) avoids a spurious
+        // `provider_error:core` in the run summary (RFC 0053).
+        let providers: Vec<DiscoveryProviderChoice> = selected_providers(&request)
+            .into_iter()
+            .filter(|&provider| self.provider_available(provider))
+            .collect();
+
+        if providers.is_empty() {
+            return Err(DiscoveryError::new(
+                "No configured providers for this search. Add an API key or enable another provider.",
+            ));
+        }
 
         // Fan out selected providers concurrently (RFC 0044): total latency is
         // ~max(provider latencies) instead of the sum. `join_all` preserves
@@ -69,7 +107,8 @@ impl DiscoveryOrchestrator {
         }
 
         let filters = merged_filters(&results, &errors);
-        let candidates = merge_rank_and_limit(results, &query, request.result_limit);
+        let candidates =
+            merge_rank_and_limit(results, &query, request.result_limit, request.only_viewable);
         let result_count = candidates.len();
 
         Ok(DiscoverySearchResponse {
@@ -91,6 +130,29 @@ impl DiscoveryOrchestrator {
         match provider {
             DiscoveryProviderChoice::OpenAlex => self.openalex.search(&request).await,
             DiscoveryProviderChoice::Arxiv => self.arxiv.search(&request).await,
+            DiscoveryProviderChoice::EuropePmc => match &self.europe_pmc {
+                Some(europe_pmc) => europe_pmc.search(&request).await,
+                None => Err(DiscoveryError::new("Europe PMC provider is not attached.")),
+            },
+            DiscoveryProviderChoice::Core => match &self.core {
+                Some(core) => core.search(&request).await,
+                None => Err(DiscoveryError::new("CORE provider is not attached.")),
+            },
+        }
+    }
+
+    /// Whether this orchestrator can serve the given provider. Europe PMC and
+    /// CORE must be attached (`with_expansion_providers`), and CORE must also
+    /// have a resolvable API key (RFC 0053).
+    fn provider_available(&self, provider: DiscoveryProviderChoice) -> bool {
+        match provider {
+            DiscoveryProviderChoice::OpenAlex | DiscoveryProviderChoice::Arxiv => true,
+            DiscoveryProviderChoice::EuropePmc => self.europe_pmc.is_some(),
+            DiscoveryProviderChoice::Core => self
+                .core
+                .as_ref()
+                .map(CoreProvider::is_configured)
+                .unwrap_or(false),
         }
     }
 }
@@ -99,6 +161,7 @@ pub fn merge_rank_and_limit(
     results: Vec<ProviderSearchResult>,
     query: &str,
     limit: i32,
+    only_viewable: bool,
 ) -> Vec<PaperCandidate> {
     let mut merged: Vec<PaperCandidate> = Vec::new();
     let mut index_by_key: HashMap<String, usize> = HashMap::new();
@@ -115,6 +178,12 @@ pub fn merge_rank_and_limit(
                 merged.push(candidate);
             }
         }
+    }
+
+    // Drop candidates with no obtainable view before ranking, so truncation to
+    // `limit` never spends slots on results the user asked to hide (RFC 0053).
+    if only_viewable {
+        merged.retain(is_viewable);
     }
 
     rank_candidates(merged, query, limit)
@@ -341,19 +410,31 @@ fn recency_score(year: Option<i32>) -> f64 {
     ((year - 2015) as f64 / 10.0).clamp(0.0, 1.0)
 }
 
+/// Viewability tier as a ranking sub-score (RFC 0053):
+/// Viewable (obtainable PDF/constructible arXiv copy) = 1.0, MaybeViewable
+/// (open-access flag but only a landing URL) = 0.6, NotViewable = 0.0.
 fn availability_score(candidate: &PaperCandidate) -> f64 {
-    if candidate.pdf_url.is_some() {
+    if candidate.pdf_url.is_some() || candidate.arxiv_id.is_some() {
         return 1.0;
     }
-    if candidate
+    if is_open_access_flagged(candidate) {
+        return 0.6;
+    }
+    0.0
+}
+
+/// Whether we have any obtainable view for this candidate — used by the
+/// `only_viewable` filter, which drops NotViewable candidates (RFC 0053).
+fn is_viewable(candidate: &PaperCandidate) -> bool {
+    candidate.pdf_url.is_some() || candidate.arxiv_id.is_some() || is_open_access_flagged(candidate)
+}
+
+fn is_open_access_flagged(candidate: &PaperCandidate) -> bool {
+    candidate
         .open_access
         .as_ref()
         .map(|access| access.is_open_access)
         .unwrap_or(false)
-    {
-        return 0.7;
-    }
-    0.0
 }
 
 fn multi_provider_score(candidate: &PaperCandidate) -> f64 {
@@ -385,6 +466,7 @@ mod tests {
             provider: DiscoveryProviderChoice::OpenAlex,
             providers,
             open_access: true,
+            only_viewable: false,
             venues: Vec::new(),
             authors: Vec::new(),
             fields_of_study: Vec::new(),
@@ -462,6 +544,7 @@ mod tests {
             ],
             "diffusion protein",
             25,
+            false,
         );
 
         assert_eq!(ranked.len(), 1);
@@ -507,6 +590,7 @@ mod tests {
             }],
             "diffusion protein",
             25,
+            false,
         );
 
         assert_eq!(ranked[0].title, "Diffusion Protein Design");

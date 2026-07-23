@@ -388,6 +388,7 @@
         provider: workspace.provider,
         providers: selectedProviders(workspace),
         openAccess: workspace.openAccess,
+        onlyViewable: workspace.onlyViewable,
         venues: selectedVenues(workspace),
       });
       applyDiscoverSearchResponse(workspace.id, response);

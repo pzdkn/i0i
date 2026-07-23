@@ -55,6 +55,7 @@ impl RealCandidateSource {
             provider: query.provider.clone(),
             providers: constraints.providers.clone(),
             open_access: constraints.open_access,
+            only_viewable: false,
             venues: constraints.venues.clone(),
             authors: constraints.authors.clone(),
             fields_of_study: constraints.fields_of_study.clone(),

@@ -1,6 +1,11 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { providerDisplayName, type DiscoverWorkspace } from "$lib/domain/discover";
+  import {
+    providerDisplayName,
+    DEFAULT_PROVIDERS,
+    SUPPORTED_PROVIDERS,
+    type DiscoverWorkspace,
+  } from "$lib/domain/discover";
 
   let {
     workspace,
@@ -25,17 +30,25 @@
   const resultLabel = $derived(
     workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
   );
+  const allProvidersSelected = $derived(workspace.providers.length === SUPPORTED_PROVIDERS.length);
   const providerLabel = $derived(
-    workspace.providers.length === 2
+    allProvidersSelected
       ? "All providers"
       : workspace.providers.map(providerDisplayName).join(", ") || providerDisplayName(workspace.provider),
   );
   // arXiv has no citation-count sort.
   const mostCitedDisabled = $derived(workspace.provider === "arxiv");
+  const isDefaultProviders = $derived(
+    workspace.providers.length === DEFAULT_PROVIDERS.length &&
+      DEFAULT_PROVIDERS.every((provider) => workspace.providers.includes(provider)),
+  );
   const nonDefaultFilters = $derived.by(() => {
     const filters: string[] = [];
-    if (workspace.providers.length !== 2) {
+    if (!isDefaultProviders) {
       filters.push(providerLabel);
+    }
+    if (workspace.onlyViewable) {
+      filters.push("openable only");
     }
     if (!workspace.deep && workspace.sortBy !== "relevance") {
       filters.push(sortLabel(workspace.sortBy));
@@ -198,6 +211,24 @@
             />
             <span>arXiv</span>
           </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={workspace.providers.includes("europe_pmc")}
+              disabled={isRunning}
+              onchange={() => toggleProvider("europe_pmc")}
+            />
+            <span>Europe PMC</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={workspace.providers.includes("core")}
+              disabled={isRunning}
+              onchange={() => toggleProvider("core")}
+            />
+            <span>CORE</span>
+          </label>
         </fieldset>
         {#if workspace.deep}
           <label>
@@ -261,6 +292,14 @@
             disabled={isRunning}
           />
           <span>Open access</span>
+        </label>
+        <label class="inline-setting">
+          <input
+            type="checkbox"
+            bind:checked={workspace.onlyViewable}
+            disabled={isRunning}
+          />
+          <span>Only results I can open</span>
         </label>
       </div>
     {/if}

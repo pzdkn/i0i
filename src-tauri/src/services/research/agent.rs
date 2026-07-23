@@ -213,6 +213,8 @@ fn provider_name(provider: &DiscoveryProviderChoice) -> &'static str {
     match provider {
         DiscoveryProviderChoice::OpenAlex => "open_alex",
         DiscoveryProviderChoice::Arxiv => "arxiv",
+        DiscoveryProviderChoice::EuropePmc => "europe_pmc",
+        DiscoveryProviderChoice::Core => "core",
     }
 }
 

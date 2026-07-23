@@ -8,6 +8,13 @@
             "arxiv": {
                 "url": "https://export.arxiv.org/api/query"
             },
+            "europe_pmc": {
+                "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+            },
+            "core": {
+                "url": "https://api.core.ac.uk/v3/search/works",
+                "api_key": "CORE_API_KEY"
+            },
             "semantic_scholar": {
                 "url": "https://api.semanticscholar.org/graph/v1/paper/search",
                 "api_key": "SEMANTIC_SCHOLAR_API_KEY"

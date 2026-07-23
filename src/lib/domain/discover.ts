@@ -37,15 +37,27 @@ export type DiscoverCandidate = {
 
 export type DiscoverSort = "relevance" | "newest" | "most_cited";
 
-export type DiscoveryProviderChoice = "open_alex" | "arxiv";
+export type DiscoveryProviderChoice = "open_alex" | "arxiv" | "europe_pmc" | "core";
 
-// Supported providers (RFC 0044). Semantic Scholar was removed.
-export const SUPPORTED_PROVIDERS: DiscoveryProviderChoice[] = ["open_alex", "arxiv"];
+// Supported providers. OpenAlex + arXiv (RFC 0044); Europe PMC + CORE added
+// opt-in (RFC 0053). Semantic Scholar was removed.
+export const SUPPORTED_PROVIDERS: DiscoveryProviderChoice[] = [
+  "open_alex",
+  "arxiv",
+  "europe_pmc",
+  "core",
+];
+
+// Default provider set. The RFC 0053 providers are opt-in, so a stale/empty
+// provider list falls back to just OpenAlex + arXiv, not the full set.
+export const DEFAULT_PROVIDERS: DiscoveryProviderChoice[] = ["open_alex", "arxiv"];
 
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   open_alex: "OpenAlex",
   openalex: "OpenAlex",
   arxiv: "arXiv",
+  europe_pmc: "Europe PMC",
+  core: "CORE",
 };
 
 export function providerDisplayName(provider: DiscoveryProviderChoice | string): string {
@@ -53,12 +65,12 @@ export function providerDisplayName(provider: DiscoveryProviderChoice | string):
 }
 
 /// Drop stale/removed provider values (e.g. `semantic_scholar` from RFC 0043
-/// state); fall back to the full supported set if nothing valid remains.
+/// state); fall back to the default set if nothing valid remains.
 export function sanitizeProviders(providers: readonly string[]): DiscoveryProviderChoice[] {
   const valid = providers.filter((provider): provider is DiscoveryProviderChoice =>
     (SUPPORTED_PROVIDERS as string[]).includes(provider),
   );
-  return valid.length > 0 ? valid : [...SUPPORTED_PROVIDERS];
+  return valid.length > 0 ? valid : [...DEFAULT_PROVIDERS];
 }
 
 export type DiscoverRunStatus = "idle" | "running" | "completed" | "failed";
@@ -90,6 +102,8 @@ export type DiscoverWorkspace = {
   providers: DiscoveryProviderChoice[];
   venue: string;
   openAccess: boolean;
+  /** Hide results with no obtainable PDF/HTML view (RFC 0053). */
+  onlyViewable: boolean;
   status: DiscoverRunStatus;
   error: string;
   activeRunMode?: DiscoverRunMode;
@@ -117,6 +131,7 @@ export type DiscoverySearchRequest = {
   provider: DiscoveryProviderChoice;
   providers?: DiscoveryProviderChoice[];
   openAccess?: boolean;
+  onlyViewable?: boolean;
   venues?: string[];
 };
 
