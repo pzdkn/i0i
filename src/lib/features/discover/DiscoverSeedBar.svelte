@@ -301,6 +301,16 @@
           />
           <span>Only results I can open</span>
         </label>
+        {#if !workspace.deep}
+          <label class="inline-setting">
+            <input
+              type="checkbox"
+              bind:checked={workspace.expandSearch}
+              disabled={isRunning}
+            />
+            <span>Expand my search</span>
+          </label>
+        {/if}
       </div>
     {/if}
   </form>

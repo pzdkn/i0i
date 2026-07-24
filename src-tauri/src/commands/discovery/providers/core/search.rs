@@ -165,4 +165,24 @@ mod tests {
             "deep learning AND yearPublished>=2020 AND yearPublished<=2024"
         );
     }
+
+    #[tokio::test]
+    #[ignore = "live network + CORE_API_KEY"]
+    async fn live_search_returns_candidates() {
+        let provider = CoreProvider::from_app_config().unwrap();
+        assert!(provider.is_configured(), "CORE_API_KEY must be set");
+        let result = provider.search(&base_request()).await.unwrap();
+        eprintln!("core live candidates: {}", result.candidates.len());
+        assert!(!result.candidates.is_empty());
+        let with_pdf = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.pdf_url.is_some())
+            .count();
+        let sample = &result.candidates[0];
+        eprintln!(
+            "with_pdf={with_pdf} sample: title={:?} year={:?} doi={:?} pdf={:?}",
+            sample.title, sample.year, sample.doi, sample.pdf_url
+        );
+    }
 }

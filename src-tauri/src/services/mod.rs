@@ -1,6 +1,9 @@
 pub mod chat;
+pub mod embedding;
 pub mod llm;
 pub mod metadata_enrichment;
+pub mod query_expansion;
 pub mod reader_service;
 pub mod research;
+pub mod settings;
 pub mod source_acquisition;

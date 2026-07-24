@@ -104,6 +104,8 @@ export type DiscoverWorkspace = {
   openAccess: boolean;
   /** Hide results with no obtainable PDF/HTML view (RFC 0053). */
   onlyViewable: boolean;
+  /** Run cheap-LLM query expansion after literal quick-search results (RFC 0054). */
+  expandSearch: boolean;
   status: DiscoverRunStatus;
   error: string;
   activeRunMode?: DiscoverRunMode;

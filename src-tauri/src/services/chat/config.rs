@@ -4,11 +4,9 @@
 //! the environment, falling back to a repo-local `.env`. A missing key is a
 //! request-time error, never a startup panic.
 
-use std::{env, fs, path::Path};
+use std::{fs, path::Path};
 
 use serde::Deserialize;
-
-use crate::shared::env::read_dotenv_value;
 
 #[derive(Debug, Clone)]
 pub struct ChatConfig {
@@ -39,7 +37,9 @@ impl ChatConfig {
         Ok(Self {
             url: app_config.chat.provider.url,
             api_key_env: app_config.chat.provider.api_key,
-            model: app_config.chat.provider.model,
+            // A user model override (Settings) wins over app.conf.json (RFC 0055).
+            model: crate::services::settings::preference("model.chat")
+                .unwrap_or(app_config.chat.provider.model),
             max_context_chars: app_config.chat.provider.max_context_chars,
             title_model: app_config
                 .chat
@@ -75,14 +75,11 @@ impl ChatConfig {
             );
         }
 
-        env::var(env_key)
-            .ok()
-            .or_else(|| read_dotenv_value(env_key))
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                format!("OpenRouter API key not found. Set {env_key} in the environment or .env.")
-            })
+        crate::services::settings::resolve_secret("secret.openrouter", env_key).ok_or_else(|| {
+            format!(
+                "OpenRouter API key not found. Set it in Settings, or {env_key} in the environment or .env."
+            )
+        })
     }
 }
 

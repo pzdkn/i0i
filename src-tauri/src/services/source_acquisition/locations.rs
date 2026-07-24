@@ -137,15 +137,11 @@ async fn unpaywall_pdf_urls(client: &reqwest::Client, doi: &str) -> Vec<String> 
 }
 
 fn unpaywall_email() -> Option<String> {
-    ["I0I_UNPAYWALL_EMAIL", "IOI_EMAIL", "I0I_CROSSREF_MAILTO"]
+    // User settings (`secret.email`) win; then the historical env-var chain,
+    // each also falling back to `.env` via `resolve_secret` (RFC 0055).
+    ["IOI_EMAIL", "I0I_UNPAYWALL_EMAIL", "I0I_CROSSREF_MAILTO"]
         .into_iter()
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .or_else(|| crate::shared::env::read_dotenv_value(key))
-        })
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .find_map(|env_key| crate::services::settings::resolve_secret("secret.email", env_key))
 }
 
 fn normalized_doi(doi: Option<&str>) -> Option<String> {

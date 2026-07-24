@@ -17,6 +17,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# On by default (RFC 0054): the local ONNX embedding reranker. Pulls the native
+# ONNX Runtime via fastembed and downloads a ~130 MB model on first run. Build
+# with `--no-default-features` to drop it; ranking then uses legacy weights.
+default = ["embeddings"]
+embeddings = ["dep:fastembed"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
@@ -33,3 +40,7 @@ pdfium-render = { version = "0.9.2", default-features = false, features = ["pdfi
 async-trait = "0.1.89"
 tauri-plugin-dialog = "2"
 regex = "1"
+fastembed = { version = "4", optional = true }
+ammonia = "4.1.4"
+scraper = "0.27.0"
+dom_smoothie = "0.18.0"

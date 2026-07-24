@@ -354,12 +354,16 @@ Manual smoke:
   Author names come from the structured `authorList` when present, else the
   flat `authorString`. `isOpenAccess` is a `"Y"/"N"` string; `pubYear` is a
   string — both handled.
-- **CORE** implemented from the v3 `search/works` schema but **not
-  live-verified**: no `CORE_API_KEY` is present in this environment. The
+- **CORE** implemented from the v3 `search/works` schema and, once a
+  `CORE_API_KEY` was added, **live-verified** (2026-07-23): a "deep learning"
+  search returned 25 candidates, all 25 with a direct `downloadUrl` → `pdf_url`
+  (e.g. `https://core.ac.uk/download/611946517.pdf`), titles/years parsed;
+  numeric `id`s and DOI-less repository records handled. Note CORE's API sits
+  behind Cloudflare and rejects some clients by User-Agent (a default Python
+  client got a 1010 block); the adapter's `User-Agent` header passes. The
   adapter resolves its key lazily and the orchestrator skips CORE when the key
-  is absent (`CoreProvider::is_configured()`), so it is inert until a key is
-  added. Wire types are `#[serde(default)]`-tolerant against schema drift. Add
-  `CORE_API_KEY` to `.env` to activate it, then confirm the response shape.
+  is absent (`CoreProvider::is_configured()`), so it stays inert without a key.
+  Wire types are `#[serde(default)]`-tolerant against schema drift.
 - **Viewability** is folded into the existing `availability` sub-score rather
   than a separate enum: Viewable (has `pdf_url` or arXiv id) = 1.0,
   MaybeViewable (open-access flag, landing only) = 0.6, NotViewable = 0.0. The

@@ -1,6 +1,6 @@
 # RFC 0054: Search Relevance Engine — Local Embedding Rerank + Query Expansion
 
-Status: Draft
+Status: Implemented
 Date: 2026-07-23
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first
@@ -183,9 +183,10 @@ sees fast results immediately and a quiet "found N more" refresh a beat later.
 
 ### B3. Opt-in and cost
 
-- A Discover setting **"Expand my search"** (default on for Quick, but a single
-  toggle) controls whether the background expansion fires. Off ⇒ pure literal
-  behavior, zero token cost, identical to today.
+- A Discover setting **"Expand my search"** controls whether the background
+  expansion fires. Off ⇒ pure literal behavior, zero token cost, identical to
+  today. (Shipped **on by default**; toggle off per workspace to avoid the cost
+  — see Implementation Notes.)
 - Cost profile: one small completion per opted-in Quick search; embeddings are
   local and free. Consistent with the project's token-cost discipline —
   expansion is the *only* paid element and it is bounded and cache-guarded.
@@ -295,6 +296,91 @@ Manual smoke:
 - **Weight rebalance regresses some queries.** Mitigation: keep legacy weights
   as the not-ready path and treat the new weights as tunable constants;
   validate on a small fixed query set before defaulting on.
+
+## Implementation Notes (2026-07-23)
+
+Both parts implemented and validated.
+
+**Part A — embedding reranker**
+- Lives in `services/embedding/`. A `TextEmbedder` trait + `EmbeddingReranker`
+  handle + cosine math + score assembly all compile and are unit-tested with a
+  fake bag-of-words embedder **regardless of the feature flag**, so the
+  relevance logic ships even where ONNX can't build.
+- The real model is behind the `embeddings` Cargo feature (`fastembed` 4.x,
+  BGE-small-en-v1.5, ONNX Runtime via `ort`). **The feature builds cleanly
+  here** (~50s cold) and a live `#[ignore]` test confirmed the model loads and
+  ranks a topical match above an unrelated paper. It is **on by default**
+  (`default = ["embeddings"]`), so a normal build pulls ONNX Runtime and
+  downloads the ~130 MB model on first run. Build `--no-default-features` to
+  drop it (verified to still compile); ranking then uses legacy weights.
+- **The ready-mode weights are still a first guess and have not been validated
+  against a fixed query set.** They are live now that the feature is on by
+  default — worth a calibration pass.
+- Ranking shape (per review): `EmbeddingReranker::semantic_scores(query,
+  &candidates) -> Vec<f64>` is async and index-aligned, returning an **empty
+  vec** when not ready. `rank_candidates`/`rank_score` stay pure/sync and take a
+  `&[f64]` slice; a missing/empty score ⇒ legacy weights per candidate. The
+  orchestrator computes scores **after** merge/dedupe/viewability-filter and
+  **before** ranking, in `search_expanded`. Semantic scoring runs on the
+  embedding of *title + first 400 abstract chars*, off-thread via
+  `spawn_blocking`.
+- Ready-mode weights (provider 0.25 / semantic 0.30 / keyword 0.10 / citations
+  0.10 / recency 0.10 / availability 0.10 / multi 0.05) and legacy weights both
+  assert-sum to 1.0. **The weights are a first guess and want validation
+  against a fixed query set before enabling the feature by default.**
+- **Top-N embedding window implemented** (`SEMANTIC_RERANK_WINDOW = 100`): the
+  expand path can produce a few-hundred-candidate union (up to ~4 queries × 4
+  providers), so when the reranker is ready and the set exceeds the window,
+  `search_expanded` keeps the legacy-top-100 (`legacy_top_n`, no annotation)
+  before semantic scoring and final ranking. The dropped tail could not survive
+  truncation to `result_limit` anyway. This bounds embedding cost now that the
+  feature is on by default.
+
+**Part B — progressive query expansion**
+- `services/query_expansion.rs`: `QueryExpander` calls a cheap model (the chat
+  config's `title_model`, else the chat model) via the existing OpenRouter
+  transport, parses a JSON array of 2–3 variants (tolerant of object-wrapping
+  and surrounding prose), dedupes/caps them, and caches by normalized query for
+  the session (empty results cached too). No key / timeout / unparseable reply
+  ⇒ empty ⇒ literal results stand. Live-verified against the real model.
+- Rather than bolt a spawn+event path onto the synchronous `search_papers`
+  command, expansion is a **second command** (`expand_search`) the frontend
+  calls after literal results render. It expands, re-runs the original query
+  plus variants through the orchestrator, and returns the merged, reranked
+  superset. This preserves "literal first, expansion a beat later" without
+  changing the command's execution model.
+- **Cost, stated plainly:** with expansion on, one quick search costs an LLM
+  expansion call plus a re-fan-out of the original query **and** each variant —
+  roughly **5× the provider traffic** of a plain search (1 literal + original +
+  3 variants). That is the architectural price of the second-command design.
+  Expansion is **on by default** (enabled on request); the no-variant
+  short-circuit below keeps the floor cheap, and it can be turned off per
+  workspace via the "Expand my search" toggle (quick-search only).
+- **No-variant short-circuit:** if expansion yields no variants (no key,
+  cached-empty, timeout, unparseable reply), `expand_search` returns an
+  empty-candidate sentinel *without* re-running any search, and the frontend
+  merge no-ops on it. So a no-variant search costs zero extra provider calls —
+  only the one (bounded, cached) LLM attempt.
+- Ranking is always measured against the **original** query; variants only
+  widen recall (`search_expanded` ranks against `request.query`, not the
+  variants).
+- Frontend: `applyDiscoverExpansion` merges the superset in place, **preserving
+  the current selection and per-candidate probe state** so the augmentation
+  doesn't disturb what the user is looking at; it no-ops on the empty sentinel,
+  a changed query, or a newer run.
+
+**Deferred (noted, not blocking)**
+- Deep research keeps legacy ranking — the embedding reranker is not threaded
+  through the `SearchManager` loop (`agent.rs` passes `&[]`). Same pragmatic
+  scoping as RFC 0053's deep-research provider gap.
+- No model-download progress UI yet (A4); with the feature off there's nothing
+  to download, and the startup log reports readiness.
+- Hosted-embedding fallback (`embedding_provider = "remote"`) and the
+  cross-encoder path remain Future Work.
+
+Validation: `cargo test` 213 passed / 0 failed / 2 ignored (feature off);
+`cargo build --features embeddings` clean; live model + live expansion checks
+pass; `pnpm check` 0 errors / 0 warnings; `git diff --check` clean.
 
 ## Future Work
 

@@ -1,5 +1,6 @@
 mod commands;
 mod domain;
+mod html_ingestion;
 mod pdf_extraction;
 mod pdf_ingestion;
 mod services;
@@ -22,6 +23,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Settings store first (RFC 0055): installed as the process-global
+            // handle so every config/key resolver below — including the ones
+            // that read model overrides at construction — sees user overrides.
+            let settings_store = services::settings::SettingsStore::new(&app.handle())
+                .map_err(std::io::Error::other)?;
+            services::settings::init_global(settings_store.clone());
+
             let store = LibraryStore::new(&app.handle()).map_err(std::io::Error::other)?;
             store.init().map_err(std::io::Error::other)?;
             let extraction_config = PdfExtractionConfig::load(&app.handle());
@@ -82,6 +90,23 @@ pub fn run() {
             search_manager
                 .recover_and_queue_startup_runs()
                 .map_err(std::io::Error::other)?;
+            // Embedding reranker (RFC 0054). Disabled unless the `embeddings`
+            // feature is built in; ranking falls back to legacy weights.
+            let embedding_reranker = {
+                let cache_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map(|dir| dir.join("models"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from("models"));
+                services::embedding::build(cache_dir)
+            };
+            eprintln!(
+                "[embedding] reranker ready={}",
+                embedding_reranker.is_ready()
+            );
+            // Query expansion (RFC 0054). Disabled without an OpenRouter key.
+            let query_expander = services::query_expansion::QueryExpander::from_app_config();
+            eprintln!("[query_expansion] ready={}", query_expander.is_ready());
             app.manage(store);
             app.manage(pdf_downloads);
             app.manage(pdf_extractions);
@@ -91,11 +116,20 @@ pub fn run() {
             app.manage(metadata_enrichment);
             app.manage(discovery_providers);
             app.manage(search_manager);
+            app.manage(embedding_reranker);
+            app.manage(query_expander);
+            app.manage(settings_store);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::vault::get_vault_status,
             commands::discovery::search_papers,
+            commands::discovery::expand_search,
+            commands::settings::get_settings,
+            commands::settings::save_setting,
+            commands::settings::clear_setting,
+            commands::settings::test_provider_key,
+            commands::settings::get_reranker_status,
             commands::library::get_library,
             commands::library::add_paper_to_vaults,
             commands::library::import_local_pdfs,

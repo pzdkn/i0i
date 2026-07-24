@@ -4,12 +4,11 @@
 //! resolved lazily at search time (not at construction) so a missing key never
 //! blocks app startup — the orchestrator skips CORE when it is not configured.
 
-use std::{env, fs, path::Path};
+use std::{fs, path::Path};
 
 use serde::Deserialize;
 
 use crate::commands::discovery::error::DiscoveryError;
-use crate::shared::env::read_dotenv_value;
 
 #[derive(Debug, Clone)]
 pub(super) struct CoreConfig {
@@ -40,16 +39,11 @@ impl CoreConfig {
             ));
         }
 
-        env::var(env_key)
-            .ok()
-            .or_else(|| read_dotenv_value(env_key))
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                DiscoveryError::new(format!(
-                    "CORE API key not found. Set {env_key} in the environment or .env."
-                ))
-            })
+        crate::services::settings::resolve_secret("secret.core", env_key).ok_or_else(|| {
+            DiscoveryError::new(format!(
+                "CORE API key not found. Set it in Settings, or {env_key} in the environment or .env."
+            ))
+        })
     }
 }
 

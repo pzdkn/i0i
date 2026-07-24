@@ -70,6 +70,25 @@ function nextDiscoverId() {
   return id;
 }
 
+// Seed values for new Discover workspaces, overridable from Settings → Search
+// (RFC 0055). Loaded once on app start via applyDiscoverDefaults; a new-search
+// bar still overrides these per workspace.
+const discoverDefaults: { resultLimit: 10 | 25 | 50; onlyViewable: boolean; expandSearch: boolean } =
+  {
+    resultLimit: 25,
+    onlyViewable: false,
+    expandSearch: true,
+  };
+
+export function applyDiscoverDefaults(prefs: Record<string, string>) {
+  discoverDefaults.expandSearch = prefs["search.default_expand"] !== "false";
+  discoverDefaults.onlyViewable = prefs["search.default_only_viewable"] === "true";
+  const limit = Number(prefs["search.default_result_limit"]);
+  if (limit === 10 || limit === 25 || limit === 50) {
+    discoverDefaults.resultLimit = limit;
+  }
+}
+
 function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
   return {
     id,
@@ -80,13 +99,16 @@ function makeDiscoverWorkspace(id = nextDiscoverId()): DiscoverWorkspace {
     deepDepth: "standard",
     yearFrom: "",
     yearTo: "",
-    resultLimit: 25,
+    resultLimit: discoverDefaults.resultLimit,
     sortBy: "relevance",
     provider: "open_alex",
     providers: ["open_alex", "arxiv"],
     venue: "",
     openAccess: true,
-    onlyViewable: false,
+    onlyViewable: discoverDefaults.onlyViewable,
+    // Default from Settings → Search (RFC 0054/0055). Expansion costs an LLM
+    // call + extra provider fan-out per search; toggle off per workspace to avoid it.
+    expandSearch: discoverDefaults.expandSearch,
     status: "idle",
     error: "",
     runTrace: [],
@@ -302,6 +324,49 @@ export function applyDiscoverSearchResponse(discoverId: string, response: Discov
   };
   workspace.candidates = response.candidates.map(toDiscoverCandidate);
   workspace.selectedCandidateId = workspace.candidates[0]?.id;
+  markDiscoverOwnership();
+}
+
+/// Merge a query-expansion superset (RFC 0054) into an already-rendered quick
+/// search. No-op if the workspace has moved on to a different/newer query.
+/// Preserves the current selection and per-candidate probe state so the
+/// background augmentation doesn't disturb what the user is already looking at.
+export function applyDiscoverExpansion(
+  discoverId: string,
+  response: DiscoverySearchResponse,
+  originalQuery: string,
+) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  if (!workspace) {
+    return;
+  }
+  // No-op sentinel: an empty expansion (no variants) must never shrink or wipe
+  // the literal results already on screen (RFC 0054).
+  if (response.candidates.length === 0) {
+    return;
+  }
+  // Stale: the user changed the query or started a newer run in the meantime.
+  if (workspace.status !== "completed" || workspace.query.trim() !== originalQuery.trim()) {
+    return;
+  }
+
+  const previousById = new Map(workspace.candidates.map((candidate) => [candidate.id, candidate]));
+  workspace.candidates = response.candidates.map(toDiscoverCandidate).map((candidate) => {
+    const previous = previousById.get(candidate.id);
+    return previous
+      ? { ...candidate, pdfAvailability: previous.pdfAvailability, reviewing: previous.reviewing }
+      : candidate;
+  });
+  if (!workspace.candidates.some((candidate) => candidate.id === workspace.selectedCandidateId)) {
+    workspace.selectedCandidateId = workspace.candidates[0]?.id;
+  }
+  if (workspace.lastRun) {
+    workspace.lastRun = {
+      ...workspace.lastRun,
+      filters: [...response.filters],
+      resultCount: response.resultCount,
+    };
+  }
   markDiscoverOwnership();
 }
 

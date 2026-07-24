@@ -156,7 +156,9 @@ where
     on(Progress::Ranking {
         count: new_candidates.len(),
     });
-    let ranked = rank_candidates(new_candidates, inputs.goal, constraints.target_count)
+    // Deep research keeps legacy ranking for now; wiring the embedding reranker
+    // through the SearchManager loop is a follow-up (RFC 0054 notes).
+    let ranked = rank_candidates(new_candidates, inputs.goal, constraints.target_count, &[])
         .into_iter()
         .enumerate()
         .map(|(index, candidate)| RankedCandidate {

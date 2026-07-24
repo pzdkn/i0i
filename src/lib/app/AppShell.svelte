@@ -12,6 +12,8 @@
     bridgeError = "",
     readerFocusMode = false,
     onSelectMode = () => {},
+    onOpenSettings = () => {},
+    settingsAttention = false,
     children,
   }: {
     activeMode?: string;
@@ -20,6 +22,8 @@
     bridgeError?: string;
     readerFocusMode?: boolean;
     onSelectMode?: (mode: string) => void;
+    onOpenSettings?: () => void;
+    settingsAttention?: boolean;
     children: Snippet;
   } = $props();
 </script>
@@ -28,7 +32,7 @@
   <TitleBar {vaultStatus} {currentPath} />
   <div class="app-body row">
     {#if !readerFocusMode}
-      <ActivityRail active={activeMode} {onSelectMode} />
+      <ActivityRail active={activeMode} {onSelectMode} {onOpenSettings} {settingsAttention} />
     {/if}
     {@render children()}
   </div>

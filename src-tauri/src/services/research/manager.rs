@@ -145,11 +145,15 @@ impl SearchManager {
         self.store
             .set_search_status(search_id, SearchRunStatus::Planning, None, None)?;
 
-        // Build the seams. Provider/LLM config is loaded per run (runs are rare).
+        // Build the seams. Provider/LLM config is loaded per run (runs are rare),
+        // so a `model.planner` override (Settings) applies without restart; it
+        // falls back to the chat model (RFC 0055).
         let chat = ChatConfig::load()?;
         let api_key = chat.resolve_api_key()?;
+        let planner_model = crate::services::settings::preference("model.planner")
+            .unwrap_or_else(|| chat.model.clone());
         let planner =
-            OpenRouterPlanner::new(Client::new(), chat.url.clone(), api_key, chat.model.clone());
+            OpenRouterPlanner::new(Client::new(), chat.url.clone(), api_key, planner_model);
         let source = RealCandidateSource::new(
             OpenAlexProvider::from_app_config().map_err(|e| e.to_string())?,
             ArxivProvider::from_app_config().map_err(|e| e.to_string())?,

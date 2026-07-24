@@ -2,9 +2,11 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import AppShell from "$lib/app/AppShell.svelte";
+  import SettingsDialog from "$lib/features/settings/SettingsDialog.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
-  import { searchPapers } from "$lib/bridge/discovery";
+  import { searchPapers, expandSearch } from "$lib/bridge/discovery";
+  import { getSettings } from "$lib/bridge/settings";
   import {
     createSearch,
     listSearchCandidates,
@@ -57,6 +59,8 @@
     applyDiscoverResearchPreview,
     applyDiscoverResearchCandidates,
     applyDiscoverSearchResponse,
+    applyDiscoverExpansion,
+    applyDiscoverDefaults,
     createDiscoverWorkspace,
     createDiscoverWorkspaceFrom,
     discoverTitleFromQuery,
@@ -73,6 +77,20 @@
 
   let vaultStatus = $state<VaultStatus | null>(null);
   let bridgeError = $state("");
+  let settingsOpen = $state(false);
+  let settingsAttention = $state(false);
+
+  // Load user settings: seed Discover defaults and flag the gear when a required
+  // key (OpenRouter) is unresolved (RFC 0055). Re-run when Settings closes.
+  async function refreshSettingsState() {
+    try {
+      const view = await getSettings();
+      applyDiscoverDefaults(view.prefs);
+      settingsAttention = !view.secrets.find((secret) => secret.name === "openrouter")?.configured;
+    } catch {
+      // Settings are best-effort; defaults stand if the load fails.
+    }
+  }
   let activeVaultId = $state("");
   let selectedPaperId = $state("");
   let selectedReaderPaper = $state<Paper | null>(null);
@@ -126,6 +144,7 @@
     } catch (error) {
       bridgeError = String(error);
     }
+    await refreshSettingsState();
   });
 
   onMount(() => {
@@ -378,23 +397,34 @@
     setDiscoverStatus(workspace.id, "running");
     setDiscoverRunStarted(workspace.id, "shallow");
 
+    const request = {
+      query,
+      yearFrom: parseOptionalYear(workspace.yearFrom),
+      yearTo: parseOptionalYear(workspace.yearTo),
+      resultLimit: Number(workspace.resultLimit),
+      sortBy: workspace.sortBy,
+      provider: workspace.provider,
+      providers: selectedProviders(workspace),
+      openAccess: workspace.openAccess,
+      onlyViewable: workspace.onlyViewable,
+      venues: selectedVenues(workspace),
+    };
+
     try {
-      const response = await searchPapers({
-        query,
-        yearFrom: parseOptionalYear(workspace.yearFrom),
-        yearTo: parseOptionalYear(workspace.yearTo),
-        resultLimit: Number(workspace.resultLimit),
-        sortBy: workspace.sortBy,
-        provider: workspace.provider,
-        providers: selectedProviders(workspace),
-        openAccess: workspace.openAccess,
-        onlyViewable: workspace.onlyViewable,
-        venues: selectedVenues(workspace),
-      });
+      const response = await searchPapers(request);
       applyDiscoverSearchResponse(workspace.id, response);
       const title = discoverTitleFromQuery(query);
       workspace.title = title;
       updateDiscoverTabTitle(workspace.id, title);
+
+      // Progressive expansion (RFC 0054): literal results are on screen; widen
+      // recall in the background and merge the reranked superset when it lands.
+      // Best-effort — failures leave the literal results untouched.
+      if (workspace.expandSearch) {
+        void expandSearch(request)
+          .then((expanded) => applyDiscoverExpansion(workspace.id, expanded, query))
+          .catch(() => {});
+      }
     } catch (error) {
       setDiscoverStatus(workspace.id, "failed", String(error));
     }
@@ -778,7 +808,7 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-<AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} readerFocusMode={isReaderFocusMode} onSelectMode={handleModeSelect}>
+<AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} readerFocusMode={isReaderFocusMode} onSelectMode={handleModeSelect} onOpenSettings={() => (settingsOpen = true)} {settingsAttention}>
   {#if isReaderFocusMode && activePaper}
     <section class="workspace focus-workspace col">
       <ReaderView
@@ -867,6 +897,14 @@
     </ResizableSplit>
   {/if}
 </AppShell>
+
+<SettingsDialog
+  open={settingsOpen}
+  onClose={() => {
+    settingsOpen = false;
+    void refreshSettingsState();
+  }}
+/>
 
 <style>
   .workspace {
