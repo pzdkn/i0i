@@ -53,6 +53,17 @@ pub struct AcquiredSource {
     pub method: AcquisitionMethod,
 }
 
+/// A fetched page ingested into clean, annotatable article HTML (RFC 0056).
+#[derive(Debug, Clone)]
+pub struct AcquiredHtml {
+    pub final_url: String,
+    pub title: Option<String>,
+    /// Sanitized, self-contained article HTML (safe to render).
+    pub clean_html: String,
+    /// Readable plain text (chat context / search).
+    pub source_text: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]

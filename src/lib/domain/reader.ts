@@ -131,6 +131,10 @@ export type ReaderDocument = {
   pdfError?: string;
   /** "acquiring" while a background download is in flight (RFC 0051). */
   pdfStatus?: string;
+  /** What the reader renders: "pdf" (default) or "html" (RFC 0056). */
+  contentKind?: string;
+  /** Source URL for an HTML document's "View original" (RFC 0056). */
+  sourceUrl?: string;
   pages: ReaderPage[];
   blocks: ReaderBlock[];
   spans: ReaderSpan[];

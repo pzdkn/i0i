@@ -6,4 +6,4 @@ pub mod types;
 
 pub use locations::PdfLocationHints;
 pub use service::SourceAcquisitionService;
-pub use types::{BrowserEndpoint, BrowserPageSnapshot};
+pub use types::{AcquiredHtml, BrowserEndpoint, BrowserPageSnapshot};

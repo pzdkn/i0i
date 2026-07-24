@@ -96,6 +96,33 @@ pub async fn probe_discovery_candidate_pdf(
     Ok(availability.to_string())
 }
 
+/// Open an arbitrary URL as an HTML reader document (RFC 0056).
+#[tauri::command]
+pub async fn open_html_document(
+    reader_service: tauri::State<'_, ReaderService>,
+    url: String,
+) -> Result<crate::domain::reader::ReaderDocument, String> {
+    reader_log(format!("open_html_document start url={url}"));
+    let result = reader_service.open_html_document(&url).await;
+    match &result {
+        Ok(document) => reader_log(format!(
+            "open_html_document ok source_id={} title={}",
+            document.source_id, document.title
+        )),
+        Err(error) => reader_log(format!("open_html_document error url={url} error={error}")),
+    }
+    result
+}
+
+/// Serve the sanitized HTML for a cached HTML source id (RFC 0056).
+#[tauri::command]
+pub fn get_reader_html(
+    reader_service: tauri::State<'_, ReaderService>,
+    source_id: String,
+) -> Result<String, String> {
+    reader_service.get_reader_html(&source_id)
+}
+
 /// Read PDF bytes for either a durable or temporary Reader source id.
 #[tauri::command]
 pub fn get_reader_pdf_bytes(

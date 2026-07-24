@@ -11,11 +11,6 @@
 //! No network here (image inlining lives in the acquisition slice), so this is
 //! deterministic and fixture-testable. On extraction failure it falls back to
 //! sanitizing the whole document, which stays readable and annotatable.
-//!
-// Foundation slice of RFC 0056: validated in isolation (see tests). Its
-// consumers — HTML acquisition, storage, and serving — land in the next slice,
-// at which point this allow comes off.
-#![allow(dead_code)]
 
 use ammonia::Builder;
 use dom_smoothie::Readability;

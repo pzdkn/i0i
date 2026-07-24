@@ -146,6 +146,16 @@ export async function getReaderPdfBytes(sourceId: string): Promise<number[]> {
   });
 }
 
+/// Open an arbitrary URL as an HTML reader document (RFC 0056).
+export async function openHtmlDocument(url: string): Promise<ReaderDocument> {
+  return invoke<ReaderDocument>("open_html_document", { url });
+}
+
+/// Serve the sanitized HTML for a cached HTML source (RFC 0056).
+export async function getReaderHtml(sourceId: string): Promise<string> {
+  return invoke<string>("get_reader_html", { sourceId });
+}
+
 export async function extractPaperDocument(paperId: string, sourceId?: string, force = false): Promise<void> {
   return invoke<void>("extract_paper_document", {
     paperId,

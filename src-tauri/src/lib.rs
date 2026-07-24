@@ -148,6 +148,8 @@ pub fn run() {
             commands::reader::cancel_discovery_pdf_acquisition,
             commands::reader::probe_discovery_candidate_pdf,
             commands::reader::get_reader_pdf_bytes,
+            commands::reader::open_html_document,
+            commands::reader::get_reader_html,
             commands::reader::extract_paper_document,
             commands::chat::list_chat_threads,
             commands::chat::get_chat_thread,

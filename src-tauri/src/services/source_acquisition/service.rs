@@ -9,8 +9,9 @@ use tauri::Manager;
 
 use super::locations::{build_location_plan, PdfLocation, PdfLocationHints};
 use super::types::{
-    AcquiredSource, AcquisitionMethod, AcquisitionResult, BrowserPageSnapshot, BrowserRuntime,
-    FetchResponse, HttpFetcher, PageInspection, SourceAcquisitionConfig, SourceAcquisitionError,
+    AcquiredHtml, AcquiredSource, AcquisitionMethod, AcquisitionResult, BrowserPageSnapshot,
+    BrowserRuntime, FetchResponse, HttpFetcher, PageInspection, SourceAcquisitionConfig,
+    SourceAcquisitionError,
 };
 use crate::services::source_acquisition::http::DirectHttpFetcher;
 use crate::services::source_acquisition::obscura::{ObscuraBrowserRuntime, ObscuraManager};
@@ -322,6 +323,70 @@ impl SourceAcquisitionService {
         self.debug_fetch_url(url).await
     }
 
+    /// Fetch a page over direct HTTP and ingest it into clean, annotatable
+    /// article HTML (RFC 0056). Most article HTML needs no browser, so this
+    /// uses the direct fetcher; the reader falls back to "View original" if a
+    /// page turns out to need JS. Remote images are inlined as `data:` URIs so
+    /// the article renders offline under the app's strict CSP.
+    pub async fn acquire_html_page(&self, url: &str) -> AcquisitionResult<AcquiredHtml> {
+        let response = self.http.fetch(url).await?;
+        let raw = String::from_utf8_lossy(&response.bytes);
+        let ingested = crate::html_ingestion::ingest_html(&raw, Some(&response.final_url));
+        let clean_html = self.inline_images(ingested.clean_html).await;
+        Ok(AcquiredHtml {
+            final_url: response.final_url,
+            title: ingested.title,
+            clean_html,
+            source_text: ingested.source_text,
+        })
+    }
+
+    /// Fetch remote `<img src="http…">` images and rewrite them as inlined
+    /// `data:` URIs (RFC 0056), bounded by count and per-image size so the
+    /// cached article stays reasonable. Fetch failures leave the tag as-is.
+    async fn inline_images(&self, html: String) -> String {
+        const MAX_INLINE_IMAGES: usize = 40;
+        const MAX_INLINE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+        use base64::Engine as _;
+
+        let pattern = match regex::Regex::new(r#"src="(https?://[^"]+)""#) {
+            Ok(pattern) => pattern,
+            Err(_) => return html,
+        };
+        let mut urls: Vec<String> = Vec::new();
+        for capture in pattern.captures_iter(&html) {
+            if let Some(url) = capture.get(1) {
+                let url = url.as_str().to_string();
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+            if urls.len() >= MAX_INLINE_IMAGES {
+                break;
+            }
+        }
+
+        let mut result = html;
+        for url in urls {
+            let Ok(response) = self.http.fetch(&url).await else {
+                continue;
+            };
+            if response.bytes.is_empty() || response.bytes.len() > MAX_INLINE_IMAGE_BYTES {
+                continue;
+            }
+            let mime = response
+                .content_type
+                .as_deref()
+                .and_then(|value| value.split(';').next())
+                .filter(|value| value.starts_with("image/"))
+                .unwrap_or("image/*");
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&response.bytes);
+            let data_uri = format!("data:{mime};base64,{encoded}");
+            result = result.replace(&format!("src=\"{url}\""), &format!("src=\"{data_uri}\""));
+        }
+        result
+    }
+
     async fn acquire_pdf_from_landing_page(
         &self,
         landing_page_url: &str,
@@ -603,6 +668,29 @@ mod tests {
             final_url: url.to_string(),
             content_type: Some("text/html".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn rfc0056_acquire_html_page_ingests_clean_article() {
+        let url = "https://example.org/article";
+        let response = FetchResponse {
+            bytes: br#"<html><body><nav>menu</nav><article><h1>Title</h1>
+                <p>A sufficiently long article paragraph about diffusion models and proteins
+                so the readability extractor treats it as real body content worth keeping.</p>
+                </article><script>evil()</script></body></html>"#
+                .to_vec(),
+            final_url: url.to_string(),
+            content_type: Some("text/html".to_string()),
+        };
+        let (service, _) = service(
+            FakeHttp::new(vec![(url, Ok(response))]),
+            FakeBrowser::new(vec![], vec![]),
+        );
+        let acquired = service.acquire_html_page(url).await.expect("html acquired");
+        assert!(acquired.clean_html.contains("article paragraph"));
+        assert!(!acquired.clean_html.contains("<script"));
+        assert!(acquired.source_text.contains("diffusion models"));
+        assert_eq!(acquired.final_url, url);
     }
 
     fn page_snapshot(url: &str, title: &str) -> BrowserPageSnapshot {

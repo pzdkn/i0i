@@ -127,6 +127,12 @@ pub struct ReaderDocument {
     pub pdf_error: Option<String>,
     /// "acquiring" while a background download is in flight (RFC 0051).
     pub pdf_status: Option<String>,
+    /// What the reader should render: "pdf" (default) or "html" (RFC 0056).
+    #[serde(default = "default_content_kind")]
+    pub content_kind: String,
+    /// Source URL for an HTML document's "View original" (RFC 0056).
+    #[serde(default)]
+    pub source_url: Option<String>,
     pub source_text: String,
     pub pages: Vec<ReaderPage>,
     pub blocks: Vec<ReaderBlock>,
@@ -135,4 +141,8 @@ pub struct ReaderDocument {
     pub text_blocks: Vec<ReaderTextBlock>,
     pub paragraphs: Vec<ReaderParagraph>,
     pub marks: Vec<ReaderMark>,
+}
+
+fn default_content_kind() -> String {
+    "pdf".to_string()
 }

@@ -1,6 +1,6 @@
 # RFC 0056: HTML Reader with Annotation and Chat
 
-Status: Draft
+Status: Implemented
 Date: 2026-07-24
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first
@@ -258,6 +258,52 @@ Manual smoke:
 - **Image inlining bloat.** Data-URI inlining can balloon `source.html`.
   Mitigation: per-image size cap and per-document count cap; oversized images
   dropped (alt text kept).
+
+## Implementation Notes (2026-07-24)
+
+Implemented A–F and validated (226 backend tests, `pnpm check` 0/0).
+
+- **Ingestion** (`html_ingestion.rs`): `dom_smoothie` (Readability) + `ammonia`
+  with the **MathML allowlist** — the load-bearing `sanitize_preserves_mathml`
+  test proves `<math>`/`<msup>`/`<mi>`/`display` survive while scripts/handlers
+  are stripped. `source_text` comes from the extractor's text; a fallback
+  sanitizes the whole body.
+- **Offset space is browser-only**, confirmed by tracing the chat path
+  (`context.rs` uses `anchor.selected_text()`; `source_text` is only truncated
+  whole-doc context, never sliced by offset). So the reader owns offsets
+  entirely and the cross-parser risk is moot. `source_text` is chat context /
+  search.
+- **Annotation reuses `ThreadAnchor::TextOffset`** unchanged: `HtmlReader`
+  computes selection offsets by walking the rendered DOM's text nodes and emits
+  the existing `ReaderTextSelection{anchorKind:"text_offset"}`, which
+  `ReaderInspector.anchorFromSelection` already turns into a `textOffset`
+  anchor. No new anchor kind or storage.
+- **Highlights** use the **CSS Custom Highlight API** (`CSS.highlights` +
+  `::highlight()`), so no DOM mutation and re-paint is idempotent. **Clicking a
+  highlight opens its thread** (parity with PDF marks): a plain click resolves
+  its character offset from the collapsed selection and opens the thread whose
+  `TextOffset` span covers it; a drag creates a passage selection.
+- **Acquisition** (`acquire_html_page`): direct HTTP fetch → ingest → **image
+  inlining** as `data:` URIs (bounded: ≤40 images, ≤2 MB each) so articles
+  render offline under CSP. Served via `get_reader_html`; the `ReaderDocument`
+  gains `content_kind` + `source_url`.
+- **Discovery tie-in is pragmatic**: instead of threading provider HTML URLs to
+  pre-classify a "Viewable (HTML)" Discover chip, the reader's missing-PDF panel
+  gains a **"Read as HTML"** button that opens the source URL in-app via
+  `open_html_document`. This also *is* the import-any-URL path (F) — any
+  source URL becomes a readable HTML document. The pre-classified Discover chip
+  is deferred (see below).
+- **Fetched articles are cached to disk** (parity with the discovery-PDF
+  cache): `cache_discovery_html` writes `source.html` plus a `meta.json`
+  sidecar (title / source_text / final_url); a re-open with both present serves
+  from disk without re-fetching.
+
+### Deferred (documented)
+- The **"Viewable (HTML)" Discover chip** (probe/pre-classify at discovery time)
+  — needs provider HTML-URL threading + a probe, like RFC 0053's deferred
+  `locations[]`. "Read as HTML" covers the actual open path in the meantime.
+- A dedicated URL-paste import box (the `open_html_document` command already
+  supports it); block-separator offset normalization (D2).
 
 ## Future Work
 

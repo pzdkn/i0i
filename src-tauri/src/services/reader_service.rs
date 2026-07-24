@@ -12,15 +12,27 @@ use crate::domain::reader::{
     DiscoveryReaderCandidate, ReaderAsset, ReaderBlock, ReaderDocument, ReaderPage,
     ReaderParagraph, ReaderSpan, ReaderTextBlock,
 };
-use crate::services::source_acquisition::{PdfLocationHints, SourceAcquisitionService};
+use crate::services::source_acquisition::{
+    AcquiredHtml, PdfLocationHints, SourceAcquisitionService,
+};
 use crate::storage::library_store::LibraryStore;
 
 const DISCOVERY_PDF_SOURCE_PREFIX: &str = "temp-pdf";
+const DISCOVERY_HTML_SOURCE_PREFIX: &str = "temp-html";
 const DISCOVERY_NO_SOURCE_PREFIX: &str = "temp-meta";
 const READER_MAX_PDF_BYTES: u64 = 104_857_600;
 
 /// Reader-side status values for RFC 0051 background PDF acquisition.
 const PDF_STATUS_ACQUIRING: &str = "acquiring";
+
+/// Sidecar metadata persisted next to a cached HTML `source.html` so a re-open
+/// can rebuild the reader document without re-fetching (RFC 0056).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct HtmlSourceMeta {
+    title: Option<String>,
+    source_text: String,
+    final_url: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,6 +216,90 @@ impl ReaderService {
                 local_path.display()
             )
         })
+    }
+
+    /// Open an arbitrary URL as an HTML reader document (RFC 0056): fetch,
+    /// extract to clean article HTML, cache it, and return a document the reader
+    /// renders in its reading column. Annotation/chat reuse the flow-text
+    /// (`TextOffset`) anchor path.
+    pub async fn open_html_document(&self, url: &str) -> Result<ReaderDocument, String> {
+        let source_id = discovery_html_source_id(url);
+        let acquired = self.cache_discovery_html(&source_id, url).await?;
+        Ok(html_reader_document(source_id, url, acquired))
+    }
+
+    /// Serve the sanitized HTML for a cached HTML source (RFC 0056). The reader
+    /// fetches this after receiving an `html`-kind `ReaderDocument`.
+    pub fn get_reader_html(&self, source_id: &str) -> Result<String, String> {
+        let path = self.discovery_html_path(source_id)?;
+        fs::read_to_string(&path)
+            .map_err(|error| format!("Cached HTML source is missing: {source_id} ({error})"))
+    }
+
+    /// Fetch + ingest a page into clean article HTML and cache it for serving.
+    /// On a cache hit (both `source.html` and its `meta.json` present) the page
+    /// is served from disk without re-fetching — parity with the discovery PDF
+    /// cache (RFC 0056). Returns the ingested result (title / text) for the doc.
+    async fn cache_discovery_html(
+        &self,
+        source_id: &str,
+        url: &str,
+    ) -> Result<AcquiredHtml, String> {
+        let local_path = self.discovery_html_path(source_id)?;
+        let meta_path = html_meta_path(&local_path);
+
+        // Cache hit: reuse the cached article + its metadata.
+        if local_path.is_file() {
+            if let Ok(meta_json) = fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<HtmlSourceMeta>(&meta_json) {
+                    let clean_html = fs::read_to_string(&local_path).unwrap_or_default();
+                    return Ok(AcquiredHtml {
+                        final_url: meta.final_url,
+                        title: meta.title,
+                        clean_html,
+                        source_text: meta.source_text,
+                    });
+                }
+            }
+        }
+
+        let acquired = self
+            .source_acquisition
+            .acquire_html_page(url)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let partial_path = PathBuf::from(format!("{}.part", local_path.display()));
+        fs::write(&partial_path, acquired.clean_html.as_bytes())
+            .map_err(|error| error.to_string())?;
+        fs::rename(&partial_path, &local_path).map_err(|error| error.to_string())?;
+        // Persist metadata so a re-open serves from disk without re-fetching.
+        let meta = HtmlSourceMeta {
+            title: acquired.title.clone(),
+            source_text: acquired.source_text.clone(),
+            final_url: acquired.final_url.clone(),
+        };
+        if let Ok(meta_json) = serde_json::to_string(&meta) {
+            let _ = fs::write(&meta_path, meta_json);
+        }
+        Ok(acquired)
+    }
+
+    /// App-cache path for a cached HTML source (mirrors the discovery-PDF path).
+    fn discovery_html_path(&self, source_id: &str) -> Result<PathBuf, String> {
+        let app_cache_dir = self
+            .app
+            .path()
+            .app_cache_dir()
+            .map_err(|error| error.to_string())?;
+        Ok(app_cache_dir
+            .join("reader")
+            .join("discovery")
+            .join(sanitize_path_component(source_id))
+            .join("source.html"))
     }
 
     /// Promote a discovery-cached PDF into the durable document-source layout.
@@ -413,6 +509,8 @@ impl ReaderService {
             pdf_source_url,
             pdf_error,
             pdf_status: None,
+            content_kind: "pdf".to_string(),
+            source_url: None,
             source_text,
             pages,
             blocks,
@@ -562,6 +660,8 @@ impl ReaderService {
             pdf_source_url: candidate.pdf_url.clone(),
             pdf_error,
             pdf_status,
+            content_kind: "pdf".to_string(),
+            source_url: candidate.external_url.clone(),
             source_text,
             pages: Vec::new(),
             blocks: Vec::new(),
@@ -670,6 +770,55 @@ fn discovery_pdf_source_id(paper_id: &str, pdf_url: &str) -> String {
     let digest = Sha256::digest(pdf_url.as_bytes());
     let suffix = format!("{:x}", digest);
     format!("{DISCOVERY_PDF_SOURCE_PREFIX}:{paper_id}:{}", &suffix[..12])
+}
+
+/// The metadata sidecar path next to a cached `source.html` (RFC 0056).
+fn html_meta_path(html_path: &Path) -> PathBuf {
+    html_path.with_file_name("meta.json")
+}
+
+/// Derive a stable temporary HTML source id from a page URL (RFC 0056).
+fn discovery_html_source_id(url: &str) -> String {
+    let digest = Sha256::digest(url.as_bytes());
+    let suffix = format!("{:x}", digest);
+    format!("{DISCOVERY_HTML_SOURCE_PREFIX}:{}", &suffix[..12])
+}
+
+/// Build an HTML reader document from an ingested page (RFC 0056). It carries no
+/// PDF; the reader renders `content_kind = "html"` via `get_reader_html`, and
+/// selections anchor as flow-text `TextOffset`s over `source_text`.
+fn html_reader_document(source_id: String, url: &str, acquired: AcquiredHtml) -> ReaderDocument {
+    let title = acquired
+        .title
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| url.to_string());
+    ReaderDocument {
+        paper_id: source_id.clone(),
+        source_id,
+        extraction_id: None,
+        annotation_source_id: None,
+        title,
+        authors: Vec::new(),
+        venue: String::new(),
+        year: 0,
+        identifier: url.to_string(),
+        citation_key: String::new(),
+        tags: Vec::new(),
+        pdf_local_path: None,
+        pdf_source_url: None,
+        pdf_error: None,
+        pdf_status: None,
+        content_kind: "html".to_string(),
+        source_url: Some(acquired.final_url),
+        source_text: acquired.source_text,
+        pages: Vec::new(),
+        blocks: Vec::new(),
+        spans: Vec::new(),
+        assets: Vec::new(),
+        text_blocks: Vec::new(),
+        paragraphs: Vec::new(),
+        marks: Vec::new(),
+    }
 }
 
 /// Convert a structured Reader block into the lighter text-block view model.

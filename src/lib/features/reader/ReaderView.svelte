@@ -6,6 +6,7 @@
     cancelDiscoveryPdfAcquisition,
     getDiscoveryReaderDocument,
     getReaderDocument,
+    openHtmlDocument,
   } from "$lib/bridge/library";
   import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
@@ -21,6 +22,7 @@
   import ReaderHeader from "$lib/features/reader/ReaderHeader.svelte";
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
   import PdfPage from "$lib/features/reader/PdfPage.svelte";
+  import HtmlReader from "$lib/features/reader/HtmlReader.svelte";
   import { isPaperInLibrary } from "$lib/state/library-cache.svelte";
 
   let {
@@ -71,6 +73,7 @@
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
   const activeCandidate = $derived(candidate && !chatEnabled ? candidate : undefined);
   const hasCachedPdf = $derived(Boolean(readerDocument?.pdfLocalPath));
+  const isHtml = $derived(readerDocument?.contentKind === "html");
   const isAcquiringPdf = $derived(readerDocument?.pdfStatus === "acquiring");
   const fallbackSourceUrl = $derived(activeCandidate?.externalUrl ?? readerDocument?.pdfSourceUrl);
   const isFocusMode = $derived(layoutMode === "focus");
@@ -316,6 +319,19 @@
     }
   }
 
+  // Read the source URL in-app as extracted HTML (RFC 0056), rather than the
+  // browser. Swaps the current view to the HTML document.
+  async function readAsHtml() {
+    if (!fallbackSourceUrl) {
+      return;
+    }
+    try {
+      readerDocument = await openHtmlDocument(fallbackSourceUrl);
+    } catch (error) {
+      readerLog("read-as-html-error", { url: fallbackSourceUrl, error: errorDetail(error) }, "error");
+    }
+  }
+
   function openThreadFromMark(threadId: string) {
     requestedThreadId = threadId;
     openThreadsPanel();
@@ -426,7 +442,16 @@
               {:else}
                 <div class="reader-content col">
                   <div class="reading-surface row">
-                    {#if hasCachedPdf}
+                    {#if isHtml}
+                      <HtmlReader
+                        sourceId={document.sourceId}
+                        sourceUrl={readerDocument?.sourceUrl}
+                        {threads}
+                        {chatEnabled}
+                        onSelectPassage={selectPassage}
+                        onOpenThread={openThreadFromMark}
+                      />
+                    {:else if hasCachedPdf}
                       <PdfPage
                         pdfUrl={readerDocument!.pdfLocalPath!}
                         sourceId={document.sourceId}
@@ -460,7 +485,8 @@
                         <p>The publisher may require login, browser verification, or manual access.</p>
                         <div class="fallback-actions row">
                           {#if fallbackSourceUrl}
-                            <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
+                            <button class="btn primary" type="button" onclick={() => void readAsHtml()}>Read as HTML</button>
+                            <button class="btn" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
                           {/if}
                           <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
                         </div>
