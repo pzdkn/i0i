@@ -17,6 +17,7 @@ use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::Open
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::research::{candidate_dedup_key, SearchRunStatus};
 use crate::services::chat::config::ChatConfig;
+use crate::services::embedding::EmbeddingReranker;
 use crate::services::research::agent::{self, Progress, RunInputs};
 use crate::services::research::planner::OpenRouterPlanner;
 use crate::services::research::source::RealCandidateSource;
@@ -29,6 +30,10 @@ type Cancellations = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 pub struct SearchManager {
     app: AppHandle,
     store: LibraryStore,
+    /// Local biencoder for semantic ranking (RFC 0057). Cheap to clone
+    /// (`Option<Arc<…>>`); disabled when the model isn't built/available, in
+    /// which case deep research falls back to legacy ranking.
+    reranker: EmbeddingReranker,
     queued_or_active: Arc<Mutex<HashSet<String>>>,
     cancellations: Cancellations,
 }
@@ -62,10 +67,11 @@ struct RunSummary {
 }
 
 impl SearchManager {
-    pub fn new(app: AppHandle, store: LibraryStore) -> Self {
+    pub fn new(app: AppHandle, store: LibraryStore, reranker: EmbeddingReranker) -> Self {
         Self {
             app,
             store,
+            reranker,
             queued_or_active: Arc::new(Mutex::new(HashSet::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -218,7 +224,7 @@ impl SearchManager {
             );
         };
 
-        let outcome = agent::run(&planner, &source, inputs, &cancel, on)
+        let outcome = agent::run(&planner, &source, &self.reranker, inputs, &cancel, on)
             .await
             .map_err(|e| e.to_string())?;
         let query_expansions_json = {

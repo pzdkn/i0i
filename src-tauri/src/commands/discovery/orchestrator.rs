@@ -45,7 +45,16 @@ const SEM_MULTI_PROVIDER_WEIGHT: f64 = 0.05;
 /// this we keep the legacy-top-N as the working window — the tail can't survive
 /// final truncation to `result_limit` anyway — which bounds embedding cost on
 /// the expansion path (up to ~4 queries × 4 providers).
-const SEMANTIC_RERANK_WINDOW: usize = 100;
+pub(crate) const SEMANTIC_RERANK_WINDOW: usize = 100;
+
+/// Deep research drops candidates whose semantic similarity to the goal is below
+/// this cosine before truncation, so famous-but-off-topic papers are removed,
+/// not merely re-sorted down (RFC 0057). Deliberately conservative.
+pub(crate) const SEMANTIC_FLOOR: f64 = 0.30;
+
+/// The floor never empties a run: if fewer than this many candidates clear
+/// `SEMANTIC_FLOOR`, keep the highest-scoring ones instead (RFC 0057).
+pub(crate) const SEMANTIC_MIN_KEEP: usize = 5;
 
 #[derive(Clone)]
 pub struct DiscoveryOrchestrator {
@@ -289,7 +298,11 @@ pub fn merge_rank_and_limit(
 /// Keep the `n` highest-scoring candidates by **legacy** rank score, without
 /// annotating them (they'll be scored again for real by `rank_candidates`).
 /// Used only to bound the semantic-embedding working set (RFC 0054).
-fn legacy_top_n(candidates: Vec<PaperCandidate>, query: &str, n: usize) -> Vec<PaperCandidate> {
+pub(crate) fn legacy_top_n(
+    candidates: Vec<PaperCandidate>,
+    query: &str,
+    n: usize,
+) -> Vec<PaperCandidate> {
     let mut scored: Vec<(f64, PaperCandidate)> = candidates
         .into_iter()
         .map(|candidate| (rank_score(&candidate, query, None), candidate))
@@ -305,6 +318,54 @@ fn legacy_top_n(candidates: Vec<PaperCandidate>, query: &str, n: usize) -> Vec<P
         .take(n)
         .map(|(_, candidate)| candidate)
         .collect()
+}
+
+/// Drop candidates whose semantic similarity to the goal is below
+/// `SEMANTIC_FLOOR`, keeping candidate↔score index alignment for the subsequent
+/// `rank_candidates` call (RFC 0057).
+///
+/// - **No signal ⇒ no-op.** When `semantic_scores` is empty or its length does
+///   not match `candidates` (reranker off/unavailable, or a shape mismatch), the
+///   inputs pass through unchanged — deep research then ranks exactly as before.
+/// - **Never empties a run.** If fewer than `SEMANTIC_MIN_KEEP` candidates clear
+///   the floor, the top scorers are kept instead, so a strict floor can't return
+///   an empty result.
+pub(crate) fn apply_semantic_floor(
+    candidates: Vec<PaperCandidate>,
+    semantic_scores: Vec<f64>,
+) -> (Vec<PaperCandidate>, Vec<f64>) {
+    if candidates.is_empty() || semantic_scores.len() != candidates.len() {
+        return (candidates, semantic_scores);
+    }
+
+    let mut above: Vec<usize> = (0..candidates.len())
+        .filter(|&i| semantic_scores[i] >= SEMANTIC_FLOOR)
+        .collect();
+
+    let min_keep = SEMANTIC_MIN_KEEP.min(candidates.len());
+    if above.len() < min_keep {
+        // Floor too aggressive: keep the top `min_keep` by score, restoring
+        // ascending index order so downstream alignment stays simple.
+        above = (0..candidates.len()).collect();
+        above.sort_by(|&a, &b| {
+            semantic_scores[b]
+                .partial_cmp(&semantic_scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        above.truncate(min_keep);
+        above.sort_unstable();
+    }
+
+    let keep: std::collections::HashSet<usize> = above.into_iter().collect();
+    let mut kept_candidates = Vec::with_capacity(keep.len());
+    let mut kept_scores = Vec::with_capacity(keep.len());
+    for (index, (candidate, score)) in candidates.into_iter().zip(semantic_scores).enumerate() {
+        if keep.contains(&index) {
+            kept_candidates.push(candidate);
+            kept_scores.push(score);
+        }
+    }
+    (kept_candidates, kept_scores)
 }
 
 pub fn rank_candidates(
@@ -814,5 +875,50 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.starts_with("semantic:")));
+    }
+
+    #[test]
+    fn semantic_floor_drops_below_threshold_and_keeps_alignment() {
+        // Six candidates so the min-keep guard (5) doesn't force-keep the loser.
+        let candidates: Vec<PaperCandidate> = (0..6)
+            .map(|i| candidate(&format!("Paper {i}"), Some(&format!("10.1/{i}")), "openalex"))
+            .collect();
+        // Indices 0..5 clear the floor; index 5 is off-topic.
+        let scores = vec![0.9, 0.8, 0.7, 0.6, 0.5, 0.10];
+        let (kept, kept_scores) = apply_semantic_floor(candidates, scores);
+        assert_eq!(kept.len(), 5);
+        assert!(kept.iter().all(|c| c.title != "Paper 5"));
+        // Scores stay index-aligned with the surviving candidates.
+        assert_eq!(kept_scores, vec![0.9, 0.8, 0.7, 0.6, 0.5]);
+    }
+
+    #[test]
+    fn semantic_floor_never_empties_below_min_keep() {
+        // All below the floor: the guard keeps the top SEMANTIC_MIN_KEEP by score.
+        let candidates: Vec<PaperCandidate> = (0..8)
+            .map(|i| candidate(&format!("Paper {i}"), Some(&format!("10.1/{i}")), "openalex"))
+            .collect();
+        let scores = vec![0.01, 0.02, 0.29, 0.28, 0.05, 0.10, 0.15, 0.20];
+        let (kept, kept_scores) = apply_semantic_floor(candidates, scores);
+        assert_eq!(kept.len(), SEMANTIC_MIN_KEEP);
+        // The five highest scores survive (0.29,0.28,0.20,0.15,0.10).
+        let mut sorted = kept_scores.clone();
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert_eq!(sorted, vec![0.29, 0.28, 0.20, 0.15, 0.10]);
+    }
+
+    #[test]
+    fn semantic_floor_is_noop_without_signal() {
+        let candidates = vec![
+            candidate("Paper A", Some("10.1/a"), "openalex"),
+            candidate("Paper B", Some("10.1/b"), "openalex"),
+        ];
+        // Empty scores (reranker off) and mismatched-length scores both pass through.
+        let (kept, scores) = apply_semantic_floor(candidates.clone(), Vec::new());
+        assert_eq!(kept.len(), 2);
+        assert!(scores.is_empty());
+        let (kept2, scores2) = apply_semantic_floor(candidates, vec![0.9]);
+        assert_eq!(kept2.len(), 2);
+        assert_eq!(scores2, vec![0.9]);
     }
 }

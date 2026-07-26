@@ -86,12 +86,10 @@ pub fn run() {
                 discovery_providers.openalex.clone(),
                 discovery_providers.arxiv.clone(),
             );
-            let search_manager = SearchManager::new(app.handle().clone(), store.clone());
-            search_manager
-                .recover_and_queue_startup_runs()
-                .map_err(std::io::Error::other)?;
             // Embedding reranker (RFC 0054). Disabled unless the `embeddings`
-            // feature is built in; ranking falls back to legacy weights.
+            // feature is built in; ranking falls back to legacy weights. Built
+            // before SearchManager so deep research can rank semantically too
+            // (RFC 0057).
             let embedding_reranker = {
                 let cache_dir = app
                     .path()
@@ -104,6 +102,14 @@ pub fn run() {
                 "[embedding] reranker ready={}",
                 embedding_reranker.is_ready()
             );
+            let search_manager = SearchManager::new(
+                app.handle().clone(),
+                store.clone(),
+                embedding_reranker.clone(),
+            );
+            search_manager
+                .recover_and_queue_startup_runs()
+                .map_err(std::io::Error::other)?;
             // Query expansion (RFC 0054). Disabled without an OpenRouter key.
             let query_expander = services::query_expansion::QueryExpander::from_app_config();
             eprintln!("[query_expansion] ready={}", query_expander.is_ready());

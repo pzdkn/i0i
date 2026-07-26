@@ -11,6 +11,17 @@ type LibraryState = {
 // Saved library data comes from Rust/SQLite. This module caches the latest
 // LibrarySnapshot for Svelte views.
 let discoverSequence = 1;
+
+// Discover search defaults (Settings → Search, RFC 0054/0055). Declared before
+// makeDiscoverWorkspace() runs at module init (line below) — it reads these, so
+// a TDZ here would abort the whole module.
+const discoverDefaults: { resultLimit: 10 | 25 | 50; onlyViewable: boolean; expandSearch: boolean } =
+  {
+    resultLimit: 25,
+    onlyViewable: false,
+    expandSearch: true,
+  };
+
 const initialDiscoverWorkspaces = [makeDiscoverWorkspace()];
 
 const library = $state<LibraryState>({
@@ -73,13 +84,6 @@ function nextDiscoverId() {
 // Seed values for new Discover workspaces, overridable from Settings → Search
 // (RFC 0055). Loaded once on app start via applyDiscoverDefaults; a new-search
 // bar still overrides these per workspace.
-const discoverDefaults: { resultLimit: 10 | 25 | 50; onlyViewable: boolean; expandSearch: boolean } =
-  {
-    resultLimit: 25,
-    onlyViewable: false,
-    expandSearch: true,
-  };
-
 export function applyDiscoverDefaults(prefs: Record<string, string>) {
   discoverDefaults.expandSearch = prefs["search.default_expand"] !== "false";
   discoverDefaults.onlyViewable = prefs["search.default_only_viewable"] === "true";

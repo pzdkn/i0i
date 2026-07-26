@@ -10,8 +10,11 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::commands::discovery::orchestrator::rank_candidates;
+use crate::commands::discovery::orchestrator::{
+    apply_semantic_floor, legacy_top_n, rank_candidates, SEMANTIC_RERANK_WINDOW,
+};
 use crate::domain::discovery::{DiscoveryProviderChoice, PaperCandidate};
+use crate::services::embedding::EmbeddingReranker;
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, SearchConstraints, SearchStrategy,
 };
@@ -57,6 +60,7 @@ pub enum Progress {
 pub async fn run<P, S>(
     planner: &P,
     source: &S,
+    reranker: &EmbeddingReranker,
     inputs: RunInputs<'_>,
     cancelled: &AtomicBool,
     mut on: impl FnMut(Progress),
@@ -156,9 +160,19 @@ where
     on(Progress::Ranking {
         count: new_candidates.len(),
     });
-    // Deep research keeps legacy ranking for now; wiring the embedding reranker
-    // through the SearchManager loop is a follow-up (RFC 0054 notes).
-    let ranked = rank_candidates(new_candidates, inputs.goal, constraints.target_count, &[])
+    // Rank by meaning (RFC 0057). Bound the embedding set to the legacy-top-N,
+    // score each candidate's semantic similarity to the goal, drop off-topic
+    // results below the floor, then rank with the semantic-aware weights. When
+    // the reranker is off/unavailable, `semantic_scores` is empty and every step
+    // degrades to today's legacy ranking.
+    let windowed = if reranker.is_ready() && new_candidates.len() > SEMANTIC_RERANK_WINDOW {
+        legacy_top_n(new_candidates, inputs.goal, SEMANTIC_RERANK_WINDOW)
+    } else {
+        new_candidates
+    };
+    let semantic = reranker.semantic_scores(inputs.goal, &windowed).await;
+    let (windowed, semantic) = apply_semantic_floor(windowed, semantic);
+    let ranked = rank_candidates(windowed, inputs.goal, constraints.target_count, &semantic)
         .into_iter()
         .enumerate()
         .map(|(index, candidate)| RankedCandidate {
@@ -224,11 +238,13 @@ fn provider_name(provider: &DiscoveryProviderChoice) -> &'static str {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
 
     use crate::domain::discovery::{CandidateMatch, DiscoveryProviderChoice, PaperCandidate};
     use crate::domain::research::Depth;
+    use crate::services::embedding::TextEmbedder;
     use crate::services::research::planner::{Assessment, Query};
 
     fn candidate(title: &str, doi: &str) -> PaperCandidate {
@@ -384,9 +400,16 @@ mod tests {
             strategy,
             existing_keys: existing,
         };
-        run(planner, source, inputs, cancelled, |_| {})
-            .await
-            .expect("loop ok")
+        run(
+            planner,
+            source,
+            &EmbeddingReranker::disabled(),
+            inputs,
+            cancelled,
+            |_| {},
+        )
+        .await
+        .expect("loop ok")
     }
 
     #[tokio::test]
@@ -435,6 +458,7 @@ mod tests {
         run(
             &planner,
             &source,
+            &EmbeddingReranker::disabled(),
             inputs,
             &AtomicBool::new(false),
             |progress| events.push(progress),
@@ -534,6 +558,7 @@ mod tests {
         let outcome = run(
             &planner,
             &source,
+            &EmbeddingReranker::disabled(),
             inputs,
             &AtomicBool::new(false),
             |progress| {
@@ -567,5 +592,100 @@ mod tests {
         .await;
         assert_eq!(outcome.ranked.len(), 1);
         assert_eq!(outcome.ranked[0].candidate.title, "Beta");
+    }
+
+    /// Deterministic stand-in for the ONNX biencoder: a tiny presence-of-token
+    /// embedding, enough for cosine to tell "distributed LLM training" apart from
+    /// an unrelated image-recognition paper.
+    struct KeywordEmbedder;
+
+    impl TextEmbedder for KeywordEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let lower = text.to_lowercase();
+                    vec![
+                        f32::from(lower.contains("distributed")),
+                        f32::from(lower.contains("language") || lower.contains("llm")),
+                        f32::from(lower.contains("image")),
+                        0.01, // non-zero norm even when nothing matches
+                    ]
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn deep_research_ranks_by_semantic_similarity_to_goal() {
+        // A relevant paper with zero citations vs. a famous, off-topic one.
+        // Legacy ranking would reward the citation count; the biencoder must
+        // lift the on-topic paper to the top instead (RFC 0057).
+        let mut relevant = candidate("Distributed training of large language models", "10/rel");
+        relevant.citation_count = Some(0);
+        let mut famous_offtopic =
+            candidate("Deep residual learning for image recognition", "10/off");
+        famous_offtopic.citation_count = Some(200_000);
+
+        let planner = FakePlanner::new(0);
+        let source = FakeSource {
+            batch: vec![famous_offtopic, relevant],
+        };
+        let reranker = EmbeddingReranker::with_embedder(Arc::new(KeywordEmbedder));
+        let strategy = Depth::Standard.budget();
+        let constraints = constraints(20);
+        let inputs = RunInputs {
+            goal: "distributed training for llms",
+            constraints: &constraints,
+            strategy: &strategy,
+            existing_keys: HashSet::new(),
+        };
+
+        let outcome = run(
+            &planner,
+            &source,
+            &reranker,
+            inputs,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .await
+        .expect("loop ok");
+
+        assert_eq!(
+            outcome.ranked[0].candidate.title,
+            "Distributed training of large language models"
+        );
+        // Every ranked candidate now carries an inspectable semantic score —
+        // the tell that the biencoder ran on the deep-research path.
+        assert!(outcome.ranked.iter().all(|ranked| ranked
+            .candidate
+            .match_summary
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("semantic:"))));
+    }
+
+    #[tokio::test]
+    async fn deep_research_without_reranker_attaches_no_semantic_reason() {
+        // Disabled reranker ⇒ empty scores ⇒ legacy ranking, no semantic reason.
+        let batch = vec![candidate("Alpha", "10/a")];
+        let planner = FakePlanner::new(0);
+        let source = FakeSource { batch };
+        let outcome = run_loop(
+            &planner,
+            &source,
+            &constraints(20),
+            &Depth::Standard.budget(),
+            HashSet::new(),
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(!outcome.ranked[0]
+            .candidate
+            .match_summary
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("semantic:")));
     }
 }
