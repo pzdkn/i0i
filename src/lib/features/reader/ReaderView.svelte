@@ -9,8 +9,10 @@
     openHtmlDocument,
   } from "$lib/bridge/library";
   import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
+  import { createHighlight, listHighlights, recolorHighlight, removeHighlight } from "$lib/bridge/highlight";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import type { ChatThreadSummary, PinnedHighlight } from "$lib/domain/chat";
+  import type { Highlight, HighlightColor, Locator } from "$lib/domain/highlight";
   import type {
     MetadataAutofillProgress,
     MetadataCandidate,
@@ -23,6 +25,8 @@
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
   import PdfPage from "$lib/features/reader/PdfPage.svelte";
   import HtmlReader from "$lib/features/reader/HtmlReader.svelte";
+  import HighlightPopover from "$lib/features/reader/HighlightPopover.svelte";
+  import { findThreadForHighlight, hasExistingHighlight, samePassage } from "$lib/features/reader/highlight-thread-match";
   import { isPaperInLibrary } from "$lib/state/library-cache.svelte";
 
   let {
@@ -53,7 +57,15 @@
   let selection = $state<ReaderTextSelection | null>(null);
   let threads = $state<ChatThreadSummary[]>([]);
   let pins = $state<PinnedHighlight[]>([]);
+  let highlights = $state<Highlight[]>([]);
+  // RFC 0058 Phase 1 (Task 9): the last color picked (swatch or note/ask) is
+  // the sticky default for the next one-click highlight.
+  let stickyColor = $state<HighlightColor>("yellow");
   let requestedThreadId = $state<string | null>(null);
+  // Click-a-highlight popover (RFC 0058 Task 10): which mark's popover is
+  // open, and where to anchor it (viewport coords from the click event).
+  let popoverHighlightId = $state<string | null>(null);
+  let popoverPos = $state<{ x: number; y: number } | null>(null);
   let isLoadingChat = $state(false);
   let chatError = $state("");
   let chatLoadSequence = 0;
@@ -78,6 +90,8 @@
   const fallbackSourceUrl = $derived(activeCandidate?.externalUrl ?? readerDocument?.pdfSourceUrl);
   const isFocusMode = $derived(layoutMode === "focus");
   const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
+  const popoverHighlight = $derived(highlights.find((hl) => hl.id === popoverHighlightId) ?? null);
+  const popoverThread = $derived(popoverHighlight ? findThreadForHighlight(threads, popoverHighlight) : undefined);
 
   onMount(() => {
     let unlistenSource: (() => void) | undefined;
@@ -241,10 +255,13 @@
     selection = null;
     requestedThreadId = null;
     chatError = "";
+    popoverHighlightId = null;
+    popoverPos = null;
 
     if (!chatEnabled) {
       threads = [];
       pins = [];
+      highlights = [];
       isLoadingChat = false;
       return;
     }
@@ -262,13 +279,15 @@
     const loadId = (chatLoadSequence += 1);
     isLoadingChat = true;
     try {
-      const [threadList, pinList] = await Promise.all([
+      const [threadList, pinList, highlightList] = await Promise.all([
         listChatThreads({ kind: "paper", paperId }),
         listPinnedChatEntries({ kind: "paper", paperId }),
+        listHighlights(paperId),
       ]);
       if (paper.id === paperId && loadId === chatLoadSequence) {
         threads = threadList;
         pins = pinList;
+        highlights = highlightList;
       }
     } catch (error) {
       if (paper.id === paperId) {
@@ -289,6 +308,181 @@
   function clearSelection() {
     selection = null;
     window.getSelection()?.removeAllRanges();
+  }
+
+  // Maps the reader's live selection to the Locator the highlight bridge
+  // expects — text-offset for HTML, page rect for PDF (RFC 0058 Phase 1).
+  function locatorFromSelection(sel: ReaderTextSelection): Locator {
+    if (sel.anchorKind === "pdf_rect") {
+      return {
+        kind: "pdfRect",
+        sourceId: sel.sourceId,
+        pageIndex: sel.pageIndex ?? 0,
+        rectsJson: sel.rectsJson ?? "[]",
+      };
+    }
+    return {
+      kind: "textOffset",
+      sourceId: sel.sourceId,
+      startOffset: sel.startOffset,
+      endOffset: sel.endOffset,
+    };
+  }
+
+  // Guards createHighlight calls from both the swatch row and the
+  // note/ask one-gesture path so rapid double-clicks can't create two
+  // highlights for the same passage.
+  let highlightActionInFlight = $state(false);
+
+  // One-click highlight from a swatch: mark the current selection, make that
+  // color sticky, refresh the marks, then clear the selection.
+  async function pickColor(color: HighlightColor) {
+    if (!selection || highlightActionInFlight) {
+      return;
+    }
+    const sel = selection;
+    const locator = locatorFromSelection(sel);
+    // The passage may already be highlighted (e.g. reopened from the rail or
+    // popover, or a race with ensureHighlightForSelection's one-gesture
+    // path) — recolor the existing mark instead of creating a duplicate at
+    // the same locator (RFC 0058 Task 10 / final review fix).
+    const existing = hasExistingHighlight(highlights, locator)
+      ? highlights.find((hl) => samePassage(hl.locator, locator))
+      : undefined;
+    highlightActionInFlight = true;
+    try {
+      if (existing) {
+        await recolorHighlight(existing.id, color);
+      } else {
+        await createHighlight({
+          paperId: paper.id,
+          locator,
+          excerpt: sel.selectedText,
+          color,
+        });
+      }
+      // Only sticks on success — a failed create shouldn't change the
+      // default the user will get on their next attempt. Clear the
+      // selection now (not after the reload below) so the swatch row
+      // disappears immediately — otherwise a second swatch click during
+      // the reload round-trip would still pass the `!selection` guard and
+      // create a second highlight instead of a no-op.
+      stickyColor = color;
+      clearSelection();
+    } catch (error) {
+      readerLog("create-highlight-error", { error: errorDetail(error) }, "error");
+    } finally {
+      highlightActionInFlight = false;
+    }
+    await reloadChat();
+  }
+
+  // One-gesture Note/Ask: called by the inspector right before it turns a
+  // fresh (virtual) selection thread into a real one, so the passage gets
+  // marked with the sticky color alongside the thread (RFC 0058 Phase 1).
+  // Idempotent: Task 10's "add note after the fact" path opens a virtual
+  // thread for a passage that's *already* highlighted (clicked from the
+  // popover or the rail), so a second createHighlight for the same locator
+  // must be skipped rather than producing a duplicate mark.
+  async function ensureHighlightForSelection() {
+    if (!selection || highlightActionInFlight) {
+      return;
+    }
+    const locator = locatorFromSelection(selection);
+    if (hasExistingHighlight(highlights, locator)) {
+      return;
+    }
+    highlightActionInFlight = true;
+    try {
+      await createHighlight({
+        paperId: paper.id,
+        locator,
+        excerpt: selection.selectedText,
+        color: stickyColor,
+      });
+    } catch (error) {
+      readerLog("create-highlight-error", { error: errorDetail(error) }, "error");
+    } finally {
+      highlightActionInFlight = false;
+    }
+  }
+
+  // Click-a-highlight popover (RFC 0058 Task 10).
+  function openHighlightPopover(highlightId: string, x: number, y: number) {
+    popoverHighlightId = highlightId;
+    popoverPos = {
+      x: Math.max(8, Math.min(x, window.innerWidth - 232)),
+      y: Math.min(y, window.innerHeight - 170),
+    };
+  }
+
+  function closeHighlightPopover() {
+    popoverHighlightId = null;
+    popoverPos = null;
+  }
+
+  async function recolorPopoverHighlight(color: HighlightColor) {
+    if (!popoverHighlight) {
+      return;
+    }
+    try {
+      await recolorHighlight(popoverHighlight.id, color);
+      await reloadChat();
+    } catch (error) {
+      readerLog("recolor-highlight-error", { error: errorDetail(error) }, "error");
+    }
+  }
+
+  async function removePopoverHighlight() {
+    if (!popoverHighlight) {
+      return;
+    }
+    try {
+      await removeHighlight(popoverHighlight.id);
+      closeHighlightPopover();
+      await reloadChat();
+    } catch (error) {
+      readerLog("remove-highlight-error", { error: errorDetail(error) }, "error");
+    }
+  }
+
+  // Add note / Ask on a highlight after the fact: reuse its existing thread
+  // if it has one, otherwise open a fresh note/ask composer on the same
+  // locator via the normal selection flow (RFC 0058 Task 10).
+  function openHighlightThread(highlight: Highlight) {
+    const thread = findThreadForHighlight(threads, highlight);
+    closeHighlightPopover();
+    if (thread) {
+      openThreadFromMark(thread.id);
+      return;
+    }
+    const locator = highlight.locator;
+    const sel: ReaderTextSelection =
+      locator.kind === "pdfRect"
+        ? {
+            sourceId: locator.sourceId,
+            startOffset: 0,
+            endOffset: highlight.excerpt.length,
+            selectedText: highlight.excerpt,
+            anchorKind: "pdf_rect",
+            pageIndex: locator.pageIndex,
+            rectsJson: locator.rectsJson,
+          }
+        : {
+            sourceId: locator.sourceId,
+            startOffset: locator.startOffset,
+            endOffset: locator.endOffset,
+            selectedText: highlight.excerpt,
+            anchorKind: "text_offset",
+          };
+    selectPassage(sel);
+  }
+
+  function openHighlightById(highlightId: string) {
+    const highlight = highlights.find((hl) => hl.id === highlightId);
+    if (highlight) {
+      openHighlightThread(highlight);
+    }
   }
 
   function retryDocumentLoad() {
@@ -446,21 +640,22 @@
                       <HtmlReader
                         sourceId={document.sourceId}
                         sourceUrl={readerDocument?.sourceUrl}
-                        {threads}
+                        {highlights}
                         {chatEnabled}
                         onSelectPassage={selectPassage}
-                        onOpenThread={openThreadFromMark}
+                        onHighlightClick={openHighlightPopover}
                       />
                     {:else if hasCachedPdf}
                       <PdfPage
                         pdfUrl={readerDocument!.pdfLocalPath!}
                         sourceId={document.sourceId}
                         {threads}
+                        {highlights}
                         {selection}
                         {chatEnabled}
                         scale={pdfScale}
                         onSelectPassage={selectPassage}
-                        onOpenThread={openThreadFromMark}
+                        onHighlightClick={openHighlightPopover}
                       />
                     {:else if isAcquiringPdf}
                       <div class="missing-pdf col">
@@ -524,7 +719,10 @@
           {chatEnabled}
           {threads}
           {pins}
+          {highlights}
           {selection}
+          {stickyColor}
+          highlightBusy={highlightActionInFlight}
           {requestedThreadId}
           {isLoadingChat}
           {chatError}
@@ -536,6 +734,9 @@
           onReloadChat={reloadChat}
           onClearSelection={clearSelection}
           onConsumeRequestedThread={consumeRequestedThread}
+          onPickColor={pickColor}
+          onEnsureHighlight={ensureHighlightForSelection}
+          onOpenHighlight={openHighlightById}
         />
       {/if}
     {/snippet}
@@ -597,6 +798,21 @@
       </ResizableSplit>
     {/if}
   </div>
+
+  {#if popoverHighlight && popoverPos}
+    <HighlightPopover
+      highlight={popoverHighlight}
+      hasThread={Boolean(popoverThread)}
+      hasNote={Boolean(popoverThread && popoverThread.entryCount > 0)}
+      x={popoverPos.x}
+      y={popoverPos.y}
+      onAddNote={() => openHighlightThread(popoverHighlight!)}
+      onAsk={() => openHighlightThread(popoverHighlight!)}
+      onRecolor={recolorPopoverHighlight}
+      onRemove={removePopoverHighlight}
+      onClose={closeHighlightPopover}
+    />
+  {/if}
 </section>
 
 <style>

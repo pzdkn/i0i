@@ -18,12 +18,15 @@
     type PinnedHighlight,
     type ThreadAnchor,
   } from "$lib/domain/chat";
+  import { HIGHLIGHT_COLORS, type Highlight, type HighlightColor } from "$lib/domain/highlight";
   import type {
     MetadataAutofillProgress,
     MetadataCandidate,
     PaperMetadataUpdate,
   } from "$lib/domain/library";
   import type { ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
+  import { highlightFill } from "$lib/features/reader/highlight-colors";
+  import { samePassage } from "$lib/features/reader/highlight-thread-match";
   import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
 
   type InspectorTab = "threads" | "pins" | "meta";
@@ -33,7 +36,10 @@
     chatEnabled,
     threads,
     pins,
+    highlights,
     selection,
+    stickyColor,
+    highlightBusy = false,
     requestedThreadId,
     isLoadingChat,
     chatError,
@@ -45,12 +51,18 @@
     onReloadChat,
     onClearSelection,
     onConsumeRequestedThread,
+    onPickColor,
+    onEnsureHighlight,
+    onOpenHighlight,
   }: {
     document: ReaderDocument;
     chatEnabled: boolean;
     threads: ChatThreadSummary[];
     pins: PinnedHighlight[];
+    highlights: Highlight[];
     selection: ReaderTextSelection | null;
+    stickyColor: HighlightColor;
+    highlightBusy?: boolean;
     requestedThreadId: string | null;
     isLoadingChat: boolean;
     chatError: string;
@@ -62,6 +74,9 @@
     onReloadChat: () => void;
     onClearSelection: () => void;
     onConsumeRequestedThread: () => void;
+    onPickColor: (color: HighlightColor) => void | Promise<void>;
+    onEnsureHighlight: () => void | Promise<void>;
+    onOpenHighlight: (highlightId: string) => void;
   } = $props();
 
   let activeTab = $state<InspectorTab>("threads");
@@ -82,6 +97,16 @@
   const scope = $derived<ChatScope>({ kind: "paper", paperId: document.paperId });
   const documentThread = $derived(threads.find((thread) => thread.anchor.kind === "document"));
   const anchoredThreads = $derived(threads.filter((thread) => thread.anchor.kind !== "document"));
+  // Rail badges (RFC 0058 Task 10): pair each anchored thread with its
+  // highlight (for the color chip) and surface highlights that don't have a
+  // thread yet — a mark from a plain swatch pick, with no note/ask started —
+  // as their own rows so "Add note" / "Ask" is reachable from the rail too.
+  function highlightForThread(thread: ChatThreadSummary): Highlight | undefined {
+    return highlights.find((hl) => samePassage(thread.anchor, hl.locator));
+  }
+  const orphanHighlights = $derived(
+    highlights.filter((hl) => !threads.some((thread) => samePassage(thread.anchor, hl.locator))),
+  );
   const isVirtual = $derived(Boolean(openThread) && openThread!.thread.id === "");
   const openPassage = $derived(openThread ? anchorSelectedText(openThread.thread.anchor) : null);
   // For a selection thread the title defaults to the passage, so the quote block
@@ -185,6 +210,11 @@
 
   async function openThreadById(threadId: string) {
     error = "";
+    // Switching to a specific existing thread (a mark click, a pin, a thread
+    // row) invalidates any pending selection — otherwise the swatch row for
+    // the old selection would stay visible over the newly-opened thread and
+    // a swatch click would mark the wrong (stale) passage.
+    onClearSelection();
     try {
       openThread = await getChatThread(threadId);
     } catch (caught) {
@@ -233,6 +263,11 @@
     streamingAnswer = "";
     chatInput = "";
     try {
+      if (virtual) {
+        // RFC 0058 Phase 1 (Task 9): mark the passage alongside the thread,
+        // one gesture. Reuses the reload the ask itself triggers below.
+        await onEnsureHighlight();
+      }
       const onDelta = (text: string) => {
         if (activeAskId === askId) {
           streamingAnswer = (streamingAnswer ?? "") + text;
@@ -274,6 +309,9 @@
     isBusy = true;
     error = "";
     try {
+      if (virtual) {
+        await onEnsureHighlight();
+      }
       const view = virtual ? await noteAtAnchor(scope, anchor, body) : await addChatNote(threadId, body);
       openThread = view;
       chatInput = "";
@@ -421,6 +459,23 @@
             <blockquote>{openPassage}</blockquote>
           {/if}
 
+          {#if selection}
+            <div class="row swatch-row" role="group" aria-label="Highlight color">
+              {#each HIGHLIGHT_COLORS as color}
+                <button
+                  class="swatch"
+                  class:active={color === stickyColor}
+                  type="button"
+                  disabled={highlightBusy}
+                  style={`background:${highlightFill(color)}`}
+                  aria-label={`Highlight ${color}`}
+                  title={`Highlight ${color}`}
+                  onclick={() => void onPickColor(color)}
+                ></button>
+              {/each}
+            </div>
+          {/if}
+
           <div class="thread-view">
             {#each openThread.entries as entry}
               <div class="entry {entry.kind}">
@@ -499,9 +554,22 @@
               <p class="empty-note">Loading threads…</p>
             {:else}
               {#each anchoredThreads as thread}
+                {@const hl = highlightForThread(thread)}
                 <button class="thread-row" type="button" onclick={() => void openThreadById(thread.id)}>
+                  {#if hl}
+                    <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
+                  {/if}
                   <span class="thread-row-title">{thread.title}</span>
+                  {#if thread.entryCount > 0}<span class="badge" title="has notes/answers">💬</span>{/if}
                   <span class="mono-dim">{thread.pinnedCount > 0 ? "★ " : ""}{thread.entryCount}</span>
+                </button>
+              {/each}
+
+              {#each orphanHighlights as hl}
+                <button class="thread-row" type="button" onclick={() => onOpenHighlight(hl.id)}>
+                  <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
+                  <span class="thread-row-title">{hl.excerpt}</span>
+                  <span class="badge" title="no note or thread yet">＋</span>
                 </button>
               {/each}
             {/if}
@@ -652,6 +720,31 @@
     line-height: 1.45;
   }
 
+  .swatch-row {
+    margin-top: 8px;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .swatch {
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    border: 1px solid var(--border-2);
+    border-radius: 50%;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .swatch:hover {
+    border-color: var(--fg-3);
+  }
+
+  .swatch.active {
+    border-color: var(--fg-1);
+    box-shadow: 0 0 0 1px var(--fg-1);
+  }
+
   textarea {
     width: 100%;
     min-height: 72px;
@@ -786,6 +879,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .color-chip {
+    width: 9px;
+    height: 9px;
+    flex-shrink: 0;
+    border-radius: 50%;
+  }
+
+  .badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    line-height: 1;
   }
 
   .thread-view {

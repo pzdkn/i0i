@@ -1307,6 +1307,57 @@ impl LibraryStore {
         read_highlight(&conn, &id)
     }
 
+    /// Find an existing highlight at the same locator (paper, source, and
+    /// matching offsets/rect), if any. Used to keep highlight creation
+    /// idempotent when the same passage is targeted twice — e.g. the
+    /// legacy-thread migration linking to a highlight the new-flow UI
+    /// already created, instead of inserting a duplicate.
+    pub fn find_highlight_by_locator(
+        &self,
+        paper_id: &str,
+        locator: &crate::domain::highlight::Locator,
+    ) -> StoreResult<Option<crate::domain::highlight::Highlight>> {
+        use crate::domain::highlight::Locator;
+
+        let conn = self.open_connection()?;
+        let id: Option<String> = match locator {
+            Locator::TextOffset {
+                source_id,
+                start_offset,
+                end_offset,
+            } => conn
+                .query_row(
+                    "select id from highlights
+                     where paper_id = ?1 and source_id = ?2 and locator_kind = 'text_offset'
+                       and start_offset = ?3 and end_offset = ?4
+                     limit 1",
+                    params![paper_id, source_id, start_offset, end_offset],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?,
+            Locator::PdfRect {
+                source_id,
+                page_index,
+                rects_json,
+            } => conn
+                .query_row(
+                    "select id from highlights
+                     where paper_id = ?1 and source_id = ?2 and locator_kind = 'pdf_rect'
+                       and page_index = ?3 and rects_json = ?4
+                     limit 1",
+                    params![paper_id, source_id, page_index, rects_json],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?,
+        };
+        match id {
+            Some(id) => read_highlight(&conn, &id).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// List a paper's highlights, oldest first.
     pub fn list_highlights(
         &self,
@@ -1432,15 +1483,26 @@ impl LibraryStore {
                     end_offset: row.end.unwrap_or(0),
                 }
             };
-            let excerpt = row.text.unwrap_or_default();
-            let hl = self.insert_highlight(
-                &row.paper_id,
-                &locator,
-                &excerpt,
-                HighlightColor::default(),
-                None,
-                &HighlightAuthor::User,
-            )?;
+            // A highlight may already exist at this exact locator — either
+            // because the new note/ask flow created one up front (leaving
+            // this thread's `highlight_id` null until its own update lands),
+            // or because a previous migration run inserted the highlight but
+            // failed before updating the thread. Link to it instead of
+            // inserting a duplicate.
+            let hl = match self.find_highlight_by_locator(&row.paper_id, &locator)? {
+                Some(existing) => existing,
+                None => {
+                    let excerpt = row.text.clone().unwrap_or_default();
+                    self.insert_highlight(
+                        &row.paper_id,
+                        &locator,
+                        &excerpt,
+                        HighlightColor::default(),
+                        None,
+                        &HighlightAuthor::User,
+                    )?
+                }
+            };
             conn.execute(
                 "update chat_threads set highlight_id = ?2 where id = ?1",
                 params![row.thread_id, hl.id],
@@ -4612,6 +4674,63 @@ mod tests {
         );
 
         // Idempotent: second run migrates nothing.
+        assert_eq!(db.store.migrate_threads_to_highlights()?, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migration_links_instead_of_duplicating_when_highlight_already_exists() -> StoreResult<()> {
+        use crate::domain::highlight::{HighlightAuthor, HighlightColor, Locator};
+
+        let db = test_db()?;
+        let paper_id = "vaswani2017";
+
+        // Simulate the new note/ask UI flow: it creates the thread with an
+        // anchor (highlight_id still null, since the thread write and the
+        // highlight write are separate calls) and separately inserts a
+        // highlight at the same locator up front.
+        let anchor = ThreadAnchor::TextOffset {
+            source_id: "src-1".into(),
+            start_offset: 3,
+            end_offset: 12,
+            selected_text: "abc".into(),
+        };
+        let write =
+            db.store
+                .add_note_at_anchor_with_creation("paper", paper_id, &anchor, "note body")?;
+
+        let locator = Locator::TextOffset {
+            source_id: "src-1".into(),
+            start_offset: 3,
+            end_offset: 12,
+        };
+        let created = db.store.insert_highlight(
+            paper_id,
+            &locator,
+            "abc",
+            HighlightColor::Green,
+            None,
+            &HighlightAuthor::User,
+        )?;
+
+        // The migration must find the existing highlight at this locator and
+        // link the thread to it, rather than inserting a second (default
+        // yellow) highlight at the same passage.
+        let migrated = db.store.migrate_threads_to_highlights()?;
+        assert_eq!(migrated, 1);
+
+        let highlights = db.store.list_highlights(paper_id)?;
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].id, created.id);
+        assert_eq!(highlights[0].color, HighlightColor::Green);
+
+        assert_eq!(
+            db.store.thread_highlight_id(&write.view.thread.id)?,
+            Some(created.id)
+        );
+
+        // Idempotent: second run migrates nothing further.
         assert_eq!(db.store.migrate_threads_to_highlights()?, 0);
 
         Ok(())

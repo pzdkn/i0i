@@ -4,6 +4,7 @@
   import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
   import { getReaderPdfBytes } from "$lib/bridge/library";
   import type { ChatThreadSummary } from "$lib/domain/chat";
+  import type { Highlight } from "$lib/domain/highlight";
   import type { ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
   import PdfRenderedPage from "$lib/features/reader/PdfRenderedPage.svelte";
@@ -16,20 +17,22 @@
     pdfUrl,
     sourceId,
     threads,
+    highlights,
     selection,
     chatEnabled,
     scale = 1.15,
     onSelectPassage,
-    onOpenThread,
+    onHighlightClick,
   }: {
     pdfUrl: string;
     sourceId: string;
     threads: ChatThreadSummary[];
+    highlights: Highlight[];
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
     scale?: number;
     onSelectPassage: (selection: ReaderTextSelection) => void;
-    onOpenThread: (threadId: string) => void;
+    onHighlightClick: (highlightId: string, x: number, y: number) => void;
   } = $props();
 
   let pdfDocument = $state<PDFDocumentProxy | null>(null);
@@ -38,14 +41,10 @@
   let error = $state("");
   let renderSessionSequence = 0;
 
-  // Pinned threads anchored to this PDF source become the on-page highlights.
+  // Highlights anchored to this PDF source become the on-page marks (RFC 0056;
+  // no longer gated on pinnedCount — asks persist their highlight too).
   const pdfMarks = $derived(
-    threads.filter(
-      (thread) =>
-        thread.pinnedCount > 0 &&
-        thread.anchor.kind === "pdfRect" &&
-        thread.anchor.sourceId === sourceId,
-    ),
+    highlights.filter((hl) => hl.locator.kind === "pdfRect" && hl.locator.sourceId === sourceId),
   );
 
   $effect(() => {
@@ -139,7 +138,7 @@
             {chatEnabled}
             {sourceId}
             {onSelectPassage}
-            {onOpenThread}
+            {onHighlightClick}
           />
         {/each}
       </div>

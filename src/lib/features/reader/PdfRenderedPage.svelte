@@ -1,9 +1,10 @@
 <script lang="ts">
   import { TextLayer } from "pdfjs-dist/legacy/build/pdf.mjs";
   import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist/legacy/build/pdf.mjs";
-  import type { ChatThreadSummary } from "$lib/domain/chat";
+  import type { Highlight } from "$lib/domain/highlight";
   import type { PdfRect, ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
+  import { highlightFill } from "$lib/features/reader/highlight-colors";
 
   type PendingNote = ReaderTextSelection & { x: number; y: number };
 
@@ -18,18 +19,18 @@
     chatEnabled,
     sourceId,
     onSelectPassage,
-    onOpenThread,
+    onHighlightClick,
   }: {
     pdfDocument: PDFDocumentProxy;
     pageNumber: number;
     scale: number;
-    // Pinned threads anchored to this PDF source — the on-page highlights.
-    marks: ChatThreadSummary[];
+    // Highlights anchored to this PDF source — the on-page marks (RFC 0056).
+    marks: Highlight[];
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
     sourceId: string;
     onSelectPassage: (selection: ReaderTextSelection) => void;
-    onOpenThread: (threadId: string) => void;
+    onHighlightClick: (highlightId: string, x: number, y: number) => void;
   } = $props();
 
   let pageElement = $state<HTMLElement | null>(null);
@@ -43,7 +44,7 @@
 
   const pageIndex = $derived(pageNumber - 1);
   const pageMarks = $derived(
-    marks.filter((mark) => mark.anchor.kind === "pdfRect" && mark.anchor.pageIndex === pageIndex),
+    marks.filter((mark) => mark.locator.kind === "pdfRect" && mark.locator.pageIndex === pageIndex),
   );
   const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
 
@@ -240,8 +241,8 @@
     pendingNote = null;
   }
 
-  function markRects(mark: ChatThreadSummary): PdfRect[] {
-    return mark.anchor.kind === "pdfRect" ? rectsFromJson(mark.anchor.rectsJson) : [];
+  function markRects(mark: Highlight): PdfRect[] {
+    return mark.locator.kind === "pdfRect" ? rectsFromJson(mark.locator.rectsJson) : [];
   }
 
   function rectsFromJson(rectsJson?: string): PdfRect[] {
@@ -278,11 +279,11 @@
         <button
           class="pdf-note-anchor"
           type="button"
-          aria-label="Open thread"
-          style={rectStyle(rect)}
+          aria-label="Highlight actions"
+          style={`${rectStyle(rect)} background: ${highlightFill(mark.color)};`}
           onclick={(event) => {
             event.stopPropagation();
-            onOpenThread(mark.id);
+            onHighlightClick(mark.id, event.clientX, event.clientY);
           }}
         ></button>
       {/each}

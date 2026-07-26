@@ -2,22 +2,24 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { getReaderHtml } from "$lib/bridge/library";
   import type { ReaderTextSelection } from "$lib/domain/reader";
-  import type { ChatThreadSummary } from "$lib/domain/chat";
+  import type { Highlight } from "$lib/domain/highlight";
+  import { HIGHLIGHT_COLORS } from "$lib/domain/highlight";
+  import { findHighlightForOffset } from "$lib/features/reader/highlight-thread-match";
 
   let {
     sourceId,
     sourceUrl,
-    threads = [],
+    highlights = [],
     chatEnabled = true,
     onSelectPassage,
-    onOpenThread,
+    onHighlightClick,
   }: {
     sourceId: string;
     sourceUrl?: string;
-    threads?: ChatThreadSummary[];
+    highlights?: Highlight[];
     chatEnabled?: boolean;
     onSelectPassage: (selection: ReaderTextSelection) => void;
-    onOpenThread?: (threadId: string) => void;
+    onHighlightClick?: (highlightId: string, x: number, y: number) => void;
   } = $props();
 
   let root: HTMLElement | undefined = $state();
@@ -62,33 +64,21 @@
     return null;
   }
 
-  /// The saved thread whose highlighted passage covers `offset`, if any.
-  function threadAt(offset: number): ChatThreadSummary | undefined {
-    return threads.find((thread) => {
-      const anchor = thread.anchor;
-      return (
-        anchor.kind === "textOffset" &&
-        anchor.sourceId === sourceId &&
-        offset >= anchor.startOffset &&
-        offset < anchor.endOffset
-      );
-    });
-  }
-
-  function handleMouseUp() {
+  function handleMouseUp(event: MouseEvent) {
     if (!root) return;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
     if (!root.contains(range.commonAncestorContainer)) return;
 
-    // A plain click (no drag) inside a highlight opens that thread — parity with
-    // clicking a PDF highlight mark (RFC 0056).
+    // A plain click (no drag) inside a highlight opens the click-a-highlight
+    // popover for that mark (RFC 0058 Task 10; generalizes the old
+    // click-opens-its-thread behavior to any mark, threaded or not).
     if (selection.isCollapsed) {
-      if (onOpenThread && selection.anchorNode) {
+      if (onHighlightClick && selection.anchorNode) {
         const offset = offsetIn(root, selection.anchorNode, selection.anchorOffset);
-        const thread = threadAt(offset);
-        if (thread) onOpenThread(thread.id);
+        const hit = findHighlightForOffset(highlights, sourceId, offset);
+        if (hit) onHighlightClick(hit.id, event.clientX, event.clientY);
       }
       return;
     }
@@ -108,37 +98,29 @@
     });
   }
 
-  // Repaint highlights for this document's saved threads using the CSS Custom
-  // Highlight API — no DOM mutation, so re-running is safe and cheap. Re-runs
-  // whenever the rendered HTML or the thread set changes.
+  // Repaint one CSS Custom Highlight per color from the highlights list.
   $effect(() => {
     html;
-    const currentThreads = threads;
+    const current = highlights;
     if (!root || !html) return;
-    const highlightApi = (
-      CSS as unknown as { highlights?: Map<string, unknown> }
-    ).highlights;
-    if (!highlightApi || typeof (globalThis as { Highlight?: unknown }).Highlight !== "function") {
-      return;
-    }
+    const api = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
+    const Ctor = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+    if (!api || typeof Ctor !== "function") return;
 
-    const ranges: Range[] = [];
-    for (const thread of currentThreads) {
-      const anchor = thread.anchor;
-      if (anchor.kind !== "textOffset" || anchor.sourceId !== sourceId) continue;
-      const start = locate(root, anchor.startOffset);
-      const end = locate(root, anchor.endOffset);
+    const byColor = new Map<string, Range[]>();
+    for (const hl of current) {
+      if (hl.locator.kind !== "textOffset" || hl.locator.sourceId !== sourceId) continue;
+      const start = locate(root, hl.locator.startOffset);
+      const end = locate(root, hl.locator.endOffset);
       if (!start || !end) continue;
       const range = document.createRange();
       range.setStart(start.node, start.offset);
       range.setEnd(end.node, end.offset);
-      ranges.push(range);
+      (byColor.get(hl.color) ?? byColor.set(hl.color, []).get(hl.color)!).push(range);
     }
-
-    const HighlightCtor = (globalThis as { Highlight: new (...ranges: Range[]) => unknown })
-      .Highlight;
-    highlightApi.set("i0i-annotation", new HighlightCtor(...ranges));
-    return () => highlightApi.delete("i0i-annotation");
+    const names = HIGHLIGHT_COLORS.map((c) => `i0i-hl-${c}`);
+    for (const c of HIGHLIGHT_COLORS) api.set(`i0i-hl-${c}`, new Ctor(...(byColor.get(c) ?? [])));
+    return () => names.forEach((n) => api.delete(n));
   });
 
   async function viewOriginal() {
@@ -279,9 +261,12 @@
     font-size: 1.05em;
   }
 
-  /* Annotation highlights (CSS Custom Highlight API — no DOM mutation). */
-  :global(::highlight(i0i-annotation)) {
-    background: rgba(242, 169, 59, 0.28);
-    color: inherit;
-  }
+  /* Annotation highlights (CSS Custom Highlight API — no DOM mutation), one
+     rule per highlight color. */
+  :global(::highlight(i0i-hl-yellow)) { background: rgba(242, 201, 76, 0.32); }
+  :global(::highlight(i0i-hl-green))  { background: rgba(111, 207, 151, 0.32); }
+  :global(::highlight(i0i-hl-blue))   { background: rgba(86, 156, 214, 0.32); }
+  :global(::highlight(i0i-hl-red))    { background: rgba(235, 87, 87, 0.32); }
+  :global(::highlight(i0i-hl-purple)) { background: rgba(187, 107, 217, 0.32); }
+  :global(::highlight(i0i-hl-orange)) { background: rgba(242, 153, 74, 0.32); }
 </style>
