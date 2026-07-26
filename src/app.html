@@ -5,41 +5,6 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tauri + SvelteKit + Typescript App</title>
-    <script>
-      // DIAGNOSTIC (temporary): surface any runtime error onto the page so a
-      // blank window shows its cause without needing devtools.
-      (function () {
-        function show(label, detail) {
-          var el = document.getElementById("i0i-error-overlay");
-          if (!el) {
-            el = document.createElement("pre");
-            el.id = "i0i-error-overlay";
-            el.style.cssText =
-              "position:fixed;inset:0;z-index:99999;margin:0;padding:20px;" +
-              "background:#1a0000;color:#ff9c9c;font:12px/1.5 monospace;" +
-              "white-space:pre-wrap;overflow:auto;";
-            (document.body || document.documentElement).appendChild(el);
-          }
-          el.textContent += "[" + label + "] " + detail + "\n\n";
-        }
-        window.addEventListener("error", function (e) {
-          show("error", (e.message || "") + "\n" + (e.error && e.error.stack ? e.error.stack : e.filename + ":" + e.lineno));
-        });
-        window.addEventListener("unhandledrejection", function (e) {
-          var r = e.reason;
-          var parts = [];
-          if (r) {
-            if (r.name || r.message) parts.push((r.name || "") + ": " + (r.message || ""));
-            if (r.cause) parts.push("cause: " + (r.cause.stack || r.cause.message || String(r.cause)));
-            if (r.stack) parts.push(r.stack);
-            if (!parts.length) parts.push(String(r));
-          } else {
-            parts.push(String(r));
-          }
-          show("promise", parts.join("\n"));
-        });
-      })();
-    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

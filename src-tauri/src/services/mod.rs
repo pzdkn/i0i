@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod embedding;
+pub mod highlight;
 pub mod llm;
 pub mod metadata_enrichment;
 pub mod query_expansion;

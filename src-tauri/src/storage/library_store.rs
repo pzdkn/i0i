@@ -70,7 +70,7 @@ impl LibraryStore {
     }
 
     #[cfg(test)]
-    fn for_test(db_path: PathBuf) -> Self {
+    pub(crate) fn for_test(db_path: PathBuf) -> Self {
         Self { db_path }
     }
 
@@ -86,6 +86,14 @@ impl LibraryStore {
         if self.is_library_empty(&conn)? {
             self.seed_defaults(&mut conn)?;
         }
+
+        // chat_threads.highlight_id may predate this column on an existing DB
+        // (it's only in the `create table if not exists` shape for new DBs).
+        // Swallow the "duplicate column" error on already-migrated DBs; that's
+        // the idempotency guard.
+        let _ = conn.execute("alter table chat_threads add column highlight_id text", []);
+
+        self.migrate_threads_to_highlights()?;
 
         Ok(())
     }
@@ -1243,6 +1251,220 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Create a highlight at a locator on a paper's source.
+    pub fn insert_highlight(
+        &self,
+        paper_id: &str,
+        locator: &crate::domain::highlight::Locator,
+        excerpt: &str,
+        color: crate::domain::highlight::HighlightColor,
+        label: Option<&str>,
+        author: &crate::domain::highlight::HighlightAuthor,
+    ) -> StoreResult<crate::domain::highlight::Highlight> {
+        use crate::domain::highlight::Locator;
+
+        let conn = self.open_connection()?;
+        let id = timestamped_id("hl")?;
+        let color_str = highlight_color_str(color);
+        let (start, end, page, rects) = match locator {
+            Locator::TextOffset {
+                start_offset,
+                end_offset,
+                ..
+            } => (Some(*start_offset), Some(*end_offset), None, None),
+            Locator::PdfRect {
+                page_index,
+                rects_json,
+                ..
+            } => (None, None, Some(*page_index), Some(rects_json.clone())),
+        };
+        conn.execute(
+            "
+            insert into highlights (
+              id, paper_id, source_id, locator_kind, start_offset, end_offset,
+              page_index, rects_json, excerpt, color, label, author_kind,
+              author_model, created_at, updated_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'), datetime('now'))
+            ",
+            params![
+                id,
+                paper_id,
+                locator.source_id(),
+                locator.kind_str(),
+                start,
+                end,
+                page,
+                rects,
+                excerpt,
+                color_str,
+                label,
+                author.kind_str(),
+                author.model(),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        read_highlight(&conn, &id)
+    }
+
+    /// List a paper's highlights, oldest first.
+    pub fn list_highlights(
+        &self,
+        paper_id: &str,
+    ) -> StoreResult<Vec<crate::domain::highlight::Highlight>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "
+                select id, paper_id, source_id, locator_kind, start_offset, end_offset,
+                       page_index, rects_json, excerpt, color, label, author_kind,
+                       author_model, created_at, updated_at
+                from highlights
+                where paper_id = ?1
+                order by created_at asc
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![paper_id], highlight_from_row)
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
+    /// Change a highlight's color.
+    pub fn recolor_highlight(
+        &self,
+        id: &str,
+        color: crate::domain::highlight::HighlightColor,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update highlights set color = ?2, updated_at = datetime('now') where id = ?1",
+            params![id, highlight_color_str(color)],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Set or clear a highlight's label.
+    pub fn set_highlight_label(&self, id: &str, label: Option<&str>) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update highlights set label = ?2, updated_at = datetime('now') where id = ?1",
+            params![id, label],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Delete a highlight.
+    pub fn remove_highlight(&self, id: &str) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute("delete from highlights where id = ?1", params![id])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// One-time backfill (RFC 0058): every paper-scoped anchored thread
+    /// (text_offset / pdf_rect) with no highlight yet becomes a User
+    /// highlight, and the thread points at it. Document-anchored threads and
+    /// non-paper scopes (e.g. vault-level threads, where `scope_id` is not a
+    /// paper id) are left with `highlight_id = NULL`. Idempotent: only rows
+    /// where `highlight_id is null` are considered, so a second run migrates
+    /// nothing.
+    pub fn migrate_threads_to_highlights(&self) -> StoreResult<usize> {
+        use crate::domain::highlight::{HighlightAuthor, HighlightColor, Locator};
+
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "select t.id, t.scope_id, t.anchor_kind, t.source_id, t.start_offset,
+                        t.end_offset, t.selected_text, t.page_index, t.rects_json
+                 from chat_threads t
+                 where t.highlight_id is null
+                   and t.scope_kind = 'paper'
+                   and t.anchor_kind in ('text_offset','pdf_rect')",
+            )
+            .map_err(|error| error.to_string())?;
+
+        struct Legacy {
+            thread_id: String,
+            paper_id: String,
+            kind: String,
+            source: Option<String>,
+            start: Option<i64>,
+            end: Option<i64>,
+            text: Option<String>,
+            page: Option<i32>,
+            rects: Option<String>,
+        }
+
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Legacy {
+                    thread_id: r.get(0)?,
+                    paper_id: r.get(1)?,
+                    kind: r.get(2)?,
+                    source: r.get(3)?,
+                    start: r.get(4)?,
+                    end: r.get(5)?,
+                    text: r.get(6)?,
+                    page: r.get(7)?,
+                    rects: r.get(8)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let rows: Vec<Legacy> = collect_rows(rows)?;
+
+        let mut count = 0;
+        for row in rows {
+            let source_id = row.source.unwrap_or_default();
+            let locator = if row.kind == "pdf_rect" {
+                Locator::PdfRect {
+                    source_id,
+                    page_index: row.page.unwrap_or(0),
+                    rects_json: row.rects.unwrap_or_default(),
+                }
+            } else {
+                Locator::TextOffset {
+                    source_id,
+                    start_offset: row.start.unwrap_or(0),
+                    end_offset: row.end.unwrap_or(0),
+                }
+            };
+            let excerpt = row.text.unwrap_or_default();
+            let hl = self.insert_highlight(
+                &row.paper_id,
+                &locator,
+                &excerpt,
+                HighlightColor::default(),
+                None,
+                &HighlightAuthor::User,
+            )?;
+            conn.execute(
+                "update chat_threads set highlight_id = ?2 where id = ?1",
+                params![row.thread_id, hl.id],
+            )
+            .map_err(|error| error.to_string())?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Read the `highlight_id` a thread now points at (set by the backfill
+    /// migration, or by future writes that create the highlight up front).
+    pub fn thread_highlight_id(&self, id: &str) -> StoreResult<Option<String>> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "select highlight_id from chat_threads where id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+        .map(|value| value.flatten())
+    }
+
     fn open_connection(&self) -> StoreResult<Connection> {
         let conn = Connection::open(&self.db_path).map_err(|error| error.to_string())?;
         conn.execute_batch("pragma foreign_keys = on;")
@@ -1417,6 +1639,7 @@ impl LibraryStore {
               selected_text text,
               page_index integer,
               rects_json text,
+              highlight_id text,
               title text not null,
               created_at text not null,
               updated_at text not null
@@ -1442,6 +1665,27 @@ impl LibraryStore {
 
             create index if not exists idx_chat_entries_pinned
               on chat_entries(thread_id, pinned);
+
+            create table if not exists highlights (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              locator_kind text not null,
+              start_offset integer,
+              end_offset integer,
+              page_index integer,
+              rects_json text,
+              excerpt text not null,
+              color text not null,
+              label text,
+              author_kind text not null,
+              author_model text,
+              created_at text not null,
+              updated_at text not null
+            );
+
+            create index if not exists idx_highlights_paper
+              on highlights(paper_id, created_at);
 
             create table if not exists searches (
               id text primary key,
@@ -2176,6 +2420,76 @@ fn chat_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEntry> {
         context_summary,
         pinned: pinned != 0,
         created_at: row.get(7)?,
+    })
+}
+
+/// Serialize a `HighlightColor` to its lowercase storage string, e.g. `"yellow"`.
+fn highlight_color_str(color: crate::domain::highlight::HighlightColor) -> String {
+    serde_json::to_string(&color)
+        .ok()
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_else(|| "yellow".to_string())
+}
+
+fn read_highlight(
+    conn: &Connection,
+    id: &str,
+) -> StoreResult<crate::domain::highlight::Highlight> {
+    conn.query_row(
+        "
+        select id, paper_id, source_id, locator_kind, start_offset, end_offset,
+               page_index, rects_json, excerpt, color, label, author_kind,
+               author_model, created_at, updated_at
+        from highlights
+        where id = ?1
+        ",
+        params![id],
+        highlight_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn highlight_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::domain::highlight::Highlight> {
+    use crate::domain::highlight::{Highlight, HighlightAuthor, HighlightColor, Locator};
+
+    let source_id: String = row.get(2)?;
+    let locator_kind: String = row.get(3)?;
+    let locator = if locator_kind == "pdf_rect" {
+        Locator::PdfRect {
+            source_id: source_id.clone(),
+            page_index: row.get::<_, Option<i32>>(6)?.unwrap_or_default(),
+            rects_json: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        }
+    } else {
+        Locator::TextOffset {
+            source_id: source_id.clone(),
+            start_offset: row.get::<_, Option<i64>>(4)?.unwrap_or_default(),
+            end_offset: row.get::<_, Option<i64>>(5)?.unwrap_or_default(),
+        }
+    };
+    let color_str: String = row.get(9)?;
+    let color: HighlightColor =
+        serde_json::from_str(&format!("\"{color_str}\"")).unwrap_or_default();
+    let author = match row.get::<_, String>(11)?.as_str() {
+        "agent" => HighlightAuthor::Agent {
+            model: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+        },
+        _ => HighlightAuthor::User,
+    };
+
+    Ok(Highlight {
+        id: row.get(0)?,
+        paper_id: row.get(1)?,
+        source_id,
+        locator,
+        excerpt: row.get(8)?,
+        color,
+        label: row.get(10)?,
+        author,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -4231,6 +4545,74 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].entry_count, 2);
         assert_eq!(threads[0].pinned_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn highlight_crud_round_trips() -> StoreResult<()> {
+        let db = test_db()?;
+        let paper_id = "vaswani2017";
+        let loc = crate::domain::highlight::Locator::TextOffset {
+            source_id: "src-1".into(),
+            start_offset: 5,
+            end_offset: 25,
+        };
+        let hl = db.store.insert_highlight(
+            paper_id,
+            &loc,
+            "quoted text",
+            crate::domain::highlight::HighlightColor::Yellow,
+            Some("important"),
+            &crate::domain::highlight::HighlightAuthor::User,
+        )?;
+        assert_eq!(hl.color, crate::domain::highlight::HighlightColor::Yellow);
+        assert_eq!(hl.excerpt, "quoted text");
+
+        db.store
+            .recolor_highlight(&hl.id, crate::domain::highlight::HighlightColor::Red)?;
+        let listed = db.store.list_highlights(paper_id)?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].color, crate::domain::highlight::HighlightColor::Red);
+
+        db.store.remove_highlight(&hl.id)?;
+        assert!(db.store.list_highlights(paper_id)?.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn backfill_makes_anchored_threads_into_visible_highlights() -> StoreResult<()> {
+        let db = test_db()?;
+        let paper_id = "vaswani2017";
+        // Create a legacy-style anchored thread via the existing note path.
+        let anchor = ThreadAnchor::TextOffset {
+            source_id: "src-1".into(),
+            start_offset: 3,
+            end_offset: 12,
+            selected_text: "abc".into(),
+        };
+        let write =
+            db.store
+                .add_note_at_anchor_with_creation("paper", paper_id, &anchor, "note body")?;
+
+        // init() already ran the migration once (against an empty table), so
+        // this thread — created after init — still needs its own backfill.
+        let migrated = db.store.migrate_threads_to_highlights()?;
+        assert_eq!(migrated, 1);
+
+        let highlights = db.store.list_highlights(paper_id)?;
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].excerpt, "abc");
+
+        // The thread now references the new highlight.
+        assert_eq!(
+            db.store.thread_highlight_id(&write.view.thread.id)?,
+            Some(highlights[0].id.clone())
+        );
+
+        // Idempotent: second run migrates nothing.
+        assert_eq!(db.store.migrate_threads_to_highlights()?, 0);
 
         Ok(())
     }

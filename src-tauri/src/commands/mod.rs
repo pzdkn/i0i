@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod discovery;
+pub mod highlight;
 pub mod library;
 pub mod reader;
 pub mod research;

@@ -32,6 +32,7 @@ pub fn run() {
 
             let store = LibraryStore::new(&app.handle()).map_err(std::io::Error::other)?;
             store.init().map_err(std::io::Error::other)?;
+            let highlight_service = services::highlight::HighlightService::new(store.clone());
             let extraction_config = PdfExtractionConfig::load(&app.handle());
             let pdf_extractions = PdfExtractionManager::new(
                 app.handle().clone(),
@@ -114,6 +115,7 @@ pub fn run() {
             let query_expander = services::query_expansion::QueryExpander::from_app_config();
             eprintln!("[query_expansion] ready={}", query_expander.is_ready());
             app.manage(store);
+            app.manage(highlight_service);
             app.manage(pdf_downloads);
             app.manage(pdf_extractions);
             app.manage(source_acquisition);
@@ -178,6 +180,11 @@ pub fn run() {
             commands::research::mark_search_candidates_seen,
             commands::source_acquisition::debug_obscura_start,
             commands::source_acquisition::debug_obscura_fetch,
+            commands::highlight::create_highlight,
+            commands::highlight::recolor_highlight,
+            commands::highlight::set_highlight_label,
+            commands::highlight::remove_highlight,
+            commands::highlight::list_highlights,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
