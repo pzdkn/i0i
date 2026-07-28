@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Pencil, Trash2, Sparkles, MessageSquare, Plus } from "@lucide/svelte";
   import {
     addChatNote,
     askAtAnchorStreamed,
@@ -543,9 +544,9 @@
             <button class="link-btn" type="button" onclick={backToThreadList}>‹ Threads</button>
             <div class="flex1"></div>
             {#if !isVirtual}
-              <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}>✎</button>
+              <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
             {/if}
-            <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}>-</button>
+            <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}><Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /></button>
           </div>
 
           {#if renaming}
@@ -691,8 +692,8 @@
                     <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
                   {/if}
                   <span class="thread-row-title">{thread.title}</span>
-                  {#if hl?.author.kind === "agent"}<span class="badge" title="AI-added highlight">✨</span>{/if}
-                  {#if thread.entryCount > 0}<span class="badge" title="has notes/answers">💬</span>{/if}
+                  {#if hl?.author.kind === "agent"}<span class="badge" title="AI-added highlight"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                  {#if thread.entryCount > 0}<span class="badge" title="has notes/answers"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                   <span class="mono-dim">{thread.pinnedCount > 0 ? "★ " : ""}{thread.entryCount}</span>
                 </button>
               {/each}
@@ -701,8 +702,8 @@
                 <button class="thread-row" type="button" onclick={() => onOpenHighlight(hl.id)}>
                   <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
                   <span class="thread-row-title">{hl.excerpt}</span>
-                  {#if hl.author.kind === "agent"}<span class="badge" title="AI-added highlight">✨</span>{/if}
-                  <span class="badge" title="no note or thread yet">＋</span>
+                  {#if hl.author.kind === "agent"}<span class="badge" title="AI-added highlight"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                  <span class="badge" title="no note or thread yet"><Plus size={12} strokeWidth={1.75} aria-hidden="true" /></span>
                 </button>
               {/each}
             {/if}
@@ -966,6 +967,9 @@
   }
 
   .note-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: 20px;
     height: 20px;
     flex-shrink: 0;
@@ -1068,7 +1072,10 @@
   }
 
   .badge {
+    display: inline-flex;
+    align-items: center;
     flex-shrink: 0;
+    color: var(--fg-3);
     font-size: 10px;
     line-height: 1;
   }

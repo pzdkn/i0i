@@ -7,6 +7,7 @@
   import { highlightFill } from "$lib/features/reader/highlight-colors";
   import { resolveQuoteInText } from "$lib/features/reader/resolve-quote-html";
   import { debugLog } from "$lib/bridge/chat";
+  import { StickyNote, MessageSquare } from "@lucide/svelte";
 
   type PendingNote = ReaderTextSelection & { x: number; y: number };
 
@@ -377,9 +378,13 @@
     onmousedown={(event) => event.preventDefault()}
     role="presentation"
   >
-    <button class="popover-action" type="button" onclick={startThread}>✎ Note</button>
+    <button class="popover-action" type="button" onclick={startThread}>
+      <StickyNote size={14} strokeWidth={1.75} aria-hidden="true" /> Note
+    </button>
     <span class="popover-divider" aria-hidden="true"></span>
-    <button class="popover-action" type="button" onclick={startThread}>💬 Ask</button>
+    <button class="popover-action" type="button" onclick={startThread}>
+      <MessageSquare size={14} strokeWidth={1.75} aria-hidden="true" /> Ask
+    </button>
   </div>
 {/if}
 
@@ -503,6 +508,9 @@
   }
 
   .popover-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     border: 0;
     background: transparent;
     color: var(--amber);

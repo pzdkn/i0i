@@ -1,5 +1,6 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { ExternalLink } from "@lucide/svelte";
   import { getReaderHtml } from "$lib/bridge/library";
   import type { ReaderTextSelection } from "$lib/domain/reader";
   import type { Highlight, Locator } from "$lib/domain/highlight";
@@ -162,7 +163,9 @@
   <div class="toolbar row">
     <span class="kind">HTML</span>
     {#if sourceUrl}
-      <button class="view-original" type="button" onclick={viewOriginal}>View original ↗</button>
+      <button class="view-original" type="button" onclick={viewOriginal}>
+        View original <ExternalLink size={12} strokeWidth={1.75} aria-hidden="true" />
+      </button>
     {/if}
   </div>
 
@@ -207,6 +210,9 @@
   }
 
   .view-original {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     border: 1px solid var(--fg-3, #444);
     background: transparent;
     color: var(--fg-2, #bbb);
