@@ -8,7 +8,12 @@
     getReaderDocument,
     openHtmlDocument,
   } from "$lib/bridge/library";
-  import { listChatThreads, listPinnedChatEntries, type HighlightIntent } from "$lib/bridge/chat";
+  import {
+    debugLog,
+    listChatThreads,
+    listPinnedChatEntries,
+    type HighlightIntent,
+  } from "$lib/bridge/chat";
   import {
     createAgentHighlight,
     createHighlight,
@@ -341,6 +346,23 @@
     }
   }
 
+  // Lightweight reload of just the highlight marks (no threads/pins), so an
+  // agent mark can pop in the instant it is created — background marking
+  // reloads per-mark instead of one batch at the end (RFC 0059 progress UX).
+  async function reloadHighlightsOnly(paperId: string = paper.id) {
+    if (!chatEnabled) {
+      return;
+    }
+    try {
+      const next = await listHighlights(paperId);
+      if (paper.id === paperId) {
+        highlights = next;
+      }
+    } catch {
+      // Best-effort repaint; the next full reloadChat will reconcile.
+    }
+  }
+
   function selectPassage(next: ReaderTextSelection) {
     selection = next;
     openThreadsPanel();
@@ -462,14 +484,23 @@
   // created, so the caller can count unresolved passages.
   async function handleHighlightIntent(intent: HighlightIntent): Promise<boolean> {
     try {
+      void debugLog(
+        `intent isHtml=${isHtml} hasHtmlRef=${!!htmlReaderRef} hasPdfRef=${!!pdfPageRef} quote_len=${intent.quote.length} quote="${intent.quote.slice(0, 60)}"`,
+      );
       const locator = isHtml
         ? (htmlReaderRef?.resolveQuote(intent.quote) ?? null)
         : pdfPageRef
           ? await pdfPageRef.resolveQuote(intent.quote)
           : null;
       if (!locator) {
+        void debugLog(`resolve FAILED: quote not located in the rendered document`, "warn");
         return false;
       }
+      const where =
+        locator.kind === "pdfRect"
+          ? `pdfRect page=${locator.pageIndex} rects=${JSON.parse(locator.rectsJson || "[]").length}`
+          : `textOffset [${locator.startOffset}, ${locator.endOffset}]`;
+      void debugLog(`resolve OK -> ${where}`);
       const created = await createAgentHighlight({
         paperId: paper.id,
         locator,
@@ -478,15 +509,20 @@
         label: intent.label,
         model: chatModel,
       });
+      void debugLog(`created highlight id=${created.id}`);
       // RFC 0059 Phase 2 (Task 9): collect this turn's created id for the
       // batch Keep/Undo affordance shown once the ask turn settles.
       turnHighlightIds = [...turnHighlightIds, created.id];
+      // Repaint immediately so the mark appears the moment it lands, rather
+      // than after the whole batch settles.
+      void reloadHighlightsOnly();
       return true;
     } catch (error) {
       // A resolve or create failure here must never surface as an ask
       // error — the ask itself may well have succeeded. Count it as
       // unresolved and move on (caller tallies this via the return value).
       readerLog("agent-highlight-intent-error", { error: errorDetail(error) }, "error");
+      void debugLog(`intent ERROR ${String(error).slice(0, 200)}`);
       return false;
     }
   }

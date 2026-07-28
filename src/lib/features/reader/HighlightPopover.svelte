@@ -4,8 +4,8 @@
   import { highlightFill } from "$lib/features/reader/highlight-colors";
 
   // Click-a-highlight popover (RFC 0058 Task 10): the after-the-fact actions
-  // for a mark that's already on the page — recolor, remove, or open/start
-  // the passage's thread. Rendered by ReaderView, anchored at the click point
+  // for a mark that's already on the page — recolor, remove, or open/start the
+  // passage's thread. Rendered by ReaderView, anchored at the click point
   // (viewport coordinates, same space as MouseEvent.clientX/Y).
   let {
     highlight,
@@ -33,10 +33,9 @@
 
   let root: HTMLElement | undefined = $state();
 
-  // Dismiss on any click outside the popover, or Escape — standard popover
-  // behavior. The mark's own click handler runs its onclick after this
-  // mousedown, so clicking a *different* mark closes this one and opens the
-  // next in the same gesture.
+  // Dismiss on any click outside the popover, or Escape. The mark's own click
+  // handler runs its onclick after this mousedown, so clicking a *different*
+  // mark closes this one and opens the next in the same gesture.
   function handleWindowMousedown(event: MouseEvent) {
     if (root && !root.contains(event.target as Node)) {
       onClose();
@@ -54,136 +53,161 @@
 
 <div
   bind:this={root}
-  class="highlight-popover"
+  class="hp"
   style={`left: ${x}px; top: ${y}px;`}
   role="dialog"
   aria-label="Highlight actions"
   tabindex="-1"
   onmousedown={(event) => event.stopPropagation()}
 >
-  <div class="row swatch-row" role="group" aria-label="Recolor highlight">
+  {#if highlight.excerpt}
+    <div class="hp-quote-row">
+      {#if highlight.author.kind === "agent"}
+        <span class="hp-tag" title={`AI-added (${highlight.author.model})`}>AI</span>
+      {/if}
+      <p class="hp-quote">{highlight.excerpt}</p>
+    </div>
+  {/if}
+
+  <div class="hp-swatches" role="group" aria-label="Recolor highlight">
     {#each HIGHLIGHT_COLORS as color}
       <button
-        class="swatch"
+        class="hp-swatch"
         class:active={color === highlight.color}
         type="button"
         style={`background:${highlightFill(color)}`}
         aria-label={`Recolor ${color}`}
-        title={`Recolor ${color}`}
+        title={color}
         onclick={() => void onRecolor(color)}
       ></button>
     {/each}
   </div>
 
-  {#if highlight.author.kind === "agent"}
-    <div class="agent-badge" title={`AI-added highlight (${highlight.author.model})`}>✨ AI</div>
-  {/if}
-
-  {#if highlight.excerpt}
-    <blockquote class="excerpt">{highlight.excerpt}</blockquote>
-  {/if}
-
-  <div class="actions">
-    <button class="action" type="button" onclick={onAddNote}>
-      📝 {hasNote ? "Note" : "Add note"}
+  <div class="hp-actions">
+    <button class="hp-btn" type="button" onclick={onAddNote}>{hasNote ? "Note" : "Add note"}</button>
+    <button class="hp-btn" type="button" onclick={onAsk}>{hasThread ? "Open thread" : "Ask"}</button>
+    <button class="hp-btn hp-remove" type="button" aria-label="Remove highlight" title="Remove" onclick={() => void onRemove()}>
+      Remove
     </button>
-    <button class="action" type="button" onclick={onAsk}>
-      💬 {hasThread ? "Open" : "Ask"}
-    </button>
-    <span class="flex1"></span>
-    <button class="action remove" type="button" onclick={() => void onRemove()}>Remove</button>
   </div>
 </div>
 
 <style>
-  .highlight-popover {
+  .hp {
     position: fixed;
     z-index: 40;
-    width: 220px;
+    width: 232px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    border: 1px solid var(--amber);
-    border-radius: 4px;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--hair, var(--border-2));
+    border-radius: 8px;
     background: var(--bg-1);
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
   }
 
-  .swatch-row {
+  /* Quoted passage — subtle, clamped to two lines with a real ellipsis. */
+  .hp-quote-row {
+    display: flex;
+    align-items: flex-start;
     gap: 6px;
+  }
+
+  .hp-tag {
+    flex-shrink: 0;
+    margin-top: 1px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: rgba(242, 169, 59, 0.16);
+    color: var(--amber, #f2a93b);
+    font-size: 8.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+
+  .hp-quote {
+    margin: 0;
+    color: var(--fg-2);
+    font-size: 11px;
+    line-height: 1.45;
+    font-style: italic;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .hp-quote::before {
+    content: "\201C";
+    color: var(--fg-3);
+  }
+  .hp-quote::after {
+    content: "\201D";
+    color: var(--fg-3);
+  }
+
+  /* Recolor swatches. */
+  .hp-swatches {
+    display: flex;
+    gap: 7px;
     align-items: center;
   }
 
-  .swatch {
-    width: 18px;
-    height: 18px;
+  .hp-swatch {
+    width: 17px;
+    height: 17px;
     flex-shrink: 0;
-    border: 1px solid var(--border-2);
+    border: 1px solid transparent;
     border-radius: 50%;
     padding: 0;
     cursor: pointer;
+    transition: transform 0.08s ease;
   }
 
-  .swatch:hover {
-    border-color: var(--fg-3);
+  .hp-swatch:hover {
+    transform: scale(1.15);
   }
 
-  .swatch.active {
+  .hp-swatch.active {
     border-color: var(--fg-1);
-    box-shadow: 0 0 0 1px var(--fg-1);
+    box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3px var(--fg-1);
   }
 
-  .agent-badge {
-    align-self: flex-start;
-    color: var(--fg-3);
-    font-size: 9.5px;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-  }
-
-  .excerpt {
-    margin: 0;
-    padding: 0 0 0 8px;
-    border-left: 2px solid var(--amber-mid);
-    color: var(--fg-2);
-    font-size: 10.5px;
-    line-height: 1.4;
-    max-height: 4.2em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .actions {
+  /* Actions — flat text buttons, Remove pushed to the right. */
+  .hp-actions {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
+    border-top: 1px solid var(--hair, var(--border-2));
+    padding-top: 10px;
   }
 
-  .action {
-    border: 1px solid var(--border-2);
+  .hp-btn {
+    border: none;
     background: transparent;
-    color: var(--fg-1);
+    color: var(--fg-2);
     font: inherit;
-    font-size: 11px;
-    padding: 4px 8px;
+    font-size: 11.5px;
+    padding: 3px 6px;
+    border-radius: 4px;
     cursor: pointer;
     white-space: nowrap;
   }
 
-  .action:hover {
-    border-color: var(--amber-dim);
-    background: rgba(242, 169, 59, 0.08);
-    color: var(--amber);
+  .hp-btn:hover {
+    background: rgba(242, 169, 59, 0.1);
+    color: var(--amber, #f2a93b);
   }
 
-  .action.remove:hover {
-    border-color: var(--border-2);
-    background: rgba(227, 88, 74, 0.08);
-    color: var(--red);
+  .hp-remove {
+    margin-left: auto;
+    color: var(--fg-3);
   }
 
-  .flex1 {
-    flex: 1;
+  .hp-remove:hover {
+    background: rgba(227, 88, 74, 0.1);
+    color: var(--red, #e3584a);
   }
 </style>

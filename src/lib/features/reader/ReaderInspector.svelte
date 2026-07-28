@@ -2,6 +2,7 @@
   import {
     addChatNote,
     askAtAnchorStreamed,
+    annotateStreamed,
     askChatThreadStreamed,
     deleteChatThread,
     getChatThread,
@@ -109,6 +110,11 @@
   let openThread = $state<ChatThreadView | null>(null);
   let chatInput = $state("");
   let isBusy = $state(false);
+  // Background agent-marking progress (RFC 0059). Marking runs AFTER the answer
+  // stream completes and must not block the composer: `markingActive` shows a
+  // "Marking…" indicator while it runs, `markingCount` ticks up as marks land.
+  let markingActive = $state(false);
+  let markingCount = $state(0);
   let pendingQuestion = $state<string | null>(null);
   let streamingAnswer = $state<string | null>(null);
   let error = $state("");
@@ -292,6 +298,7 @@
     isBusy = true;
     error = "";
     unresolvedNotice = "";
+    markingActive = false;
     pendingQuestion = body;
     streamingAnswer = "";
     chatInput = "";
@@ -304,55 +311,29 @@
         // one gesture. Reuses the reload the ask itself triggers below.
         await onEnsureHighlight();
       }
+      // Marking is a SEPARATE fast-model pass, kicked off IN PARALLEL with the
+      // answer (only for marking-intent requests, only if the reader can resolve
+      // intents). It never blocks the composer, and its marks can land while the
+      // answer is still streaming (RFC 0059 follow-up).
+      if (onHighlightIntent && shouldAnnotate(body)) {
+        runAnnotationPass(anchor, body, askId);
+      }
       const onDelta = (text: string) => {
         if (activeAskId === askId) {
           streamingAnswer = (streamingAnswer ?? "") + text;
         }
       };
-      // RFC 0059 Phase 2 (Task 8): each streamed HighlightIntent is resolved
-      // and turned into an agent highlight by the reader (ReaderView owns
-      // the resolvers). Intent handling can outlive the `done` event (PDF
-      // resolution is async), so every intent's promise is tracked and
-      // awaited before the turn is considered settled.
-      const pendingIntents: Promise<void>[] = [];
-      let unresolvedCount = 0;
-      const onIntent = (intent: HighlightIntent) => {
-        if (activeAskId !== askId || !onHighlightIntent) {
-          return;
-        }
-        pendingIntents.push(
-          onHighlightIntent(intent)
-            .then((resolved) => {
-              if (!resolved) {
-                unresolvedCount += 1;
-              }
-            })
-            // Defensive: onHighlightIntent already catches internally, but a
-            // rejection here must never propagate to the ask's own
-            // try/catch below — that would turn a successful ask into a
-            // reported error and re-fill the composer with the question.
-            .catch(() => {
-              unresolvedCount += 1;
-            }),
-        );
-      };
       const view = virtual
-        ? await askAtAnchorStreamed(scope, anchor, body, onDelta, onIntent)
+        ? await askAtAnchorStreamed(scope, anchor, body, onDelta)
         : await askChatThreadStreamed(threadId, body, onDelta);
-      await Promise.all(pendingIntents);
+      // The ANSWER is done: show it and unblock the composer immediately (the
+      // `finally` below clears `isBusy`).
       if (activeAskId === askId) {
         openThread = view;
         onReloadChat();
-        if (unresolvedCount > 0) {
-          unresolvedNotice = `Couldn't add ${unresolvedCount} passage${unresolvedCount > 1 ? "s" : ""} to the paper.`;
-        }
         if (virtual) {
           onClearSelection();
         }
-        // RFC 0059 Phase 2 (Task 9): the turn has settled (every intent's
-        // create-or-fail has resolved, above) — ReaderView now knows the
-        // final id count and can surface the batch Keep/Undo affordance.
-        onAskTurnComplete?.();
       }
     } catch (caught) {
       if (activeAskId === askId) {
@@ -366,6 +347,64 @@
         streamingAnswer = null;
       }
     }
+  }
+
+  // Loose match for a request that wants passages marked, so annotation only
+  // spends a call when the user actually asked to highlight (RFC 0059 follow-up).
+  function shouldAnnotate(text: string): boolean {
+    return /(highlight|annotat|underlin|\bmark)/i.test(text);
+  }
+
+  // Background fast-model marking pass. Streams intents, resolves+creates each
+  // in the reader, shows the "Marking…" indicator, and reports misses once it
+  // settles. Never blocks the composer; a superseding ask abandons it.
+  function runAnnotationPass(anchor: ThreadAnchor, body: string, askId: number) {
+    const handleIntent = onHighlightIntent;
+    if (!handleIntent) {
+      return;
+    }
+    let unresolvedCount = 0;
+    markingCount = 0;
+    markingActive = true;
+    const pending: Promise<void>[] = [];
+    const onIntent = (intent: HighlightIntent) => {
+      if (activeAskId !== askId) {
+        return;
+      }
+      pending.push(
+        handleIntent(intent)
+          .then((resolved) => {
+            if (activeAskId !== askId) {
+              return;
+            }
+            if (resolved) {
+              markingCount += 1;
+            } else {
+              unresolvedCount += 1;
+            }
+          })
+          .catch(() => {
+            unresolvedCount += 1;
+          }),
+      );
+    };
+    annotateStreamed(scope, anchor, body, onIntent)
+      .catch(() => {
+        // The annotation pass itself failed (model/network) — leave any marks
+        // already made and never surface it as an ask error.
+      })
+      .finally(() => {
+        void Promise.allSettled(pending).then(() => {
+          if (activeAskId !== askId) {
+            return;
+          }
+          markingActive = false;
+          if (unresolvedCount > 0) {
+            unresolvedNotice = `Couldn't add ${unresolvedCount} passage${unresolvedCount > 1 ? "s" : ""} to the paper.`;
+          }
+          onAskTurnComplete?.();
+        });
+      });
   }
 
   async function addNote() {
@@ -587,6 +626,13 @@
 
             {#if visibleError}
               <p class="note-error">{visibleError}</p>
+            {/if}
+
+            {#if markingActive}
+              <p class="marking-progress">
+                <span class="marking-dot"></span>
+                Marking…{markingCount > 0 ? ` ${markingCount} added` : ""}
+              </p>
             {/if}
 
             {#if unresolvedNotice}
@@ -878,6 +924,33 @@
     color: var(--fg-3);
     font-size: 10.5px;
     line-height: 1.45;
+  }
+
+  .marking-progress {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0 0;
+    color: var(--fg-2);
+    font-size: 10.5px;
+  }
+
+  .marking-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--amber, #f2a93b);
+    animation: marking-pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes marking-pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
+    }
   }
 
   .turn-affordance {

@@ -195,22 +195,18 @@ impl ChatService {
     /// thread. The passage (for a selection anchor) is foregrounded in the
     /// prompt, just as for a thread-scoped ask.
     ///
-    /// The model is offered the `highlight`/`note` tools (RFC 0059 Phase 2);
-    /// each assembled tool call is parsed into a `HighlightIntentData` and
-    /// delivered to `on_intent` (before this method returns), capped at
-    /// `MAX_HIGHLIGHT_INTENTS_PER_TURN` per turn. Malformed or empty-quote
-    /// tool calls are skipped.
-    pub async fn ask_at_anchor_streamed<F, I>(
+    /// Prose only — agent marking is a separate fast-model pass
+    /// (`annotate_streamed`), so the answer streams clean and quick and is
+    /// never slowed by tool-call generation (RFC 0059 follow-up).
+    pub async fn ask_at_anchor_streamed<F>(
         &self,
         scope: &ChatScope,
         anchor: ThreadAnchor,
         body: String,
         on_delta: F,
-        mut on_intent: I,
     ) -> Result<ChatThreadView, String>
     where
         F: FnMut(String),
-        I: FnMut(HighlightIntentData),
     {
         let prep = self.prepare_ask_at_anchor(scope, &anchor, body).await?;
         let request = CompletionRequest {
@@ -219,7 +215,7 @@ impl ChatService {
             stream: true,
             max_tokens: None,
             response_format: None,
-            tools: Some(openrouter::highlight_tools()),
+            tools: None,
             tool_choice: None,
         };
         let outcome = openrouter::complete_streamed(
@@ -231,31 +227,7 @@ impl ChatService {
         )
         .await?;
 
-        let mut delivered = 0usize;
-        let mut unresolved = 0usize;
-        for tool_call in &outcome.tool_calls {
-            // Past the per-turn cap, extra tool calls are dropped rather than
-            // delivered — but they must still be counted as unresolved
-            // (Minor finding 4, final review) rather than silently vanishing.
-            if delivered >= MAX_HIGHLIGHT_INTENTS_PER_TURN {
-                unresolved += 1;
-                continue;
-            }
-            match intent_from_tool_call(&tool_call.name, &tool_call.arguments) {
-                Some(intent) => {
-                    on_intent(intent);
-                    delivered += 1;
-                }
-                None => unresolved += 1,
-            }
-        }
-        if unresolved > 0 {
-            chat_title_log(format!(
-                "ask_at_anchor_streamed: {unresolved} tool call(s) could not be parsed into a highlight intent"
-            ));
-        }
-
-        let answer_text = answer_text_or_tool_only_fallback(outcome.text, !outcome.tool_calls.is_empty());
+        let answer_text = outcome.text;
 
         let default_title = anchor.default_title();
         let selected_text = anchor.selected_text().map(ToString::to_string);
@@ -274,6 +246,93 @@ impl ChatService {
             selected_text,
         );
         Ok(write.view)
+    }
+
+    /// Fast-model annotation pass (RFC 0059 follow-up): reuses the ask's paper
+    /// context but runs the cheap `annotation_model` with ONLY the highlight
+    /// tools, steered to mark rather than answer. Persists nothing — each parsed
+    /// intent is handed to `on_intent`; the client resolves the quote and
+    /// creates the agent highlight. Runs independently of the answer so the chat
+    /// is never blocked behind marking. Capped at `MAX_HIGHLIGHT_INTENTS_PER_TURN`.
+    pub async fn annotate_streamed<I>(
+        &self,
+        scope: &ChatScope,
+        anchor: ThreadAnchor,
+        body: String,
+        mut on_intent: I,
+    ) -> Result<(), String>
+    where
+        I: FnMut(HighlightIntentData),
+    {
+        let prep = self.prepare_ask_at_anchor(scope, &anchor, body).await?;
+        let mut messages = Vec::with_capacity(prep.request_messages.len() + 1);
+        messages.push(WireMessage {
+            role: "system".to_string(),
+            content: "You mark passages in a paper by calling the `highlight` tool. \
+                      For each passage the user wants marked, quote a SHORT phrase — a \
+                      single sentence or less — copied EXACTLY and VERBATIM from the \
+                      paper text provided, character for character (do not paraphrase, \
+                      shorten, or fix typos). Prefer a distinctive short span over a long \
+                      one. Call `highlight` once per passage, choosing a fitting color. \
+                      Do not answer in prose; only call the tool."
+                .to_string(),
+        });
+        messages.extend(prep.request_messages);
+        let request = CompletionRequest {
+            model: self.config.annotation_model.clone(),
+            messages,
+            stream: true,
+            max_tokens: None,
+            response_format: None,
+            tools: Some(openrouter::highlight_tools()),
+            tool_choice: Some("auto".to_string()),
+        };
+        let outcome = openrouter::complete_streamed(
+            &self.client,
+            &self.config.url,
+            &prep.api_key,
+            &request,
+            |_text| {}, // annotation yields tool calls, not prose
+        )
+        .await?;
+
+        // Show exactly what the annotation model returned, so a "no marks"
+        // outcome can be told apart — no tool calls vs. a missed assembly.
+        crate::shared::log::debug(
+            "annotate",
+            format!(
+                "model={} text_len={} tool_calls={}",
+                self.config.annotation_model,
+                outcome.text.len(),
+                outcome.tool_calls.len(),
+            ),
+        );
+        for tool_call in &outcome.tool_calls {
+            let args: String = tool_call.arguments.chars().take(200).collect();
+            crate::shared::log::debug(
+                "annotate",
+                format!("tool_call name={} args={args}", tool_call.name),
+            );
+        }
+
+        let mut delivered = 0usize;
+        for tool_call in &outcome.tool_calls {
+            if delivered >= MAX_HIGHLIGHT_INTENTS_PER_TURN {
+                break;
+            }
+            match intent_from_tool_call(&tool_call.name, &tool_call.arguments) {
+                Some(intent) => {
+                    on_intent(intent);
+                    delivered += 1;
+                }
+                None => crate::shared::log::warn(
+                    "annotate",
+                    format!("tool_call '{}' did not parse into an intent", tool_call.name),
+                ),
+            }
+        }
+        crate::shared::log::info("annotate", format!("delivered {delivered} intent(s)"));
+        Ok(())
     }
 
     /// Assemble the prompt for a brand-new anchored ask — persisting nothing.
@@ -438,18 +497,6 @@ impl ChatService {
             );
         }
         Ok(())
-    }
-}
-
-/// A tool-only reply can leave the model's text empty — persist a short
-/// synthetic answer body instead of a blank bubble (Minor finding 2, final
-/// review). Only substitutes when the turn actually produced tool calls;
-/// an empty reply with no tool calls is left as-is (existing behavior).
-fn answer_text_or_tool_only_fallback(text: String, had_tool_calls: bool) -> String {
-    if text.trim().is_empty() && had_tool_calls {
-        "Highlighted the requested passage(s).".to_string()
-    } else {
-        text
     }
 }
 
@@ -629,31 +676,6 @@ mod tests {
             pinned: false,
             created_at: "2026-06-14".to_string(),
         }
-    }
-
-    #[test]
-    fn tool_only_reply_falls_back_to_synthetic_answer_body() {
-        assert_eq!(
-            answer_text_or_tool_only_fallback(String::new(), true),
-            "Highlighted the requested passage(s).".to_string()
-        );
-        assert_eq!(
-            answer_text_or_tool_only_fallback("   ".to_string(), true),
-            "Highlighted the requested passage(s).".to_string()
-        );
-    }
-
-    #[test]
-    fn empty_reply_without_tool_calls_is_left_as_is() {
-        assert_eq!(answer_text_or_tool_only_fallback(String::new(), false), "");
-    }
-
-    #[test]
-    fn non_empty_reply_passes_through_regardless_of_tool_calls() {
-        assert_eq!(
-            answer_text_or_tool_only_fallback("Here's the summary.".to_string(), true),
-            "Here's the summary.".to_string()
-        );
     }
 
     #[test]

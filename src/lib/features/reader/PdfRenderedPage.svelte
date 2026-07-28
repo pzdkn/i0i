@@ -1,10 +1,12 @@
 <script lang="ts">
   import { TextLayer } from "pdfjs-dist/legacy/build/pdf.mjs";
   import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist/legacy/build/pdf.mjs";
-  import type { Highlight } from "$lib/domain/highlight";
+  import type { Highlight, Locator } from "$lib/domain/highlight";
   import type { PdfRect, ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
   import { highlightFill } from "$lib/features/reader/highlight-colors";
+  import { resolveQuoteInText } from "$lib/features/reader/resolve-quote-html";
+  import { debugLog } from "$lib/bridge/chat";
 
   type PendingNote = ReaderTextSelection & { x: number; y: number };
 
@@ -219,6 +221,71 @@
     }
 
     return rects;
+  }
+
+  // Flat text of the rendered text layer, in the same node walk `layerLocate`
+  // uses — so a char span found in it maps back to the exact text nodes.
+  function layerFullText(container: Node): string {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let text = "";
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      text += node.textContent ?? "";
+    }
+    return text;
+  }
+
+  function layerLocate(container: Node, target: number): { node: Node; offset: number } | null {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let count = 0;
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const length = node.textContent?.length ?? 0;
+      if (count + length >= target) {
+        return { node, offset: target - count };
+      }
+      count += length;
+    }
+    return null;
+  }
+
+  // Resolve an agent quote to a tight pdfRect on THIS page by matching it in the
+  // rendered text layer and taking the selection's client rects — the same path
+  // manual highlighting uses, so agent marks hug the text (not full-line bands).
+  // Returns null when the quote isn't on this (rendered) page (RFC 0059).
+  export function resolveQuote(quote: string): Locator | null {
+    const layer = textLayerElement;
+    if (!layer) {
+      void debugLog(`pdf page ${pageIndex}: no text layer (not rendered yet)`, "debug");
+      return null;
+    }
+    const layerText = layerFullText(layer);
+    const span = resolveQuoteInText(layerText, quote);
+    if (!span) {
+      void debugLog(`pdf page ${pageIndex}: quote not found in ${layerText.length} chars of text layer`, "debug");
+      return null;
+    }
+    const start = layerLocate(layer, span.start);
+    const end = layerLocate(layer, span.end);
+    if (!start || !end) {
+      void debugLog(`pdf page ${pageIndex}: matched span [${span.start},${span.end}] but could not map to text nodes`, "warn");
+      return null;
+    }
+    const range = document.createRange();
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+    } catch (error) {
+      void debugLog(`pdf page ${pageIndex}: range build failed: ${String(error).slice(0, 120)}`, "warn");
+      return null;
+    }
+    const rects = rectsFromClientRects(range.getClientRects());
+    if (rects.length === 0) {
+      void debugLog(`pdf page ${pageIndex}: matched but produced 0 rects`, "warn");
+      return null;
+    }
+    void debugLog(`pdf page ${pageIndex}: matched at [${span.start},${span.end}] -> ${rects.length} rect(s)`, "debug");
+    return { kind: "pdfRect", sourceId, pageIndex, rectsJson: JSON.stringify(rects) };
   }
 
   // Both popover actions open this passage's thread; Note vs. Ask is chosen in

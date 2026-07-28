@@ -21,6 +21,36 @@ test('whitespace-normalized match: extra spaces and a newline in source vs singl
 	assert.equal(matchedOriginal.replace(/\s+/g, ' ').trim(), quote);
 });
 
+test('PDF.js span concatenation: words joined with no separators still match', () => {
+	// PDF.js text layers often join runs with no space and use ligatures; the
+	// model quotes normally-spaced text. The alphanumeric matcher bridges both.
+	const fullText = 'DeepLearning(DL)modelsareﬁnebutlarge';
+	const quote = 'Deep Learning (DL) models are fine but large';
+	const result = resolveQuoteInText(fullText, quote);
+	assert.ok(result, 'expected a match despite missing spaces + a ligature');
+	assert.equal(fullText.slice(result!.start, result!.end), 'DeepLearning(DL)modelsareﬁnebutlarge');
+});
+
+test('hyphenated line break in source matches an un-hyphenated quote (PDF case)', () => {
+	// PDFs break words across lines with a hyphen; the model quotes the joined word.
+	const fullText = 'exhibit funda-\nmental limitations to fit these models';
+	const quote = 'fundamental limitations';
+	const result = resolveQuoteInText(fullText, quote);
+	assert.ok(result, 'expected a match across the hyphenated break');
+	// The matched original span covers the hyphenated word through "limitations".
+	const matched = fullText.slice(result!.start, result!.end);
+	assert.ok(matched.includes('funda-'), `matched span should include the hyphen: ${matched}`);
+	assert.ok(matched.includes('limitations'));
+});
+
+test('case-insensitive fuzzy match', () => {
+	const fullText = 'Zero Redundancy Optimizer eliminates memory redundancies.';
+	const quote = 'zero redundancy optimizer';
+	const result = resolveQuoteInText(fullText, quote);
+	assert.ok(result, 'expected a case-insensitive match');
+	assert.equal(fullText.slice(result!.start, result!.end), 'Zero Redundancy Optimizer');
+});
+
 test('multi-line source with quote spanning a paragraph break', () => {
 	const fullText = [
 		'Paragraph one starts here.',

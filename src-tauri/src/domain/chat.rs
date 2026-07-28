@@ -237,13 +237,26 @@ pub enum ChatStreamEvent {
     Done { thread: ChatThreadView },
     #[serde(rename = "error")]
     Error { message: String },
-    #[serde(rename = "highlightIntent")]
-    HighlightIntent {
+}
+
+/// Event pushed over the annotation channel (RFC 0059 follow-up): the fast
+/// annotation pass streams one `Intent` per marked passage, then `Done`. Kept
+/// separate from `ChatStreamEvent` because annotation persists nothing and has
+/// no thread to return.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event")]
+pub enum AnnotateEvent {
+    #[serde(rename = "intent")]
+    Intent {
         quote: String,
         color: String,
         label: Option<String>,
         note: Option<String>,
     },
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "error")]
+    Error { message: String },
 }
 
 #[cfg(test)]
@@ -319,15 +332,15 @@ mod tests {
     }
 
     #[test]
-    fn highlight_intent_event_serializes_with_event_tag() {
-        let event = ChatStreamEvent::HighlightIntent {
+    fn annotate_intent_event_serializes_with_event_tag() {
+        let event = AnnotateEvent::Intent {
             quote: "scaled dot-product".to_string(),
             color: "yellow".to_string(),
             label: Some("key idea".to_string()),
             note: None,
         };
         let json = serde_json::to_value(&event).expect("event serializes");
-        assert_eq!(json["event"], "highlightIntent");
+        assert_eq!(json["event"], "intent");
         assert_eq!(json["quote"], "scaled dot-product");
         assert_eq!(json["color"], "yellow");
         assert_eq!(json["label"], "key idea");

@@ -8,11 +8,22 @@ use std::{fs, path::Path};
 
 use serde::Deserialize;
 
+/// Upper bound on paper-context characters sent to the model per ask, regardless
+/// of the configured budget. ~32k chars (~8k tokens) covers a paper's key
+/// sections while keeping ask latency and cost bounded (RFC 0059 follow-up).
+const CONTEXT_CHARS_CAP: usize = 32_000;
+
+/// Default model for agent annotation/marking — a cheap, fast open model, since
+/// picking verbatim passages to highlight is a much lighter task than answering
+/// (RFC 0059 follow-up). Overridable via the `model.annotation` setting.
+const DEFAULT_ANNOTATION_MODEL: &str = "meta-llama/llama-3.3-70b-instruct";
+
 #[derive(Debug, Clone)]
 pub struct ChatConfig {
     pub url: String,
     api_key_env: String,
     pub model: String,
+    pub annotation_model: String,
     pub max_context_chars: usize,
     pub title_model: Option<String>,
     pub title_max_tokens: u32,
@@ -40,7 +51,20 @@ impl ChatConfig {
             // A user model override (Settings) wins over app.conf.json (RFC 0055).
             model: crate::services::settings::preference("model.chat")
                 .unwrap_or(app_config.chat.provider.model),
-            max_context_chars: app_config.chat.provider.max_context_chars,
+            // Fast/cheap model for agent annotation, separate from the answer
+            // model (RFC 0059 follow-up). Falls back to a cheap open default.
+            annotation_model: crate::services::settings::preference("model.annotation")
+                .unwrap_or_else(|| DEFAULT_ANNOTATION_MODEL.to_string()),
+            // Cap the paper context fed to the model. A large budget (e.g. the
+            // 60k some configs set) makes every ask slow and costly for little
+            // added answer quality — the model rarely needs the whole paper to
+            // answer or to pick passages to highlight. Bounded here so latency
+            // is predictable; raise CONTEXT_CHARS_CAP if you need more.
+            max_context_chars: app_config
+                .chat
+                .provider
+                .max_context_chars
+                .min(CONTEXT_CHARS_CAP),
             title_model: app_config
                 .chat
                 .provider
@@ -128,7 +152,8 @@ mod tests {
         let config = ChatConfig::from_json(FIXTURE).expect("chat block parses");
         assert_eq!(config.url, "https://openrouter.ai/api/v1/chat/completions");
         assert_eq!(config.model, "anthropic/claude-sonnet-4.5");
-        assert_eq!(config.max_context_chars, 60000);
+        // The configured 60000 is clamped to the latency cap (CONTEXT_CHARS_CAP).
+        assert_eq!(config.max_context_chars, CONTEXT_CHARS_CAP);
         assert!(config.title_model.is_none());
         assert_eq!(config.title_max_tokens, 24);
         assert_eq!(config.title_timeout_ms, 5_000);
@@ -165,6 +190,7 @@ mod tests {
             url: "u".to_string(),
             api_key_env: "   ".to_string(),
             model: "m".to_string(),
+            annotation_model: "a".to_string(),
             max_context_chars: 10,
             title_model: None,
             title_max_tokens: 24,
@@ -182,6 +208,7 @@ mod tests {
             url: "u".to_string(),
             api_key_env: "I0I_CHAT_KEY_DEFINITELY_MISSING_XYZ".to_string(),
             model: "m".to_string(),
+            annotation_model: "a".to_string(),
             max_context_chars: 10,
             title_model: None,
             title_max_tokens: 24,

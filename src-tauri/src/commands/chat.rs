@@ -5,7 +5,8 @@
 use tauri::ipc::Channel;
 
 use crate::domain::chat::{
-    ChatScope, ChatStreamEvent, ChatThreadSummary, ChatThreadView, PinnedHighlight, ThreadAnchor,
+    AnnotateEvent, ChatScope, ChatStreamEvent, ChatThreadSummary, ChatThreadView, PinnedHighlight,
+    ThreadAnchor,
 };
 use crate::services::chat::ChatService;
 
@@ -133,24 +134,10 @@ pub async fn ask_at_anchor_streamed(
     ));
 
     let deltas = on_event.clone();
-    let intents = on_event.clone();
     let result = chat_service
-        .ask_at_anchor_streamed(
-            &scope,
-            anchor,
-            body,
-            move |text| {
-                let _ = deltas.send(ChatStreamEvent::Delta { text });
-            },
-            move |intent| {
-                let _ = intents.send(ChatStreamEvent::HighlightIntent {
-                    quote: intent.quote,
-                    color: intent.color,
-                    label: intent.label,
-                    note: intent.note,
-                });
-            },
-        )
+        .ask_at_anchor_streamed(&scope, anchor, body, move |text| {
+            let _ = deltas.send(ChatStreamEvent::Delta { text });
+        })
         .await;
 
     match result {
@@ -159,6 +146,62 @@ pub async fn ask_at_anchor_streamed(
         }
         Err(message) => {
             let _ = on_event.send(ChatStreamEvent::Error { message });
+        }
+    }
+    Ok(())
+}
+
+/// Surface a frontend log line in the backend terminal at a chosen level, so
+/// client-side detail (e.g. quote→locator resolution) shows up alongside the
+/// backend logs. `level` is one of error|warn|info|debug|trace (default debug),
+/// gated by the `I0I_LOG` threshold like every other leveled log.
+#[tauri::command]
+pub fn debug_log(level: Option<String>, message: String) {
+    let level = level
+        .as_deref()
+        .map(crate::shared::log::Level::parse)
+        .unwrap_or(crate::shared::log::Level::Debug);
+    crate::shared::log::log(level, "frontend", &message);
+}
+
+/// Fast-model annotation pass (RFC 0059 follow-up): streams `HighlightIntent`
+/// events for the passages the agent marks, on its own channel, independent of
+/// the answer. The caller invokes this only for marking-intent requests.
+#[tauri::command]
+pub async fn annotate_streamed(
+    chat_service: tauri::State<'_, ChatService>,
+    scope: ChatScope,
+    anchor: ThreadAnchor,
+    body: String,
+    on_event: Channel<AnnotateEvent>,
+) -> Result<(), String> {
+    chat_log(format!(
+        "annotate_streamed scope={}:{} anchor={} body_len={}",
+        scope.kind(),
+        scope.id(),
+        anchor.storage_kind(),
+        body.len()
+    ));
+
+    let intents = on_event.clone();
+    let result = chat_service
+        .annotate_streamed(&scope, anchor, body, move |intent| {
+            let _ = intents.send(AnnotateEvent::Intent {
+                quote: intent.quote,
+                color: intent.color,
+                label: intent.label,
+                note: intent.note,
+            });
+        })
+        .await;
+
+    match result {
+        Ok(()) => {
+            let _ = on_event.send(AnnotateEvent::Done);
+        }
+        Err(message) => {
+            crate::shared::log::error("annotate", format!("annotate_streamed failed: {message}"));
+            let _ = on_event.send(AnnotateEvent::Error { message });
         }
     }
     Ok(())

@@ -29,9 +29,11 @@ export function resolveQuoteInText(
 		return { start: exactIndex, end: exactIndex + trimmedQuote.length };
 	}
 
-	// 2. Whitespace-tolerant fallback.
+	// 2. Fuzzy fallback: match on the alphanumeric sequence, tolerant of spacing,
+	// punctuation, hyphenation, ligature, and case differences between the two
+	// text extractions.
 	const { normalized: normalizedText, indexMap } = normalizeWithIndexMap(fullText);
-	const normalizedQuote = normalizeWhitespace(trimmedQuote);
+	const normalizedQuote = normalizeForMatch(trimmedQuote);
 	if (normalizedQuote.length === 0) {
 		return null;
 	}
@@ -41,62 +43,60 @@ export function resolveQuoteInText(
 		return null;
 	}
 
-	const normalizedEnd = normalizedIndex + normalizedQuote.length;
+	const lastMatchedNormalized = normalizedIndex + normalizedQuote.length - 1;
 
-	// indexMap[i] gives the original-text offset corresponding to
-	// normalized-text position i. It has one entry per normalized char,
-	// plus a trailing entry for the end-of-string position so that the
-	// end boundary can be mapped even when the match reaches the end of
-	// normalizedText.
+	// `indexMap[k]` is the original-text index of the k-th kept (alphanumeric)
+	// character. The span starts at the first matched char and ends just after
+	// the last matched original char (so trailing spaces/punctuation aren't
+	// swept into the highlight).
 	const start = indexMap[normalizedIndex];
-	const end = indexMap[normalizedEnd];
+	const lastOriginal = indexMap[lastMatchedNormalized];
 
-	if (start === undefined || end === undefined) {
+	if (start === undefined || lastOriginal === undefined) {
 		return null;
 	}
 
-	return { start, end };
-}
-
-/** Collapses runs of whitespace (space/tab/newline/etc.) to a single space. */
-function normalizeWhitespace(text: string): string {
-	return text.replace(/\s+/g, ' ').trim();
+	return { start, end: lastOriginal + 1 };
 }
 
 /**
- * Normalizes whitespace while building a map from each position in the
- * normalized string to the corresponding position in the original string.
+ * Reduce text to a lowercase ALPHANUMERIC sequence: NFKD-normalize (which splits
+ * ligatures like "ﬁ"→"fi" and accents), lowercase, and drop everything that
+ * isn't [a-z0-9] — all whitespace, punctuation, and hyphens.
+ *
+ * This is what makes a model's quote (from the app's text extraction) match the
+ * rendered text (from PDF.js's text layer, a *different* extraction): the two
+ * disagree on spacing (PDF.js joins words at span/line boundaries), hyphenated
+ * line breaks, punctuation, and ligatures — but agree on the letters. For a
+ * sentence-length quote the alphanumeric run is still unique, so false matches
+ * are not a practical risk.
+ */
+function normalizeForMatch(text: string): string {
+	return text.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Same alphanumeric reduction as `normalizeForMatch`, but records, for each kept
+ * character in the normalized string, the index of the ORIGINAL character it
+ * came from — so a match in normalized space maps back to original offsets.
  */
 function normalizeWithIndexMap(text: string): { normalized: string; indexMap: number[] } {
 	let normalized = '';
 	const indexMap: number[] = [];
-	let inWhitespace = false;
 
 	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		if (/\s/.test(ch)) {
-			if (!inWhitespace && normalized.length > 0) {
-				normalized += ' ';
+		// A single source char may decompose to several (e.g. "ﬁ" → "f","i");
+		// each kept output char maps back to this same original index.
+		const decomposed = text[i].normalize('NFKD').toLowerCase();
+		for (const ch of decomposed) {
+			if (ch >= 'a' && ch <= 'z') {
+				normalized += ch;
+				indexMap.push(i);
+			} else if (ch >= '0' && ch <= '9') {
+				normalized += ch;
 				indexMap.push(i);
 			}
-			inWhitespace = true;
-		} else {
-			normalized += ch;
-			indexMap.push(i);
-			inWhitespace = false;
 		}
-	}
-
-	// Trailing entry so the end offset of a match that reaches the end of
-	// `normalized` maps to the end of `text`.
-	indexMap.push(text.length);
-
-	// If normalization produced a trailing space (source ended in
-	// whitespace), trim it and its index-map entry so lookups stay aligned
-	// with `normalized`'s actual length.
-	if (normalized.endsWith(' ')) {
-		normalized = normalized.slice(0, -1);
-		indexMap.splice(normalized.length, 1);
 	}
 
 	return { normalized, indexMap };

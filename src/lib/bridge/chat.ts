@@ -47,12 +47,16 @@ export async function deleteChatThread(threadId: string): Promise<void> {
 type ChatStreamEvent =
   | { event: "delta"; text: string }
   | { event: "done"; thread: ChatThreadView }
-  | { event: "error"; message: string }
-  | { event: "highlightIntent"; quote: string; color: string; label: string | null; note: string | null };
+  | { event: "error"; message: string };
 
-/// A model-proposed highlight (RFC 0059 Phase 2): a verbatim quote to locate
-/// in the reader plus the color/label/note the model attached to it. `color`
-/// arrives already normalized to one of the palette colors by the backend.
+type AnnotateEvent =
+  | { event: "intent"; quote: string; color: string; label: string | null; note: string | null }
+  | { event: "done" }
+  | { event: "error"; message: string };
+
+/// A model-proposed highlight (RFC 0059): a verbatim quote to locate in the
+/// reader plus the color/label/note the model attached. `color` arrives already
+/// normalized to a palette color by the backend.
 export type HighlightIntent = {
   quote: string;
   color: string;
@@ -71,26 +75,57 @@ export async function askChatThreadStreamed(
 }
 
 /// Ask at an anchor; the thread is created lazily on success and returned
-/// (RFC 0034). A failed ask persists nothing. `onIntent` fires once per
-/// `highlight`/`note` tool call the model makes before the reply completes
-/// (RFC 0059 Phase 2).
+/// (RFC 0034). Prose only — marking is a separate fast-model pass
+/// (`annotateStreamed`), so the answer is never slowed by tool-calling.
 export async function askAtAnchorStreamed(
   scope: ChatScope,
   anchor: ThreadAnchor,
   body: string,
   onDelta: (text: string) => void,
-  onIntent?: (intent: HighlightIntent) => void,
 ): Promise<ChatThreadView> {
-  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body }, onDelta, onIntent);
+  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body }, onDelta);
 }
 
-/// Shared streaming-ask plumbing: open a channel, forward deltas/intents, and
-/// resolve with the thread on `done` (or reject on `error`).
+export type LogLevel = "error" | "warn" | "info" | "debug" | "trace";
+
+/// Log a line into the backend terminal at a level (default "debug"), gated by
+/// the backend's I0I_LOG threshold — so frontend detail shows up in the same
+/// terminal alongside backend logs.
+export function debugLog(message: string, level: LogLevel = "debug"): Promise<void> {
+  return invoke("debug_log", { message, level });
+}
+
+/// Fast-model annotation pass (RFC 0059 follow-up): runs the cheap annotation
+/// model with only the highlight tools and invokes `onIntent` once per marked
+/// passage. Persists nothing; resolves when the pass completes. Meant to run in
+/// the background, in parallel with the answer.
+export async function annotateStreamed(
+  scope: ChatScope,
+  anchor: ThreadAnchor,
+  body: string,
+  onIntent: (intent: HighlightIntent) => void,
+): Promise<void> {
+  const channel = new Channel<AnnotateEvent>();
+  return new Promise<void>((resolve, reject) => {
+    channel.onmessage = (message) => {
+      if (message.event === "intent") {
+        onIntent({ quote: message.quote, color: message.color, label: message.label, note: message.note });
+      } else if (message.event === "done") {
+        resolve();
+      } else if (message.event === "error") {
+        reject(new Error(message.message));
+      }
+    };
+    invoke<void>("annotate_streamed", { scope, anchor, body, onEvent: channel }).catch(reject);
+  });
+}
+
+/// Shared streaming-ask plumbing: open a channel, forward deltas, and resolve
+/// with the thread on `done` (or reject on `error`).
 function streamAsk(
   command: string,
   args: Record<string, unknown>,
   onDelta: (text: string) => void,
-  onIntent?: (intent: HighlightIntent) => void,
 ): Promise<ChatThreadView> {
   const channel = new Channel<ChatStreamEvent>();
 
@@ -102,8 +137,6 @@ function streamAsk(
         resolve(message.thread);
       } else if (message.event === "error") {
         reject(new Error(message.message));
-      } else if (message.event === "highlightIntent") {
-        onIntent?.({ quote: message.quote, color: message.color, label: message.label, note: message.note });
       }
     };
 
