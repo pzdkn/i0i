@@ -75,6 +75,10 @@
     {/each}
   </div>
 
+  {#if highlight.author.kind === "agent"}
+    <div class="agent-badge" title={`AI-added highlight (${highlight.author.model})`}>✨ AI</div>
+  {/if}
+
   {#if highlight.excerpt}
     <blockquote class="excerpt">{highlight.excerpt}</blockquote>
   {/if}
@@ -128,6 +132,14 @@
   .swatch.active {
     border-color: var(--fg-1);
     box-shadow: 0 0 0 1px var(--fg-1);
+  }
+
+  .agent-badge {
+    align-self: flex-start;
+    color: var(--fg-3);
+    font-size: 9.5px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
   }
 
   .excerpt {

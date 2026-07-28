@@ -177,6 +177,8 @@ impl OpenRouterPlanner {
             stream: false,
             max_tokens: None,
             response_format: None,
+            tools: None,
+            tool_choice: None,
         };
         llm::complete(&self.client, &self.url, &self.api_key, &request)
             .await

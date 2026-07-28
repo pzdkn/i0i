@@ -59,6 +59,13 @@ impl HighlightService {
     pub async fn list(&self, paper_id: &str) -> Result<Vec<Highlight>, String> {
         self.store.list_highlights(paper_id).map_err(|e| e.to_string())
     }
+
+    /// List only the agent-authored highlights for a paper.
+    pub async fn list_agent(&self, paper_id: &str) -> Result<Vec<Highlight>, String> {
+        self.store
+            .list_highlights_by_author(paper_id, "agent")
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -117,5 +124,39 @@ mod tests {
             .unwrap();
         assert!(matches!(agent.author, HighlightAuthor::Agent { .. }));
         assert_eq!(svc.list(&paper).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_agent_returns_only_agent_authored_rows() {
+        let (svc, paper) = service();
+        let loc = Locator::TextOffset {
+            source_id: "s".into(),
+            start_offset: 0,
+            end_offset: 4,
+        };
+        svc.create_highlight(
+            &paper,
+            loc.clone(),
+            "quote",
+            HighlightColor::Yellow,
+            None,
+            HighlightAuthor::User,
+        )
+        .await
+        .unwrap();
+        svc.create_highlight(
+            &paper,
+            loc,
+            "quote",
+            HighlightColor::Red,
+            None,
+            HighlightAuthor::Agent { model: "m".into() },
+        )
+        .await
+        .unwrap();
+
+        let agent_only = svc.list_agent(&paper).await.unwrap();
+        assert_eq!(agent_only.len(), 1);
+        assert!(matches!(agent_only[0].author, HighlightAuthor::Agent { .. }));
     }
 }

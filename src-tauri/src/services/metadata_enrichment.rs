@@ -781,6 +781,8 @@ impl MetadataEnrichmentService {
             stream: false,
             max_tokens: Some(LLM_METADATA_MAX_TOKENS),
             response_format: Some(ResponseFormat::json_object()),
+            tools: None,
+            tool_choice: None,
         };
 
         let raw = llm::complete(&self.client, &config.url, &api_key, &request).await?;

@@ -1382,6 +1382,32 @@ impl LibraryStore {
         collect_rows(rows)
     }
 
+    /// List a paper's highlights authored by the given author kind
+    /// (`"user"` or `"agent"`), oldest first.
+    pub fn list_highlights_by_author(
+        &self,
+        paper_id: &str,
+        author_kind: &str,
+    ) -> StoreResult<Vec<crate::domain::highlight::Highlight>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "
+                select id, paper_id, source_id, locator_kind, start_offset, end_offset,
+                       page_index, rects_json, excerpt, color, label, author_kind,
+                       author_model, created_at, updated_at
+                from highlights
+                where paper_id = ?1 and author_kind = ?2
+                order by created_at asc
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![paper_id, author_kind], highlight_from_row)
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
     /// Change a highlight's color.
     pub fn recolor_highlight(
         &self,

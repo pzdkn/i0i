@@ -25,3 +25,18 @@ export function removeHighlight(id: string): Promise<void> {
 export function listHighlights(paperId: string): Promise<Highlight[]> {
   return invoke<Highlight[]>("list_highlights", { paperId });
 }
+
+/// Create a highlight authored by the agent (RFC 0059 Phase 2): same shape as
+/// `createHighlight`, plus the model that proposed it.
+export function createAgentHighlight(args: {
+  paperId: string; locator: Locator; excerpt: string; color: HighlightColor; label?: string | null; model: string;
+}): Promise<Highlight> {
+  return invoke<Highlight>("create_agent_highlight", {
+    paperId: args.paperId, locator: args.locator, excerpt: args.excerpt,
+    color: args.color, label: args.label ?? null, model: args.model,
+  });
+}
+
+export function listAgentHighlights(paperId: string): Promise<Highlight[]> {
+  return invoke<Highlight[]>("list_agent_highlights", { paperId });
+}

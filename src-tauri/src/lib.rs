@@ -185,6 +185,8 @@ pub fn run() {
             commands::highlight::set_highlight_label,
             commands::highlight::remove_highlight,
             commands::highlight::list_highlights,
+            commands::highlight::create_agent_highlight,
+            commands::highlight::list_agent_highlights,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

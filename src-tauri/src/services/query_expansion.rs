@@ -131,6 +131,8 @@ impl Inner {
             stream: false,
             max_tokens: Some(160),
             response_format: Some(ResponseFormat::json_object()),
+            tools: None,
+            tool_choice: None,
         };
         let text = llm::complete(&self.client, &self.url, &self.api_key, &request).await?;
         Ok(parse_variants(&text))

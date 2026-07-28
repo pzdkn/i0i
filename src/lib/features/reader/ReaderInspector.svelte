@@ -8,6 +8,7 @@
     noteAtAnchor,
     renameChatThread,
     setChatEntryPinned,
+    type HighlightIntent,
   } from "$lib/bridge/chat";
   import {
     anchorSelectedText,
@@ -54,6 +55,14 @@
     onPickColor,
     onEnsureHighlight,
     onOpenHighlight,
+    onHighlightIntent,
+    onAskTurnStart,
+    onAskTurnComplete,
+    turnHighlightCount = 0,
+    showTurnAffordance = false,
+    onKeepTurnHighlights,
+    onUndoTurnHighlights,
+    onDismissTurnAffordance,
   }: {
     document: ReaderDocument;
     chatEnabled: boolean;
@@ -77,6 +86,21 @@
     onPickColor: (color: HighlightColor) => void | Promise<void>;
     onEnsureHighlight: () => void | Promise<void>;
     onOpenHighlight: (highlightId: string) => void;
+    onHighlightIntent?: (intent: HighlightIntent) => Promise<boolean>;
+    // RFC 0059 Phase 2 (Task 9): lifecycle hooks around a single ask turn so
+    // ReaderView can collect the highlight ids the agent creates during that
+    // turn (via onHighlightIntent) and offer a batch Keep/Undo once it settles.
+    onAskTurnStart?: () => void;
+    onAskTurnComplete?: () => void;
+    turnHighlightCount?: number;
+    showTurnAffordance?: boolean;
+    onKeepTurnHighlights?: () => void;
+    onUndoTurnHighlights?: () => void | Promise<void>;
+    // Fired at the thread-close chokepoints (back to list, opening a
+    // different thread) so ReaderView can drop a stale turn's affordance
+    // before it can reappear over the next thread (Minor finding 1, final
+    // review).
+    onDismissTurnAffordance?: () => void;
   } = $props();
 
   let activeTab = $state<InspectorTab>("threads");
@@ -90,6 +114,9 @@
   let error = $state("");
   let renaming = $state(false);
   let renameTitle = $state("");
+  // RFC 0059 Phase 2 (Task 8): passages the model tried to highlight but
+  // couldn't be located in this turn's reply, surfaced once the ask settles.
+  let unresolvedNotice = $state("");
   // Guards streamed deltas against paper switches / superseded asks.
   let askSequence = 0;
   let activeAskId = $state(0);
@@ -124,6 +151,7 @@
     openThread = null;
     chatInput = "";
     error = "";
+    unresolvedNotice = "";
     renaming = false;
     activeAskId = (askSequence += 1);
   });
@@ -210,11 +238,13 @@
 
   async function openThreadById(threadId: string) {
     error = "";
+    unresolvedNotice = "";
     // Switching to a specific existing thread (a mark click, a pin, a thread
     // row) invalidates any pending selection — otherwise the swatch row for
     // the old selection would stay visible over the newly-opened thread and
     // a swatch click would mark the wrong (stale) passage.
     onClearSelection();
+    onDismissTurnAffordance?.();
     try {
       openThread = await getChatThread(threadId);
     } catch (caught) {
@@ -225,7 +255,9 @@
   function backToThreadList() {
     openThread = null;
     renaming = false;
+    unresolvedNotice = "";
     onClearSelection();
+    onDismissTurnAffordance?.();
   }
 
   async function refreshOpenThread() {
@@ -259,9 +291,13 @@
     activeAskId = askId;
     isBusy = true;
     error = "";
+    unresolvedNotice = "";
     pendingQuestion = body;
     streamingAnswer = "";
     chatInput = "";
+    // RFC 0059 Phase 2 (Task 9): a fresh turn starts here, before any
+    // HighlightIntent can arrive, so ReaderView resets its per-turn id list.
+    onAskTurnStart?.();
     try {
       if (virtual) {
         // RFC 0058 Phase 1 (Task 9): mark the passage alongside the thread,
@@ -273,15 +309,50 @@
           streamingAnswer = (streamingAnswer ?? "") + text;
         }
       };
+      // RFC 0059 Phase 2 (Task 8): each streamed HighlightIntent is resolved
+      // and turned into an agent highlight by the reader (ReaderView owns
+      // the resolvers). Intent handling can outlive the `done` event (PDF
+      // resolution is async), so every intent's promise is tracked and
+      // awaited before the turn is considered settled.
+      const pendingIntents: Promise<void>[] = [];
+      let unresolvedCount = 0;
+      const onIntent = (intent: HighlightIntent) => {
+        if (activeAskId !== askId || !onHighlightIntent) {
+          return;
+        }
+        pendingIntents.push(
+          onHighlightIntent(intent)
+            .then((resolved) => {
+              if (!resolved) {
+                unresolvedCount += 1;
+              }
+            })
+            // Defensive: onHighlightIntent already catches internally, but a
+            // rejection here must never propagate to the ask's own
+            // try/catch below — that would turn a successful ask into a
+            // reported error and re-fill the composer with the question.
+            .catch(() => {
+              unresolvedCount += 1;
+            }),
+        );
+      };
       const view = virtual
-        ? await askAtAnchorStreamed(scope, anchor, body, onDelta)
+        ? await askAtAnchorStreamed(scope, anchor, body, onDelta, onIntent)
         : await askChatThreadStreamed(threadId, body, onDelta);
+      await Promise.all(pendingIntents);
       if (activeAskId === askId) {
         openThread = view;
         onReloadChat();
+        if (unresolvedCount > 0) {
+          unresolvedNotice = `Couldn't add ${unresolvedCount} passage${unresolvedCount > 1 ? "s" : ""} to the paper.`;
+        }
         if (virtual) {
           onClearSelection();
         }
+        // RFC 0059 Phase 2 (Task 9): the turn has settled (every intent's
+        // create-or-fail has resolved, above) — ReaderView now knows the
+        // final id count and can surface the batch Keep/Undo affordance.
+        onAskTurnComplete?.();
       }
     } catch (caught) {
       if (activeAskId === askId) {
@@ -517,6 +588,20 @@
             {#if visibleError}
               <p class="note-error">{visibleError}</p>
             {/if}
+
+            {#if unresolvedNotice}
+              <p class="unresolved-notice">{unresolvedNotice}</p>
+            {/if}
+
+            {#if showTurnAffordance}
+              <div class="turn-affordance row">
+                <span>AI added {turnHighlightCount} highlight{turnHighlightCount === 1 ? "" : "s"}</span>
+                <div class="flex1"></div>
+                <button class="link-btn" type="button" onclick={onKeepTurnHighlights}>Keep</button>
+                <span class="mono-dim">·</span>
+                <button class="link-btn" type="button" onclick={() => void onUndoTurnHighlights?.()}>Undo all</button>
+              </div>
+            {/if}
           </div>
 
           <div class="thread-input">
@@ -560,6 +645,7 @@
                     <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
                   {/if}
                   <span class="thread-row-title">{thread.title}</span>
+                  {#if hl?.author.kind === "agent"}<span class="badge" title="AI-added highlight">✨</span>{/if}
                   {#if thread.entryCount > 0}<span class="badge" title="has notes/answers">💬</span>{/if}
                   <span class="mono-dim">{thread.pinnedCount > 0 ? "★ " : ""}{thread.entryCount}</span>
                 </button>
@@ -569,6 +655,7 @@
                 <button class="thread-row" type="button" onclick={() => onOpenHighlight(hl.id)}>
                   <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
                   <span class="thread-row-title">{hl.excerpt}</span>
+                  {#if hl.author.kind === "agent"}<span class="badge" title="AI-added highlight">✨</span>{/if}
                   <span class="badge" title="no note or thread yet">＋</span>
                 </button>
               {/each}
@@ -784,6 +871,25 @@
 
   .note-error {
     color: var(--red);
+  }
+
+  .unresolved-notice {
+    margin: 8px 0 0;
+    color: var(--fg-3);
+    font-size: 10.5px;
+    line-height: 1.45;
+  }
+
+  .turn-affordance {
+    margin: 8px 0 0;
+    padding: 6px 8px;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border-2);
+    background: var(--bg-1);
+    color: var(--fg-2);
+    font-size: 10.5px;
+    line-height: 1.4;
   }
 
   .note-icon {

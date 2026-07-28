@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use reqwest::Client;
+use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 
 use super::config::ChatConfig;
@@ -147,6 +148,8 @@ impl ChatService {
             stream: false,
             max_tokens: None,
             response_format: None,
+            tools: None,
+            tool_choice: None,
         };
         let answer =
             openrouter::complete(&self.client, &self.config.url, &prep.api_key, &request).await?;
@@ -171,8 +174,10 @@ impl ChatService {
             stream: true,
             max_tokens: None,
             response_format: None,
+            tools: None,
+            tool_choice: None,
         };
-        let answer = openrouter::complete_streamed(
+        let outcome = openrouter::complete_streamed(
             &self.client,
             &self.config.url,
             &prep.api_key,
@@ -180,7 +185,7 @@ impl ChatService {
             on_delta,
         )
         .await?;
-        self.finalize_ask(thread_id, &prep.user_body, answer, prep.summary)
+        self.finalize_ask(thread_id, &prep.user_body, outcome.text, prep.summary)
             .await
     }
 
@@ -189,15 +194,23 @@ impl ChatService {
     /// Nothing is persisted until the reply arrives, so a failed ask leaves no
     /// thread. The passage (for a selection anchor) is foregrounded in the
     /// prompt, just as for a thread-scoped ask.
-    pub async fn ask_at_anchor_streamed<F>(
+    ///
+    /// The model is offered the `highlight`/`note` tools (RFC 0059 Phase 2);
+    /// each assembled tool call is parsed into a `HighlightIntentData` and
+    /// delivered to `on_intent` (before this method returns), capped at
+    /// `MAX_HIGHLIGHT_INTENTS_PER_TURN` per turn. Malformed or empty-quote
+    /// tool calls are skipped.
+    pub async fn ask_at_anchor_streamed<F, I>(
         &self,
         scope: &ChatScope,
         anchor: ThreadAnchor,
         body: String,
         on_delta: F,
+        mut on_intent: I,
     ) -> Result<ChatThreadView, String>
     where
         F: FnMut(String),
+        I: FnMut(HighlightIntentData),
     {
         let prep = self.prepare_ask_at_anchor(scope, &anchor, body).await?;
         let request = CompletionRequest {
@@ -206,8 +219,10 @@ impl ChatService {
             stream: true,
             max_tokens: None,
             response_format: None,
+            tools: Some(openrouter::highlight_tools()),
+            tool_choice: None,
         };
-        let answer = openrouter::complete_streamed(
+        let outcome = openrouter::complete_streamed(
             &self.client,
             &self.config.url,
             &prep.api_key,
@@ -215,6 +230,33 @@ impl ChatService {
             on_delta,
         )
         .await?;
+
+        let mut delivered = 0usize;
+        let mut unresolved = 0usize;
+        for tool_call in &outcome.tool_calls {
+            // Past the per-turn cap, extra tool calls are dropped rather than
+            // delivered — but they must still be counted as unresolved
+            // (Minor finding 4, final review) rather than silently vanishing.
+            if delivered >= MAX_HIGHLIGHT_INTENTS_PER_TURN {
+                unresolved += 1;
+                continue;
+            }
+            match intent_from_tool_call(&tool_call.name, &tool_call.arguments) {
+                Some(intent) => {
+                    on_intent(intent);
+                    delivered += 1;
+                }
+                None => unresolved += 1,
+            }
+        }
+        if unresolved > 0 {
+            chat_title_log(format!(
+                "ask_at_anchor_streamed: {unresolved} tool call(s) could not be parsed into a highlight intent"
+            ));
+        }
+
+        let answer_text = answer_text_or_tool_only_fallback(outcome.text, !outcome.tool_calls.is_empty());
+
         let default_title = anchor.default_title();
         let selected_text = anchor.selected_text().map(ToString::to_string);
         let write = self.store.persist_anchored_turn_with_creation(
@@ -222,7 +264,7 @@ impl ChatService {
             scope.id(),
             &anchor,
             &ChatEntryDraft::question(prep.user_body.clone()),
-            &ChatEntryDraft::answer(answer, self.config.model.clone(), prep.summary),
+            &ChatEntryDraft::answer(answer_text, self.config.model.clone(), prep.summary),
         )?;
         self.spawn_title_generation_if_created(
             write.created,
@@ -365,6 +407,8 @@ impl ChatService {
             stream: false,
             max_tokens: Some(self.config.title_max_tokens),
             response_format: None,
+            tools: None,
+            tool_choice: None,
         };
 
         let raw_title = tokio::time::timeout(
@@ -394,6 +438,89 @@ impl ChatService {
             );
         }
         Ok(())
+    }
+}
+
+/// A tool-only reply can leave the model's text empty — persist a short
+/// synthetic answer body instead of a blank bubble (Minor finding 2, final
+/// review). Only substitutes when the turn actually produced tool calls;
+/// an empty reply with no tool calls is left as-is (existing behavior).
+fn answer_text_or_tool_only_fallback(text: String, had_tool_calls: bool) -> String {
+    if text.trim().is_empty() && had_tool_calls {
+        "Highlighted the requested passage(s).".to_string()
+    } else {
+        text
+    }
+}
+
+/// Per-turn cap on how many highlight intents a single ask will deliver,
+/// guarding against a model that calls the highlight/note tools excessively.
+const MAX_HIGHLIGHT_INTENTS_PER_TURN: usize = 25;
+
+/// A parsed, ready-to-emit highlight intent (RFC 0059 Phase 2): a quote to
+/// highlight, its color, and optionally a label (from `highlight`) or a note
+/// body (from `note`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HighlightIntentData {
+    pub quote: String,
+    pub color: String,
+    pub label: Option<String>,
+    pub note: Option<String>,
+}
+
+/// The JSON arguments shape for both the `highlight` and `note` tools.
+#[derive(Debug, Deserialize)]
+struct HighlightArgs {
+    quote: String,
+    color: Option<String>,
+    label: Option<String>,
+    body: Option<String>,
+}
+
+/// Palette the `highlight`/`note` tools advertise (mirrors `highlight_tools()`
+/// in `services/llm.rs`). Any color outside this set — including missing or
+/// blank — is normalized to `"yellow"` rather than dropping the intent.
+const HIGHLIGHT_COLOR_PALETTE: &[&str] = &["yellow", "green", "blue", "red", "purple", "orange"];
+const DEFAULT_HIGHLIGHT_COLOR: &str = "yellow";
+
+/// Normalize a raw color string to a valid palette member, defaulting to
+/// `DEFAULT_HIGHLIGHT_COLOR` when missing, blank, or off-palette.
+fn normalize_highlight_color(raw: Option<&str>) -> String {
+    let candidate = raw.map(str::trim).unwrap_or("").to_lowercase();
+    if HIGHLIGHT_COLOR_PALETTE.contains(&candidate.as_str()) {
+        candidate
+    } else {
+        DEFAULT_HIGHLIGHT_COLOR.to_string()
+    }
+}
+
+/// Parse one assembled tool call into a highlight intent, or `None` if the
+/// tool is unrecognized, the arguments don't parse, or the quote is empty.
+/// A missing/blank/off-palette color is normalized to `"yellow"` rather than
+/// dropping the intent — `color` is required by the `highlight` tool schema
+/// but optional for `note`, and a model may emit an off-palette string.
+fn intent_from_tool_call(name: &str, arguments: &str) -> Option<HighlightIntentData> {
+    let args: HighlightArgs = serde_json::from_str(arguments).ok()?;
+    let quote = args.quote.trim();
+    if quote.is_empty() {
+        return None;
+    }
+    let color = normalize_highlight_color(args.color.as_deref());
+
+    match name {
+        "highlight" => Some(HighlightIntentData {
+            quote: quote.to_string(),
+            color,
+            label: args.label.filter(|label| !label.trim().is_empty()),
+            note: None,
+        }),
+        "note" => Some(HighlightIntentData {
+            quote: quote.to_string(),
+            color,
+            label: None,
+            note: args.body.filter(|body| !body.trim().is_empty()),
+        }),
+        _ => None,
     }
 }
 
@@ -505,6 +632,31 @@ mod tests {
     }
 
     #[test]
+    fn tool_only_reply_falls_back_to_synthetic_answer_body() {
+        assert_eq!(
+            answer_text_or_tool_only_fallback(String::new(), true),
+            "Highlighted the requested passage(s).".to_string()
+        );
+        assert_eq!(
+            answer_text_or_tool_only_fallback("   ".to_string(), true),
+            "Highlighted the requested passage(s).".to_string()
+        );
+    }
+
+    #[test]
+    fn empty_reply_without_tool_calls_is_left_as_is() {
+        assert_eq!(answer_text_or_tool_only_fallback(String::new(), false), "");
+    }
+
+    #[test]
+    fn non_empty_reply_passes_through_regardless_of_tool_calls() {
+        assert_eq!(
+            answer_text_or_tool_only_fallback("Here's the summary.".to_string(), true),
+            "Here's the summary.".to_string()
+        );
+    }
+
+    #[test]
     fn wire_messages_lead_with_system_replay_entries_then_new_question() {
         let entries = vec![
             entry("note", "a standalone note"),
@@ -536,6 +688,91 @@ mod tests {
             Some("one two three four five six".to_string())
         );
         assert_eq!(clean_generated_title("   "), None);
+    }
+
+    #[test]
+    fn highlight_tool_call_parses_into_intent_with_label() {
+        let intent = intent_from_tool_call(
+            "highlight",
+            r#"{"quote":"scaled dot-product","color":"yellow","label":"key idea"}"#,
+        )
+        .expect("valid highlight call parses");
+
+        assert_eq!(intent.quote, "scaled dot-product");
+        assert_eq!(intent.color, "yellow");
+        assert_eq!(intent.label.as_deref(), Some("key idea"));
+        assert_eq!(intent.note, None);
+    }
+
+    #[test]
+    fn note_tool_call_parses_into_intent_with_note_body() {
+        let intent = intent_from_tool_call(
+            "note",
+            r#"{"quote":"attention is all you need","color":"green","body":"the core claim"}"#,
+        )
+        .expect("valid note call parses");
+
+        assert_eq!(intent.quote, "attention is all you need");
+        assert_eq!(intent.color, "green");
+        assert_eq!(intent.label, None);
+        assert_eq!(intent.note.as_deref(), Some("the core claim"));
+    }
+
+    #[test]
+    fn tool_call_with_empty_quote_is_skipped() {
+        assert_eq!(
+            intent_from_tool_call("highlight", r#"{"quote":"","color":"yellow"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_call_with_missing_or_blank_color_defaults_to_yellow() {
+        assert_eq!(
+            intent_from_tool_call("highlight", r#"{"quote":"some text"}"#)
+                .expect("missing color still parses")
+                .color,
+            "yellow"
+        );
+        assert_eq!(
+            intent_from_tool_call("highlight", r#"{"quote":"some text","color":"  "}"#)
+                .expect("blank color still parses")
+                .color,
+            "yellow"
+        );
+    }
+
+    #[test]
+    fn note_tool_call_without_color_defaults_to_yellow() {
+        let intent = intent_from_tool_call("note", r#"{"quote":"x","body":"b"}"#)
+            .expect("note without color still parses");
+
+        assert_eq!(intent.color, "yellow");
+        assert_eq!(intent.note.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn off_palette_color_defaults_to_yellow() {
+        let intent = intent_from_tool_call(
+            "highlight",
+            r#"{"quote":"scaled dot-product","color":"crimson"}"#,
+        )
+        .expect("off-palette color still parses");
+
+        assert_eq!(intent.color, "yellow");
+    }
+
+    #[test]
+    fn malformed_json_is_skipped() {
+        assert_eq!(intent_from_tool_call("highlight", "not json"), None);
+    }
+
+    #[test]
+    fn unrecognized_tool_name_is_skipped() {
+        assert_eq!(
+            intent_from_tool_call("unknown_tool", r#"{"quote":"x","color":"red"}"#),
+            None
+        );
     }
 
     #[test]

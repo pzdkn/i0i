@@ -133,10 +133,24 @@ pub async fn ask_at_anchor_streamed(
     ));
 
     let deltas = on_event.clone();
+    let intents = on_event.clone();
     let result = chat_service
-        .ask_at_anchor_streamed(&scope, anchor, body, move |text| {
-            let _ = deltas.send(ChatStreamEvent::Delta { text });
-        })
+        .ask_at_anchor_streamed(
+            &scope,
+            anchor,
+            body,
+            move |text| {
+                let _ = deltas.send(ChatStreamEvent::Delta { text });
+            },
+            move |intent| {
+                let _ = intents.send(ChatStreamEvent::HighlightIntent {
+                    quote: intent.quote,
+                    color: intent.color,
+                    label: intent.label,
+                    note: intent.note,
+                });
+            },
+        )
         .await;
 
     match result {

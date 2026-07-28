@@ -47,7 +47,18 @@ export async function deleteChatThread(threadId: string): Promise<void> {
 type ChatStreamEvent =
   | { event: "delta"; text: string }
   | { event: "done"; thread: ChatThreadView }
-  | { event: "error"; message: string };
+  | { event: "error"; message: string }
+  | { event: "highlightIntent"; quote: string; color: string; label: string | null; note: string | null };
+
+/// A model-proposed highlight (RFC 0059 Phase 2): a verbatim quote to locate
+/// in the reader plus the color/label/note the model attached to it. `color`
+/// arrives already normalized to one of the palette colors by the backend.
+export type HighlightIntent = {
+  quote: string;
+  color: string;
+  label: string | null;
+  note: string | null;
+};
 
 /// Ask in a thread, invoking `onDelta` for each streamed fragment, and resolve
 /// with the updated thread once the reply completes.
@@ -60,22 +71,26 @@ export async function askChatThreadStreamed(
 }
 
 /// Ask at an anchor; the thread is created lazily on success and returned
-/// (RFC 0034). A failed ask persists nothing.
+/// (RFC 0034). A failed ask persists nothing. `onIntent` fires once per
+/// `highlight`/`note` tool call the model makes before the reply completes
+/// (RFC 0059 Phase 2).
 export async function askAtAnchorStreamed(
   scope: ChatScope,
   anchor: ThreadAnchor,
   body: string,
   onDelta: (text: string) => void,
+  onIntent?: (intent: HighlightIntent) => void,
 ): Promise<ChatThreadView> {
-  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body }, onDelta);
+  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body }, onDelta, onIntent);
 }
 
-/// Shared streaming-ask plumbing: open a channel, forward deltas, and resolve
-/// with the thread on `done` (or reject on `error`).
+/// Shared streaming-ask plumbing: open a channel, forward deltas/intents, and
+/// resolve with the thread on `done` (or reject on `error`).
 function streamAsk(
   command: string,
   args: Record<string, unknown>,
   onDelta: (text: string) => void,
+  onIntent?: (intent: HighlightIntent) => void,
 ): Promise<ChatThreadView> {
   const channel = new Channel<ChatStreamEvent>();
 
@@ -87,6 +102,8 @@ function streamAsk(
         resolve(message.thread);
       } else if (message.event === "error") {
         reject(new Error(message.message));
+      } else if (message.event === "highlightIntent") {
+        onIntent?.({ quote: message.quote, color: message.color, label: message.label, note: message.note });
       }
     };
 

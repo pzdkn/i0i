@@ -2,9 +2,10 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { getReaderHtml } from "$lib/bridge/library";
   import type { ReaderTextSelection } from "$lib/domain/reader";
-  import type { Highlight } from "$lib/domain/highlight";
+  import type { Highlight, Locator } from "$lib/domain/highlight";
   import { HIGHLIGHT_COLORS } from "$lib/domain/highlight";
   import { findHighlightForOffset } from "$lib/features/reader/highlight-thread-match";
+  import { resolveQuoteInText } from "$lib/features/reader/resolve-quote-html";
 
   let {
     sourceId,
@@ -62,6 +63,29 @@
       count += length;
     }
     return null;
+  }
+
+  // Concatenates text nodes under `container` in document order — the same
+  // walk `offsetIn`/`locate` use — so a char span found here lands at the
+  // exact same offsets the highlight-rendering effect below uses.
+  function extractFullText(container: Node): string {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let text = "";
+    let current: Node | null;
+    while ((current = walker.nextNode())) {
+      text += current.textContent ?? "";
+    }
+    return text;
+  }
+
+  // Resolves an agent-provided verbatim quote to a textOffset Locator in this
+  // article's plain text (RFC 0059 Phase 2 / Task 8). Exposed to ReaderView
+  // via `bind:this`.
+  export function resolveQuote(quote: string): Locator | null {
+    if (!root) return null;
+    const span = resolveQuoteInText(extractFullText(root), quote);
+    if (!span) return null;
+    return { kind: "textOffset", sourceId, startOffset: span.start, endOffset: span.end };
   }
 
   function handleMouseUp(event: MouseEvent) {

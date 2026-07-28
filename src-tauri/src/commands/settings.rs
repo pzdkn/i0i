@@ -198,6 +198,8 @@ async fn test_openrouter() -> Result<(), String> {
         stream: false,
         max_tokens: Some(1),
         response_format: None,
+        tools: None,
+        tool_choice: None,
     };
     llm::complete(&client, &config.url, &api_key, &request)
         .await

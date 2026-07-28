@@ -8,11 +8,18 @@
     getReaderDocument,
     openHtmlDocument,
   } from "$lib/bridge/library";
-  import { listChatThreads, listPinnedChatEntries } from "$lib/bridge/chat";
-  import { createHighlight, listHighlights, recolorHighlight, removeHighlight } from "$lib/bridge/highlight";
+  import { listChatThreads, listPinnedChatEntries, type HighlightIntent } from "$lib/bridge/chat";
+  import {
+    createAgentHighlight,
+    createHighlight,
+    listHighlights,
+    recolorHighlight,
+    removeHighlight,
+  } from "$lib/bridge/highlight";
+  import { getSettings } from "$lib/bridge/settings";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import type { ChatThreadSummary, PinnedHighlight } from "$lib/domain/chat";
-  import type { Highlight, HighlightColor, Locator } from "$lib/domain/highlight";
+  import { HIGHLIGHT_COLORS, type Highlight, type HighlightColor, type Locator } from "$lib/domain/highlight";
   import type {
     MetadataAutofillProgress,
     MetadataCandidate,
@@ -80,6 +87,21 @@
   let forceNextLoad = false;
   let focusThreadsMode = $state<"open" | "collapsed">("open");
   let pdfScale = $state(1.15);
+  // RFC 0059 Phase 2 (Task 8): refs to the active reader so intents can be
+  // resolved wherever the content actually lives — the HTML reader resolves
+  // synchronously against its rendered text; the PDF reader resolves
+  // asynchronously against per-page text-content items.
+  let htmlReaderRef = $state<HtmlReader | undefined>();
+  let pdfPageRef = $state<PdfPage | undefined>();
+  // The chat model string to attribute agent-created highlights to, resolved
+  // once from settings; falls back to a generic label if unset.
+  let chatModel = $state("agent");
+  // RFC 0059 Phase 2 (Task 9): ids of highlights the agent created during the
+  // ask turn currently in flight (or just settled) — reset at the start of
+  // each turn, accumulated as each HighlightIntent resolves to a created
+  // Highlight. Drives the batch Keep/Undo affordance once the turn completes.
+  let turnHighlightIds = $state<string[]>([]);
+  let showTurnAffordance = $state(false);
 
   const document = $derived<ReaderDocument | null>(readerDocument);
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
@@ -192,6 +214,20 @@
         console.error("Failed to listen for chat_thread_updated:", error);
       });
 
+    // RFC 0059 Phase 2 (Task 8): the model string agent-created highlights
+    // are attributed to. Best-effort — a settings load failure just leaves
+    // the "agent" fallback.
+    getSettings()
+      .then((settings) => {
+        const configured = settings.prefs["model.chat"]?.trim();
+        if (configured) {
+          chatModel = configured;
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load settings:", error);
+      });
+
     return () => {
       unlistenSource?.();
       unlistenExtraction?.();
@@ -257,6 +293,11 @@
     chatError = "";
     popoverHighlightId = null;
     popoverPos = null;
+
+    // A stale turn's affordance must not reappear over a different paper's
+    // thread (Task 9 / final review fix).
+    turnHighlightIds = [];
+    showTurnAffordance = false;
 
     if (!chatEnabled) {
       threads = [];
@@ -405,6 +446,94 @@
     } finally {
       highlightActionInFlight = false;
     }
+  }
+
+  // A model-emitted `color` is normalized backend-side to one of the palette
+  // colors already, but the wire type is a plain string — this just proves
+  // that to the type system, falling back defensively if it somehow isn't.
+  function asHighlightColor(color: string): HighlightColor {
+    return (HIGHLIGHT_COLORS as string[]).includes(color) ? (color as HighlightColor) : "yellow";
+  }
+
+  // Resolves one streamed HighlightIntent to a Locator in the active reader
+  // and creates the agent highlight (RFC 0059 Phase 2 / Task 8). Does not
+  // reload marks itself — ReaderInspector reloads once after the whole ask
+  // turn settles. Returns whether the quote was resolved and the highlight
+  // created, so the caller can count unresolved passages.
+  async function handleHighlightIntent(intent: HighlightIntent): Promise<boolean> {
+    try {
+      const locator = isHtml
+        ? (htmlReaderRef?.resolveQuote(intent.quote) ?? null)
+        : pdfPageRef
+          ? await pdfPageRef.resolveQuote(intent.quote)
+          : null;
+      if (!locator) {
+        return false;
+      }
+      const created = await createAgentHighlight({
+        paperId: paper.id,
+        locator,
+        excerpt: intent.quote,
+        color: asHighlightColor(intent.color),
+        label: intent.label,
+        model: chatModel,
+      });
+      // RFC 0059 Phase 2 (Task 9): collect this turn's created id for the
+      // batch Keep/Undo affordance shown once the ask turn settles.
+      turnHighlightIds = [...turnHighlightIds, created.id];
+      return true;
+    } catch (error) {
+      // A resolve or create failure here must never surface as an ask
+      // error — the ask itself may well have succeeded. Count it as
+      // unresolved and move on (caller tallies this via the return value).
+      readerLog("agent-highlight-intent-error", { error: errorDetail(error) }, "error");
+      return false;
+    }
+  }
+
+  // A new ask turn starts: dismiss any leftover affordance from a previous
+  // turn and reset the id list the next handleHighlightIntent calls will
+  // fill in (RFC 0059 Phase 2 / Task 9).
+  function handleAskTurnStart() {
+    turnHighlightIds = [];
+    showTurnAffordance = false;
+  }
+
+  // The turn has settled — if the agent created at least one highlight,
+  // offer the batch Keep/Undo affordance.
+  function handleAskTurnComplete() {
+    if (turnHighlightIds.length > 0) {
+      showTurnAffordance = true;
+    }
+  }
+
+  // The open thread closed (back to the list, or a different thread opened)
+  // — any leftover affordance from the just-closed thread's turn must not
+  // linger and reappear over whatever's opened next (Minor finding 1, final
+  // review).
+  function dismissTurnAffordance() {
+    showTurnAffordance = false;
+    turnHighlightIds = [];
+  }
+
+  // Keep: just dismiss the affordance, the marks stay.
+  function keepTurnHighlights() {
+    showTurnAffordance = false;
+    turnHighlightIds = [];
+  }
+
+  // Undo all: remove every highlight this turn created, then reload so the
+  // marks/rail/pins all drop it together.
+  async function undoTurnHighlights() {
+    const ids = turnHighlightIds;
+    showTurnAffordance = false;
+    turnHighlightIds = [];
+    try {
+      await Promise.all(ids.map((id) => removeHighlight(id)));
+    } catch (error) {
+      readerLog("undo-turn-highlights-error", { error: errorDetail(error) }, "error");
+    }
+    await reloadChat();
   }
 
   // Click-a-highlight popover (RFC 0058 Task 10).
@@ -638,6 +767,7 @@
                   <div class="reading-surface row">
                     {#if isHtml}
                       <HtmlReader
+                        bind:this={htmlReaderRef}
                         sourceId={document.sourceId}
                         sourceUrl={readerDocument?.sourceUrl}
                         {highlights}
@@ -647,6 +777,7 @@
                       />
                     {:else if hasCachedPdf}
                       <PdfPage
+                        bind:this={pdfPageRef}
                         pdfUrl={readerDocument!.pdfLocalPath!}
                         sourceId={document.sourceId}
                         {threads}
@@ -737,6 +868,14 @@
           onPickColor={pickColor}
           onEnsureHighlight={ensureHighlightForSelection}
           onOpenHighlight={openHighlightById}
+          onHighlightIntent={handleHighlightIntent}
+          onAskTurnStart={handleAskTurnStart}
+          onAskTurnComplete={handleAskTurnComplete}
+          onDismissTurnAffordance={dismissTurnAffordance}
+          turnHighlightCount={turnHighlightIds.length}
+          showTurnAffordance={showTurnAffordance}
+          onKeepTurnHighlights={keepTurnHighlights}
+          onUndoTurnHighlights={undoTurnHighlights}
         />
       {/if}
     {/snippet}

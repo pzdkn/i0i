@@ -1,6 +1,6 @@
 # RFC 0059: Agent-Authored Highlights (Phase 2)
 
-Status: Proposed
+Status: Implemented (HTML path verified; PDF resolver best-effort/pending live-PDF verification; `note`-tool body not yet persisted)
 Date: 2026-07-26
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

@@ -1,12 +1,13 @@
 <script lang="ts">
   import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
   import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
-  import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
+  import type { PDFDocumentProxy, PageViewport } from "pdfjs-dist/legacy/build/pdf.mjs";
   import { getReaderPdfBytes } from "$lib/bridge/library";
   import type { ChatThreadSummary } from "$lib/domain/chat";
-  import type { Highlight } from "$lib/domain/highlight";
+  import type { Highlight, Locator } from "$lib/domain/highlight";
   import type { ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
+  import { coveringRectsForQuote, type PdfTextItem } from "$lib/features/reader/resolve-quote-pdf";
   import PdfRenderedPage from "$lib/features/reader/PdfRenderedPage.svelte";
 
   ensurePdfJsRuntimeCompatibility();
@@ -98,6 +99,74 @@
       void loadingTask?.destroy();
     };
   });
+
+  // Best-effort text-item extraction for quote resolution (RFC 0059 Phase 2 /
+  // Task 8) — NEEDS MANUAL VERIFICATION against a live rendered PDF. Derives
+  // each item's on-page rect from PDF.js's own transform matrix, the same way
+  // its text-layer builder positions spans, rather than reading the rendered
+  // DOM text layer (`resolve-quote-pdf.ts` flagged that DOM approach as messy
+  // — rotated text, marked-content wrapper spans, `<br>`s). This sidesteps
+  // that by working from `getTextContent()` items directly, but the rect math
+  // (in particular for rotated or vertically-scaled text) is unverified;
+  // horizontal, unrotated text (the common case) should be correct.
+  // PDF.js's `getTextContent()` types (`TextItem`/`TextMarkedContent`) aren't
+  // re-exported from the package's aggregate type entry, so we shape only the
+  // fields used here rather than deep-importing internal type paths.
+  type RawTextContentItem = { str?: string; transform?: number[]; width?: number };
+
+  function extractPageTextItems(viewport: PageViewport, items: RawTextContentItem[]): PdfTextItem[] {
+    const result: PdfTextItem[] = [];
+    for (const item of items) {
+      if (!item.str || !item.transform || typeof item.width !== "number") {
+        continue;
+      }
+      const tx = pdfjsLib.Util.transform(viewport.transform, item.transform) as number[];
+      const fontHeight = Math.hypot(tx[2], tx[3]);
+      const scaleX = Math.hypot(tx[0], tx[1]);
+      const width = scaleX * item.width;
+      if (fontHeight <= 0 || width <= 0) {
+        continue;
+      }
+      const left = tx[4];
+      const top = tx[5] - fontHeight;
+      result.push({
+        str: item.str,
+        rect: {
+          x: left / viewport.width,
+          y: top / viewport.height,
+          width: width / viewport.width,
+          height: fontHeight / viewport.height,
+        },
+      });
+    }
+    return result;
+  }
+
+  // Resolves an agent-provided verbatim quote to a pdfRect Locator by scanning
+  // pages in order and matching against each page's extracted text items.
+  // Exposed to ReaderView via `bind:this`. Best-effort — see
+  // `extractPageTextItems` above.
+  export async function resolveQuote(quote: string): Promise<Locator | null> {
+    const document = pdfDocument;
+    if (!document) {
+      return null;
+    }
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
+      // `getPage` returns the document's cached proxy — the same instance
+      // `PdfRenderedPage` may be actively rendering — so this deliberately
+      // does NOT call `page.cleanup()`; doing so here raced with (and could
+      // tear down resources under) that in-progress render.
+      const page = await document.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1 });
+      const textContent = await page.getTextContent();
+      const items = extractPageTextItems(viewport, textContent.items as RawTextContentItem[]);
+      const rects = coveringRectsForQuote(items, quote);
+      if (rects) {
+        return { kind: "pdfRect", sourceId, pageIndex: pageNumber - 1, rectsJson: JSON.stringify(rects) };
+      }
+    }
+    return null;
+  }
 
   function errorDetail(value: unknown) {
     if (value instanceof Error) {

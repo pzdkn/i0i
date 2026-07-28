@@ -237,6 +237,13 @@ pub enum ChatStreamEvent {
     Done { thread: ChatThreadView },
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "highlightIntent")]
+    HighlightIntent {
+        quote: String,
+        color: String,
+        label: Option<String>,
+        note: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -309,6 +316,22 @@ mod tests {
         };
         assert_eq!(anchor.default_title(), "multi-head");
         assert_eq!(anchor.storage_kind(), "pdf_rect");
+    }
+
+    #[test]
+    fn highlight_intent_event_serializes_with_event_tag() {
+        let event = ChatStreamEvent::HighlightIntent {
+            quote: "scaled dot-product".to_string(),
+            color: "yellow".to_string(),
+            label: Some("key idea".to_string()),
+            note: None,
+        };
+        let json = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(json["event"], "highlightIntent");
+        assert_eq!(json["quote"], "scaled dot-product");
+        assert_eq!(json["color"], "yellow");
+        assert_eq!(json["label"], "key idea");
+        assert!(json["note"].is_null());
     }
 
     #[test]

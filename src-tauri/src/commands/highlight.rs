@@ -50,3 +50,35 @@ pub async fn list_highlights(
 ) -> Result<Vec<Highlight>, String> {
     service.list(&paper_id).await
 }
+
+/// Agent-authored counterpart to `create_highlight` (RFC 0059). Thread
+/// linkage is deferred; the agent tool passes no thread id yet.
+#[tauri::command]
+pub async fn create_agent_highlight(
+    service: tauri::State<'_, HighlightService>,
+    paper_id: String,
+    locator: Locator,
+    excerpt: String,
+    color: HighlightColor,
+    label: Option<String>,
+    model: String,
+) -> Result<Highlight, String> {
+    service
+        .create_highlight(
+            &paper_id,
+            locator,
+            &excerpt,
+            color,
+            label,
+            HighlightAuthor::Agent { model },
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn list_agent_highlights(
+    service: tauri::State<'_, HighlightService>,
+    paper_id: String,
+) -> Result<Vec<Highlight>, String> {
+    service.list_agent(&paper_id).await
+}
