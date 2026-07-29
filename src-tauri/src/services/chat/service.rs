@@ -335,6 +335,82 @@ impl ChatService {
         Ok(())
     }
 
+    /// Explicit AI auto-highlight (RFC 0064): a *command*, not a conversation.
+    /// Given a set of categories (each with a color), ask the fast annotation
+    /// model — with a strict `json_schema` structured output — for one parseable
+    /// list of verbatim passages to mark. No streaming, no tool-call assembly,
+    /// no prose. The caller resolves each quote and creates the AI highlights.
+    pub async fn auto_highlight(
+        &self,
+        scope: &ChatScope,
+        categories: Vec<AutoHighlightCategory>,
+    ) -> Result<Vec<HighlightIntentData>, String> {
+        if categories.is_empty() {
+            return Err("Choose at least one category to highlight.".to_string());
+        }
+        let mut lines = String::new();
+        for category in &categories {
+            let label = category.label.trim();
+            if label.is_empty() {
+                continue;
+            }
+            let color = normalize_highlight_color(Some(&category.color));
+            lines.push_str(&format!("- {label} (color: {color})"));
+            if let Some(prompt) = category
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|prompt| !prompt.is_empty())
+            {
+                lines.push_str(&format!(": {prompt}"));
+            }
+            lines.push('\n');
+        }
+        if lines.is_empty() {
+            return Err("Choose at least one category to highlight.".to_string());
+        }
+
+        let body =
+            format!("Mark passages in this paper for these categories, using the given color for each:\n{lines}");
+        let prep = self
+            .prepare_ask_at_anchor(scope, &ThreadAnchor::Document, body)
+            .await?;
+        let mut messages = Vec::with_capacity(prep.request_messages.len() + 1);
+        messages.push(WireMessage {
+            role: "system".to_string(),
+            content: "You mark passages in a paper. Return ONLY a JSON object matching the schema \
+                      { \"highlights\": [ { \"quote\", \"color\", \"label\" } ] }. Each `quote` must \
+                      be a SHORT phrase — a single sentence or less — copied EXACTLY and VERBATIM \
+                      from the paper text provided (character for character; do not paraphrase, \
+                      shorten, or fix typos). Use the requested color for each category and set \
+                      `label` to the category name. Prefer a distinctive short span. If nothing \
+                      matches, return an empty list."
+                .to_string(),
+        });
+        messages.extend(prep.request_messages);
+        let request = CompletionRequest {
+            model: self.config.annotation_model.clone(),
+            messages,
+            stream: false,
+            max_tokens: None,
+            response_format: Some(openrouter::ResponseFormat::json_schema(
+                "highlights",
+                auto_highlight_schema(),
+            )),
+            tools: None,
+            tool_choice: None,
+        };
+        let text =
+            openrouter::complete(&self.client, &self.config.url, &prep.api_key, &request).await?;
+        let mut intents = parse_auto_highlights(&text)?;
+        intents.truncate(MAX_HIGHLIGHT_INTENTS_PER_TURN);
+        crate::shared::log::info(
+            "auto_highlight",
+            format!("parsed {} passage(s) from structured output", intents.len()),
+        );
+        Ok(intents)
+    }
+
     /// Assemble the prompt for a brand-new anchored ask — persisting nothing.
     ///
     /// A new anchored thread has no prior entries; whole-paper continuity is
@@ -513,6 +589,74 @@ pub struct HighlightIntentData {
     pub color: String,
     pub label: Option<String>,
     pub note: Option<String>,
+}
+
+/// One category the user chose in the auto-highlight lens menu (RFC 0064): a
+/// label, its color, and an optional free-text instruction (the "Custom…" row).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoHighlightCategory {
+    pub label: String,
+    pub color: String,
+    pub prompt: Option<String>,
+}
+
+/// Strict `json_schema` for the auto-highlight structured output (RFC 0064).
+fn auto_highlight_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "highlights": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "quote": {"type": "string"},
+                        "color": {"type": "string", "enum": HIGHLIGHT_COLOR_PALETTE},
+                        "label": {"type": "string"}
+                    },
+                    "required": ["quote", "color"]
+                }
+            }
+        },
+        "required": ["highlights"]
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoHighlightResponse {
+    highlights: Vec<AutoHighlightItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoHighlightItem {
+    quote: String,
+    color: Option<String>,
+    label: Option<String>,
+}
+
+/// Parse the auto-highlight structured output into ready-to-resolve intents
+/// (RFC 0064). Malformed JSON is an error (so the UI can say "couldn't read the
+/// AI's response" rather than silently marking nothing); empty-quote items are
+/// dropped; a missing/off-palette color normalizes to yellow.
+fn parse_auto_highlights(json: &str) -> Result<Vec<HighlightIntentData>, String> {
+    let parsed: AutoHighlightResponse = serde_json::from_str(json.trim())
+        .map_err(|error| format!("Couldn't read the AI's highlight list: {error}"))?;
+    Ok(parsed
+        .highlights
+        .into_iter()
+        .filter_map(|item| {
+            let quote = item.quote.trim().to_string();
+            if quote.is_empty() {
+                return None;
+            }
+            Some(HighlightIntentData {
+                color: normalize_highlight_color(item.color.as_deref()),
+                quote,
+                label: item.label.filter(|label| !label.trim().is_empty()),
+                note: None,
+            })
+        })
+        .collect())
 }
 
 /// The JSON arguments shape for both the `highlight` and `note` tools.
@@ -805,5 +949,45 @@ mod tests {
         assert!(messages[0].content.contains("Selected passage"));
         assert!(messages[0].content.contains("scaled dot-product"));
         assert!(messages[0].content.contains("why does this matter?"));
+    }
+
+    #[test]
+    fn parse_auto_highlights_reads_a_well_formed_list() {
+        let json = r#"{"highlights":[
+            {"quote":"attention is all you need","color":"yellow","label":"contribution"},
+            {"quote":"we report BLEU","color":"green"}
+        ]}"#;
+        let intents = parse_auto_highlights(json).expect("valid list");
+        assert_eq!(intents.len(), 2);
+        assert_eq!(intents[0].quote, "attention is all you need");
+        assert_eq!(intents[0].color, "yellow");
+        assert_eq!(intents[0].label.as_deref(), Some("contribution"));
+        // Missing label → None; color preserved.
+        assert_eq!(intents[1].label, None);
+        assert_eq!(intents[1].color, "green");
+    }
+
+    #[test]
+    fn parse_auto_highlights_drops_empty_quotes_and_normalizes_color() {
+        let json = r#"{"highlights":[
+            {"quote":"   ","color":"blue"},
+            {"quote":"kept","color":"chartreuse"}
+        ]}"#;
+        let intents = parse_auto_highlights(json).expect("valid list");
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].quote, "kept");
+        // Off-palette color normalizes to the default rather than dropping.
+        assert_eq!(intents[0].color, "yellow");
+    }
+
+    #[test]
+    fn parse_auto_highlights_empty_list_is_ok() {
+        assert!(parse_auto_highlights(r#"{"highlights":[]}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_auto_highlights_malformed_json_errors() {
+        assert!(parse_auto_highlights("not json").is_err());
+        assert!(parse_auto_highlights(r#"{"wrong":1}"#).is_err());
     }
 }

@@ -4,4 +4,4 @@ pub(crate) mod config;
 mod context;
 mod service;
 
-pub use service::ChatService;
+pub use service::{AutoHighlightCategory, ChatService};

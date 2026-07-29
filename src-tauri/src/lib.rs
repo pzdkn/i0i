@@ -165,6 +165,7 @@ pub fn run() {
             commands::chat::add_note_at_anchor,
             commands::chat::ask_at_anchor_streamed,
             commands::chat::annotate_streamed,
+            commands::chat::auto_highlight,
             commands::chat::debug_log,
             commands::chat::add_chat_note,
             commands::chat::ask_chat_thread,

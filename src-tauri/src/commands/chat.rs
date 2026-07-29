@@ -5,10 +5,10 @@
 use tauri::ipc::Channel;
 
 use crate::domain::chat::{
-    AnnotateEvent, ChatScope, ChatStreamEvent, ChatThreadSummary, ChatThreadView, PinnedHighlight,
-    ThreadAnchor,
+    AnnotateEvent, ChatScope, ChatStreamEvent, ChatThreadSummary, ChatThreadView,
+    HighlightIntentPayload, PinnedHighlight, ThreadAnchor,
 };
-use crate::services::chat::ChatService;
+use crate::services::chat::{AutoHighlightCategory, ChatService};
 
 /// List a scope's threads with entry/pin counts.
 #[tauri::command]
@@ -205,6 +205,34 @@ pub async fn annotate_streamed(
         }
     }
     Ok(())
+}
+
+/// Explicit AI auto-highlight (RFC 0064): a command, not a conversation. Given
+/// the chosen lens categories, return one parseable list of passages to mark
+/// (structured output — no streaming, no prose). The frontend resolves each
+/// quote and creates the AI highlights with Keep/Undo.
+#[tauri::command]
+pub async fn auto_highlight(
+    chat_service: tauri::State<'_, ChatService>,
+    scope: ChatScope,
+    categories: Vec<AutoHighlightCategory>,
+) -> Result<Vec<HighlightIntentPayload>, String> {
+    chat_log(format!(
+        "auto_highlight scope={}:{} categories={}",
+        scope.kind(),
+        scope.id(),
+        categories.len()
+    ));
+    let intents = chat_service.auto_highlight(&scope, categories).await?;
+    Ok(intents
+        .into_iter()
+        .map(|intent| HighlightIntentPayload {
+            quote: intent.quote,
+            color: intent.color,
+            label: intent.label,
+            note: intent.note,
+        })
+        .collect())
 }
 
 /// Pin or unpin an entry.

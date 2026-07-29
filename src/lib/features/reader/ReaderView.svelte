@@ -9,9 +9,11 @@
     openHtmlDocument,
   } from "$lib/bridge/library";
   import {
+    autoHighlight,
     debugLog,
     listChatThreads,
     listPinnedChatEntries,
+    type AutoHighlightCategory,
     type HighlightIntent,
   } from "$lib/bridge/chat";
   import {
@@ -38,6 +40,7 @@
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
   import PdfPage from "$lib/features/reader/PdfPage.svelte";
   import HtmlReader from "$lib/features/reader/HtmlReader.svelte";
+  import ReaderToolbar from "$lib/features/reader/ReaderToolbar.svelte";
   import HighlightPopover from "$lib/features/reader/HighlightPopover.svelte";
   import { findThreadForHighlight, hasExistingHighlight, samePassage } from "$lib/features/reader/highlight-thread-match";
   import { isPaperInLibrary } from "$lib/state/library-cache.svelte";
@@ -108,6 +111,18 @@
   // Highlight. Drives the batch Keep/Undo affordance once the turn completes.
   let turnHighlightIds = $state<string[]>([]);
   let showTurnAffordance = $state(false);
+  // RFC 0064: explicit AI auto-highlight (toolbar command). `aiBusy` drives the
+  // toolbar "Marking…" state; the created highlights reuse the per-turn id list
+  // and the Keep/Undo affordance, surfaced here in a bar under the toolbar.
+  let aiBusy = $state(false);
+  let aiMarkedCount = $state(0);
+  let aiUnresolvedCount = $state(0);
+  let aiError = $state("");
+  // RFC 0063: in-document search state (HTML reader in v1). ReaderView owns it;
+  // the toolbar is presentational and the HtmlReader does the painting.
+  let searchQuery = $state("");
+  let matchCount = $state(0);
+  let activeMatch = $state(0);
 
   const document = $derived<ReaderDocument | null>(readerDocument);
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
@@ -299,6 +314,14 @@
     chatError = "";
     popoverHighlightId = null;
     popoverPos = null;
+    // RFC 0063: a new paper starts with a clean search. (Any leftover painted
+    // ranges from the previous document point at removed nodes and are ignored
+    // by the browser; we deliberately don't read `htmlReaderRef` here — that
+    // would subscribe this effect to the ref and trigger a redundant reload on
+    // every reader mount.)
+    searchQuery = "";
+    matchCount = 0;
+    activeMatch = 0;
 
     // A stale turn's affordance must not reappear over a different paper's
     // thread (Task 9 / final review fix).
@@ -557,6 +580,52 @@
     turnHighlightIds = [];
   }
 
+  // RFC 0064: run the toolbar auto-highlight command. Fetches one structured
+  // list of passages, resolves + creates each via the shipped intent path, and
+  // reuses the per-turn Keep/Undo affordance. No conversation, no prose.
+  async function runAutoHighlight(categories: AutoHighlightCategory[]) {
+    if (aiBusy || !chatEnabled) {
+      return;
+    }
+    aiBusy = true;
+    aiError = "";
+    aiMarkedCount = 0;
+    aiUnresolvedCount = 0;
+    handleAskTurnStart();
+    try {
+      const intents = await autoHighlight({ kind: "paper", paperId: paper.id }, categories);
+      for (const intent of intents) {
+        const resolved = await handleHighlightIntent(intent);
+        if (resolved) {
+          aiMarkedCount += 1;
+        } else {
+          aiUnresolvedCount += 1;
+        }
+      }
+    } catch (error) {
+      aiError = String(error);
+      readerLog("auto-highlight-error", { error: errorDetail(error) }, "error");
+    } finally {
+      aiBusy = false;
+      handleAskTurnComplete();
+    }
+  }
+
+  // Dismiss the AI bar keeping any marks (also clears the error / unresolved
+  // notice so the bar closes).
+  function keepAi() {
+    aiError = "";
+    aiUnresolvedCount = 0;
+    keepTurnHighlights();
+  }
+
+  // Undo every mark this auto-highlight run created, then close the bar.
+  async function undoAi() {
+    aiError = "";
+    aiUnresolvedCount = 0;
+    await undoTurnHighlights();
+  }
+
   // Keep: just dismiss the affordance, the marks stay.
   function keepTurnHighlights() {
     showTurnAffordance = false;
@@ -729,6 +798,51 @@
     pdfScale = Math.max(pdfScale - 0.15, 0.65);
   }
 
+  // In-document search (RFC 0063). v1 targets the HTML reader; the toolbar
+  // disables the box for PDF.
+  function runSearch(query: string) {
+    searchQuery = query;
+    if (!htmlReaderRef) {
+      return;
+    }
+    // Require 2+ chars: a single-character query matches thousands of ranges on
+    // a real article, one rebuild per keystroke.
+    if (query.trim().length < 2) {
+      htmlReaderRef.clearSearch();
+      matchCount = 0;
+      activeMatch = 0;
+      return;
+    }
+    matchCount = htmlReaderRef.search(query);
+    activeMatch = 0;
+    if (matchCount > 0) {
+      htmlReaderRef.focusMatch(0);
+    }
+  }
+
+  function nextMatch() {
+    if (!htmlReaderRef || matchCount === 0) {
+      return;
+    }
+    activeMatch = (activeMatch + 1) % matchCount;
+    htmlReaderRef.focusMatch(activeMatch);
+  }
+
+  function prevMatch() {
+    if (!htmlReaderRef || matchCount === 0) {
+      return;
+    }
+    activeMatch = (activeMatch - 1 + matchCount) % matchCount;
+    htmlReaderRef.focusMatch(activeMatch);
+  }
+
+  function clearReaderSearch() {
+    searchQuery = "";
+    matchCount = 0;
+    activeMatch = 0;
+    htmlReaderRef?.clearSearch();
+  }
+
   function toggleThreadsPanel() {
     focusThreadsMode = focusThreadsMode === "open" ? "collapsed" : "open";
   }
@@ -812,15 +926,55 @@
                     {threadsCollapsed}
                     threadCount={threads.length}
                     pinCount={pins.length}
-                    zoomScale={hasCachedPdf ? pdfScale : undefined}
-                    onZoomIn={zoomIn}
-                    onZoomOut={zoomOut}
                     {onToggleFocus}
                     onToggleThreads={toggleThreadsPanel}
                   />
                 </div>
               {:else}
                 <div class="reader-content col">
+                  <ReaderToolbar
+                    contentKind={document.contentKind}
+                    zoomScale={hasCachedPdf ? pdfScale : undefined}
+                    onZoomIn={zoomIn}
+                    onZoomOut={zoomOut}
+                    canReadAsHtml={Boolean(fallbackSourceUrl) && !isHtml}
+                    onReadAsHtml={() => void readAsHtml()}
+                    searchEnabled={isHtml}
+                    {searchQuery}
+                    {matchCount}
+                    {activeMatch}
+                    onSearch={runSearch}
+                    onNextMatch={nextMatch}
+                    onPrevMatch={prevMatch}
+                    onClearSearch={clearReaderSearch}
+                    aiEnabled={chatEnabled}
+                    {aiBusy}
+                    onAutoHighlight={runAutoHighlight}
+                  />
+                  {#if aiBusy || showTurnAffordance || aiError || aiUnresolvedCount > 0}
+                    <div class="ai-bar row hair-b">
+                      {#if aiBusy}
+                        <span class="ai-dot"></span>
+                        <span>Marking…{aiMarkedCount > 0 ? ` ${aiMarkedCount} added` : ""}</span>
+                      {:else if aiError}
+                        <span class="ai-error">{aiError}</span>
+                        <div class="flex1"></div>
+                        <button class="ai-link" type="button" onclick={keepAi}>Dismiss</button>
+                      {:else if turnHighlightIds.length > 0}
+                        <span>
+                          AI added {turnHighlightIds.length} highlight{turnHighlightIds.length === 1 ? "" : "s"}{aiUnresolvedCount > 0 ? ` · ${aiUnresolvedCount} not found` : ""}
+                        </span>
+                        <div class="flex1"></div>
+                        <button class="ai-link" type="button" onclick={keepAi}>Keep</button>
+                        <span class="mono-dim">·</span>
+                        <button class="ai-link" type="button" onclick={() => void undoAi()}>Undo all</button>
+                      {:else}
+                        <span class="ai-error">Couldn't locate {aiUnresolvedCount} passage{aiUnresolvedCount === 1 ? "" : "s"} in this document.</span>
+                        <div class="flex1"></div>
+                        <button class="ai-link" type="button" onclick={keepAi}>Dismiss</button>
+                      {/if}
+                    </div>
+                  {/if}
                   <div class="reading-surface row">
                     {#if isHtml}
                       <HtmlReader
@@ -1111,6 +1265,50 @@
     align-items: stretch;
     overflow: hidden;
     background: var(--bg-2);
+  }
+
+  /* RFC 0064: AI auto-highlight progress / Keep-Undo bar. */
+  .ai-bar {
+    flex-shrink: 0;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    padding: 0 14px;
+    background: rgba(242, 169, 59, 0.06);
+    color: var(--fg-2);
+    font-size: 11px;
+  }
+
+  .ai-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--amber, #f2a93b);
+    animation: ai-pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes ai-pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  .ai-error {
+    color: var(--red);
+  }
+
+  .ai-link {
+    border: 0;
+    background: transparent;
+    color: var(--amber);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0;
   }
 
   .loading,

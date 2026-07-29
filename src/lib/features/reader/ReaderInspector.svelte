@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { Pencil, Trash2, Sparkles, MessageSquare, Plus } from "@lucide/svelte";
+  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star } from "@lucide/svelte";
   import {
     askAtAnchorStreamed,
-    annotateStreamed,
     askChatThreadStreamed,
     deleteChatThread,
     getChatThread,
@@ -31,7 +30,10 @@
   import { samePassage } from "$lib/features/reader/highlight-thread-match";
   import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
 
-  type InspectorTab = "threads" | "pins" | "meta";
+  type InspectorTab = "annotations" | "meta";
+  // Annotations-list filters (RFC 0062). Pins → the `starred` filter; Threads →
+  // the `conversation` filter.
+  type AuthorFilter = "all" | "you" | "ai";
 
   let {
     document,
@@ -104,7 +106,13 @@
     onDismissTurnAffordance?: () => void;
   } = $props();
 
-  let activeTab = $state<InspectorTab>("threads");
+  let activeTab = $state<InspectorTab>("annotations");
+  // Active annotation-list filters (RFC 0062).
+  let filterAuthor = $state<AuthorFilter>("all");
+  let filterColor = $state<HighlightColor | null>(null);
+  let filterHasNote = $state(false);
+  let filterHasConversation = $state(false);
+  let filterStarred = $state(false);
   // A thread with an empty id is *virtual*: it shows a passage's composer before
   // the first Note/Ask creates the row (RFC 0034 lazy threads).
   let openThread = $state<ChatThreadView | null>(null);
@@ -117,36 +125,17 @@
   let noteDraft = $state("");
   let isSavingNote = $state(false);
   let noteLoadedFor = "";
-  // Background agent-marking progress (RFC 0059). Marking runs AFTER the answer
-  // stream completes and must not block the composer: `markingActive` shows a
-  // "Marking…" indicator while it runs, `markingCount` ticks up as marks land.
-  let markingActive = $state(false);
-  let markingCount = $state(0);
   let pendingQuestion = $state<string | null>(null);
   let streamingAnswer = $state<string | null>(null);
   let error = $state("");
   let renaming = $state(false);
   let renameTitle = $state("");
-  // RFC 0059 Phase 2 (Task 8): passages the model tried to highlight but
-  // couldn't be located in this turn's reply, surfaced once the ask settles.
-  let unresolvedNotice = $state("");
   // Guards streamed deltas against paper switches / superseded asks.
   let askSequence = 0;
   let activeAskId = $state(0);
 
   const scope = $derived<ChatScope>({ kind: "paper", paperId: document.paperId });
   const documentThread = $derived(threads.find((thread) => thread.anchor.kind === "document"));
-  const anchoredThreads = $derived(threads.filter((thread) => thread.anchor.kind !== "document"));
-  // Rail badges (RFC 0058 Task 10): pair each anchored thread with its
-  // highlight (for the color chip) and surface highlights that don't have a
-  // thread yet — a mark from a plain swatch pick, with no note/ask started —
-  // as their own rows so "Add note" / "Ask" is reachable from the rail too.
-  function highlightForThread(thread: ChatThreadSummary): Highlight | undefined {
-    return highlights.find((hl) => samePassage(thread.anchor, hl.locator));
-  }
-  const orphanHighlights = $derived(
-    highlights.filter((hl) => !threads.some((thread) => samePassage(thread.anchor, hl.locator))),
-  );
   const isVirtual = $derived(Boolean(openThread) && openThread!.thread.id === "");
   const openPassage = $derived(openThread ? anchorSelectedText(openThread.thread.anchor) : null);
   // The annotated-passage row backing the open thread (RFC 0061). A passage
@@ -166,13 +155,66 @@
   const canSubmit = $derived(Boolean(openThread && chatInput.trim() && !isBusy));
   const visibleError = $derived(error || chatError);
 
+  // RFC 0062: the annotation index. Each annotated passage (a `highlights` row)
+  // becomes one row, paired with its conversation thread (if any) for the
+  // conversation/starred badges. Newest first.
+  type AnnotationRow = {
+    highlight: Highlight;
+    thread?: ChatThreadSummary;
+    hasNote: boolean;
+    hasConversation: boolean;
+    isAgent: boolean;
+    starred: boolean;
+  };
+  const annotationRows = $derived<AnnotationRow[]>(
+    highlights
+      .map((highlight) => {
+        const thread = threads.find((t) => samePassage(t.anchor, highlight.locator));
+        return {
+          highlight,
+          thread,
+          hasNote: Boolean(highlight.note && highlight.note.trim()),
+          hasConversation: Boolean(thread && thread.entryCount > 0),
+          isAgent: highlight.author.kind === "agent",
+          // v1: "starred" reuses thread pins (no highlight-level star column yet).
+          starred: Boolean(thread && thread.pinnedCount > 0),
+        };
+      })
+      .reverse(),
+  );
+  const anyFilterActive = $derived(
+    filterAuthor !== "all" ||
+      filterColor !== null ||
+      filterHasNote ||
+      filterHasConversation ||
+      filterStarred,
+  );
+  const filteredAnnotations = $derived(
+    annotationRows.filter((row) => {
+      if (filterAuthor === "you" && row.isAgent) return false;
+      if (filterAuthor === "ai" && !row.isAgent) return false;
+      if (filterColor !== null && row.highlight.color !== filterColor) return false;
+      if (filterHasNote && !row.hasNote) return false;
+      if (filterHasConversation && !row.hasConversation) return false;
+      if (filterStarred && !row.starred) return false;
+      return true;
+    }),
+  );
+
+  function clearFilters() {
+    filterAuthor = "all";
+    filterColor = null;
+    filterHasNote = false;
+    filterHasConversation = false;
+    filterStarred = false;
+  }
+
   // Reset the open conversation when the paper changes.
   $effect(() => {
     void document.paperId;
     openThread = null;
     chatInput = "";
     error = "";
-    unresolvedNotice = "";
     renaming = false;
     activeAskId = (askSequence += 1);
   });
@@ -185,7 +227,7 @@
     openThread = virtualThread(anchorFromSelection(selection), selection.selectedText.trim() || "New thread");
     error = "";
     renaming = false;
-    activeTab = "threads";
+    activeTab = "annotations";
   });
 
   // A clicked margin mark (or pin) requests a specific thread to open.
@@ -194,7 +236,7 @@
     if (!threadId) {
       return;
     }
-    activeTab = "threads";
+    activeTab = "annotations";
     void openThreadById(threadId);
     onConsumeRequestedThread();
   });
@@ -270,7 +312,7 @@
   });
 
   function openWholePaper() {
-    activeTab = "threads";
+    activeTab = "annotations";
     error = "";
     if (documentThread) {
       void openThreadById(documentThread.id);
@@ -281,7 +323,6 @@
 
   async function openThreadById(threadId: string) {
     error = "";
-    unresolvedNotice = "";
     // Switching to a specific existing thread (a mark click, a pin, a thread
     // row) invalidates any pending selection — otherwise the swatch row for
     // the old selection would stay visible over the newly-opened thread and
@@ -298,7 +339,6 @@
   function backToThreadList() {
     openThread = null;
     renaming = false;
-    unresolvedNotice = "";
     onClearSelection();
     onDismissTurnAffordance?.();
   }
@@ -334,27 +374,18 @@
     activeAskId = askId;
     isBusy = true;
     error = "";
-    unresolvedNotice = "";
-    markingActive = false;
     pendingQuestion = body;
     streamingAnswer = "";
     chatInput = "";
-    // RFC 0059 Phase 2 (Task 9): a fresh turn starts here, before any
-    // HighlightIntent can arrive, so ReaderView resets its per-turn id list.
-    onAskTurnStart?.();
     try {
       if (virtual) {
         // RFC 0058 Phase 1 (Task 9): mark the passage alongside the thread,
         // one gesture. Reuses the reload the ask itself triggers below.
         await onEnsureHighlight();
       }
-      // Marking is a SEPARATE fast-model pass, kicked off IN PARALLEL with the
-      // answer (only for marking-intent requests, only if the reader can resolve
-      // intents). It never blocks the composer, and its marks can land while the
-      // answer is still streaming (RFC 0059 follow-up).
-      if (onHighlightIntent && shouldAnnotate(body)) {
-        runAnnotationPass(anchor, body, askId);
-      }
+      // RFC 0064: asking is purely a conversation now. AI marking is the
+      // explicit toolbar "Highlight with AI" command — never a side effect of a
+      // chat message (no keyword gate, no prose-plus-marks).
       const onDelta = (text: string) => {
         if (activeAskId === askId) {
           streamingAnswer = (streamingAnswer ?? "") + text;
@@ -384,64 +415,6 @@
         streamingAnswer = null;
       }
     }
-  }
-
-  // Loose match for a request that wants passages marked, so annotation only
-  // spends a call when the user actually asked to highlight (RFC 0059 follow-up).
-  function shouldAnnotate(text: string): boolean {
-    return /(highlight|annotat|underlin|\bmark)/i.test(text);
-  }
-
-  // Background fast-model marking pass. Streams intents, resolves+creates each
-  // in the reader, shows the "Marking…" indicator, and reports misses once it
-  // settles. Never blocks the composer; a superseding ask abandons it.
-  function runAnnotationPass(anchor: ThreadAnchor, body: string, askId: number) {
-    const handleIntent = onHighlightIntent;
-    if (!handleIntent) {
-      return;
-    }
-    let unresolvedCount = 0;
-    markingCount = 0;
-    markingActive = true;
-    const pending: Promise<void>[] = [];
-    const onIntent = (intent: HighlightIntent) => {
-      if (activeAskId !== askId) {
-        return;
-      }
-      pending.push(
-        handleIntent(intent)
-          .then((resolved) => {
-            if (activeAskId !== askId) {
-              return;
-            }
-            if (resolved) {
-              markingCount += 1;
-            } else {
-              unresolvedCount += 1;
-            }
-          })
-          .catch(() => {
-            unresolvedCount += 1;
-          }),
-      );
-    };
-    annotateStreamed(scope, anchor, body, onIntent)
-      .catch(() => {
-        // The annotation pass itself failed (model/network) — leave any marks
-        // already made and never surface it as an ask error.
-      })
-      .finally(() => {
-        void Promise.allSettled(pending).then(() => {
-          if (activeAskId !== askId) {
-            return;
-          }
-          markingActive = false;
-          if (unresolvedCount > 0) {
-            unresolvedNotice = `Couldn't add ${unresolvedCount} passage${unresolvedCount > 1 ? "s" : ""} to the paper.`;
-          }
-          onAskTurnComplete?.();
-        });
-      });
   }
 
   function handleNoteKeydown(event: KeyboardEvent) {
@@ -566,8 +539,7 @@
   }
 
   const tabs: Array<{ id: InspectorTab; label: string }> = [
-    { id: "threads", label: "Threads" },
-    { id: "pins", label: "Pins" },
+    { id: "annotations", label: "Annotations" },
     { id: "meta", label: "Meta" },
   ];
 </script>
@@ -587,14 +559,14 @@
   </nav>
 
   <div class="tab-panel">
-    {#if activeTab === "threads"}
+    {#if activeTab === "annotations"}
       <section>
         {#if !chatEnabled}
-          <div class="row section-title"><span class="label hot">Threads</span></div>
-          <p class="empty-note">Add this paper to a Vault to chat with it.</p>
+          <div class="row section-title"><span class="label hot">Annotations</span></div>
+          <p class="empty-note">Add this paper to a Vault to annotate it.</p>
         {:else if openThread}
           <div class="row section-title">
-            <button class="link-btn" type="button" onclick={backToThreadList}>‹ Threads</button>
+            <button class="link-btn" type="button" onclick={backToThreadList}>‹ Annotations</button>
             <div class="flex1"></div>
             {#if !isVirtual}
               <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
@@ -707,27 +679,6 @@
             {#if visibleError}
               <p class="note-error">{visibleError}</p>
             {/if}
-
-            {#if markingActive}
-              <p class="marking-progress">
-                <span class="marking-dot"></span>
-                Marking…{markingCount > 0 ? ` ${markingCount} added` : ""}
-              </p>
-            {/if}
-
-            {#if unresolvedNotice}
-              <p class="unresolved-notice">{unresolvedNotice}</p>
-            {/if}
-
-            {#if showTurnAffordance}
-              <div class="turn-affordance row">
-                <span>AI added {turnHighlightCount} highlight{turnHighlightCount === 1 ? "" : "s"}</span>
-                <div class="flex1"></div>
-                <button class="link-btn" type="button" onclick={onKeepTurnHighlights}>Keep</button>
-                <span class="mono-dim">·</span>
-                <button class="link-btn" type="button" onclick={() => void onUndoTurnHighlights?.()}>Undo all</button>
-              </div>
-            {/if}
           </div>
 
           <div class="thread-input">
@@ -747,83 +698,89 @@
           </div>
         {:else}
           <div class="row section-title">
-            <span class="label hot">Threads</span>
+            <span class="label hot">Annotations</span>
             <div class="flex1"></div>
-            <span class="mono-dim">{threads.length}</span>
+            <span class="mono-dim">{annotationRows.length}</span>
+          </div>
+
+          <button class="ask-paper-row" type="button" onclick={openWholePaper}>
+            <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
+            <span class="ask-paper-title">Ask about this paper</span>
+            {#if documentThread && documentThread.entryCount > 0}
+              <span class="mono-dim">{documentThread.entryCount}</span>
+            {/if}
+          </button>
+
+          <div class="filter-bar">
+            <div class="row filter-line" role="group" aria-label="Filter by author">
+              <button class="chip-btn" class:on={filterAuthor === "all"} type="button" onclick={() => (filterAuthor = "all")}>All</button>
+              <button class="chip-btn" class:on={filterAuthor === "you"} type="button" onclick={() => (filterAuthor = "you")}>You</button>
+              <button class="chip-btn" class:on={filterAuthor === "ai"} type="button" onclick={() => (filterAuthor = "ai")}>
+                <Sparkles size={11} strokeWidth={1.75} aria-hidden="true" /> AI
+              </button>
+              <div class="flex1"></div>
+              {#if anyFilterActive}
+                <button class="link-btn" type="button" onclick={clearFilters}>Clear</button>
+              {/if}
+            </div>
+            <div class="row filter-line" role="group" aria-label="Filter by color">
+              <button
+                class="color-dot none"
+                class:on={filterColor === null}
+                type="button"
+                aria-label="Any color"
+                title="Any color"
+                onclick={() => (filterColor = null)}
+              ></button>
+              {#each HIGHLIGHT_COLORS as color}
+                <button
+                  class="color-dot"
+                  class:on={filterColor === color}
+                  type="button"
+                  style={`background:${highlightFill(color)}`}
+                  aria-label={`Filter ${color}`}
+                  title={color}
+                  onclick={() => (filterColor = filterColor === color ? null : color)}
+                ></button>
+              {/each}
+            </div>
+            <div class="row filter-line" role="group" aria-label="Filter by attachment">
+              <button class="chip-btn" class:on={filterHasNote} type="button" onclick={() => (filterHasNote = !filterHasNote)}>
+                <StickyNote size={11} strokeWidth={1.75} aria-hidden="true" /> Note
+              </button>
+              <button class="chip-btn" class:on={filterHasConversation} type="button" onclick={() => (filterHasConversation = !filterHasConversation)}>
+                <MessageSquare size={11} strokeWidth={1.75} aria-hidden="true" /> Chat
+              </button>
+              <button class="chip-btn" class:on={filterStarred} type="button" onclick={() => (filterStarred = !filterStarred)}>
+                <Star size={11} strokeWidth={1.75} aria-hidden="true" /> Starred
+              </button>
+            </div>
           </div>
 
           <div class="thread-list">
-            <button class="thread-row" type="button" onclick={openWholePaper}>
-              <span class="thread-row-title">Whole paper</span>
-              {#if documentThread}
-                <span class="mono-dim">{documentThread.pinnedCount > 0 ? "★ " : ""}{documentThread.entryCount}</span>
-              {/if}
-            </button>
-
             {#if isLoadingChat}
-              <p class="empty-note">Loading threads…</p>
+              <p class="empty-note">Loading annotations…</p>
+            {:else if filteredAnnotations.length}
+              {#each filteredAnnotations as row (row.highlight.id)}
+                <button class="thread-row" type="button" onclick={() => onOpenHighlight(row.highlight.id)}>
+                  <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
+                  <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
+                  {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                  {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                  {#if row.hasConversation}<span class="badge" title="has a conversation"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                  {#if row.starred}<span class="badge" title="starred"><Star size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                </button>
+              {/each}
+            {:else if anyFilterActive}
+              <p class="empty-note">No annotations match these filters. <button class="link-btn" type="button" onclick={clearFilters}>Clear</button></p>
             {:else}
-              {#each anchoredThreads as thread}
-                {@const hl = highlightForThread(thread)}
-                <button class="thread-row" type="button" onclick={() => void openThreadById(thread.id)}>
-                  {#if hl}
-                    <span class="color-chip" style={`background:${markFill(hl.color)}`} aria-hidden="true"></span>
-                  {/if}
-                  <span class="thread-row-title">{thread.title}</span>
-                  {#if hl?.author.kind === "agent"}<span class="badge" title="AI-added highlight"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                  {#if thread.entryCount > 0}<span class="badge" title="has notes/answers"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                  <span class="mono-dim">{thread.pinnedCount > 0 ? "★ " : ""}{thread.entryCount}</span>
-                </button>
-              {/each}
-
-              {#each orphanHighlights as hl}
-                <button class="thread-row" type="button" onclick={() => onOpenHighlight(hl.id)}>
-                  <span class="color-chip" style={`background:${markFill(hl.color)}`} aria-hidden="true"></span>
-                  <span class="thread-row-title">{hl.excerpt}</span>
-                  {#if hl.author.kind === "agent"}<span class="badge" title="AI-added highlight"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                  <span class="badge" title="no note or thread yet"><Plus size={12} strokeWidth={1.75} aria-hidden="true" /></span>
-                </button>
-              {/each}
+              <p class="empty-note">Select text in the Reader to highlight, note, or ask about a passage.</p>
             {/if}
           </div>
-
-          <p class="empty-note">Select text in the Reader and choose “Note” or “Ask” to start a thread about a passage.</p>
 
           {#if visibleError}
             <p class="note-error">{visibleError}</p>
           {/if}
-        {/if}
-      </section>
-    {:else if activeTab === "pins"}
-      <section>
-        <div class="row section-title">
-          <span class="label hot">Pins</span>
-          <div class="flex1"></div>
-          <span class="mono-dim">{pins.length}</span>
-        </div>
-
-        {#if !chatEnabled}
-          <p class="empty-note">Add this paper to a Vault to collect highlights.</p>
-        {:else if isLoadingChat}
-          <p class="empty-note">Loading highlights…</p>
-        {:else if pins.length}
-          <div class="pins-list">
-            {#each pins as pin}
-              <button
-                class="pin-item"
-                type="button"
-                onclick={() => {
-                  activeTab = "threads";
-                  void openThreadById(pin.entry.threadId);
-                }}
-              >
-                <p>{pin.entry.body}</p>
-                <div class="pin-source mono-dim">{pin.entry.kind === "answer" ? "AI" : "Note"} · {pin.threadTitle}</div>
-              </button>
-            {/each}
-          </div>
-        {:else}
-          <p class="empty-note">Pin a note or answer in a thread and it shows up here.</p>
         {/if}
       </section>
     {:else}
@@ -1012,52 +969,6 @@
     color: var(--red);
   }
 
-  .unresolved-notice {
-    margin: 8px 0 0;
-    color: var(--fg-3);
-    font-size: 10.5px;
-    line-height: 1.45;
-  }
-
-  .marking-progress {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 8px 0 0;
-    color: var(--fg-2);
-    font-size: 10.5px;
-  }
-
-  .marking-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--amber, #f2a93b);
-    animation: marking-pulse 1s ease-in-out infinite;
-  }
-
-  @keyframes marking-pulse {
-    0%,
-    100% {
-      opacity: 0.35;
-    }
-    50% {
-      opacity: 1;
-    }
-  }
-
-  .turn-affordance {
-    margin: 8px 0 0;
-    padding: 6px 8px;
-    align-items: center;
-    gap: 6px;
-    border: 1px solid var(--border-2);
-    background: var(--bg-1);
-    color: var(--fg-2);
-    font-size: 10.5px;
-    line-height: 1.4;
-  }
-
   .note-icon {
     display: inline-flex;
     align-items: center;
@@ -1236,37 +1147,89 @@
     margin-top: 10px;
   }
 
-  .pins-list {
-    margin-top: 8px;
+  /* Annotations panel (RFC 0062) */
+  .ask-paper-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid var(--border-2);
+    background: rgba(107, 160, 168, 0.05);
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .ask-paper-row:hover {
+    border-color: var(--cyan);
+    color: var(--cyan);
+  }
+
+  .ask-paper-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .filter-bar {
+    margin-top: 10px;
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
 
-  .pin-item {
-    width: 100%;
-    padding: 8px;
-    border: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.015);
-    text-align: left;
+  .filter-line {
+    gap: 5px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .chip-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 8px;
+    border: 1px solid var(--border-2);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg-3);
+    font: inherit;
+    font-size: 10px;
     cursor: pointer;
   }
 
-  .pin-item:hover {
-    border-color: var(--amber-dim);
-    background: rgba(242, 169, 59, 0.05);
-  }
-
-  .pin-item p {
-    margin: 0;
+  .chip-btn:hover {
     color: var(--fg-1);
-    font-size: 11px;
-    line-height: 1.45;
   }
 
-  .pin-source {
-    margin-top: 5px;
-    font-size: 9px;
+  .chip-btn.on {
+    border-color: var(--amber);
+    background: rgba(242, 169, 59, 0.08);
+    color: var(--amber);
+  }
+
+  .color-dot {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    border: 1px solid var(--border-2);
+    border-radius: 50%;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .color-dot.none {
+    background:
+      linear-gradient(45deg, transparent 45%, var(--fg-3) 45%, var(--fg-3) 55%, transparent 55%),
+      var(--bg);
+  }
+
+  .color-dot.on {
+    border-color: var(--fg-1);
+    box-shadow: 0 0 0 1px var(--fg-1);
   }
 
   .metadata {

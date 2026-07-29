@@ -92,12 +92,23 @@ pub(crate) fn highlight_tools() -> Vec<Tool> {
     ]
 }
 
-/// OpenAI-compatible `response_format` hint. `ResponseFormat::json_object()`
-/// asks the model to emit a single JSON object.
+/// OpenAI-compatible `response_format` hint. `json_object` asks for a single
+/// JSON object; `json_schema` (RFC 0064) additionally constrains it to a strict
+/// schema so the reply is one parseable object.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponseFormat {
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<JsonSchemaFormat>,
+}
+
+/// The `json_schema` payload for structured outputs (RFC 0064).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct JsonSchemaFormat {
+    pub name: String,
+    pub strict: bool,
+    pub schema: serde_json::Value,
 }
 
 impl ResponseFormat {
@@ -106,6 +117,19 @@ impl ResponseFormat {
     pub(crate) fn json_object() -> Self {
         Self {
             kind: "json_object".to_string(),
+            json_schema: None,
+        }
+    }
+
+    /// Strict structured output constrained to `schema` (RFC 0064).
+    pub(crate) fn json_schema(name: &str, schema: serde_json::Value) -> Self {
+        Self {
+            kind: "json_schema".to_string(),
+            json_schema: Some(JsonSchemaFormat {
+                name: name.to_string(),
+                strict: true,
+                schema,
+            }),
         }
     }
 }

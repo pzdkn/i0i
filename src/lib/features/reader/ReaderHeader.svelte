@@ -7,9 +7,6 @@
     threadsCollapsed = false,
     threadCount = 0,
     pinCount = 0,
-    zoomScale,
-    onZoomIn,
-    onZoomOut,
     onToggleFocus,
     onToggleThreads,
   }: {
@@ -18,14 +15,9 @@
     threadsCollapsed?: boolean;
     threadCount?: number;
     pinCount?: number;
-    zoomScale?: number;
-    onZoomIn?: () => void;
-    onZoomOut?: () => void;
     onToggleFocus: () => void;
     onToggleThreads: () => void;
   } = $props();
-
-  const showZoom = $derived(zoomScale !== undefined);
 </script>
 
 <header class="reader-header hair-b">
@@ -48,13 +40,6 @@
     <button class="btn" type="button" title="Ask about paper">Ask</button>
 
     <div class="flex1"></div>
-    {#if showZoom}
-      <div class="zoom-group row">
-        <button class="tool" type="button" title="Zoom out" aria-label="Zoom out" onclick={onZoomOut}>-</button>
-        <span class="zoom-label">{Math.round((zoomScale ?? 1) * 100)}%</span>
-        <button class="tool" type="button" title="Zoom in" aria-label="Zoom in" onclick={onZoomIn}>+</button>
-      </div>
-    {/if}
     {#if layoutMode === "focus"}
       <button class="btn" type="button" title="Toggle threads panel" onclick={onToggleThreads}>
         {threadsCollapsed ? "Threads" : "Hide Threads"} · {threadCount}{pinCount ? ` / ${pinCount}` : ""}
@@ -114,32 +99,5 @@
     align-items: center;
     color: var(--fg-3);
     font-size: 10px;
-  }
-
-  .zoom-group {
-    gap: 6px;
-    align-items: center;
-  }
-
-  .tool {
-    width: 24px;
-    height: 24px;
-    border: 1px solid var(--border-2);
-    background: var(--bg);
-    color: var(--fg-2);
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .tool:hover {
-    border-color: var(--amber-dim);
-    color: var(--amber);
-  }
-
-  .zoom-label {
-    width: 44px;
-    color: var(--fg-3);
-    font-size: 10px;
-    text-align: center;
   }
 </style>

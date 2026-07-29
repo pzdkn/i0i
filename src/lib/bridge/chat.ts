@@ -120,6 +120,24 @@ export async function annotateStreamed(
   });
 }
 
+/// A lens category chosen in the AI auto-highlight menu (RFC 0064): a label, a
+/// palette color, and an optional free-text instruction (the "Custom…" row).
+export type AutoHighlightCategory = {
+  label: string;
+  color: string;
+  prompt: string | null;
+};
+
+/// Explicit AI auto-highlight (RFC 0064): a command, not a conversation. Returns
+/// the list of passages the AI proposes to mark (structured output). The caller
+/// resolves each quote and creates the highlights (reusing the RFC 0059 path).
+export async function autoHighlight(
+  scope: ChatScope,
+  categories: AutoHighlightCategory[],
+): Promise<HighlightIntent[]> {
+  return invoke<HighlightIntent[]>("auto_highlight", { scope, categories });
+}
+
 /// Shared streaming-ask plumbing: open a channel, forward deltas, and resolve
 /// with the thread on `done` (or reject on `error`).
 function streamAsk(

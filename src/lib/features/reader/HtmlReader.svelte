@@ -7,6 +7,7 @@
   import { HIGHLIGHT_COLORS } from "$lib/domain/highlight";
   import { findHighlightForOffset } from "$lib/features/reader/highlight-thread-match";
   import { resolveQuoteInText } from "$lib/features/reader/resolve-quote-html";
+  import { findTextMatches, type TextMatch } from "$lib/features/reader/find-matches";
 
   let {
     sourceId,
@@ -87,6 +88,68 @@
     const span = resolveQuoteInText(extractFullText(root), quote);
     if (!span) return null;
     return { kind: "textOffset", sourceId, startOffset: span.start, endOffset: span.end };
+  }
+
+  // In-document search (RFC 0063). Reuses the same text-node walk and Custom
+  // Highlight API as annotations, under distinct highlight names so search marks
+  // and annotation marks never collide. Exposed to ReaderView via `bind:this`.
+  let searchMatches: TextMatch[] = [];
+
+  function highlightApi() {
+    const api = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
+    const Ctor = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+    if (!api || typeof Ctor !== "function") return null;
+    return { api, Ctor };
+  }
+
+  function rangeForMatch(match: TextMatch): Range | null {
+    if (!root) return null;
+    const start = locate(root, match.start);
+    const end = locate(root, match.end);
+    if (!start || !end) return null;
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    return range;
+  }
+
+  export function search(query: string): number {
+    const hl = highlightApi();
+    if (!root || !hl) return 0;
+    searchMatches = findTextMatches(extractFullText(root), query);
+    const ranges = searchMatches
+      .map(rangeForMatch)
+      .filter((range): range is Range => range !== null);
+    hl.api.set("i0i-search", new hl.Ctor(...ranges));
+    hl.api.delete("i0i-search-active");
+    return searchMatches.length;
+  }
+
+  export function focusMatch(index: number): void {
+    const hl = highlightApi();
+    if (!hl || index < 0 || index >= searchMatches.length) return;
+    const range = rangeForMatch(searchMatches[index]);
+    if (!range) return;
+    hl.api.set("i0i-search-active", new hl.Ctor(range));
+    // Scroll the match *itself* (not its paragraph) into the middle of the
+    // scrolling reader column, using the range's own geometry — works even
+    // before the highlight has painted (so the first search scrolls too).
+    const scroller = root?.closest(".html-reader") as HTMLElement | null;
+    const rect = range.getBoundingClientRect();
+    if (scroller && rect.height) {
+      const scRect = scroller.getBoundingClientRect();
+      const delta = rect.top - scRect.top - scroller.clientHeight / 2 + rect.height / 2;
+      scroller.scrollBy({ top: delta, behavior: "smooth" });
+    }
+  }
+
+  export function clearSearch(): void {
+    const hl = highlightApi();
+    searchMatches = [];
+    if (hl) {
+      hl.api.delete("i0i-search");
+      hl.api.delete("i0i-search-active");
+    }
   }
 
   function handleMouseUp(event: MouseEvent) {
@@ -308,5 +371,11 @@
   :global(::highlight(i0i-hl-note)) {
     background: rgba(148, 148, 148, 0.12);
     text-decoration: underline dotted rgba(148, 148, 148, 0.7);
+  }
+  /* In-document search matches (RFC 0063) — distinct from annotation marks. */
+  :global(::highlight(i0i-search)) { background: rgba(255, 214, 10, 0.38); }
+  :global(::highlight(i0i-search-active)) {
+    background: rgba(242, 120, 34, 0.7);
+    color: #111;
   }
 </style>

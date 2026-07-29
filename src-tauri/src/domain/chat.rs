@@ -259,6 +259,18 @@ pub enum AnnotateEvent {
     Error { message: String },
 }
 
+/// One passage the AI proposes to highlight (RFC 0064 auto-highlight). Returned
+/// as a list from the `auto_highlight` command; the frontend resolves each quote
+/// to a locator and creates the AI highlight (reusing the RFC 0059 path).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HighlightIntentPayload {
+    pub quote: String,
+    pub color: String,
+    pub label: Option<String>,
+    pub note: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
