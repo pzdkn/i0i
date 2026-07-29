@@ -9,22 +9,20 @@
   // (viewport coordinates, same space as MouseEvent.clientX/Y).
   let {
     highlight,
-    hasNote = false,
     hasThread = false,
     x,
     y,
-    onAddNote,
+    onSaveNote,
     onAsk,
     onRecolor,
     onRemove,
     onClose,
   }: {
     highlight: Highlight;
-    hasNote?: boolean;
     hasThread?: boolean;
     x: number;
     y: number;
-    onAddNote: () => void;
+    onSaveNote: (note: string | null) => void | Promise<void>;
     onAsk: () => void;
     onRecolor: (color: HighlightColor) => void | Promise<void>;
     onRemove: () => void | Promise<void>;
@@ -32,6 +30,30 @@
   } = $props();
 
   let root: HTMLElement | undefined = $state();
+
+  // Inline, editable note (RFC 0061). Seeded from the passage's stored note and
+  // re-seeded whenever the popover targets a different highlight. Enter saves;
+  // Shift+Enter inserts a newline — never asks the AI.
+  let noteDraft = $state("");
+  let noteFor = "";
+  $effect(() => {
+    if (highlight.id !== noteFor) {
+      noteFor = highlight.id;
+      noteDraft = highlight.note ?? "";
+    }
+  });
+  const noteDirty = $derived(noteDraft.trim() !== (highlight.note ?? "").trim());
+
+  function saveNote() {
+    void onSaveNote(noteDraft.trim().length ? noteDraft.trim() : null);
+  }
+
+  function handleNoteKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      saveNote();
+    }
+  }
 
   // Dismiss on any click outside the popover, or Escape. The mark's own click
   // handler runs its onclick after this mousedown, so clicking a *different*
@@ -83,8 +105,21 @@
     {/each}
   </div>
 
+  <div class="hp-note">
+    <textarea
+      class="hp-note-input"
+      bind:value={noteDraft}
+      aria-label="Note"
+      placeholder="Add a note… (Enter saves)"
+      rows="2"
+      onkeydown={handleNoteKeydown}
+    ></textarea>
+    {#if noteDirty}
+      <button class="hp-btn hp-save-note" type="button" onclick={saveNote}>Save note</button>
+    {/if}
+  </div>
+
   <div class="hp-actions">
-    <button class="hp-btn" type="button" onclick={onAddNote}>{hasNote ? "Note" : "Add note"}</button>
     <button class="hp-btn" type="button" onclick={onAsk}>{hasThread ? "Open thread" : "Ask"}</button>
     <button class="hp-btn hp-remove" type="button" aria-label="Remove highlight" title="Remove" onclick={() => void onRemove()}>
       Remove
@@ -173,6 +208,37 @@
   .hp-swatch.active {
     border-color: var(--fg-1);
     box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3px var(--fg-1);
+  }
+
+  /* Inline editable note. */
+  .hp-note {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .hp-note-input {
+    width: 100%;
+    min-height: 44px;
+    resize: vertical;
+    padding: 6px 7px;
+    border: 1px solid var(--border-2);
+    border-radius: 4px;
+    outline: none;
+    background: var(--bg);
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .hp-note-input:focus {
+    border-color: var(--cyan);
+  }
+
+  .hp-save-note {
+    align-self: flex-start;
+    color: var(--amber, #f2a93b);
   }
 
   /* Actions — flat text buttons, Remove pushed to the right. */

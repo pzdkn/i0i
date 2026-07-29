@@ -20,6 +20,7 @@
     listHighlights,
     recolorHighlight,
     removeHighlight,
+    setHighlightNote,
   } from "$lib/bridge/highlight";
   import { getSettings } from "$lib/bridge/settings";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
@@ -440,31 +441,35 @@
     await reloadChat();
   }
 
-  // One-gesture Note/Ask: called by the inspector right before it turns a
-  // fresh (virtual) selection thread into a real one, so the passage gets
-  // marked with the sticky color alongside the thread (RFC 0058 Phase 1).
-  // Idempotent: Task 10's "add note after the fact" path opens a virtual
-  // thread for a passage that's *already* highlighted (clicked from the
-  // popover or the rail), so a second createHighlight for the same locator
-  // must be skipped rather than producing a duplicate mark.
-  async function ensureHighlightForSelection() {
+  // One-gesture Note/Ask: called by the inspector to guarantee the current
+  // selection has an annotated-passage row (a `highlights` row) it can attach a
+  // note or conversation to. Per RFC 0061 the passage is created **color-less**
+  // — note/ask no longer force a colored mark (a note renders a neutral marker,
+  // a conversation-only passage renders nothing). Returns the passage's id so
+  // the note path can `set_highlight_note` on it.
+  // Idempotent: if the passage is already highlighted (reopened from the popover
+  // or rail), returns the existing id rather than creating a duplicate.
+  async function ensureHighlightForSelection(): Promise<string | null> {
     if (!selection || highlightActionInFlight) {
-      return;
+      return null;
     }
     const locator = locatorFromSelection(selection);
-    if (hasExistingHighlight(highlights, locator)) {
-      return;
+    const existing = highlights.find((hl) => samePassage(hl.locator, locator));
+    if (existing) {
+      return existing.id;
     }
     highlightActionInFlight = true;
     try {
-      await createHighlight({
+      const created = await createHighlight({
         paperId: paper.id,
         locator,
         excerpt: selection.selectedText,
-        color: stickyColor,
+        color: null,
       });
+      return created.id;
     } catch (error) {
       readerLog("create-highlight-error", { error: errorDetail(error) }, "error");
+      return null;
     } finally {
       highlightActionInFlight = false;
     }
@@ -608,6 +613,22 @@
       await reloadChat();
     } catch (error) {
       readerLog("remove-highlight-error", { error: errorDetail(error) }, "error");
+    }
+  }
+
+  // Save/clear a passage's note from the popover's inline note field (RFC
+  // 0061). An empty note clears it; the reload repaints the neutral note
+  // marker (or removes it, if the passage now has neither color nor note).
+  async function saveNoteForPopoverHighlight(note: string | null) {
+    if (!popoverHighlight) {
+      return;
+    }
+    const trimmed = note?.trim() ?? "";
+    try {
+      await setHighlightNote(popoverHighlight.id, trimmed.length ? trimmed : null);
+      await reloadChat();
+    } catch (error) {
+      readerLog("set-highlight-note-error", { error: errorDetail(error) }, "error");
     }
   }
 
@@ -978,10 +999,9 @@
     <HighlightPopover
       highlight={popoverHighlight}
       hasThread={Boolean(popoverThread)}
-      hasNote={Boolean(popoverThread && popoverThread.entryCount > 0)}
       x={popoverPos.x}
       y={popoverPos.y}
-      onAddNote={() => openHighlightThread(popoverHighlight!)}
+      onSaveNote={saveNoteForPopoverHighlight}
       onAsk={() => openHighlightThread(popoverHighlight!)}
       onRecolor={recolorPopoverHighlight}
       onRemove={removePopoverHighlight}

@@ -1572,6 +1572,13 @@ impl LibraryStore {
         }
         let mut stmt = conn
             .prepare(
+                // All note entries fold into the passage's `note` field —
+                // including pinned ones. Notes pin *by default* in the legacy
+                // flow, so `pinned` is not a deliberate keep-signal here; the
+                // content is preserved in `highlights.note`, it just leaves the
+                // Pins tab (which is the intended model shift — notes are now a
+                // passage attachment, not a thread entry). Answers are untouched
+                // and keep their pins.
                 "select e.id, t.highlight_id, e.body
                  from chat_entries e
                  join chat_threads t on e.thread_id = t.id
@@ -4811,6 +4818,36 @@ mod tests {
 
         // Idempotent: the note field is now set, so a second run does nothing.
         assert_eq!(db.store.migrate_notes_into_highlight_field()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn note_migration_moves_notes_out_of_pins_into_the_passage_note() -> StoreResult<()> {
+        // Notes pin by default in the legacy flow, so they show in the Pins tab
+        // today. The RFC 0061 model change moves a note onto the passage (its
+        // `note` field); the migration must preserve the content and drop it
+        // from Pins — not silently lose it.
+        let db = test_db()?;
+        let paper_id = "vaswani2017";
+        let anchor = ThreadAnchor::TextOffset {
+            source_id: "src-1".into(),
+            start_offset: 3,
+            end_offset: 12,
+            selected_text: "abc".into(),
+        };
+        db.store
+            .add_note_at_anchor_with_creation("paper", paper_id, &anchor, "kept note")?;
+        db.store.migrate_threads_to_highlights()?;
+
+        // Before: the auto-pinned note is in Pins.
+        assert_eq!(db.store.list_pinned_chat_entries("paper", paper_id)?.len(), 1);
+
+        assert_eq!(db.store.migrate_notes_into_highlight_field()?, 1);
+
+        // After: content lives on the passage; Pins no longer carries the note.
+        let highlights = db.store.list_highlights(paper_id)?;
+        assert_eq!(highlights[0].note.as_deref(), Some("kept note"));
+        assert_eq!(db.store.list_pinned_chat_entries("paper", paper_id)?.len(), 0);
         Ok(())
     }
 

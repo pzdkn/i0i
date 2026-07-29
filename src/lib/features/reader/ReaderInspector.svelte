@@ -1,17 +1,16 @@
 <script lang="ts">
   import { Pencil, Trash2, Sparkles, MessageSquare, Plus } from "@lucide/svelte";
   import {
-    addChatNote,
     askAtAnchorStreamed,
     annotateStreamed,
     askChatThreadStreamed,
     deleteChatThread,
     getChatThread,
-    noteAtAnchor,
     renameChatThread,
     setChatEntryPinned,
     type HighlightIntent,
   } from "$lib/bridge/chat";
+  import { setHighlightNote } from "$lib/bridge/highlight";
   import {
     anchorSelectedText,
     type ChatEntry,
@@ -82,11 +81,11 @@
     onAutofillMetadata?: (paperId: string) => void | Promise<void>;
     onApplyMetadataCandidate: (paperId: string, candidate: MetadataCandidate) => void | Promise<void>;
     onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
-    onReloadChat: () => void;
+    onReloadChat: () => void | Promise<void>;
     onClearSelection: () => void;
     onConsumeRequestedThread: () => void;
     onPickColor: (color: HighlightColor) => void | Promise<void>;
-    onEnsureHighlight: () => void | Promise<void>;
+    onEnsureHighlight: () => Promise<string | null>;
     onOpenHighlight: (highlightId: string) => void;
     onHighlightIntent?: (intent: HighlightIntent) => Promise<boolean>;
     // RFC 0059 Phase 2 (Task 9): lifecycle hooks around a single ask turn so
@@ -111,6 +110,13 @@
   let openThread = $state<ChatThreadView | null>(null);
   let chatInput = $state("");
   let isBusy = $state(false);
+  // RFC 0061: the passage's note is a highlight attachment, edited in its own
+  // field (never the ask composer). `noteDraft` holds the editable text;
+  // `isSavingNote` guards the save; `noteLoadedFor` tracks which passage's note
+  // is currently in the draft so a background reload never clobbers typing.
+  let noteDraft = $state("");
+  let isSavingNote = $state(false);
+  let noteLoadedFor = "";
   // Background agent-marking progress (RFC 0059). Marking runs AFTER the answer
   // stream completes and must not block the composer: `markingActive` shows a
   // "Marking…" indicator while it runs, `markingCount` ticks up as marks land.
@@ -143,6 +149,14 @@
   );
   const isVirtual = $derived(Boolean(openThread) && openThread!.thread.id === "");
   const openPassage = $derived(openThread ? anchorSelectedText(openThread.thread.anchor) : null);
+  // The annotated-passage row backing the open thread (RFC 0061). A passage
+  // may exist without a thread (note-only / color-only) and a virtual selection
+  // may have no row yet — the note field creates one on first save.
+  const currentHighlight = $derived(
+    openThread && openThread.thread.anchor.kind !== "document"
+      ? highlights.find((hl) => samePassage(openThread!.thread.anchor, hl.locator))
+      : undefined,
+  );
   // For a selection thread the title defaults to the passage, so the quote block
   // alone says it — only show the heading when it adds something (a renamed
   // thread, or the whole-paper thread that has no passage).
@@ -232,6 +246,28 @@
       entries: [],
     };
   }
+
+  // Stable identity for a passage, so the note-load effect re-seeds the draft
+  // only when the *passage* changes — not on every `highlights` reload.
+  function passageKey(anchor: ThreadAnchor): string {
+    if (anchor.kind === "document") return "document";
+    if (anchor.kind === "pdfRect") return `pdf:${anchor.sourceId}:${anchor.pageIndex}:${anchor.rectsJson}`;
+    return `txt:${anchor.sourceId}:${anchor.startOffset}:${anchor.endOffset}`;
+  }
+
+  // Seed the note draft from the open passage's stored note, once per passage.
+  $effect(() => {
+    if (!openThread) {
+      noteLoadedFor = "";
+      noteDraft = "";
+      return;
+    }
+    const key = passageKey(openThread.thread.anchor);
+    if (key !== noteLoadedFor) {
+      noteLoadedFor = key;
+      noteDraft = currentHighlight?.note ?? "";
+    }
+  });
 
   function openWholePaper() {
     activeTab = "threads";
@@ -408,32 +444,49 @@
       });
   }
 
-  async function addNote() {
-    const body = chatInput.trim();
-    if (!body || isBusy || !openThread) {
+  function handleNoteKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void saveNote();
+    }
+  }
+
+  // RFC 0061: the Note field saves the passage's note (never asks the AI).
+  // It attaches to the annotated-passage row — creating a color-less one for a
+  // fresh selection — and writes `set_highlight_note`. An empty draft clears
+  // the note. It creates no thread; a note-only passage renders as the neutral
+  // marker.
+  async function saveNote() {
+    if (!openThread || isSavingNote) {
       return;
     }
-
-    const virtual = openThread.thread.id === "";
-    const anchor = openThread.thread.anchor;
-    const threadId = openThread.thread.id;
-    isBusy = true;
+    const body = noteDraft.trim();
+    // Nothing to save and nothing to clear — don't conjure a phantom passage
+    // from a stray Enter on a fresh selection (RFC 0061; the Note field is now
+    // the first input, inheriting the old composer's "type, Enter" reflex).
+    if (!body.length && !currentHighlight) {
+      return;
+    }
+    isSavingNote = true;
     error = "";
     try {
-      if (virtual) {
-        await onEnsureHighlight();
+      let id = currentHighlight?.id ?? null;
+      if (!id) {
+        id = await onEnsureHighlight();
       }
-      const view = virtual ? await noteAtAnchor(scope, anchor, body) : await addChatNote(threadId, body);
-      openThread = view;
-      chatInput = "";
-      onReloadChat();
-      if (virtual) {
+      if (!id) {
+        error = "Couldn't attach the note to this passage.";
+        return;
+      }
+      await setHighlightNote(id, body.length ? body : null);
+      await onReloadChat();
+      if (isVirtual) {
         onClearSelection();
       }
     } catch (caught) {
       error = String(caught);
     } finally {
-      isBusy = false;
+      isSavingNote = false;
     }
   }
 
@@ -587,6 +640,32 @@
             </div>
           {/if}
 
+          {#if openPassage}
+            <div class="note-field">
+              <div class="row note-field-head">
+                <span class="label">Note</span>
+                {#if noteDraft.trim() !== (currentHighlight?.note ?? "").trim()}
+                  <button
+                    class="link-btn"
+                    type="button"
+                    disabled={isSavingNote}
+                    onclick={() => void saveNote()}
+                  >
+                    {isSavingNote ? "Saving…" : "Save"}
+                  </button>
+                {/if}
+              </div>
+              <textarea
+                bind:value={noteDraft}
+                aria-label="Note on this passage"
+                placeholder="Jot a note on this passage… (Enter saves, Shift+Enter newline)"
+                rows="2"
+                disabled={isSavingNote}
+                onkeydown={handleNoteKeydown}
+              ></textarea>
+            </div>
+          {/if}
+
           <div class="thread-view">
             {#each openThread.entries as entry}
               <div class="entry {entry.kind}">
@@ -622,7 +701,7 @@
             {/if}
 
             {#if !openThread.entries.length && pendingQuestion === null}
-              <p class="empty-note">Write a note or ask a question to start this thread.</p>
+              <p class="empty-note">Ask a question below to start a conversation about this passage.</p>
             {/if}
 
             {#if visibleError}
@@ -654,14 +733,13 @@
           <div class="thread-input">
             <textarea
               bind:value={chatInput}
-              aria-label="Note or question"
-              placeholder="Note this passage, or ask… (Enter asks, Shift+Enter newline)"
+              aria-label="Ask a question"
+              placeholder="Ask the AI about this passage… (Enter sends, Shift+Enter newline)"
               rows="3"
               disabled={isBusy}
               onkeydown={handleComposerKeydown}
             ></textarea>
             <div class="row note-actions">
-              <button class="btn ghost" type="button" disabled={!canSubmit} onclick={() => void addNote()}>Note</button>
               <button class="btn primary" type="button" disabled={!canSubmit} onclick={() => void ask()}>
                 {isBusy ? "…" : "Ask"}
               </button>
@@ -877,6 +955,20 @@
   .swatch.active {
     border-color: var(--fg-1);
     box-shadow: 0 0 0 1px var(--fg-1);
+  }
+
+  .note-field {
+    margin-top: 10px;
+  }
+
+  .note-field-head {
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  .note-field textarea {
+    min-height: 48px;
   }
 
   textarea {

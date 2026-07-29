@@ -1,6 +1,6 @@
 # RFC 0061: Annotated-Passage Primitive + Note/Ask Separation
 
-Status: Proposed
+Status: Implemented
 Date: 2026-07-28
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -149,13 +149,38 @@ Rules:
 
 ## Rollout (slices)
 
-1. **Storage:** `color` nullable + `note` column + the note backfill migration.
-2. **Backend:** optional color through service/commands; `set_highlight_note`;
-   note path writes the field; threads become Q&A-only.
-3. **Bridge/types:** `color`/`note` nullable; `setHighlightNote`.
-4. **Selection UX:** separate Note field (Enter saves) from Ask.
-5. **Rendering:** neutral marker for note-only; ask leaves no mark.
-6. **Popover:** inline editable note.
+1. ✅ **Storage:** `color` nullable + `note` column + the note backfill migration.
+2. ✅ **Backend:** optional color through service/commands; `set_highlight_note`.
+3. ✅ **Bridge/types:** `color`/`note` nullable; `setHighlightNote`.
+4. ✅ **Selection UX:** a dedicated **Note field** (Enter saves via
+   `set_highlight_note`, Shift+Enter = newline) separate from an **Ask**-only
+   composer. Note/Ask create the passage **color-less** (`ensureHighlightForSelection`
+   now creates with `color: null` and returns the id); Ask leaves no page mark.
+5. ✅ **Rendering:** neutral marker for note-only; ask leaves no mark.
+6. ✅ **Popover:** inline editable note (`onSaveNote` → `set_highlight_note`).
+
+Deferred cleanup (out of scope, non-breaking): removing the now-unused
+`noteAtAnchor` / `addChatNote` bridge exports and their backend commands.
+
+## Implementation notes / accepted behaviors
+
+- **Notes leave the Pins tab (content preserved).** In the legacy flow notes
+  **pin by default**, so `pinned` is not a deliberate keep-signal — the
+  migration folds *all* note entries into `highlights.note` (content preserved)
+  and removes them from threads, so they no longer appear in Pins. That is the
+  intended model shift: a note is now a passage attachment shown in the note
+  field / popover, not a pinned thread entry. Answers are untouched and keep
+  their pins; the Pins tab becomes answers-only. Going forward a note is a
+  single `highlights.note` string and is not pinnable. Covered by
+  `note_migration_moves_notes_out_of_pins_into_the_passage_note`.
+- **Clearing the last attachment leaves a bare passage row.** Emptying a note on
+  a passage that has no color and no conversation leaves an invisible
+  `highlights` row (no page mark) that still appears in the rail as a bare
+  excerpt. Accepted for now; row lifecycle (delete-when-empty, filters) is RFC
+  0062's Annotations panel.
+- **Ask leaves no on-page mark**, by design ("Ask sets no color"). The
+  conversation is reachable only from the rail, not by clicking the page. The
+  navigational affordance for un-marked passages is deferred to RFC 0062.
 
 ## Non-goals
 
