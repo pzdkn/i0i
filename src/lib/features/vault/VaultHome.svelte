@@ -14,6 +14,7 @@
     workspace,
     onOpenPaper,
     onImportPdfs,
+    onAddHtmlUrl,
     onAutofillMetadata,
     autofillingMetadataPaperIds,
     metadataAutofillProgressByPaperId = {},
@@ -25,6 +26,7 @@
     workspace: VaultWorkspace;
     onOpenPaper: (paperId: string) => void;
     onImportPdfs: (vaultId: string, paths: string[]) => void | Promise<void>;
+    onAddHtmlUrl: (vaultId: string, url: string) => void | Promise<void>;
     onAutofillMetadata: (paperId: string) => void | Promise<void>;
     autofillingMetadataPaperIds: string[];
     metadataAutofillProgressByPaperId?: Record<string, MetadataAutofillProgress>;
@@ -37,6 +39,11 @@
   let selectedPaperId = $state("");
   let localFilter = $state("");
   let isImporting = $state(false);
+  // RFC 0065: add a web page to this vault by URL.
+  let showUrlInput = $state(false);
+  let urlDraft = $state("");
+  let isAddingUrl = $state(false);
+  let urlError = $state("");
   const selectedPaper = $derived(
     workspace.papers.find((paper) => paper.id === selectedPaperId) ?? workspace.papers[0],
   );
@@ -68,6 +75,32 @@
       isImporting = false;
     }
   }
+
+  function toggleUrlInput() {
+    showUrlInput = !showUrlInput;
+    urlError = "";
+    if (!showUrlInput) {
+      urlDraft = "";
+    }
+  }
+
+  async function submitUrl() {
+    const url = urlDraft.trim();
+    if (!url || isAddingUrl) {
+      return;
+    }
+    isAddingUrl = true;
+    urlError = "";
+    try {
+      await onAddHtmlUrl(workspace.id, url);
+      urlDraft = "";
+      showUrlInput = false;
+    } catch (error) {
+      urlError = String(error);
+    } finally {
+      isAddingUrl = false;
+    }
+  }
 </script>
 
 <section class="workspace col">
@@ -94,9 +127,36 @@
                   <button class="btn" type="button" disabled={isImporting} onclick={chooseLocalPdfs}>
                     {isImporting ? "Importing" : "Import PDF"}
                   </button>
+                  <button class="btn" type="button" class:active={showUrlInput} onclick={toggleUrlInput}>
+                    Add web page
+                  </button>
                   <button class="btn" type="button">Export .bib</button>
                 </div>
               </div>
+
+              {#if showUrlInput}
+                <div class="url-bar row">
+                  <input
+                    class="url-input"
+                    type="url"
+                    bind:value={urlDraft}
+                    disabled={isAddingUrl}
+                    placeholder="https://example.com/article"
+                    aria-label="Web page URL"
+                    onkeydown={(event) => {
+                      if (event.key === "Enter") void submitUrl();
+                      if (event.key === "Escape") toggleUrlInput();
+                    }}
+                  />
+                  <button class="btn primary" type="button" disabled={isAddingUrl || !urlDraft.trim()} onclick={() => void submitUrl()}>
+                    {isAddingUrl ? "Adding…" : "Add"}
+                  </button>
+                  <button class="btn" type="button" disabled={isAddingUrl} onclick={toggleUrlInput}>Cancel</button>
+                </div>
+                {#if urlError}
+                  <p class="url-error">{urlError}</p>
+                {/if}
+              {/if}
 
               <div class="row chip-row">
                 {#each workspace.chips as chip, index}
@@ -194,6 +254,41 @@
 
   .actions {
     gap: 6px;
+  }
+
+  .btn.active {
+    border-color: var(--amber);
+    color: var(--amber);
+  }
+
+  .url-bar {
+    gap: 6px;
+    align-items: center;
+    margin-top: 10px;
+  }
+
+  .url-input {
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    border: 1px solid var(--border-2);
+    outline: none;
+    background: var(--bg);
+    color: var(--fg-1);
+    padding: 0 9px;
+    font: inherit;
+    font-size: 12px;
+  }
+
+  .url-input:focus {
+    border-color: var(--cyan);
+  }
+
+  .url-error {
+    margin: 6px 0 0;
+    color: var(--red);
+    font-size: 11px;
+    line-height: 1.45;
   }
 
   .chip-row {

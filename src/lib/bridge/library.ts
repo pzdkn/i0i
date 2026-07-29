@@ -32,6 +32,15 @@ export async function importLocalPdfs(vaultId: string, paths: string[]): Promise
   });
 }
 
+/// Add a web page to a vault by URL (RFC 0065): fetch + sanitize + save it as a
+/// permanent, annotatable paper. Returns the refreshed library snapshot.
+export async function addHtmlUrlToVault(vaultId: string, url: string): Promise<LocalPdfImportResult> {
+  return invoke<LocalPdfImportResult>("import_html_url", {
+    vaultId,
+    url,
+  });
+}
+
 export async function autofillPaperMetadata(paperId: string): Promise<void> {
   return invoke<void>("autofill_paper_metadata", {
     paperId,

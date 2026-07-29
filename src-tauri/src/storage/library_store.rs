@@ -597,6 +597,41 @@ impl LibraryStore {
         source_url: &str,
         local_path: &str,
     ) -> StoreResult<()> {
+        self.add_local_source_to_vault(
+            paper, vault_id, source_id, source_url, local_path, "pdf", "local_import",
+        )
+    }
+
+    /// Persist a URL-imported web page as a durable vault source (RFC 0065). The
+    /// `local_path` is the sanitized `source.html` snapshot; the reader serves it
+    /// back via [`Self::read_html_snapshot`].
+    pub fn add_local_html_to_vault(
+        &self,
+        paper: &PaperDraft,
+        vault_id: &str,
+        source_id: &str,
+        source_url: &str,
+        local_path: &str,
+    ) -> StoreResult<()> {
+        self.add_local_source_to_vault(
+            paper, vault_id, source_id, source_url, local_path, "html", "html_import",
+        )
+    }
+
+    /// Shared upsert for a locally-imported source (PDF file or saved web page):
+    /// create/refresh the paper, register a `cached` document source of the given
+    /// kind, and add the paper to the vault. Idempotent on all three (conflict
+    /// clauses), so a re-import is a no-op.
+    fn add_local_source_to_vault(
+        &self,
+        paper: &PaperDraft,
+        vault_id: &str,
+        source_id: &str,
+        source_url: &str,
+        local_path: &str,
+        source_kind: &str,
+        acquisition_method: &str,
+    ) -> StoreResult<()> {
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
         let authors_json = to_json(&paper.authors)?;
@@ -643,7 +678,7 @@ impl LibraryStore {
               id, paper_id, source_kind, source_url, landing_url, final_url, acquisition_method,
               local_path, status, error, created_at, updated_at
             )
-            values (?1, ?2, 'pdf', ?3, null, ?3, 'local_import', ?4, 'cached', null, datetime('now'), datetime('now'))
+            values (?1, ?2, ?5, ?3, null, ?3, ?6, ?4, 'cached', null, datetime('now'), datetime('now'))
             on conflict(id) do update set
               source_url = excluded.source_url,
               final_url = excluded.final_url,
@@ -653,7 +688,7 @@ impl LibraryStore {
               error = null,
               updated_at = datetime('now')
             ",
-            params![source_id, paper.id, source_url, local_path],
+            params![source_id, paper.id, source_url, local_path, source_kind, acquisition_method],
         )
         .map_err(|error| error.to_string())?;
 
@@ -668,6 +703,22 @@ impl LibraryStore {
         .map_err(|error| error.to_string())?;
 
         tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// Read a persisted web-page snapshot's sanitized HTML by source id (RFC
+    /// 0065): resolve the source's stored `local_path` and read it. The reader's
+    /// `get_reader_html` delegates here for durable `html:` vault sources.
+    pub fn read_html_snapshot(&self, source_id: &str) -> StoreResult<String> {
+        // `get_document_source` surfaces a raw "no rows" error for an unknown id;
+        // give the reader a friendly message instead.
+        let source = self
+            .get_document_source(source_id)
+            .map_err(|_| format!("Saved web page not found: {source_id}"))?;
+        let path = source
+            .local_path
+            .ok_or_else(|| format!("Saved web page has no snapshot: {source_id}"))?;
+        std::fs::read_to_string(&path)
+            .map_err(|error| format!("Saved web page is missing: {source_id} ({error})"))
     }
 
     pub fn apply_paper_metadata_enrichment(
@@ -4356,6 +4407,68 @@ mod tests {
                 .active_source_id
                 .as_deref(),
             Some(source_id)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_local_html_to_vault_persists_html_source_and_serves_snapshot() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft("web:deadbeef1234");
+        let source_id = "html:deadbeef1234";
+        // The snapshot lives on disk; `local_path` points the reader at it.
+        let snapshot_path = db.dir.join("source.html");
+        fs::write(&snapshot_path, "<article><p>Saved page.</p></article>")
+            .map_err(|error| error.to_string())?;
+        let local_path = snapshot_path.to_string_lossy().to_string();
+
+        db.store.add_local_html_to_vault(
+            &draft,
+            "attention",
+            source_id,
+            "https://example.com/post",
+            &local_path,
+        )?;
+
+        let snapshot = db.store.get_library()?;
+        let source = snapshot
+            .document_sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .expect("saved web-page source should exist");
+        assert!(has_membership(&snapshot, "attention", "web:deadbeef1234"));
+        assert_eq!(source.source_kind, "html");
+        assert_eq!(source.status, "cached");
+        assert_eq!(source.acquisition_method.as_deref(), Some("html_import"));
+        assert_eq!(source.source_url.as_deref(), Some("https://example.com/post"));
+        assert_eq!(
+            paper(&snapshot, "web:deadbeef1234").active_source_id.as_deref(),
+            Some(source_id)
+        );
+
+        // The reader read-path resolves the source id to its on-disk snapshot.
+        assert_eq!(
+            db.store.read_html_snapshot(source_id)?,
+            "<article><p>Saved page.</p></article>"
+        );
+
+        // Idempotent re-add: still one membership, snapshot unchanged.
+        db.store.add_local_html_to_vault(
+            &draft,
+            "attention",
+            source_id,
+            "https://example.com/post",
+            &local_path,
+        )?;
+        let after = db.store.get_library()?;
+        assert_eq!(
+            after
+                .document_sources
+                .iter()
+                .filter(|source| source.id == source_id)
+                .count(),
+            1
         );
 
         Ok(())

@@ -7,7 +7,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::domain::library::DocumentSource;
+use crate::domain::library::{DocumentSource, Paper};
 use crate::domain::reader::{
     DiscoveryReaderCandidate, ReaderAsset, ReaderBlock, ReaderDocument, ReaderPage,
     ReaderParagraph, ReaderSpan, ReaderTextBlock,
@@ -32,6 +32,13 @@ struct HtmlSourceMeta {
     title: Option<String>,
     source_text: String,
     final_url: String,
+}
+
+/// A web page persisted as a durable vault snapshot (RFC 0065): the on-disk
+/// `source.html` path plus the ingested title/text the paper draft needs.
+pub struct StoredHtml {
+    pub local_path: String,
+    pub acquired: AcquiredHtml,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,12 +235,17 @@ impl ReaderService {
         Ok(html_reader_document(source_id, url, acquired))
     }
 
-    /// Serve the sanitized HTML for a cached HTML source (RFC 0056). The reader
-    /// fetches this after receiving an `html`-kind `ReaderDocument`.
+    /// Serve the sanitized HTML for an `html`-kind `ReaderDocument`. Transient
+    /// discovery pages (`temp-html:`) come from the app cache (RFC 0056); pages
+    /// saved into a vault (`html:`) resolve to their durable snapshot via the
+    /// stored `local_path` (RFC 0065).
     pub fn get_reader_html(&self, source_id: &str) -> Result<String, String> {
-        let path = self.discovery_html_path(source_id)?;
-        fs::read_to_string(&path)
-            .map_err(|error| format!("Cached HTML source is missing: {source_id} ({error})"))
+        if is_discovery_html_source(source_id) {
+            let path = self.discovery_html_path(source_id)?;
+            return fs::read_to_string(&path)
+                .map_err(|error| format!("Cached HTML source is missing: {source_id} ({error})"));
+        }
+        self.store.read_html_snapshot(source_id)
     }
 
     /// Fetch + ingest a page into clean article HTML and cache it for serving.
@@ -300,6 +312,80 @@ impl ReaderService {
             .join("discovery")
             .join(sanitize_path_component(source_id))
             .join("source.html"))
+    }
+
+    /// Durable (non-cache) snapshot path for a web page saved into a vault
+    /// (RFC 0065), mirroring the durable local-PDF layout under app-data.
+    fn durable_html_path(&self, paper_id: &str, source_id: &str) -> Result<PathBuf, String> {
+        let app_data_dir = self
+            .app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?;
+        Ok(app_data_dir
+            .join("documents")
+            .join(paper_id)
+            .join("sources")
+            .join(sanitize_path_component(source_id))
+            .join("source.html"))
+    }
+
+    /// Acquire + sanitize a URL and persist it as a **durable** vault snapshot
+    /// (RFC 0065). Cache-aware: if a snapshot already exists on disk it is reused
+    /// verbatim rather than re-fetched, so re-adding the same page never re-hits
+    /// the network and never shifts the text offsets existing annotations anchor
+    /// to. Returns the snapshot path plus the ingested title/text for the paper.
+    pub async fn acquire_and_store_html(
+        &self,
+        paper_id: &str,
+        source_id: &str,
+        url: &str,
+    ) -> Result<StoredHtml, String> {
+        let local_path = self.durable_html_path(paper_id, source_id)?;
+        let meta_path = html_meta_path(&local_path);
+
+        // Reuse an existing snapshot (frozen offsets, no re-fetch).
+        if local_path.is_file() {
+            if let Ok(meta_json) = fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<HtmlSourceMeta>(&meta_json) {
+                    return Ok(StoredHtml {
+                        local_path: local_path.to_string_lossy().to_string(),
+                        acquired: AcquiredHtml {
+                            final_url: meta.final_url,
+                            title: meta.title,
+                            clean_html: fs::read_to_string(&local_path).unwrap_or_default(),
+                            source_text: meta.source_text,
+                        },
+                    });
+                }
+            }
+        }
+
+        let acquired = self
+            .source_acquisition
+            .acquire_html_page(url)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let partial_path = PathBuf::from(format!("{}.part", local_path.display()));
+        fs::write(&partial_path, acquired.clean_html.as_bytes())
+            .map_err(|error| error.to_string())?;
+        fs::rename(&partial_path, &local_path).map_err(|error| error.to_string())?;
+        let meta = HtmlSourceMeta {
+            title: acquired.title.clone(),
+            source_text: acquired.source_text.clone(),
+            final_url: acquired.final_url.clone(),
+        };
+        if let Ok(meta_json) = serde_json::to_string(&meta) {
+            let _ = fs::write(&meta_path, meta_json);
+        }
+        Ok(StoredHtml {
+            local_path: local_path.to_string_lossy().to_string(),
+            acquired,
+        })
     }
 
     /// Promote a discovery-cached PDF into the durable document-source layout.
@@ -370,6 +456,15 @@ impl ReaderService {
                     || (paper.active_source_id.is_none() && s.paper_id == paper_id)
             })
             .filter(|s| s.status == "cached" || s.status == "remote_available");
+
+        // A web page saved into the vault (RFC 0065) is served as an HTML reader
+        // document from its durable snapshot — not through the PDF/extraction
+        // path below.
+        if let Some(ref s) = source {
+            if s.source_kind == "html" {
+                return self.saved_html_reader_document(&paper, s);
+            }
+        }
 
         let active_extraction = if let Some(id) = extraction_id {
             snapshot
@@ -517,6 +612,55 @@ impl ReaderService {
             spans,
             assets,
             text_blocks,
+            paragraphs: Vec::new(),
+            marks: Vec::new(),
+        })
+    }
+
+    /// Build an HTML reader document for a web page saved into a vault (RFC
+    /// 0065). The sanitized markup is served separately by `get_reader_html`;
+    /// here we carry the passage-anchor `source_text` (from the snapshot's
+    /// `meta.json`) and the durable source id highlights anchor on. Crucially
+    /// `pdf_local_path` stays `None` so the reader picks the HTML surface.
+    fn saved_html_reader_document(
+        &self,
+        paper: &Paper,
+        source: &DocumentSource,
+    ) -> Result<ReaderDocument, String> {
+        let source_text = source
+            .local_path
+            .as_deref()
+            .map(|path| html_meta_path(Path::new(path)))
+            .and_then(|meta_path| fs::read_to_string(meta_path).ok())
+            .and_then(|json| serde_json::from_str::<HtmlSourceMeta>(&json).ok())
+            .map(|meta| meta.source_text)
+            .unwrap_or_default();
+
+        let identifier = format!("{}:{}", paper.id, paper.venue.to_lowercase());
+        Ok(ReaderDocument {
+            paper_id: paper.id.clone(),
+            source_id: source.id.clone(),
+            extraction_id: None,
+            annotation_source_id: None,
+            title: paper.title.clone(),
+            authors: paper.authors.clone(),
+            venue: paper.venue.clone(),
+            year: paper.year,
+            identifier,
+            citation_key: paper.id.clone(),
+            tags: paper.tags.clone(),
+            pdf_local_path: None,
+            pdf_source_url: None,
+            pdf_error: None,
+            pdf_status: None,
+            content_kind: "html".to_string(),
+            source_url: source.source_url.clone(),
+            source_text,
+            pages: Vec::new(),
+            blocks: Vec::new(),
+            spans: Vec::new(),
+            assets: Vec::new(),
+            text_blocks: Vec::new(),
             paragraphs: Vec::new(),
             marks: Vec::new(),
         })
@@ -775,6 +919,13 @@ fn discovery_pdf_source_id(paper_id: &str, pdf_url: &str) -> String {
 /// The metadata sidecar path next to a cached `source.html` (RFC 0056).
 fn html_meta_path(html_path: &Path) -> PathBuf {
     html_path.with_file_name("meta.json")
+}
+
+/// Whether a source id belongs to the transient discovery HTML cache (as opposed
+/// to a durable vault `html:` source, RFC 0065). Exact prefix — must not match
+/// `html:` ids.
+fn is_discovery_html_source(source_id: &str) -> bool {
+    source_id.starts_with(&format!("{DISCOVERY_HTML_SOURCE_PREFIX}:"))
 }
 
 /// Derive a stable temporary HTML source id from a page URL (RFC 0056).

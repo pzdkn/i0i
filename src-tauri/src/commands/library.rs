@@ -109,6 +109,36 @@ pub fn import_local_pdfs(
     })
 }
 
+/// Add a web page to a vault by URL (RFC 0065): fetch + sanitize the page, save
+/// it as a durable snapshot, and register it as a permanent `html:` paper the
+/// reader can annotate. Cache-aware — re-adding the same URL reuses the frozen
+/// snapshot rather than re-fetching.
+#[tauri::command]
+pub async fn import_html_url(
+    store: tauri::State<'_, LibraryStore>,
+    reader_service: tauri::State<'_, ReaderService>,
+    vault_id: String,
+    url: String,
+) -> Result<LocalPdfImportResult, String> {
+    let normalized = normalize_html_url(&url)?;
+    let short_hash = sha256_str(&normalized)[..12].to_string();
+    // `web:` keeps saved pages in their own id namespace, distinct from the
+    // `local:` PDF-import namespace (RFC 0065).
+    let paper_id = format!("web:{short_hash}");
+    let source_id = format!("html:{short_hash}");
+
+    let stored = reader_service
+        .acquire_and_store_html(&paper_id, &source_id, &normalized)
+        .await?;
+    let paper = html_paper_draft(stored.acquired.title.as_deref(), &normalized, &paper_id);
+    store.add_local_html_to_vault(&paper, &vault_id, &source_id, &normalized, &stored.local_path)?;
+
+    Ok(LocalPdfImportResult {
+        snapshot: store.get_library()?,
+        imported_paper_ids: vec![paper_id],
+    })
+}
+
 #[tauri::command]
 pub fn autofill_paper_metadata(
     metadata_enrichment: tauri::State<'_, MetadataEnrichmentService>,
@@ -321,6 +351,62 @@ fn title_from_pdf_path(path: &Path) -> String {
         "Imported PDF".to_string()
     } else {
         title
+    }
+}
+
+/// Validate + normalize a page URL for import (RFC 0065). Trims whitespace and
+/// strips only the `#fragment` — deliberately no query/trailing-slash
+/// canonicalization, so `a` and `a/` remain distinct pages.
+fn normalize_html_url(url: &str) -> Result<String, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Enter a URL to add.".to_string());
+    }
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return Err("Enter a full http(s):// URL.".to_string());
+    }
+    Ok(trimmed.split('#').next().unwrap_or(trimmed).to_string())
+}
+
+fn sha256_str(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Draft paper for a saved web page. Title comes from the page (`<title>`),
+/// falling back to the host and then the raw URL.
+fn html_paper_draft(title: Option<&str>, url: &str, paper_id: &str) -> PaperDraft {
+    let title = title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| host_from_url(url).unwrap_or_else(|| url.to_string()));
+    PaperDraft {
+        id: paper_id.to_string(),
+        title,
+        authors: vec![],
+        venue: "Web page".to_string(),
+        year: 0,
+        citations: 0,
+        tags: vec!["web".to_string(), "needs-review".to_string()],
+        status: "UNREAD".to_string(),
+        abstract_text: None,
+        sources: vec![],
+    }
+}
+
+fn host_from_url(url: &str) -> Option<String> {
+    let after_scheme = url.split("://").nth(1)?;
+    let host = after_scheme.split('/').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
     }
 }
 

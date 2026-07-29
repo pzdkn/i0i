@@ -21,6 +21,7 @@
     createVault,
     getLibrary,
     importLocalPdfs,
+    addHtmlUrlToVault,
     probeDiscoveryCandidatePdf,
     removeVault,
     removePaperFromLibrary as removePaperFromLibraryCommand,
@@ -618,6 +619,13 @@
     }
   }
 
+  // RFC 0065: add a web page by URL. Rethrows so VaultHome can show the fetch
+  // error inline next to the URL field (paywalls / JS-only pages fail here).
+  async function addHtmlUrlToVaultWorkspace(vaultId: string, url: string) {
+    const result = await addHtmlUrlToVault(vaultId, url);
+    hydrateLibrary(result.snapshot);
+  }
+
   async function autofillMetadataForPaper(paperId: string) {
     if (autofillingMetadataPaperIds.includes(paperId)) {
       return;
@@ -876,6 +884,7 @@
                 workspace={activeVaultWorkspace}
                 onOpenPaper={openPaper}
                 onImportPdfs={importPdfsToVault}
+                onAddHtmlUrl={addHtmlUrlToVaultWorkspace}
                 onAutofillMetadata={autofillMetadataForPaper}
                 {autofillingMetadataPaperIds}
                 {metadataAutofillProgressByPaperId}
