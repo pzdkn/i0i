@@ -28,7 +28,7 @@
     PaperMetadataUpdate,
   } from "$lib/domain/library";
   import type { ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
-  import { highlightFill } from "$lib/features/reader/highlight-colors";
+  import { highlightFill, markFill } from "$lib/features/reader/highlight-colors";
   import { samePassage } from "$lib/features/reader/highlight-thread-match";
   import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
 
@@ -689,7 +689,7 @@
                 {@const hl = highlightForThread(thread)}
                 <button class="thread-row" type="button" onclick={() => void openThreadById(thread.id)}>
                   {#if hl}
-                    <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
+                    <span class="color-chip" style={`background:${markFill(hl.color)}`} aria-hidden="true"></span>
                   {/if}
                   <span class="thread-row-title">{thread.title}</span>
                   {#if hl?.author.kind === "agent"}<span class="badge" title="AI-added highlight"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
@@ -700,7 +700,7 @@
 
               {#each orphanHighlights as hl}
                 <button class="thread-row" type="button" onclick={() => onOpenHighlight(hl.id)}>
-                  <span class="color-chip" style={`background:${highlightFill(hl.color)}`} aria-hidden="true"></span>
+                  <span class="color-chip" style={`background:${markFill(hl.color)}`} aria-hidden="true"></span>
                   <span class="thread-row-title">{hl.excerpt}</span>
                   {#if hl.author.kind === "agent"}<span class="badge" title="AI-added highlight"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                   <span class="badge" title="no note or thread yet"><Plus size={12} strokeWidth={1.75} aria-hidden="true" /></span>

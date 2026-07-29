@@ -31,7 +31,7 @@ impl HighlightService {
         paper_id: &str,
         locator: Locator,
         excerpt: &str,
-        color: HighlightColor,
+        color: Option<HighlightColor>,
         label: Option<String>,
         author: HighlightAuthor,
     ) -> Result<Highlight, String> {
@@ -43,6 +43,13 @@ impl HighlightService {
     pub async fn recolor(&self, id: &str, color: HighlightColor) -> Result<(), String> {
         self.store
             .recolor_highlight(id, color)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Set or clear a passage's note (RFC 0061).
+    pub async fn set_note(&self, id: &str, note: Option<String>) -> Result<(), String> {
+        self.store
+            .set_highlight_note(id, note.as_deref())
             .map_err(|e| e.to_string())
     }
 
@@ -104,7 +111,7 @@ mod tests {
                 &paper,
                 loc.clone(),
                 "quote",
-                HighlightColor::Yellow,
+                Some(HighlightColor::Yellow),
                 None,
                 HighlightAuthor::User,
             )
@@ -116,7 +123,7 @@ mod tests {
                 &paper,
                 loc,
                 "quote",
-                HighlightColor::Red,
+                Some(HighlightColor::Red),
                 Some("exp".into()),
                 HighlightAuthor::Agent { model: "m".into() },
             )
@@ -138,7 +145,7 @@ mod tests {
             &paper,
             loc.clone(),
             "quote",
-            HighlightColor::Yellow,
+            Some(HighlightColor::Yellow),
             None,
             HighlightAuthor::User,
         )
@@ -148,7 +155,7 @@ mod tests {
             &paper,
             loc,
             "quote",
-            HighlightColor::Red,
+            Some(HighlightColor::Red),
             None,
             HighlightAuthor::Agent { model: "m".into() },
         )

@@ -9,12 +9,22 @@ pub async fn create_highlight(
     paper_id: String,
     locator: Locator,
     excerpt: String,
-    color: HighlightColor,
+    // Optional (RFC 0061): a null color creates a note-/ask-only passage.
+    color: Option<HighlightColor>,
     label: Option<String>,
 ) -> Result<Highlight, String> {
     service
         .create_highlight(&paper_id, locator, &excerpt, color, label, HighlightAuthor::User)
         .await
+}
+
+#[tauri::command]
+pub async fn set_highlight_note(
+    service: tauri::State<'_, HighlightService>,
+    id: String,
+    note: Option<String>,
+) -> Result<(), String> {
+    service.set_note(&id, note).await
 }
 
 #[tauri::command]
@@ -68,7 +78,7 @@ pub async fn create_agent_highlight(
             &paper_id,
             locator,
             &excerpt,
-            color,
+            Some(color), // agent marks always carry a color
             label,
             HighlightAuthor::Agent { model },
         )

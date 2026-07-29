@@ -13,7 +13,11 @@ export interface Highlight {
   sourceId: string;
   locator: Locator;
   excerpt: string;
-  color: HighlightColor;
+  // Optional (RFC 0061): null = an annotated passage with no color mark
+  // (note-only or conversation-only).
+  color: HighlightColor | null;
+  // The passage's note text, if any (RFC 0061) — distinct from its conversation.
+  note: string | null;
   label: string | null;
   author: HighlightAuthor;
   createdAt: string;

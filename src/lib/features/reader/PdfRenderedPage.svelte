@@ -4,7 +4,7 @@
   import type { Highlight, Locator } from "$lib/domain/highlight";
   import type { PdfRect, ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
-  import { highlightFill } from "$lib/features/reader/highlight-colors";
+  import { markFill } from "$lib/features/reader/highlight-colors";
   import { resolveQuoteInText } from "$lib/features/reader/resolve-quote-html";
   import { debugLog } from "$lib/bridge/chat";
   import { StickyNote, MessageSquare } from "@lucide/svelte";
@@ -47,7 +47,14 @@
 
   const pageIndex = $derived(pageNumber - 1);
   const pageMarks = $derived(
-    marks.filter((mark) => mark.locator.kind === "pdfRect" && mark.locator.pageIndex === pageIndex),
+    marks.filter(
+      (mark) =>
+        mark.locator.kind === "pdfRect" &&
+        mark.locator.pageIndex === pageIndex &&
+        // Draw a mark only if the passage has a color or a note; a
+        // conversation-only passage has no page mark (RFC 0061).
+        (mark.color !== null || mark.note !== null),
+    ),
   );
   const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
 
@@ -348,7 +355,7 @@
           class="pdf-note-anchor"
           type="button"
           aria-label="Highlight actions"
-          style={`${rectStyle(rect)} background: ${highlightFill(mark.color)};`}
+          style={`${rectStyle(rect)} background: ${markFill(mark.color)};`}
           onclick={(event) => {
             event.stopPropagation();
             onHighlightClick(mark.id, event.clientX, event.clientY);

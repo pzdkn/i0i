@@ -92,8 +92,13 @@ impl LibraryStore {
         // Swallow the "duplicate column" error on already-migrated DBs; that's
         // the idempotency guard.
         let _ = conn.execute("alter table chat_threads add column highlight_id text", []);
+        // RFC 0061: color became nullable and a note field was added. Existing
+        // DBs predate the `note` column; add it if missing (the `let _` swallows
+        // the "duplicate column" error on already-migrated DBs).
+        let _ = conn.execute("alter table highlights add column note text", []);
 
         self.migrate_threads_to_highlights()?;
+        self.migrate_notes_into_highlight_field()?;
 
         Ok(())
     }
@@ -1257,7 +1262,7 @@ impl LibraryStore {
         paper_id: &str,
         locator: &crate::domain::highlight::Locator,
         excerpt: &str,
-        color: crate::domain::highlight::HighlightColor,
+        color: Option<crate::domain::highlight::HighlightColor>,
         label: Option<&str>,
         author: &crate::domain::highlight::HighlightAuthor,
     ) -> StoreResult<crate::domain::highlight::Highlight> {
@@ -1265,7 +1270,8 @@ impl LibraryStore {
 
         let conn = self.open_connection()?;
         let id = timestamped_id("hl")?;
-        let color_str = highlight_color_str(color);
+        // A null color = an annotated passage with no color highlight (RFC 0061).
+        let color_str: Option<String> = color.map(highlight_color_str);
         let (start, end, page, rects) = match locator {
             Locator::TextOffset {
                 start_offset,
@@ -1369,7 +1375,7 @@ impl LibraryStore {
                 "
                 select id, paper_id, source_id, locator_kind, start_offset, end_offset,
                        page_index, rects_json, excerpt, color, label, author_kind,
-                       author_model, created_at, updated_at
+                       author_model, created_at, updated_at, note
                 from highlights
                 where paper_id = ?1
                 order by created_at asc
@@ -1395,7 +1401,7 @@ impl LibraryStore {
                 "
                 select id, paper_id, source_id, locator_kind, start_offset, end_offset,
                        page_index, rects_json, excerpt, color, label, author_kind,
-                       author_model, created_at, updated_at
+                       author_model, created_at, updated_at, note
                 from highlights
                 where paper_id = ?1 and author_kind = ?2
                 order by created_at asc
@@ -1429,6 +1435,19 @@ impl LibraryStore {
         conn.execute(
             "update highlights set label = ?2, updated_at = datetime('now') where id = ?1",
             params![id, label],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Set or clear a passage's note (RFC 0061) — the passage's own text,
+    /// distinct from its conversation thread. An empty/blank note clears it.
+    pub fn set_highlight_note(&self, id: &str, note: Option<&str>) -> StoreResult<()> {
+        let note = note.map(str::trim).filter(|value| !value.is_empty());
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update highlights set note = ?2, updated_at = datetime('now') where id = ?1",
+            params![id, note],
         )
         .map_err(|error| error.to_string())?;
         Ok(())
@@ -1523,7 +1542,8 @@ impl LibraryStore {
                         &row.paper_id,
                         &locator,
                         &excerpt,
-                        HighlightColor::default(),
+                        // Legacy anchored threads were visible marks — keep a color.
+                        Some(HighlightColor::default()),
                         None,
                         &HighlightAuthor::User,
                     )?
@@ -1535,6 +1555,63 @@ impl LibraryStore {
             )
             .map_err(|error| error.to_string())?;
             count += 1;
+        }
+        Ok(count)
+    }
+
+    /// RFC 0061: move existing thread `note` entries into the passage's `note`
+    /// field, so notes and Q&A no longer share a thread. Idempotent — only fills
+    /// highlights whose `note` is still null; migrated note entries are deleted
+    /// from the thread (its questions/answers stay). Returns highlights updated.
+    pub fn migrate_notes_into_highlight_field(&self) -> StoreResult<usize> {
+        let conn = self.open_connection()?;
+        struct NoteRow {
+            entry_id: String,
+            highlight_id: String,
+            body: String,
+        }
+        let mut stmt = conn
+            .prepare(
+                "select e.id, t.highlight_id, e.body
+                 from chat_entries e
+                 join chat_threads t on e.thread_id = t.id
+                 join highlights h on t.highlight_id = h.id
+                 where e.kind = 'note' and t.highlight_id is not null and h.note is null
+                 order by e.created_at asc",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows: Vec<NoteRow> = stmt
+            .query_map([], |r| {
+                Ok(NoteRow {
+                    entry_id: r.get(0)?,
+                    highlight_id: r.get(1)?,
+                    body: r.get(2)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?;
+        drop(stmt);
+
+        let mut notes: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut entry_ids: Vec<String> = Vec::new();
+        for row in rows {
+            notes.entry(row.highlight_id).or_default().push(row.body);
+            entry_ids.push(row.entry_id);
+        }
+
+        let count = notes.len();
+        for (highlight_id, bodies) in notes {
+            conn.execute(
+                "update highlights set note = ?2, updated_at = datetime('now') where id = ?1",
+                params![highlight_id, bodies.join("\n\n")],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        for entry_id in entry_ids {
+            conn.execute("delete from chat_entries where id = ?1", params![entry_id])
+                .map_err(|error| error.to_string())?;
         }
         Ok(count)
     }
@@ -1764,7 +1841,8 @@ impl LibraryStore {
               page_index integer,
               rects_json text,
               excerpt text not null,
-              color text not null,
+              color text,
+              note text,
               label text,
               author_kind text not null,
               author_model text,
@@ -2527,7 +2605,7 @@ fn read_highlight(
         "
         select id, paper_id, source_id, locator_kind, start_offset, end_offset,
                page_index, rects_json, excerpt, color, label, author_kind,
-               author_model, created_at, updated_at
+               author_model, created_at, updated_at, note
         from highlights
         where id = ?1
         ",
@@ -2557,9 +2635,11 @@ fn highlight_from_row(
             end_offset: row.get::<_, Option<i64>>(5)?.unwrap_or_default(),
         }
     };
-    let color_str: String = row.get(9)?;
-    let color: HighlightColor =
-        serde_json::from_str(&format!("\"{color_str}\"")).unwrap_or_default();
+    // Color is nullable (RFC 0061): a null/blank color = no color mark.
+    let color: Option<HighlightColor> = row
+        .get::<_, Option<String>>(9)?
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| serde_json::from_str(&format!("\"{value}\"")).unwrap_or_default());
     let author = match row.get::<_, String>(11)?.as_str() {
         "agent" => HighlightAuthor::Agent {
             model: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
@@ -2574,6 +2654,7 @@ fn highlight_from_row(
         locator,
         excerpt: row.get(8)?,
         color,
+        note: row.get(15)?,
         label: row.get(10)?,
         author,
         created_at: row.get(13)?,
@@ -4650,18 +4731,18 @@ mod tests {
             paper_id,
             &loc,
             "quoted text",
-            crate::domain::highlight::HighlightColor::Yellow,
+            Some(crate::domain::highlight::HighlightColor::Yellow),
             Some("important"),
             &crate::domain::highlight::HighlightAuthor::User,
         )?;
-        assert_eq!(hl.color, crate::domain::highlight::HighlightColor::Yellow);
+        assert_eq!(hl.color, Some(crate::domain::highlight::HighlightColor::Yellow));
         assert_eq!(hl.excerpt, "quoted text");
 
         db.store
             .recolor_highlight(&hl.id, crate::domain::highlight::HighlightColor::Red)?;
         let listed = db.store.list_highlights(paper_id)?;
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].color, crate::domain::highlight::HighlightColor::Red);
+        assert_eq!(listed[0].color, Some(crate::domain::highlight::HighlightColor::Red));
 
         db.store.remove_highlight(&hl.id)?;
         assert!(db.store.list_highlights(paper_id)?.is_empty());
@@ -4706,6 +4787,34 @@ mod tests {
     }
 
     #[test]
+    fn notes_migrate_from_thread_entries_into_the_highlight_note_field() -> StoreResult<()> {
+        let db = test_db()?;
+        let paper_id = "vaswani2017";
+        let anchor = ThreadAnchor::TextOffset {
+            source_id: "src-1".into(),
+            start_offset: 3,
+            end_offset: 12,
+            selected_text: "abc".into(),
+        };
+        // Legacy flow: a note entry on an anchored thread, linked to a highlight.
+        db.store
+            .add_note_at_anchor_with_creation("paper", paper_id, &anchor, "my note")?;
+        db.store.migrate_threads_to_highlights()?;
+
+        // RFC 0061: move the note entry into the highlight's `note` field.
+        let migrated = db.store.migrate_notes_into_highlight_field()?;
+        assert_eq!(migrated, 1);
+
+        let highlights = db.store.list_highlights(paper_id)?;
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].note.as_deref(), Some("my note"));
+
+        // Idempotent: the note field is now set, so a second run does nothing.
+        assert_eq!(db.store.migrate_notes_into_highlight_field()?, 0);
+        Ok(())
+    }
+
+    #[test]
     fn migration_links_instead_of_duplicating_when_highlight_already_exists() -> StoreResult<()> {
         use crate::domain::highlight::{HighlightAuthor, HighlightColor, Locator};
 
@@ -4735,7 +4844,7 @@ mod tests {
             paper_id,
             &locator,
             "abc",
-            HighlightColor::Green,
+            Some(HighlightColor::Green),
             None,
             &HighlightAuthor::User,
         )?;
@@ -4749,7 +4858,7 @@ mod tests {
         let highlights = db.store.list_highlights(paper_id)?;
         assert_eq!(highlights.len(), 1);
         assert_eq!(highlights[0].id, created.id);
-        assert_eq!(highlights[0].color, HighlightColor::Green);
+        assert_eq!(highlights[0].color, Some(HighlightColor::Green));
 
         assert_eq!(
             db.store.thread_highlight_id(&write.view.thread.id)?,

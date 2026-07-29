@@ -132,19 +132,24 @@
     const Ctor = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
     if (!api || typeof Ctor !== "function") return;
 
-    const byColor = new Map<string, Range[]>();
+    const byGroup = new Map<string, Range[]>();
     for (const hl of current) {
       if (hl.locator.kind !== "textOffset" || hl.locator.sourceId !== sourceId) continue;
+      // A color mark → its color group; a note-only passage → the neutral
+      // "note" group; a conversation-only passage → no page mark (RFC 0061).
+      const group = hl.color ?? (hl.note ? "note" : null);
+      if (!group) continue;
       const start = locate(root, hl.locator.startOffset);
       const end = locate(root, hl.locator.endOffset);
       if (!start || !end) continue;
       const range = document.createRange();
       range.setStart(start.node, start.offset);
       range.setEnd(end.node, end.offset);
-      (byColor.get(hl.color) ?? byColor.set(hl.color, []).get(hl.color)!).push(range);
+      (byGroup.get(group) ?? byGroup.set(group, []).get(group)!).push(range);
     }
-    const names = HIGHLIGHT_COLORS.map((c) => `i0i-hl-${c}`);
-    for (const c of HIGHLIGHT_COLORS) api.set(`i0i-hl-${c}`, new Ctor(...(byColor.get(c) ?? [])));
+    const groups = [...HIGHLIGHT_COLORS, "note"];
+    const names = groups.map((g) => `i0i-hl-${g}`);
+    for (const g of groups) api.set(`i0i-hl-${g}`, new Ctor(...(byGroup.get(g) ?? [])));
     return () => names.forEach((n) => api.delete(n));
   });
 
@@ -299,4 +304,9 @@
   :global(::highlight(i0i-hl-red))    { background: rgba(235, 87, 87, 0.32); }
   :global(::highlight(i0i-hl-purple)) { background: rgba(187, 107, 217, 0.32); }
   :global(::highlight(i0i-hl-orange)) { background: rgba(242, 153, 74, 0.32); }
+  /* Note-only passage: a subtle neutral marker, not a filled color (RFC 0061). */
+  :global(::highlight(i0i-hl-note)) {
+    background: rgba(148, 148, 148, 0.12);
+    text-decoration: underline dotted rgba(148, 148, 148, 0.7);
+  }
 </style>

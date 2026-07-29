@@ -14,3 +14,11 @@ const FILLS: Record<HighlightColor, string> = {
 export function highlightFill(color: HighlightColor): string {
   return FILLS[color];
 }
+
+// Subtle neutral fill for a note-only passage (no color chosen) — RFC 0061.
+export const NEUTRAL_FILL = "rgba(148, 148, 148, 0.20)";
+
+/// Fill for a mark whose color may be null (note-only passages render neutral).
+export function markFill(color: HighlightColor | null): string {
+  return color ? FILLS[color] : NEUTRAL_FILL;
+}

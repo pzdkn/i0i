@@ -95,7 +95,12 @@ pub struct Highlight {
     pub source_id: String,
     pub locator: Locator,
     pub excerpt: String,
-    pub color: HighlightColor,
+    /// The color mark, if any. `None` = an annotated passage with no color
+    /// highlight (note-only or conversation-only) — RFC 0061.
+    pub color: Option<HighlightColor>,
+    /// The passage's note text, if any (RFC 0061) — distinct from its
+    /// conversation thread.
+    pub note: Option<String>,
     pub label: Option<String>,
     pub author: HighlightAuthor,
     pub created_at: String,
