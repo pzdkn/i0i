@@ -43,6 +43,19 @@ pub struct Paper {
     pub active_extraction_id: Option<String>,
 }
 
+/// The minimal per-paper metadata needed to emit one BibTeX entry (RFC 0070).
+///
+/// Deliberately narrower than `Paper`: it omits the counts that `Paper` computes
+/// on read from the chat tables, so a citation export never has to touch those
+/// tables. Populated by `LibraryStore::cite_records_for_vault`.
+#[derive(Debug, Clone)]
+pub struct CiteRecord {
+    pub title: String,
+    pub authors: Vec<String>,
+    pub venue: String,
+    pub year: i32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaperDraft {

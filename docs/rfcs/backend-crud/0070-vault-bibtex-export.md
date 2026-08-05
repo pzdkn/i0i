@@ -1,6 +1,6 @@
 # RFC 0070: Export Vault Citations as BibTeX
 
-Status: Draft
+Status: Implemented
 Date: 2026-08-05
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first
@@ -65,8 +65,9 @@ Export citations (.bib)
   -> Rust writes the file (overwrite if it exists)
 ```
 
-The action lives in `VaultInspector` (the vault detail/actions panel) rather
-than crowding `VaultHome`. It is disabled when the vault has zero papers.
+The action is the vault's existing top-panel "Export .bib" button in
+`VaultHome`, alongside "Import PDF" and "Add web page" — the discoverable place
+for vault-wide actions. It is disabled when the vault has zero papers.
 
 ## BibTeX Generation
 
@@ -210,9 +211,10 @@ export async function exportVaultBibtex(
 
 ## Proposed Frontend Interaction
 
-`VaultInspector.svelte`
+`VaultHome.svelte`
 
-- "Export citations (.bib)" action, disabled when the vault has no papers.
+- Wires the existing top-panel "Export .bib" button (disabled when the vault has
+  no papers) to the handler below.
 - On click:
 
 ```ts
@@ -269,7 +271,7 @@ What can go wrong (and how this RFC prevents it):
 
 ## Acceptance Criteria
 
-- A "Export citations (.bib)" action exists in `VaultInspector`, disabled for an
+- The top-panel "Export .bib" action in `VaultHome` is wired and disabled for an
   empty vault.
 - Choosing a path writes a `.bib` containing one entry per paper in the vault.
 - Cite keys follow `authorYEARword`; collisions get `a`/`b`/`c` suffixes.

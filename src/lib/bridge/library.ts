@@ -41,6 +41,15 @@ export async function addHtmlUrlToVault(vaultId: string, url: string): Promise<L
   });
 }
 
+/// Export a `.bib` for every paper in a vault to `path` (RFC 0070). Returns the
+/// number of entries written. The caller chooses `path` via a Save dialog.
+export async function exportVaultBibtex(vaultId: string, path: string): Promise<number> {
+  return invoke<number>("export_vault_bibtex", {
+    vaultId,
+    destPath: path,
+  });
+}
+
 export async function autofillPaperMetadata(paperId: string): Promise<void> {
   return invoke<void>("autofill_paper_metadata", {
     paperId,

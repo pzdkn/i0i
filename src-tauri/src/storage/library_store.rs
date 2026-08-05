@@ -13,8 +13,8 @@ use crate::domain::chat::{
 };
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
-    DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
-    LibrarySnapshot, Paper, PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate,
+    CiteRecord, DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource,
+    DocumentSpan, LibrarySnapshot, Paper, PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate,
     PaperSourceDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
 };
 use crate::domain::research::{
@@ -111,6 +111,15 @@ impl LibraryStore {
     pub fn get_paper(&self, paper_id: &str) -> StoreResult<Option<Paper>> {
         let conn = self.open_connection()?;
         read_paper(&conn, paper_id)
+    }
+
+    /// Citation fields for every paper in a vault, for BibTeX export (RFC 0070).
+    /// Reads only the columns an entry needs, so it never touches the chat tables
+    /// that `read_papers` consults for computed counts. Order is unspecified;
+    /// the exporter imposes its own stable ordering.
+    pub fn cite_records_for_vault(&self, vault_id: &str) -> StoreResult<Vec<CiteRecord>> {
+        let conn = self.open_connection()?;
+        read_cite_records_for_vault(&conn, vault_id)
     }
 
     pub fn get_document_sources(&self, paper_id: &str) -> StoreResult<Vec<DocumentSource>> {
@@ -2187,6 +2196,33 @@ fn read_paper(conn: &Connection, paper_id: &str) -> StoreResult<Option<Paper>> {
     )
     .optional()
     .map_err(|error| error.to_string())
+}
+
+fn read_cite_records_for_vault(conn: &Connection, vault_id: &str) -> StoreResult<Vec<CiteRecord>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select p.title, p.authors_json, p.venue, p.year
+            from papers p
+            join vault_papers vp on vp.paper_id = p.id
+            where vp.vault_id = ?1
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![vault_id], |row| {
+            let authors_json: String = row.get(1)?;
+            Ok(CiteRecord {
+                title: row.get(0)?,
+                authors: from_json(&authors_json),
+                venue: row.get(2)?,
+                year: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    collect_rows(rows)
 }
 
 fn read_vault_papers(conn: &Connection) -> StoreResult<Vec<VaultPaper>> {

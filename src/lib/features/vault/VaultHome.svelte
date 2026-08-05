@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
+  import { exportVaultBibtex } from "$lib/bridge/library";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import PaperList from "$lib/features/vault/PaperList.svelte";
   import VaultInspector from "$lib/features/vault/VaultInspector.svelte";
@@ -39,6 +40,8 @@
   let selectedPaperId = $state("");
   let localFilter = $state("");
   let isImporting = $state(false);
+  // RFC 0070: export the vault's papers as a BibTeX file.
+  let isExporting = $state(false);
   // RFC 0065: add a web page to this vault by URL.
   let showUrlInput = $state(false);
   let urlDraft = $state("");
@@ -73,6 +76,27 @@
       await onImportPdfs(workspace.id, paths);
     } finally {
       isImporting = false;
+    }
+  }
+
+  async function exportCitations() {
+    if (isExporting || workspace.papers.length === 0) {
+      return;
+    }
+
+    const path = await save({
+      defaultPath: `${workspace.path}/${workspace.title}.bib`,
+      filters: [{ name: "BibTeX", extensions: ["bib"] }],
+    });
+    if (!path) {
+      return;
+    }
+
+    isExporting = true;
+    try {
+      await exportVaultBibtex(workspace.id, path);
+    } finally {
+      isExporting = false;
     }
   }
 
@@ -130,7 +154,14 @@
                   <button class="btn" type="button" class:active={showUrlInput} onclick={toggleUrlInput}>
                     Add web page
                   </button>
-                  <button class="btn" type="button">Export .bib</button>
+                  <button
+                    class="btn"
+                    type="button"
+                    disabled={isExporting || workspace.papers.length === 0}
+                    onclick={exportCitations}
+                  >
+                    {isExporting ? "Exporting" : "Export .bib"}
+                  </button>
                 </div>
               </div>
 

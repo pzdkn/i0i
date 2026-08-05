@@ -272,6 +272,33 @@ pub fn delete_paper_globally(
     store.delete_paper_globally(&paper_id)
 }
 
+/// Writes a BibTeX file for every paper in `vault_id` to `dest_path`, returning
+/// the number of entries written (RFC 0070). The frontend chooses `dest_path`
+/// via a native Save dialog; writing here in Rust needs no fs capability.
+/// Overwrites an existing file at that path.
+#[tauri::command]
+pub fn export_vault_bibtex(
+    store: tauri::State<'_, LibraryStore>,
+    vault_id: String,
+    dest_path: String,
+) -> Result<usize, String> {
+    if vault_id.trim().is_empty() || dest_path.trim().is_empty() {
+        return Err("A vault and destination path are required to export.".to_string());
+    }
+
+    let records = store.cite_records_for_vault(&vault_id)?;
+    if records.is_empty() {
+        return Err("This vault has no papers to export.".to_string());
+    }
+
+    let document = crate::services::bibtex::to_bibtex(&records);
+    fs::write(&dest_path, document).map_err(|error| {
+        format!("Could not write {dest_path}: {error}")
+    })?;
+
+    Ok(records.len())
+}
+
 fn validate_pdf_path(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Err(format!("Not a file: {}", path.display()));

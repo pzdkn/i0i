@@ -152,6 +152,7 @@ pub fn run() {
             commands::library::delete_vault,
             commands::library::remove_paper_from_vault,
             commands::library::delete_paper_globally,
+            commands::library::export_vault_bibtex,
             commands::reader::get_reader_document,
             commands::reader::get_discovery_reader_document,
             commands::reader::cancel_discovery_pdf_acquisition,

@@ -79,3 +79,7 @@ Svelte UI -> bridge invoke(...) -> Tauri command -> Rust store -> SQLite
 ```
 
 The frontend should call Rust through small bridge functions, not by scattering raw `invoke(...)` calls through UI components.
+
+## Changelog
+
+- [x] RFC 0070 - Vault papers can now be exported as a BibTeX (`.bib`) file for LaTeX.
