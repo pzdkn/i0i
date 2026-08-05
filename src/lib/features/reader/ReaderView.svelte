@@ -131,8 +131,24 @@
   const isHtml = $derived(readerDocument?.contentKind === "html");
   const isAcquiringPdf = $derived(readerDocument?.pdfStatus === "acquiring");
   const fallbackSourceUrl = $derived(activeCandidate?.externalUrl ?? readerDocument?.pdfSourceUrl);
+  // RFC 0066 (R6a): "Read as HTML" fetches a web page, so it only applies to a
+  // real http(s) source — never a local PDF's `local://sha256/…` pseudo-URL,
+  // which `open_html_document` can't fetch.
+  const isWebUrl = (url: string | undefined): boolean =>
+    typeof url === "string" && /^https?:\/\//i.test(url);
+  const canReadAsHtml = $derived(isWebUrl(fallbackSourceUrl) && !isHtml);
   const isFocusMode = $derived(layoutMode === "focus");
   const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
+  // RFC 0067 (R2): highlight ids that have a conversation, so an ask-only
+  // passage (no color, no note) still draws the neutral marker on the page.
+  const conversationIds = $derived(
+    new Set(
+      threads
+        .filter((thread) => thread.anchor.kind !== "document" && thread.entryCount > 0)
+        .map((thread) => highlights.find((hl) => samePassage(thread.anchor, hl.locator))?.id)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  );
   const popoverHighlight = $derived(highlights.find((hl) => hl.id === popoverHighlightId) ?? null);
   const popoverThread = $derived(popoverHighlight ? findThreadForHighlight(threads, popoverHighlight) : undefined);
 
@@ -771,11 +787,12 @@
   // Read the source URL in-app as extracted HTML (RFC 0056), rather than the
   // browser. Swaps the current view to the HTML document.
   async function readAsHtml() {
-    if (!fallbackSourceUrl) {
+    // Defense in depth (R6a): only a real web page can be fetched as HTML.
+    if (!isWebUrl(fallbackSourceUrl)) {
       return;
     }
     try {
-      readerDocument = await openHtmlDocument(fallbackSourceUrl);
+      readerDocument = await openHtmlDocument(fallbackSourceUrl!);
     } catch (error) {
       readerLog("read-as-html-error", { url: fallbackSourceUrl, error: errorDetail(error) }, "error");
     }
@@ -937,7 +954,7 @@
                     zoomScale={hasCachedPdf ? pdfScale : undefined}
                     onZoomIn={zoomIn}
                     onZoomOut={zoomOut}
-                    canReadAsHtml={Boolean(fallbackSourceUrl) && !isHtml}
+                    {canReadAsHtml}
                     onReadAsHtml={() => void readAsHtml()}
                     searchEnabled={isHtml}
                     {searchQuery}
@@ -982,6 +999,7 @@
                         sourceId={document.sourceId}
                         sourceUrl={readerDocument?.sourceUrl}
                         {highlights}
+                        {conversationIds}
                         {chatEnabled}
                         onSelectPassage={selectPassage}
                         onHighlightClick={openHighlightPopover}
@@ -993,6 +1011,7 @@
                         sourceId={document.sourceId}
                         {threads}
                         {highlights}
+                        {conversationIds}
                         {selection}
                         {chatEnabled}
                         scale={pdfScale}

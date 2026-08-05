@@ -18,6 +18,7 @@
     pageNumber,
     scale,
     marks,
+    conversationIds,
     selection,
     chatEnabled,
     sourceId,
@@ -29,6 +30,8 @@
     scale: number;
     // Highlights anchored to this PDF source — the on-page marks (RFC 0056).
     marks: Highlight[];
+    // Highlight ids with a conversation (RFC 0067): they draw the neutral marker.
+    conversationIds?: Set<string>;
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
     sourceId: string;
@@ -45,15 +48,32 @@
   let renderError = $state("");
   let pendingNote = $state<PendingNote | null>(null);
 
+  // RFC 0069: readiness gate. `resolveQuote` reads the rendered DOM text layer,
+  // which is empty until the async render below finishes. `whenTextReady()` lets
+  // the parent await that before matching agent quotes. Flipped false at the
+  // start of every (re)render and true in the render `finally` — on success or
+  // error — so a failed page never hangs the await (it just yields no match).
+  let textReady = false;
+  let readyWaiters: Array<() => void> = [];
+  function markTextReady() {
+    textReady = true;
+    const waiters = readyWaiters;
+    readyWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+  export function whenTextReady(): Promise<void> {
+    return textReady ? Promise.resolve() : new Promise((resolve) => readyWaiters.push(resolve));
+  }
+
   const pageIndex = $derived(pageNumber - 1);
   const pageMarks = $derived(
     marks.filter(
       (mark) =>
         mark.locator.kind === "pdfRect" &&
         mark.locator.pageIndex === pageIndex &&
-        // Draw a mark only if the passage has a color or a note; a
-        // conversation-only passage has no page mark (RFC 0061).
-        (mark.color !== null || mark.note !== null),
+        // Draw a mark if the passage has a color, a note, or a conversation
+        // (RFC 0061 + RFC 0067: ask leaves the neutral marker).
+        (mark.color !== null || mark.note !== null || Boolean(conversationIds?.has(mark.id))),
     ),
   );
   const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
@@ -66,6 +86,11 @@
     let cancelled = false;
     let renderTask: { cancel: () => void; promise: Promise<unknown> } | null = null;
     let textLayerTask: TextLayer | null = null;
+
+    // A fresh render invalidates the previous text layer; invalidate readiness
+    // before the early-return guard so no run can leave `textReady` stale-true
+    // while the layer is being torn down/rebuilt (RFC 0069).
+    textReady = false;
 
     if (!canvas || !textLayer) {
       return;
@@ -108,6 +133,9 @@
       .finally(() => {
         if (!cancelled) {
           isRendering = false;
+          // Text layer is rendered (or this page errored out and never will be);
+          // either way, release quote-resolution awaiters (RFC 0069).
+          markTextReady();
         }
       });
 

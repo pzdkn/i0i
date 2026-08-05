@@ -13,6 +13,7 @@
     sourceId,
     sourceUrl,
     highlights = [],
+    conversationIds,
     chatEnabled = true,
     onSelectPassage,
     onHighlightClick,
@@ -20,6 +21,9 @@
     sourceId: string;
     sourceUrl?: string;
     highlights?: Highlight[];
+    // Highlight ids that have a conversation (RFC 0067): they draw the neutral
+    // marker even without a color or note.
+    conversationIds?: Set<string>;
     chatEnabled?: boolean;
     onSelectPassage: (selection: ReaderTextSelection) => void;
     onHighlightClick?: (highlightId: string, x: number, y: number) => void;
@@ -190,6 +194,7 @@
   $effect(() => {
     html;
     const current = highlights;
+    const chats = conversationIds;
     if (!root || !html) return;
     const api = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
     const Ctor = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
@@ -198,9 +203,9 @@
     const byGroup = new Map<string, Range[]>();
     for (const hl of current) {
       if (hl.locator.kind !== "textOffset" || hl.locator.sourceId !== sourceId) continue;
-      // A color mark → its color group; a note-only passage → the neutral
-      // "note" group; a conversation-only passage → no page mark (RFC 0061).
-      const group = hl.color ?? (hl.note ? "note" : null);
+      // A color mark → its color group; a note-only OR conversation-only passage
+      // → the neutral "note" group (RFC 0061 + RFC 0067: ask leaves a marker).
+      const group = hl.color ?? (hl.note || chats?.has(hl.id) ? "note" : null);
       if (!group) continue;
       const start = locate(root, hl.locator.startOffset);
       const end = locate(root, hl.locator.endOffset);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star } from "@lucide/svelte";
+  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal } from "@lucide/svelte";
   import {
     askAtAnchorStreamed,
     askChatThreadStreamed,
@@ -33,7 +33,7 @@
   type InspectorTab = "annotations" | "meta";
   // Annotations-list filters (RFC 0062). Pins → the `starred` filter; Threads →
   // the `conversation` filter.
-  type AuthorFilter = "all" | "you" | "ai";
+  type AuthorFilter = "all" | "me" | "ai";
 
   let {
     document,
@@ -107,7 +107,14 @@
   } = $props();
 
   let activeTab = $state<InspectorTab>("annotations");
-  // Active annotation-list filters (RFC 0062).
+  // Active annotation-list filters (RFC 0062); collapsed behind a labeled Filter
+  // control (RFC 0066 R4).
+  let filtersOpen = $state(false);
+  // RFC 0067 (R1): the Chats section under the Marks list, collapsible.
+  let chatsOpen = $state(true);
+  // RFC 0068 (R3): passage detail shows Note *or* Chat, one at a time, via a
+  // segmented switch. Pure view state, re-seeded per passage.
+  let detailView = $state<"note" | "chat">("note");
   let filterAuthor = $state<AuthorFilter>("all");
   let filterColor = $state<HighlightColor | null>(null);
   let filterHasNote = $state(false);
@@ -182,16 +189,38 @@
       })
       .reverse(),
   );
-  const anyFilterActive = $derived(
-    filterAuthor !== "all" ||
-      filterColor !== null ||
-      filterHasNote ||
-      filterHasConversation ||
-      filterStarred,
+  // RFC 0067 (R1): the Marks list is "everything I highlighted/noted" — rows
+  // with a color or a note. A *pure* conversation passage (asked, no color/note)
+  // lives under Chats, not here (though it's still marked on the page). The
+  // `!hasConversation` clause keeps orphan rows reachable: a highlight with no
+  // color, no note, and no conversation (e.g. a failed ask, a whitespace-only
+  // note) would otherwise fall out of both lists and render nowhere. Net
+  // invariant: every highlight appears in Marks ∪ Chats exactly once.
+  const markRows = $derived(
+    annotationRows.filter(
+      (row) => row.highlight.color !== null || row.hasNote || !row.hasConversation,
+    ),
   );
+  // RFC 0067 (R1): the Chats section lists every passage conversation; the
+  // whole-paper "Ask about this paper" row heads it separately. The count folds
+  // in the whole-paper conversation when it has entries.
+  const passageChats = $derived(
+    threads.filter((thread) => thread.anchor.kind !== "document" && thread.entryCount > 0),
+  );
+  const chatCount = $derived(
+    (documentThread && documentThread.entryCount > 0 ? 1 : 0) + passageChats.length,
+  );
+  const activeFilterCount = $derived(
+    (filterAuthor !== "all" ? 1 : 0) +
+      (filterColor !== null ? 1 : 0) +
+      (filterHasNote ? 1 : 0) +
+      (filterHasConversation ? 1 : 0) +
+      (filterStarred ? 1 : 0),
+  );
+  const anyFilterActive = $derived(activeFilterCount > 0);
   const filteredAnnotations = $derived(
-    annotationRows.filter((row) => {
-      if (filterAuthor === "you" && row.isAgent) return false;
+    markRows.filter((row) => {
+      if (filterAuthor === "me" && row.isAgent) return false;
       if (filterAuthor === "ai" && !row.isAgent) return false;
       if (filterColor !== null && row.highlight.color !== filterColor) return false;
       if (filterHasNote && !row.hasNote) return false;
@@ -216,6 +245,9 @@
     chatInput = "";
     error = "";
     renaming = false;
+    // RFC 0066 (R4): don't carry filters onto a different paper — a collapsed
+    // "Starred" filter would silently empty the new paper's Marks list.
+    clearFilters();
     activeAskId = (askSequence += 1);
   });
 
@@ -308,6 +340,14 @@
     if (key !== noteLoadedFor) {
       noteLoadedFor = key;
       noteDraft = currentHighlight?.note ?? "";
+      // RFC 0068: default the passage sub-view — Note if it already has a note
+      // (so the list row title and the opened view agree), else Chat if it has a
+      // conversation, else Note (jotting is the lightweight default).
+      detailView = currentHighlight?.note?.trim()
+        ? "note"
+        : openThread.entries.length > 0
+          ? "chat"
+          : "note";
     }
   });
 
@@ -613,6 +653,27 @@
           {/if}
 
           {#if openPassage}
+            <div class="row detail-switch" role="group" aria-label="Passage detail">
+              <button
+                class="switch-btn"
+                class:on={detailView === "note"}
+                type="button"
+                onclick={() => (detailView = "note")}
+              >
+                <StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /> Note
+              </button>
+              <button
+                class="switch-btn"
+                class:on={detailView === "chat"}
+                type="button"
+                onclick={() => (detailView = "chat")}
+              >
+                <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /> Chat
+              </button>
+            </div>
+          {/if}
+
+          {#if openPassage && detailView === "note"}
             <div class="note-field">
               <div class="row note-field-head">
                 <span class="label">Note</span>
@@ -638,6 +699,7 @@
             </div>
           {/if}
 
+          {#if !openPassage || detailView === "chat"}
           <div class="thread-view">
             {#each openThread.entries as entry}
               <div class="entry {entry.kind}">
@@ -675,10 +737,6 @@
             {#if !openThread.entries.length && pendingQuestion === null}
               <p class="empty-note">Ask a question below to start a conversation about this passage.</p>
             {/if}
-
-            {#if visibleError}
-              <p class="note-error">{visibleError}</p>
-            {/if}
           </div>
 
           <div class="thread-input">
@@ -696,65 +754,84 @@
               </button>
             </div>
           </div>
+          {/if}
+
+          {#if visibleError}
+            <p class="note-error">{visibleError}</p>
+          {/if}
         {:else}
           <div class="row section-title">
-            <span class="label hot">Annotations</span>
+            <span class="label hot">Marks</span>
             <div class="flex1"></div>
-            <span class="mono-dim">{annotationRows.length}</span>
+            <span class="mono-dim">{markRows.length}</span>
           </div>
 
-          <button class="ask-paper-row" type="button" onclick={openWholePaper}>
-            <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
-            <span class="ask-paper-title">Ask about this paper</span>
-            {#if documentThread && documentThread.entryCount > 0}
-              <span class="mono-dim">{documentThread.entryCount}</span>
-            {/if}
-          </button>
-
-          <div class="filter-bar">
-            <div class="row filter-line" role="group" aria-label="Filter by author">
-              <button class="chip-btn" class:on={filterAuthor === "all"} type="button" onclick={() => (filterAuthor = "all")}>All</button>
-              <button class="chip-btn" class:on={filterAuthor === "you"} type="button" onclick={() => (filterAuthor = "you")}>You</button>
-              <button class="chip-btn" class:on={filterAuthor === "ai"} type="button" onclick={() => (filterAuthor = "ai")}>
-                <Sparkles size={11} strokeWidth={1.75} aria-hidden="true" /> AI
+          <div class="filter-control">
+            <div class="row filter-head">
+              <button class="filter-toggle" class:on={filtersOpen || anyFilterActive} type="button" onclick={() => (filtersOpen = !filtersOpen)}>
+                <SlidersHorizontal size={12} strokeWidth={1.75} aria-hidden="true" />
+                Filter{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
               </button>
               <div class="flex1"></div>
               {#if anyFilterActive}
                 <button class="link-btn" type="button" onclick={clearFilters}>Clear</button>
               {/if}
             </div>
-            <div class="row filter-line" role="group" aria-label="Filter by color">
-              <button
-                class="color-dot none"
-                class:on={filterColor === null}
-                type="button"
-                aria-label="Any color"
-                title="Any color"
-                onclick={() => (filterColor = null)}
-              ></button>
-              {#each HIGHLIGHT_COLORS as color}
-                <button
-                  class="color-dot"
-                  class:on={filterColor === color}
-                  type="button"
-                  style={`background:${highlightFill(color)}`}
-                  aria-label={`Filter ${color}`}
-                  title={color}
-                  onclick={() => (filterColor = filterColor === color ? null : color)}
-                ></button>
-              {/each}
-            </div>
-            <div class="row filter-line" role="group" aria-label="Filter by attachment">
-              <button class="chip-btn" class:on={filterHasNote} type="button" onclick={() => (filterHasNote = !filterHasNote)}>
-                <StickyNote size={11} strokeWidth={1.75} aria-hidden="true" /> Note
-              </button>
-              <button class="chip-btn" class:on={filterHasConversation} type="button" onclick={() => (filterHasConversation = !filterHasConversation)}>
-                <MessageSquare size={11} strokeWidth={1.75} aria-hidden="true" /> Chat
-              </button>
-              <button class="chip-btn" class:on={filterStarred} type="button" onclick={() => (filterStarred = !filterStarred)}>
-                <Star size={11} strokeWidth={1.75} aria-hidden="true" /> Starred
-              </button>
-            </div>
+
+            {#if filtersOpen}
+              <div class="filter-panel">
+                <div class="filter-group">
+                  <span class="filter-label">Author</span>
+                  <div class="row filter-options">
+                    <button class="chip-btn" class:on={filterAuthor === "all"} type="button" onclick={() => (filterAuthor = "all")}>All</button>
+                    <button class="chip-btn" class:on={filterAuthor === "me"} type="button" onclick={() => (filterAuthor = "me")}>Me</button>
+                    <button class="chip-btn" class:on={filterAuthor === "ai"} type="button" onclick={() => (filterAuthor = "ai")}>
+                      <Sparkles size={11} strokeWidth={1.75} aria-hidden="true" /> AI
+                    </button>
+                  </div>
+                </div>
+
+                <div class="filter-group">
+                  <span class="filter-label">Color</span>
+                  <div class="row filter-options">
+                    <button
+                      class="color-dot none"
+                      class:on={filterColor === null}
+                      type="button"
+                      aria-label="Any color"
+                      title="Any color"
+                      onclick={() => (filterColor = null)}
+                    ></button>
+                    {#each HIGHLIGHT_COLORS as color}
+                      <button
+                        class="color-dot"
+                        class:on={filterColor === color}
+                        type="button"
+                        style={`background:${highlightFill(color)}`}
+                        aria-label={`Filter ${color}`}
+                        title={color}
+                        onclick={() => (filterColor = filterColor === color ? null : color)}
+                      ></button>
+                    {/each}
+                  </div>
+                </div>
+
+                <div class="filter-group">
+                  <span class="filter-label">Has</span>
+                  <div class="row filter-options">
+                    <button class="chip-btn" class:on={filterHasNote} type="button" onclick={() => (filterHasNote = !filterHasNote)}>
+                      <StickyNote size={11} strokeWidth={1.75} aria-hidden="true" /> Note
+                    </button>
+                    <button class="chip-btn" class:on={filterHasConversation} type="button" onclick={() => (filterHasConversation = !filterHasConversation)}>
+                      <MessageSquare size={11} strokeWidth={1.75} aria-hidden="true" /> Chat
+                    </button>
+                    <button class="chip-btn" class:on={filterStarred} type="button" onclick={() => (filterStarred = !filterStarred)}>
+                      <Star size={11} strokeWidth={1.75} aria-hidden="true" /> Starred
+                    </button>
+                  </div>
+                </div>
+              </div>
+            {/if}
           </div>
 
           <div class="thread-list">
@@ -772,9 +849,38 @@
                 </button>
               {/each}
             {:else if anyFilterActive}
-              <p class="empty-note">No annotations match these filters. <button class="link-btn" type="button" onclick={clearFilters}>Clear</button></p>
+              <p class="empty-note">No marks match these filters. <button class="link-btn" type="button" onclick={clearFilters}>Clear</button></p>
             {:else}
-              <p class="empty-note">Select text in the Reader to highlight, note, or ask about a passage.</p>
+              <p class="empty-note">Highlight or note a passage in the Reader to see it here.</p>
+            {/if}
+          </div>
+
+          <div class="chats-section">
+            <div class="row filter-head">
+              <button class="filter-toggle chats-toggle" class:on={chatsOpen} type="button" onclick={() => (chatsOpen = !chatsOpen)}>
+                <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
+                Chats{chatCount > 0 ? ` · ${chatCount}` : ""}
+              </button>
+            </div>
+
+            {#if chatsOpen}
+              <div class="thread-list">
+                <button class="ask-paper-row" type="button" onclick={openWholePaper}>
+                  <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <span class="ask-paper-title">Ask about this paper</span>
+                  {#if documentThread && documentThread.entryCount > 0}
+                    <span class="mono-dim">{documentThread.entryCount}</span>
+                  {/if}
+                </button>
+
+                {#each passageChats as chat (chat.id)}
+                  <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>
+                    <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
+                    <span class="thread-row-title">{chat.title.trim() || anchorSelectedText(chat.anchor) || "Conversation"}</span>
+                    <span class="mono-dim">{chat.entryCount}</span>
+                  </button>
+                {/each}
+              </div>
             {/if}
           </div>
 
@@ -912,6 +1018,42 @@
   .swatch.active {
     border-color: var(--fg-1);
     box-shadow: 0 0 0 1px var(--fg-1);
+  }
+
+  /* RFC 0068 (R3): Note/Chat segmented switch above the passage detail. */
+  .detail-switch {
+    margin-top: 10px;
+    gap: 0;
+    border: 1px solid var(--border-2);
+    border-radius: 5px;
+    overflow: hidden;
+    width: fit-content;
+  }
+
+  .switch-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--fg-3);
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .switch-btn + .switch-btn {
+    border-left: 1px solid var(--border-2);
+  }
+
+  .switch-btn:hover {
+    color: var(--fg-1);
+  }
+
+  .switch-btn.on {
+    background: rgba(242, 169, 59, 0.1);
+    color: var(--amber);
   }
 
   .note-field {
@@ -1174,14 +1316,66 @@
     min-width: 0;
   }
 
-  .filter-bar {
+  .filter-control {
     margin-top: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
   }
 
-  .filter-line {
+  /* RFC 0067 (R1): Chats section below the Marks list. */
+  .chats-section {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .filter-head {
+    align-items: center;
+    gap: 8px;
+  }
+
+  .filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border: 1px solid var(--border-2);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg-2);
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .filter-toggle:hover,
+  .filter-toggle.on {
+    border-color: var(--amber-dim);
+    color: var(--amber);
+  }
+
+  .filter-panel {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.015);
+  }
+
+  .filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .filter-label {
+    color: var(--fg-3);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .filter-options {
     gap: 5px;
     align-items: center;
     flex-wrap: wrap;

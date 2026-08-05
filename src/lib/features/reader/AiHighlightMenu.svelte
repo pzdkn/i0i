@@ -8,10 +8,16 @@
   // network call + resolution live in ReaderView.
   let {
     busy = false,
+    left,
+    top,
     onRun,
     onClose,
   }: {
     busy?: boolean;
+    // Viewport coordinates (RFC 0066 R5): the menu is fixed-positioned here so no
+    // ancestor overflow clips it.
+    left: number;
+    top: number;
     onRun: (categories: AutoHighlightCategory[]) => void;
     onClose: () => void;
   } = $props();
@@ -57,7 +63,15 @@
 
 <svelte:window onmousedown={handleWindowMousedown} onkeydown={handleWindowKeydown} />
 
-<div class="menu" bind:this={root} role="dialog" aria-label="Highlight with AI" tabindex="-1" onmousedown={(e) => e.stopPropagation()}>
+<div
+  class="menu"
+  bind:this={root}
+  role="dialog"
+  aria-label="Highlight with AI"
+  tabindex="-1"
+  style={`left: ${left}px; top: ${top}px;`}
+  onmousedown={(e) => e.stopPropagation()}
+>
   <div class="menu-title">Highlight with AI</div>
   <div class="grid">
     {#each presets as preset}
@@ -101,10 +115,8 @@
 
 <style>
   .menu {
-    position: absolute;
-    top: 34px;
-    right: 8px;
-    z-index: 40;
+    position: fixed;
+    z-index: 60;
     width: 260px;
     display: flex;
     flex-direction: column;

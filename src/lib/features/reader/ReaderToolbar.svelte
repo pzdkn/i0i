@@ -44,6 +44,29 @@
   } = $props();
 
   let aiMenuOpen = $state(false);
+  let aiButton: HTMLButtonElement | undefined = $state();
+  // RFC 0066 (R5): the menu is `position: fixed` at coordinates computed from the
+  // button, so no ancestor `overflow` clips it. Store its top-left.
+  let aiMenuPos = $state<{ left: number; top: number } | null>(null);
+
+  const AI_MENU_WIDTH = 264;
+
+  function toggleAiMenu() {
+    if (aiMenuOpen) {
+      aiMenuOpen = false;
+      return;
+    }
+    const rect = aiButton?.getBoundingClientRect();
+    if (rect) {
+      // Right-align the menu under the button, clamped to the viewport.
+      const left = Math.max(
+        8,
+        Math.min(rect.right - AI_MENU_WIDTH, window.innerWidth - AI_MENU_WIDTH - 8),
+      );
+      aiMenuPos = { left, top: rect.bottom + 6 };
+    }
+    aiMenuOpen = true;
+  }
 
   function runAutoHighlight(categories: AutoHighlightCategory[]) {
     aiMenuOpen = false;
@@ -103,17 +126,24 @@
   <div class="row right">
     {#if aiEnabled}
       <button
+        bind:this={aiButton}
         class="tool-btn ai"
         class:on={aiMenuOpen}
         type="button"
         title="Highlight with AI"
-        onclick={() => (aiMenuOpen = !aiMenuOpen)}
+        onclick={toggleAiMenu}
       >
         <Sparkles size={13} strokeWidth={1.75} aria-hidden="true" />
         {aiBusy ? "Marking…" : "Highlight with AI"}
       </button>
-      {#if aiMenuOpen}
-        <AiHighlightMenu busy={aiBusy} onRun={runAutoHighlight} onClose={() => (aiMenuOpen = false)} />
+      {#if aiMenuOpen && aiMenuPos}
+        <AiHighlightMenu
+          busy={aiBusy}
+          left={aiMenuPos.left}
+          top={aiMenuPos.top}
+          onRun={runAutoHighlight}
+          onClose={() => (aiMenuOpen = false)}
+        />
       {/if}
     {/if}
     {#if showZoom}
@@ -150,7 +180,6 @@
 
   .right {
     justify-content: flex-end;
-    position: relative;
   }
 
   .tool-btn.ai {

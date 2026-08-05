@@ -19,6 +19,7 @@
     sourceId,
     threads,
     highlights,
+    conversationIds,
     selection,
     chatEnabled,
     scale = 1.15,
@@ -29,6 +30,7 @@
     sourceId: string;
     threads: ChatThreadSummary[];
     highlights: Highlight[];
+    conversationIds?: Set<string>;
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
     scale?: number;
@@ -102,16 +104,47 @@
 
   // Child page component refs, so a quote can be resolved against each page's
   // rendered text layer (RFC 0059 follow-up).
-  let pageRefs = $state<Array<{ resolveQuote: (quote: string) => Locator | null } | undefined>>([]);
+  let pageRefs = $state<
+    Array<
+      | {
+          resolveQuote: (quote: string) => Locator | null;
+          whenTextReady: () => Promise<void>;
+        }
+      | undefined
+    >
+  >([]);
 
   // Resolves an agent quote to a pdfRect by asking each rendered page to match
   // it against its own text layer (tight, selection-accurate rects). Exposed to
   // ReaderView via `bind:this`; returns the first page that contains the quote.
-  export function resolveQuote(quote: string): Locator | null {
-    const rendered = pageRefs.filter(Boolean).length;
-    void debugLog(`pdf resolveQuote: scanning ${rendered}/${pageRefs.length} rendered page(s)`, "debug");
-    for (const ref of pageRefs) {
-      const locator = ref?.resolveQuote(quote) ?? null;
+  //
+  // RFC 0069: the text layers render asynchronously, so we must await each
+  // page's readiness before matching — otherwise the matcher is handed an empty
+  // string and every quote "isn't found." Awaiting readiness (work already in
+  // flight, since every page renders eagerly) is what makes auto-highlight land.
+  export async function resolveQuote(quote: string): Promise<Locator | null> {
+    // Cold open: the document may still be loading and `pageRefs` empty. Resolving
+    // against zero pages would falsely report "not located", so wait for the doc
+    // + all page components to mount first (bounded, so a stuck load can't hang
+    // resolution forever) — RFC 0069.
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      if (error) break;
+      if (pdfDocument && pageNumbers.length > 0 && pageRefs.filter(Boolean).length >= pageNumbers.length) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const refs = pageRefs.filter((ref): ref is NonNullable<typeof ref> => Boolean(ref));
+    if (refs.length === 0) {
+      void debugLog(`pdf resolveQuote: no pages mounted (loading=${isLoading} error=${Boolean(error)})`, "warn");
+      return null;
+    }
+    void debugLog(`pdf resolveQuote: awaiting text layers on ${refs.length}/${pageNumbers.length} page(s)`, "debug");
+    await Promise.all(refs.map((ref) => ref.whenTextReady()));
+    for (const ref of refs) {
+      const locator = ref.resolveQuote(quote);
       if (locator) {
         return locator;
       }
@@ -156,6 +189,7 @@
             {pageNumber}
             {scale}
             marks={pdfMarks}
+            {conversationIds}
             {selection}
             {chatEnabled}
             {sourceId}
