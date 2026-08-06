@@ -29,7 +29,7 @@
   </div>
 
   <div class="row title-line">
-    <h1>{document.title}</h1>
+    <h1 title={document.title}>{document.title}</h1>
     <span class="authors truncate">{document.authors.join(" / ")}</span>
   </div>
 
@@ -67,11 +67,24 @@
     min-height: 0;
     overflow: hidden;
     gap: 12px;
+    /* Stays `baseline` (RFC 0072): the byline riding the h1's first baseline
+       only mattered while that band was being clipped, and the clamp above
+       removes the clipping. `flex-end` would park a single-line title at the
+       bottom of the 87px row this becomes in normal mode. */
     align-items: baseline;
   }
 
   h1 {
+    /* RFC 0072: clamp to whole lines so a short header can never slice a line
+       box mid-glyph. The full string stays reachable via the title tooltip and
+       the inspector's Info section. */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    min-width: 0;
     margin: 0;
+    overflow: hidden;
     color: var(--amber);
     font-size: 18px;
     font-weight: 600;

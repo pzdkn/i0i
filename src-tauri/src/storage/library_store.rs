@@ -96,6 +96,10 @@ impl LibraryStore {
         // DBs predate the `note` column; add it if missing (the `let _` swallows
         // the "duplicate column" error on already-migrated DBs).
         let _ = conn.execute("alter table highlights add column note text", []);
+        // RFC 0072: ...and relax the NOT NULL that same RFC left behind on every
+        // pre-existing vault. Must run after the `note` column exists — the
+        // rebuild copies it by name.
+        relax_highlight_color_not_null(&conn)?;
 
         self.migrate_threads_to_highlights()?;
         self.migrate_notes_into_highlight_field()?;
@@ -3812,6 +3816,101 @@ fn add_column_if_missing(
     Ok(())
 }
 
+/// RFC 0061 made `highlights.color` nullable in `create_schema` only — which is
+/// inert on a database that already has the table — so every vault created
+/// before it still rejects the color-less passages Note/Ask create (RFC 0072).
+/// SQLite cannot drop a NOT NULL constraint, so rebuild the table.
+///
+/// Idempotent and cheap: one `pragma table_info` per launch, and a no-op once
+/// the column is nullable.
+fn relax_highlight_color_not_null(conn: &Connection) -> StoreResult<()> {
+    if !column_is_not_null(conn, "highlights", "color")? {
+        return Ok(());
+    }
+
+    // Foreign keys can only be toggled outside a transaction. Nothing declares a
+    // foreign key referencing `highlights`, but the rebuild drops a table, so
+    // follow SQLite's documented procedure rather than relying on that.
+    conn.execute_batch("pragma foreign_keys = off;")
+        .map_err(|error| error.to_string())?;
+
+    // Explicit column lists on BOTH halves of the insert: a database migrated
+    // from the pre-RFC-0061 shape has `note` appended last (it arrived via
+    // `alter table`), while the canonical shape carries it between `color` and
+    // `label`. `select *` would silently shift every column after `color`.
+    let rebuild = conn.execute_batch(
+        "
+        begin;
+        create table highlights_new (
+          id text primary key,
+          paper_id text not null,
+          source_id text not null,
+          locator_kind text not null,
+          start_offset integer,
+          end_offset integer,
+          page_index integer,
+          rects_json text,
+          excerpt text not null,
+          color text,
+          note text,
+          label text,
+          author_kind text not null,
+          author_model text,
+          created_at text not null,
+          updated_at text not null
+        );
+        insert into highlights_new (
+          id, paper_id, source_id, locator_kind, start_offset, end_offset,
+          page_index, rects_json, excerpt, color, note, label, author_kind,
+          author_model, created_at, updated_at
+        )
+        select
+          id, paper_id, source_id, locator_kind, start_offset, end_offset,
+          page_index, rects_json, excerpt, color, note, label, author_kind,
+          author_model, created_at, updated_at
+        from highlights;
+        drop table highlights;
+        alter table highlights_new rename to highlights;
+        create index if not exists idx_highlights_paper
+          on highlights(paper_id, created_at);
+        commit;
+        ",
+    );
+
+    if rebuild.is_err() {
+        // `execute_batch` stops at the failing statement, leaving the
+        // transaction open; close it explicitly so the pragma restore below sees
+        // a clean connection.
+        let _ = conn.execute_batch("rollback;");
+    }
+    conn.execute_batch("pragma foreign_keys = on;")
+        .map_err(|error| error.to_string())?;
+
+    rebuild.map_err(|error| error.to_string())
+}
+
+/// Whether `table.column` is declared NOT NULL. Companion to [`column_exists`]
+/// (`pragma table_info` columns: 0 cid, 1 name, 2 type, 3 notnull).
+fn column_is_not_null(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
+    let mut stmt = conn
+        .prepare(&format!("pragma table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })
+        .map_err(|error| error.to_string())?;
+
+    for row in rows {
+        let (name, not_null) = row.map_err(|error| error.to_string())?;
+        if name == column {
+            return Ok(not_null != 0);
+        }
+    }
+
+    Ok(false)
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
     let mut stmt = conn
         .prepare(&format!("pragma table_info({table})"))
@@ -5054,6 +5153,80 @@ mod tests {
         // Idempotent: second run migrates nothing further.
         assert_eq!(db.store.migrate_threads_to_highlights()?, 0);
 
+        Ok(())
+    }
+
+    /// RFC 0072: RFC 0061 made `highlights.color` nullable in `create_schema`
+    /// only — inert on a database that already has the table — so every vault
+    /// created before it still rejected the color-less passages Note/Ask
+    /// create. `test_db()` builds the already-correct schema, so this test has
+    /// to materialize the legacy shape by hand; that is the whole point of it.
+    #[test]
+    fn init_relaxes_legacy_not_null_color() -> StoreResult<()> {
+        use crate::domain::highlight::{HighlightAuthor, HighlightColor, Locator};
+
+        let unique_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "i0i-legacy-color-{}-{unique_id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let path = dir.join("library.sqlite");
+
+        // A pre-RFC-0061 vault, byte for byte: `color text not null`, and no
+        // `note` column (that one arrives via `alter table` in `init`).
+        {
+            let conn = Connection::open(&path).map_err(|error| error.to_string())?;
+            conn.execute_batch(
+                "
+                create table highlights (
+                  id text primary key, paper_id text not null, source_id text not null,
+                  locator_kind text not null, start_offset integer, end_offset integer,
+                  page_index integer, rects_json text, excerpt text not null,
+                  color text not null, label text, author_kind text not null,
+                  author_model text, created_at text not null, updated_at text not null
+                );
+                insert into highlights values (
+                  'hl-legacy', 'vaswani2017', 's', 'pdf_rect', null, null, 0, '[]', 'kept',
+                  'yellow', null, 'user', null, datetime('now'), datetime('now')
+                );
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        let store = LibraryStore::for_test(path);
+        store.init()?;
+        store.init()?; // idempotent — the second launch must be a no-op
+
+        // The color-less passage RFC 0061 promised and the legacy schema refused.
+        let created = store.insert_highlight(
+            "vaswani2017",
+            &Locator::PdfRect {
+                source_id: "s".into(),
+                page_index: 0,
+                rects_json: "[]".into(),
+            },
+            "note-only passage",
+            None,
+            None,
+            &HighlightAuthor::User,
+        )?;
+        assert!(created.color.is_none());
+
+        // And the rebuild kept the existing annotation, color and all.
+        let all = store.list_highlights("vaswani2017")?;
+        let legacy = all
+            .iter()
+            .find(|highlight| highlight.id == "hl-legacy")
+            .expect("legacy highlight survived the rebuild");
+        assert_eq!(legacy.color, Some(HighlightColor::Yellow));
+        assert_eq!(legacy.excerpt, "kept");
+
+        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 

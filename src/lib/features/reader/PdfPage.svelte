@@ -34,12 +34,20 @@
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
     scale?: number;
-    onSelectPassage: (selection: ReaderTextSelection) => void;
+    // RFC 0073: forwarded verbatim to every page — the intent must survive this
+    // hop, or Ask works from some pages and not others (an optional parameter
+    // dropped here still type-checks).
+    onSelectPassage: (selection: ReaderTextSelection, intent?: "notes" | "chat") => void;
     onHighlightClick: (highlightId: string, x: number, y: number) => void;
   } = $props();
 
   let pdfDocument = $state<PDFDocumentProxy | null>(null);
   let pageNumbers = $state<number[]>([]);
+  // Unscaled page sizes, measured once per document (RFC 0073 Phase 1). Pages
+  // size their box from these, so a page whose bitmap has been released still
+  // occupies its true height and the scroll bar never jumps.
+  let pageSizes = $state<Array<{ width: number; height: number }>>([]);
+  let scrollElement = $state<HTMLElement | null>(null);
   let isLoading = $state(false);
   let error = $state("");
   let renderSessionSequence = 0;
@@ -58,6 +66,7 @@
 
     pdfDocument = null;
     pageNumbers = [];
+    pageSizes = [];
     error = "";
     isLoading = true;
 
@@ -75,8 +84,41 @@
           return;
         }
 
+        // Pages need a box before they render (RFC 0073 Phase 1), but measuring
+        // all of them *before* publishing the document would serialize 43 page
+        // parses ahead of first paint — worse open latency than the eager render
+        // this replaces. So: measure page 1, publish immediately using it as the
+        // provisional box for every page, then refine in parallel.
+        const firstPage = await document.getPage(1);
+        if (cancelled) {
+          void document.cleanup();
+          return;
+        }
+        const firstViewport = firstPage.getViewport({ scale: 1 });
+        const provisional = { width: firstViewport.width, height: firstViewport.height };
+        const numbers = Array.from({ length: document.numPages }, (_, index) => index + 1);
+
         pdfDocument = document;
-        pageNumbers = Array.from({ length: document.numPages }, (_, index) => index + 1);
+        pageSizes = numbers.map(() => provisional);
+        pageNumbers = numbers;
+
+        // Correct any page that isn't shaped like page 1 (mixed-orientation
+        // documents). Page dictionaries only — no content streams.
+        void Promise.all(
+          numbers.map(async (number) => {
+            const page = await document.getPage(number);
+            const viewport = page.getViewport({ scale: 1 });
+            return { width: viewport.width, height: viewport.height };
+          }),
+        )
+          .then((sizes) => {
+            if (!cancelled) {
+              pageSizes = sizes;
+            }
+          })
+          .catch(() => {
+            // Provisional sizes stand; a page that renders corrects its own box.
+          });
       } catch (nextError) {
         if (!cancelled) {
           error = String(nextError);
@@ -109,10 +151,35 @@
       | {
           resolveQuote: (quote: string) => Locator | null;
           whenTextReady: () => Promise<void>;
+          getElement: () => HTMLElement | null;
         }
       | undefined
     >
   >([]);
+
+  // RFC 0073 (R2.2 / Phase 1.5): centre a page in the reader column, so opening
+  // a mark from the Marks list moves the document to it. Deliberately not
+  // `scrollIntoView`, which would scroll every scrollable ancestor — including
+  // the inspector panel the Marks list lives in. Same one-scroller geometry as
+  // `HtmlReader.focusMatch`.
+  export function scrollToPage(pageIndex: number) {
+    const target = pageRefs[pageIndex]?.getElement();
+    const scroller = scrollElement;
+    if (!target || !scroller) {
+      return;
+    }
+    const delta =
+      target.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top -
+      scroller.clientHeight / 2 +
+      target.clientHeight / 2;
+    // A smooth scroll travels through every page in between, and each one
+    // crossing the render margin queues a canvas render that is cancelled a
+    // frame later. Fine for a neighbouring page; wasteful for a jump to page 30,
+    // so long jumps land instantly (RFC 0073 Phase 1).
+    const behavior = Math.abs(delta) > scroller.clientHeight * 2 ? "auto" : "smooth";
+    scroller.scrollBy({ top: delta, behavior });
+  }
 
   // Resolves an agent quote to a pdfRect by asking each rendered page to match
   // it against its own text layer (tight, selection-accurate rects). Exposed to
@@ -170,7 +237,7 @@
 </script>
 
 <section class="pdf-reader col">
-  <div class="pdf-scroll">
+  <div class="pdf-scroll" bind:this={scrollElement}>
     {#if isLoading}
       <div class="pdf-state col">
         <div class="label">Loading PDF...</div>
@@ -188,6 +255,8 @@
             {pdfDocument}
             {pageNumber}
             {scale}
+            baseWidth={pageSizes[index]?.width ?? 0}
+            baseHeight={pageSizes[index]?.height ?? 0}
             marks={pdfMarks}
             {conversationIds}
             {selection}

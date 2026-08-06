@@ -13,10 +13,23 @@
 
   ensurePdfJsRuntimeCompatibility();
 
+  // RFC 0073 Phase 0: the canvas backing store is allocated at
+  // `viewport × devicePixelRatio`. On a Retina display that is 4× the pixels —
+  // ~9.8MB for a single letter page at scale 1.15. Cap the multiplier: the
+  // sharpness cost is small, the memory saving is ~1.8×.
+  const MAX_CANVAS_DPR = 1.5;
+
+  // RFC 0073 Phase 1: how far outside the viewport a page still renders its
+  // bitmap, as a fraction of viewport height. 1.5 keeps roughly three screens
+  // of pages hot, so ordinary scrolling never waits on a render.
+  const RENDER_MARGIN = "150% 0px";
+
   let {
     pdfDocument,
     pageNumber,
     scale,
+    baseWidth,
+    baseHeight,
     marks,
     conversationIds,
     selection,
@@ -28,6 +41,11 @@
     pdfDocument: PDFDocumentProxy;
     pageNumber: number;
     scale: number;
+    // Unscaled page size, measured once by the parent (RFC 0073 Phase 1). The
+    // page box is sized from this *before* anything renders, so a page whose
+    // bitmap is released still holds its place in the scroll height.
+    baseWidth: number;
+    baseHeight: number;
     // Highlights anchored to this PDF source — the on-page marks (RFC 0056).
     marks: Highlight[];
     // Highlight ids with a conversation (RFC 0067): they draw the neutral marker.
@@ -35,18 +53,32 @@
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
     sourceId: string;
-    onSelectPassage: (selection: ReaderTextSelection) => void;
+    // RFC 0073: the popover says which pane the passage should open in. Without
+    // it the landing section is whatever the rail was last left on, so "Ask"
+    // opened the note editor.
+    onSelectPassage: (selection: ReaderTextSelection, intent?: "notes" | "chat") => void;
     onHighlightClick: (highlightId: string, x: number, y: number) => void;
   } = $props();
 
   let pageElement = $state<HTMLElement | null>(null);
   let canvasElement = $state<HTMLCanvasElement | null>(null);
   let textLayerElement = $state<HTMLElement | null>(null);
-  let pageWidth = $state(0);
-  let pageHeight = $state(0);
   let isRendering = $state(false);
   let renderError = $state("");
   let pendingNote = $state<PendingNote | null>(null);
+  // RFC 0073 Phase 1: whether this page is near enough to the viewport to hold a
+  // rendered bitmap. Driven by the observer below; the page element itself stays
+  // mounted (and so do its text layer and marks) whatever this says.
+  let isNear = $state(false);
+
+  // Page geometry no longer waits on `getPage()` — the parent measures every
+  // page up front, so the box has its true size from first paint (RFC 0073).
+  const pageWidth = $derived(baseWidth * scale);
+  const pageHeight = $derived(baseHeight * scale);
+
+  export function getElement(): HTMLElement | null {
+    return pageElement;
+  }
 
   // RFC 0069: readiness gate. `resolveQuote` reads the rendered DOM text layer,
   // which is empty until the async render below finishes. `whenTextReady()` lets
@@ -78,13 +110,19 @@
   );
   const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
 
+  // RFC 0073 Phase 1: the text layer and the canvas bitmap are now rendered by
+  // SEPARATE effects. They used to share one, which meant that re-rendering a
+  // bitmap on scroll would also tear down and rebuild the text layer — flipping
+  // `textReady` false under an in-flight `resolveQuote` (RFC 0069) and
+  // destroying the DOM ranges a live text selection points at.
+  //
+  // The text layer belongs to the document, not to the viewport: it renders once
+  // per (document, scale) and stays. Only `textReady` is touched here.
   $effect(() => {
     const document = pdfDocument;
     const currentScale = scale;
-    const canvas = canvasElement;
     const textLayer = textLayerElement;
     let cancelled = false;
-    let renderTask: { cancel: () => void; promise: Promise<unknown> } | null = null;
     let textLayerTask: TextLayer | null = null;
 
     // A fresh render invalidates the previous text layer; invalidate readiness
@@ -92,7 +130,62 @@
     // while the layer is being torn down/rebuilt (RFC 0069).
     textReady = false;
 
-    if (!canvas || !textLayer) {
+    if (!textLayer) {
+      return;
+    }
+
+    document
+      .getPage(pageNumber)
+      .then(async (page) => {
+        if (cancelled) {
+          return;
+        }
+        const viewport = page.getViewport({ scale: currentScale });
+        textLayerTask = renderTextLayer(page, viewport, textLayer);
+        await textLayerTask.render();
+      })
+      .catch((nextError) => {
+        if (!cancelled && !isCancelledRenderError(nextError)) {
+          console.error("[pdf-render] text-layer-error", { pageNumber, error: nextError });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          // Text layer is rendered (or this page errored out and never will be);
+          // either way, release quote-resolution awaiters (RFC 0069).
+          markTextReady();
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      textLayerTask?.cancel();
+    };
+  });
+
+  // The bitmap, in contrast, is viewport-scoped: painted when the page comes
+  // near, released when it leaves. Releasing is what bounds memory by window
+  // size instead of by page count.
+  $effect(() => {
+    const document = pdfDocument;
+    const currentScale = scale;
+    const canvas = canvasElement;
+    const near = isNear;
+    let cancelled = false;
+    let renderTask: { cancel: () => void; promise: Promise<unknown> } | null = null;
+
+    if (!canvas) {
+      return;
+    }
+
+    if (!near) {
+      releaseCanvas(canvas);
+      // Drop the page's parsed operator list too — the heavy half of a rendered
+      // page. Only once the text layer is done with it, since both share the
+      // same `PDFPageProxy`.
+      if (textReady) {
+        void document.getPage(pageNumber).then((page) => page.cleanup());
+      }
       return;
     }
 
@@ -102,27 +195,12 @@
     document
       .getPage(pageNumber)
       .then(async (page) => {
-        try {
-          if (cancelled) {
-            return;
-          }
-
-          const viewport = page.getViewport({ scale: currentScale });
-          pageWidth = viewport.width;
-          pageHeight = viewport.height;
-
-          renderTask = renderCanvas(page, viewport, canvas);
-          await renderTask.promise;
-
-          if (cancelled) {
-            return;
-          }
-
-          textLayerTask = renderTextLayer(page, viewport, textLayer);
-          await textLayerTask.render();
-        } finally {
-          page.cleanup();
+        if (cancelled) {
+          return;
         }
+        const viewport = page.getViewport({ scale: currentScale });
+        renderTask = renderCanvas(page, viewport, canvas);
+        await renderTask.promise;
       })
       .catch((nextError) => {
         if (!cancelled && !isCancelledRenderError(nextError)) {
@@ -133,17 +211,37 @@
       .finally(() => {
         if (!cancelled) {
           isRendering = false;
-          // Text layer is rendered (or this page errored out and never will be);
-          // either way, release quote-resolution awaiters (RFC 0069).
-          markTextReady();
         }
       });
 
     return () => {
       cancelled = true;
       renderTask?.cancel();
-      textLayerTask?.cancel();
     };
+  });
+
+  // Drive `isNear` from the page's own position in the scroll container. One
+  // observer per page, each with a single target — cheaper than any scroll
+  // handler, and it needs no coordination with the parent.
+  $effect(() => {
+    const element = pageElement;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      // No observer (SSR, ancient runtime): render eagerly rather than never.
+      isNear = true;
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          isNear = entry.isIntersecting;
+        }
+      },
+      { root: element.closest(".pdf-scroll"), rootMargin: RENDER_MARGIN },
+    );
+    observer.observe(element);
+
+    return () => observer.disconnect();
   });
 
   function renderCanvas(page: PDFPageProxy, viewport: PageViewport, canvas: HTMLCanvasElement) {
@@ -152,7 +250,8 @@
       throw new Error("Could not create PDF canvas context");
     }
 
-    const outputScale = window.devicePixelRatio || 1;
+    // RFC 0073 Phase 0: capped, not raw DPR — see MAX_CANVAS_DPR.
+    const outputScale = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
     canvas.width = Math.floor(viewport.width * outputScale);
     canvas.height = Math.floor(viewport.height * outputScale);
     canvas.style.width = `${viewport.width}px`;
@@ -164,6 +263,17 @@
       viewport,
       transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
     });
+  }
+
+  // Free a page's pixels without disturbing its box: the element keeps its CSS
+  // size (driven by `baseWidth`/`baseHeight`), so the scroll height is stable
+  // whether or not the bitmap exists (RFC 0073 Phase 1).
+  function releaseCanvas(canvas: HTMLCanvasElement) {
+    if (canvas.width === 0 && canvas.height === 0) {
+      return;
+    }
+    canvas.width = 0;
+    canvas.height = 0;
   }
 
   function renderTextLayer(page: PDFPageProxy, viewport: PageViewport, container: HTMLElement) {
@@ -324,9 +434,10 @@
     return { kind: "pdfRect", sourceId, pageIndex, rectsJson: JSON.stringify(rects) };
   }
 
-  // Both popover actions open this passage's thread; Note vs. Ask is chosen in
-  // the thread composer (RFC 0034).
-  function startThread() {
+  // RFC 0073: the two popover actions used to share one intent-less handler, so
+  // the pane you landed in was decided by the rail's sticky section rather than
+  // by the button you clicked. Each now says what it means.
+  function startThread(intent: "notes" | "chat") {
     if (!pendingNote) {
       return;
     }
@@ -340,7 +451,7 @@
       pageIndex: pendingNote.pageIndex,
       rectsJson: pendingNote.rectsJson,
       quoteContext: pendingNote.quoteContext,
-    });
+    }, intent);
     pendingNote = null;
   }
 
@@ -413,11 +524,11 @@
     onmousedown={(event) => event.preventDefault()}
     role="presentation"
   >
-    <button class="popover-action" type="button" onclick={startThread}>
+    <button class="popover-action" type="button" onclick={() => startThread("notes")}>
       <StickyNote size={14} strokeWidth={1.75} aria-hidden="true" /> Note
     </button>
     <span class="popover-divider" aria-hidden="true"></span>
-    <button class="popover-action" type="button" onclick={startThread}>
+    <button class="popover-action" type="button" onclick={() => startThread("chat")}>
       <MessageSquare size={14} strokeWidth={1.75} aria-hidden="true" /> Ask
     </button>
   </div>
@@ -430,7 +541,9 @@
     overflow: hidden;
     border: 1px solid rgba(0, 0, 0, 0.28);
     background: #fff;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.48);
+    /* RFC 0073 Phase 0: was `0 8px 32px` — a 32px blur on every page of a long
+       document is real compositing work on each scroll frame. */
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
   }
 
   canvas {

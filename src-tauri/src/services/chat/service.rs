@@ -375,6 +375,16 @@ impl ChatService {
         let prep = self
             .prepare_ask_at_anchor(scope, &ThreadAnchor::Document, body)
             .await?;
+        // RFC 0072: an unextracted PDF sends an empty paper body, so the model
+        // can only ever return an empty list. Say why, instead of paying for a
+        // call that cannot succeed. Deliberately not applied to the ask path —
+        // an answer from title + metadata is degraded but not worthless, and the
+        // inspector already labels that turn "Context: title + metadata only".
+        if prep.summary.included_chars == 0 {
+            return Err("This document has no extracted text yet — marking can't run until \
+                        extraction finishes."
+                .to_string());
+        }
         let mut messages = Vec::with_capacity(prep.request_messages.len() + 1);
         messages.push(WireMessage {
             role: "system".to_string(),

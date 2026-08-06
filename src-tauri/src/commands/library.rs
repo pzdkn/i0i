@@ -10,6 +10,7 @@ use crate::domain::library::{
     DocumentSource, LibrarySnapshot, LocalPdfImport, LocalPdfImportResult, MetadataCandidate,
     PaperDraft, PaperMetadataUpdate, VaultDraft, VaultRenameDraft,
 };
+use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
 use crate::services::metadata_enrichment::MetadataEnrichmentService;
 use crate::services::reader_service::ReaderService;
@@ -52,6 +53,7 @@ pub fn add_paper_to_vaults(
 pub fn import_local_pdfs(
     app: tauri::AppHandle,
     store: tauri::State<'_, LibraryStore>,
+    pdf_extractions: tauri::State<'_, PdfExtractionManager>,
     vault_id: String,
     files: Vec<LocalPdfImport>,
 ) -> Result<LocalPdfImportResult, String> {
@@ -100,6 +102,11 @@ pub fn import_local_pdfs(
             &source_url,
             &pdf_path.to_string_lossy(),
         )?;
+        // RFC 0072: extract the text now, exactly as the download path already
+        // does (`pdf_ingestion.rs`). Without this the paper has no `source_text`
+        // — and therefore no working chat or AI marking — until the next
+        // launch's startup sweep picks it up.
+        pdf_extractions.queue_source(source_id, false);
         imported_paper_ids.push(paper_id);
     }
 

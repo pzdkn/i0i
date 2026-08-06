@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import {
     cancelDiscoveryPdfAcquisition,
+    extractPaperDocument,
     getDiscoveryReaderDocument,
     getReaderDocument,
     openHtmlDocument,
@@ -91,6 +92,10 @@
   let isLoadingDoc = $state(false);
   let refreshTick = $state(0);
   let documentLoadSequence = 0;
+  // RFC 0072: papers this reader session has already nudged into extraction.
+  // `document_extraction_updated` bumps `refreshTick`, so an unguarded retry
+  // would loop forever on an extraction that keeps failing.
+  const extractionRequested = new Set<string>();
   // RFC 0051: background PDF acquisition status for discovery opens.
   let acquisitionMessage = $state("");
   let forceNextLoad = false;
@@ -118,6 +123,11 @@
   let aiMarkedCount = $state(0);
   let aiUnresolvedCount = $state(0);
   let aiError = $state("");
+  // RFC 0072: a run that completed but marked nothing. Distinct from `aiError`
+  // (the run failed) and from `aiUnresolvedCount` (passages came back but
+  // couldn't be located in the rendered document) — without it, a zero-passage
+  // run leaves every flag false and the bar silently unmounts.
+  let aiNotice = $state("");
   // RFC 0063: in-document search state (HTML reader in v1). ReaderView owns it;
   // the toolbar is presentational and the HtmlReader does the painting.
   let searchQuery = $state("");
@@ -254,8 +264,13 @@
       });
 
     listen("document_extraction_updated", (event) => {
-      const payload = event.payload as { paperId?: string; paper_id?: string };
-      if ((payload.paperId ?? payload.paper_id) === paper.id) {
+      const payload = event.payload as { paperId?: string; paper_id?: string; status?: string };
+      // RFC 0072: only a *ready* extraction changes what the reader can show.
+      // The manager also emits on "extracting" (start), and a refresh there
+      // nulls `readerDocument` mid-read — unmounting PdfPage and re-fetching
+      // the whole PDF. Harmless while extraction only ran at startup; not once
+      // opening a paper can trigger it.
+      if ((payload.paperId ?? payload.paper_id) === paper.id && payload.status === "ready") {
         refreshTick += 1;
       }
     })
@@ -338,6 +353,7 @@
         });
         if (paper.id === paperId) {
           readerDocument = doc;
+          requestExtractionIfMissing(doc, paperId);
         }
       })
       .catch((error) => {
@@ -355,6 +371,29 @@
         }
       });
   });
+
+  // A cached PDF with no *ready* extraction has an empty `source_text`, so chat
+  // and AI marking silently do nothing (RFC 0072). Queue the extraction the
+  // import path missed; the `document_extraction_updated` listener above
+  // refreshes the reader when the text lands.
+  //
+  // The trigger is `!doc.extractionId`, which means "no READY extraction" —
+  // `get_saved_reader_document` only accepts `status == "ready"`, so rows stuck
+  // in `failed`/`extracting` also yield a null id and also need re-queueing. Do
+  // not tighten this into a check for whether an extraction row exists.
+  function requestExtractionIfMissing(doc: ReaderDocument, paperId: string) {
+    if (activeCandidate || doc.contentKind !== "pdf" || doc.extractionId || !doc.pdfLocalPath) {
+      return;
+    }
+    if (extractionRequested.has(paperId)) {
+      return;
+    }
+    extractionRequested.add(paperId);
+    readerLog("extract-request", { paperId, sourceId: doc.sourceId });
+    void extractPaperDocument(paperId).catch((error) => {
+      readerLog("extract-request-error", { paperId, error: errorDetail(error) }, "error");
+    });
+  }
 
   // Load the paper's threads + pins when it changes (once it's chat-enabled).
   $effect(() => {
@@ -437,8 +476,14 @@
     }
   }
 
-  function selectPassage(next: ReaderTextSelection) {
+  // RFC 0073: `intent` is what the user actually clicked — the PDF popover's
+  // Note vs. Ask. Without one (the HTML reader, which has no popover) the rail
+  // keeps its sticky section, which is the pre-existing behavior.
+  function selectPassage(next: ReaderTextSelection, intent?: "notes" | "chat") {
     selection = next;
+    if (intent) {
+      revealSection(intent);
+    }
     openThreadsPanel();
   }
 
@@ -542,7 +587,11 @@
       return created.id;
     } catch (error) {
       readerLog("create-highlight-error", { error: errorDetail(error) }, "error");
-      return null;
+      // RFC 0072: `null` now means only "there was nothing to mark". A genuine
+      // backend failure carries its message to the caller, which decides
+      // whether it is fatal — swallowing it here is what turned a NOT NULL
+      // constraint error into an unexplained "Couldn't attach the note".
+      throw error;
     } finally {
       highlightActionInFlight = false;
     }
@@ -639,11 +688,15 @@
     }
     aiBusy = true;
     aiError = "";
+    aiNotice = "";
     aiMarkedCount = 0;
     aiUnresolvedCount = 0;
     handleAskTurnStart();
     try {
       const intents = await autoHighlight({ kind: "paper", paperId: paper.id }, categories);
+      if (intents.length === 0) {
+        aiNotice = "The AI found no passages to mark in this document.";
+      }
       for (const intent of intents) {
         const resolved = await handleHighlightIntent(intent);
         if (resolved) {
@@ -665,6 +718,7 @@
   // notice so the bar closes).
   function keepAi() {
     aiError = "";
+    aiNotice = "";
     aiUnresolvedCount = 0;
     keepTurnHighlights();
   }
@@ -672,6 +726,7 @@
   // Undo every mark this auto-highlight run created, then close the bar.
   async function undoAi() {
     aiError = "";
+    aiNotice = "";
     aiUnresolvedCount = 0;
     await undoTurnHighlights();
   }
@@ -754,9 +809,16 @@
   // Add note / Ask on a highlight after the fact: reuse its existing thread
   // if it has one, otherwise open a fresh note/ask composer on the same
   // locator via the normal selection flow (RFC 0058 Task 10).
-  function openHighlightThread(highlight: Highlight) {
+  // RFC 0073: `intent` is passed only by the mark popover's Ask/Open-thread
+  // action. The Marks list uses the same entry point and deliberately passes
+  // nothing — clicking a row there must stay in Notes, not jump to Chat.
+  function openHighlightThread(highlight: Highlight, intent?: "notes" | "chat") {
     const thread = findThreadForHighlight(threads, highlight);
     closeHighlightPopover();
+    if (intent) {
+      revealSection(intent);
+    }
+    scrollToHighlight(highlight);
     if (thread) {
       openThreadFromMark(thread.id);
       return;
@@ -781,6 +843,18 @@
             anchorKind: "text_offset",
           };
     selectPassage(sel);
+  }
+
+  // RFC 0073 (R2.2): opening a mark from the Marks list moves the reader to it.
+  // Deliberately not `scrollIntoView` — that scrolls every scrollable ancestor,
+  // including the inspector panel the list now lives in.
+  function scrollToHighlight(highlight: Highlight) {
+    const locator = highlight.locator;
+    if (locator.kind === "pdfRect") {
+      pdfPageRef?.scrollToPage(locator.pageIndex);
+      return;
+    }
+    htmlReaderRef?.focusOffsets(locator.startOffset, locator.endOffset);
   }
 
   function openHighlightById(highlightId: string) {
@@ -969,7 +1043,7 @@
           {inspectorCollapsed}
           onToggleInspector={isFocusMode ? undefined : toggleInspector}
         />
-        {#if aiBusy || showTurnAffordance || aiError || aiUnresolvedCount > 0}
+        {#if aiBusy || showTurnAffordance || aiError || aiNotice || aiUnresolvedCount > 0}
           <div class="ai-bar row hair-b">
             {#if aiBusy}
               <span class="ai-dot"></span>
@@ -986,6 +1060,13 @@
               <button class="ai-link" type="button" onclick={keepAi}>Keep</button>
               <span class="mono-dim">·</span>
               <button class="ai-link" type="button" onclick={() => void undoAi()}>Undo all</button>
+            {:else if aiNotice}
+              <!-- Must precede the unresolved-count branch: a run that returned
+                   zero passages has aiUnresolvedCount === 0 and would otherwise
+                   render "Couldn't locate 0 passages" (RFC 0072). -->
+              <span>{aiNotice}</span>
+              <div class="flex1"></div>
+              <button class="ai-link" type="button" onclick={keepAi}>Dismiss</button>
             {:else}
               <span class="ai-error">Couldn't locate {aiUnresolvedCount} passage{aiUnresolvedCount === 1 ? "" : "s"} in this document.</span>
               <div class="flex1"></div>
@@ -1034,7 +1115,12 @@
             orientation="vertical"
             storageKey="i0i.reader-header-split"
             panes={[
-              { id: "header", min: 64, max: 320, default: 116 },
+              // RFC 0072: min/default must fit the meta row, TWO clamped title
+              // lines, and (in focus mode) the action row — the old 64/116 left
+              // ~39px for a 26px line box, so a wrapped title was cut mid-glyph.
+              // Raising `min` also lifts already-persisted panes back above the
+              // floor, via ResizableSplit's clampSizes.
+              { id: "header", min: 132, max: 320, default: 132 },
               { id: "content", min: 240, default: 620 },
             ]}
           >
@@ -1240,7 +1326,7 @@
       x={popoverPos.x}
       y={popoverPos.y}
       onSaveNote={saveNoteForPopoverHighlight}
-      onAsk={() => openHighlightThread(popoverHighlight!)}
+      onAsk={() => openHighlightThread(popoverHighlight!, "chat")}
       onRecolor={recolorPopoverHighlight}
       onRemove={removePopoverHighlight}
       onClose={closeHighlightPopover}

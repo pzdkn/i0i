@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info } from "@lucide/svelte";
+  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
   import {
     askAtAnchorStreamed,
     askChatThreadStreamed,
@@ -130,6 +130,29 @@
       localStorage.setItem(SECTION_KEY, activeSection);
     }
   });
+
+  // RFC 0073 (R2.4): with a thread open, the Chat section shows the conversation
+  // *and* the list of other conversations. The list collapses so the composer
+  // keeps the height, and the choice is remembered — an unremembered default
+  // would re-collapse on every thread you open.
+  const CHAT_LIST_KEY = "i0i.reader-inspector-chat-list-collapsed";
+  let chatListCollapsed = $state(loadChatListCollapsed());
+
+  function loadChatListCollapsed(): boolean {
+    if (typeof localStorage === "undefined") {
+      return true;
+    }
+    // Default collapsed: opening a thread means you want to read it.
+    return localStorage.getItem(CHAT_LIST_KEY) !== "false";
+  }
+
+  function toggleChatList() {
+    chatListCollapsed = !chatListCollapsed;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(CHAT_LIST_KEY, String(chatListCollapsed));
+    }
+  }
+
   // Active annotation-list filters (RFC 0062); collapsed behind a labeled Filter
   // control (RFC 0066 R4).
   let filtersOpen = $state(false);
@@ -153,6 +176,10 @@
   let pendingQuestion = $state<string | null>(null);
   let streamingAnswer = $state<string | null>(null);
   let error = $state("");
+  // RFC 0072: marking the passage is a bonus on the ask path — a failure there
+  // must not lose the user's question, so it surfaces as its own non-fatal
+  // notice instead of aborting the turn.
+  let passageWarning = $state("");
   let renaming = $state(false);
   let renameTitle = $state("");
   // Guards streamed deltas against paper switches / superseded asks.
@@ -178,7 +205,7 @@
     !openPassage || (openThread?.thread.title.trim() ?? "") !== openPassage.trim(),
   );
   const canSubmit = $derived(Boolean(openThread && chatInput.trim() && !isBusy));
-  const visibleError = $derived(error || chatError);
+  const visibleError = $derived(error || passageWarning || chatError);
 
   // RFC 0062: the annotation index. Each annotated passage (a `highlights` row)
   // becomes one row, paired with its conversation thread (if any) for the
@@ -301,6 +328,17 @@
     }
     activeSection = section;
     onConsumeRequestedSection?.();
+  });
+
+  // RFC 0073 (R2.3): in Notes the marks list now sits below the open passage, so
+  // a long list could leave the note field scrolled out of view when a passage
+  // opens. Anchor the panel to the detail — the thing the user just acted on.
+  let tabPanelElement = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const passage = openPassage;
+    if (activeSection === "notes" && passage && tabPanelElement) {
+      tabPanelElement.scrollTop = 0;
+    }
   });
 
   // Background title generation updates the parent `threads` list first; keep
@@ -453,6 +491,7 @@
     activeAskId = askId;
     isBusy = true;
     error = "";
+    passageWarning = "";
     pendingQuestion = body;
     streamingAnswer = "";
     chatInput = "";
@@ -460,7 +499,13 @@
       if (virtual) {
         // RFC 0058 Phase 1 (Task 9): mark the passage alongside the thread,
         // one gesture. Reuses the reload the ask itself triggers below.
-        await onEnsureHighlight();
+        // RFC 0072: the conversation still has value if the passage row can't
+        // be created — report it, don't abandon the ask.
+        try {
+          await onEnsureHighlight();
+        } catch (caught) {
+          passageWarning = `Couldn't mark this passage: ${String(caught)}`;
+        }
       }
       // RFC 0064: asking is purely a conversation now. AI marking is the
       // explicit toolbar "Highlight with AI" command — never a side effect of a
@@ -521,9 +566,12 @@
     }
     isSavingNote = true;
     error = "";
+    passageWarning = "";
     try {
       let id = currentHighlight?.id ?? null;
       if (!id) {
+        // RFC 0072: a backend failure now throws and lands in the catch below
+        // with its real message; `null` means only "there was nothing to mark".
         id = await onEnsureHighlight();
       }
       if (!id) {
@@ -619,6 +667,163 @@
 
 </script>
 
+{#snippet passageDetail()}
+  {#if openThread}
+              <!-- A focused passage (or the whole-paper thread) is open. The rail
+                   section decides the lens: Notes edits its note, Chat holds its
+                   conversation. `openThread` persists across a section switch. -->
+              <div class="row section-title">
+                <button class="link-btn" type="button" onclick={backToThreadList}>‹ {activeSection === "chat" ? "Chat" : "Marks"}</button>
+                <div class="flex1"></div>
+                {#if activeSection === "chat"}
+                  {#if !isVirtual}
+                    <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
+                  {/if}
+                  <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}><Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /></button>
+                {/if}
+              </div>
+
+              {#if renaming}
+                <input
+                  class="rename-input"
+                  bind:value={renameTitle}
+                  aria-label="Thread title"
+                  onkeydown={(event) => {
+                    if (event.key === "Enter") void commitRename();
+                    if (event.key === "Escape") renaming = false;
+                  }}
+                />
+                <div class="row note-actions">
+                  <button class="btn primary" type="button" onclick={() => void commitRename()}>Rename</button>
+                </div>
+              {:else if showTitle}
+                <h3 class="thread-title">{openThread.thread.title}</h3>
+              {/if}
+
+              {#if openPassage}
+                <blockquote>{openPassage}</blockquote>
+              {/if}
+
+              {#if activeSection === "notes"}
+                {#if selection}
+                  <div class="row swatch-row" role="group" aria-label="Highlight color">
+                    {#each HIGHLIGHT_COLORS as color}
+                      <button
+                        class="swatch"
+                        class:active={color === stickyColor}
+                        type="button"
+                        disabled={highlightBusy}
+                        style={`background:${highlightFill(color)}`}
+                        aria-label={`Highlight ${color}`}
+                        title={`Highlight ${color}`}
+                        onclick={() => void onPickColor(color)}
+                      ></button>
+                    {/each}
+                  </div>
+                {/if}
+
+                <div class="note-field">
+                  <div class="row note-field-head">
+                    <span class="label">Note</span>
+                    {#if noteDraft.trim() !== (currentHighlight?.note ?? "").trim()}
+                      <button
+                        class="link-btn"
+                        type="button"
+                        disabled={isSavingNote}
+                        onclick={() => void saveNote()}
+                      >
+                        {isSavingNote ? "Saving…" : "Save"}
+                      </button>
+                    {/if}
+                  </div>
+                  <textarea
+                    bind:value={noteDraft}
+                    aria-label="Note on this passage"
+                    placeholder="Jot a note on this passage… (Enter saves, Shift+Enter newline)"
+                    rows="2"
+                    disabled={isSavingNote}
+                    onkeydown={handleNoteKeydown}
+                  ></textarea>
+                </div>
+              {:else}
+                <div class="thread-view">
+                  {#each openThread.entries as entry}
+                    <div class="entry {entry.kind}">
+                      <div class="row entry-head">
+                        <span class="label">{entryAuthor(entry)}</span>
+                        <div class="flex1"></div>
+                        <button
+                          class="pin-btn"
+                          class:pinned={entry.pinned}
+                          type="button"
+                          aria-label={entry.pinned ? "unpin" : "pin"}
+                          onclick={() => void togglePin(entry)}
+                        >
+                          {entry.pinned ? "★" : "☆"}
+                        </button>
+                      </div>
+                      <p>{entry.body}</p>
+                      {#if entry.kind === "answer" && chatContextLabel(entry)}
+                        <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
+                      {/if}
+                    </div>
+                  {/each}
+
+                  {#if pendingQuestion !== null}
+                    <div class="entry question">
+                      <div class="label">You</div>
+                      <p>{pendingQuestion}</p>
+                    </div>
+                    <div class="entry answer">
+                      <div class="label">AI</div>
+                      <p>{streamingAnswer ? streamingAnswer : "…"}</p>
+                    </div>
+                  {/if}
+
+                  {#if !openThread.entries.length && pendingQuestion === null}
+                    <p class="empty-note">Ask a question below to start a conversation about this passage.</p>
+                  {/if}
+                </div>
+
+                <div class="thread-input">
+                  <textarea
+                    bind:value={chatInput}
+                    aria-label="Ask a question"
+                    placeholder="Ask the AI about this passage… (Enter sends, Shift+Enter newline)"
+                    rows="3"
+                    disabled={isBusy}
+                    onkeydown={handleComposerKeydown}
+                  ></textarea>
+                  <div class="row note-actions">
+                    <button class="btn primary" type="button" disabled={!canSubmit} onclick={() => void ask()}>
+                      {isBusy ? "…" : "Ask"}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+  {/if}
+{/snippet}
+
+{#snippet chatListBody()}
+              <div class="thread-list">
+                <button class="ask-paper-row" type="button" onclick={openWholePaper}>
+                  <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <span class="ask-paper-title">Ask about this paper</span>
+                  {#if documentThread && documentThread.entryCount > 0}
+                    <span class="mono-dim">{documentThread.entryCount}</span>
+                  {/if}
+                </button>
+
+                {#each passageChats as chat (chat.id)}
+                  <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>
+                    <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
+                    <span class="thread-row-title">{chat.title.trim() || anchorSelectedText(chat.anchor) || "Conversation"}</span>
+                    <span class="mono-dim">{chat.entryCount}</span>
+                  </button>
+                {/each}
+              </div>
+{/snippet}
+
 <aside class="reader-inspector hair-l">
   <div class="inspector-body">
     <header class="hair-b">
@@ -626,7 +831,7 @@
       <div class="mono-dim">paper / selected / reader</div>
     </header>
 
-    <div class="tab-panel">
+    <div class="tab-panel" bind:this={tabPanelElement}>
       {#if activeSection === "info"}
         <section class="metadata">
           <div class="meta-grid">
@@ -654,144 +859,15 @@
           {#if !chatEnabled}
             <div class="row section-title"><span class="label hot">{activeSection === "chat" ? "Chat" : "Notes"}</span></div>
             <p class="empty-note">Add this paper to a Vault to {activeSection === "chat" ? "chat about" : "annotate"} it.</p>
-          {:else if openThread && (activeSection === "chat" || openPassage)}
-            <!-- A focused passage (or the whole-paper thread) is open. The rail
-                 section decides the lens: Notes edits its note, Chat holds its
-                 conversation. `openThread` persists across a section switch. -->
-            <div class="row section-title">
-              <button class="link-btn" type="button" onclick={backToThreadList}>‹ {activeSection === "chat" ? "Chat" : "Marks"}</button>
-              <div class="flex1"></div>
-              {#if activeSection === "chat"}
-                {#if !isVirtual}
-                  <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
-                {/if}
-                <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}><Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /></button>
-              {/if}
-            </div>
-
-            {#if renaming}
-              <input
-                class="rename-input"
-                bind:value={renameTitle}
-                aria-label="Thread title"
-                onkeydown={(event) => {
-                  if (event.key === "Enter") void commitRename();
-                  if (event.key === "Escape") renaming = false;
-                }}
-              />
-              <div class="row note-actions">
-                <button class="btn primary" type="button" onclick={() => void commitRename()}>Rename</button>
-              </div>
-            {:else if showTitle}
-              <h3 class="thread-title">{openThread.thread.title}</h3>
-            {/if}
-
-            {#if openPassage}
-              <blockquote>{openPassage}</blockquote>
-            {/if}
-
-            {#if activeSection === "notes"}
-              {#if selection}
-                <div class="row swatch-row" role="group" aria-label="Highlight color">
-                  {#each HIGHLIGHT_COLORS as color}
-                    <button
-                      class="swatch"
-                      class:active={color === stickyColor}
-                      type="button"
-                      disabled={highlightBusy}
-                      style={`background:${highlightFill(color)}`}
-                      aria-label={`Highlight ${color}`}
-                      title={`Highlight ${color}`}
-                      onclick={() => void onPickColor(color)}
-                    ></button>
-                  {/each}
-                </div>
-              {/if}
-
-              <div class="note-field">
-                <div class="row note-field-head">
-                  <span class="label">Note</span>
-                  {#if noteDraft.trim() !== (currentHighlight?.note ?? "").trim()}
-                    <button
-                      class="link-btn"
-                      type="button"
-                      disabled={isSavingNote}
-                      onclick={() => void saveNote()}
-                    >
-                      {isSavingNote ? "Saving…" : "Save"}
-                    </button>
-                  {/if}
-                </div>
-                <textarea
-                  bind:value={noteDraft}
-                  aria-label="Note on this passage"
-                  placeholder="Jot a note on this passage… (Enter saves, Shift+Enter newline)"
-                  rows="2"
-                  disabled={isSavingNote}
-                  onkeydown={handleNoteKeydown}
-                ></textarea>
-              </div>
-            {:else}
-              <div class="thread-view">
-                {#each openThread.entries as entry}
-                  <div class="entry {entry.kind}">
-                    <div class="row entry-head">
-                      <span class="label">{entryAuthor(entry)}</span>
-                      <div class="flex1"></div>
-                      <button
-                        class="pin-btn"
-                        class:pinned={entry.pinned}
-                        type="button"
-                        aria-label={entry.pinned ? "unpin" : "pin"}
-                        onclick={() => void togglePin(entry)}
-                      >
-                        {entry.pinned ? "★" : "☆"}
-                      </button>
-                    </div>
-                    <p>{entry.body}</p>
-                    {#if entry.kind === "answer" && chatContextLabel(entry)}
-                      <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
-                    {/if}
-                  </div>
-                {/each}
-
-                {#if pendingQuestion !== null}
-                  <div class="entry question">
-                    <div class="label">You</div>
-                    <p>{pendingQuestion}</p>
-                  </div>
-                  <div class="entry answer">
-                    <div class="label">AI</div>
-                    <p>{streamingAnswer ? streamingAnswer : "…"}</p>
-                  </div>
-                {/if}
-
-                {#if !openThread.entries.length && pendingQuestion === null}
-                  <p class="empty-note">Ask a question below to start a conversation about this passage.</p>
-                {/if}
-              </div>
-
-              <div class="thread-input">
-                <textarea
-                  bind:value={chatInput}
-                  aria-label="Ask a question"
-                  placeholder="Ask the AI about this passage… (Enter sends, Shift+Enter newline)"
-                  rows="3"
-                  disabled={isBusy}
-                  onkeydown={handleComposerKeydown}
-                ></textarea>
-                <div class="row note-actions">
-                  <button class="btn primary" type="button" disabled={!canSubmit} onclick={() => void ask()}>
-                    {isBusy ? "…" : "Ask"}
-                  </button>
-                </div>
-              </div>
-            {/if}
-
-            {#if visibleError}
-              <p class="note-error">{visibleError}</p>
-            {/if}
           {:else if activeSection === "notes"}
+            <!-- RFC 0073 (R2.1): Notes COMPOSES the open passage and the marks
+                 list — the detail used to replace the list, so annotating a
+                 passage hid every other mark. Chat keeps replace-semantics: a
+                 conversation needs the whole panel. -->
+            {#if openThread && openPassage}
+              {@render passageDetail()}
+            {/if}
+
             <div class="row section-title">
               <span class="label hot">Marks</span>
               <div class="flex1"></div>
@@ -890,6 +966,32 @@
             {#if visibleError}
               <p class="note-error">{visibleError}</p>
             {/if}
+          {:else if openThread}
+            {@render passageDetail()}
+
+            <!-- RFC 0073 (R2.4): the other conversations stay reachable from the
+                 same panel as the composer, but collapsed by default — the thread
+                 you are reading needs the height more than the list does. -->
+            <div class="row section-title">
+              <button class="list-toggle" type="button" aria-expanded={!chatListCollapsed} onclick={toggleChatList}>
+                {#if chatListCollapsed}
+                  <ChevronRight size={12} strokeWidth={1.75} aria-hidden="true" />
+                {:else}
+                  <ChevronDown size={12} strokeWidth={1.75} aria-hidden="true" />
+                {/if}
+                <span class="label hot">Chat</span>
+              </button>
+              <div class="flex1"></div>
+              <span class="mono-dim">{chatCount}</span>
+            </div>
+
+            {#if !chatListCollapsed}
+              {@render chatListBody()}
+            {/if}
+
+            {#if visibleError}
+              <p class="note-error">{visibleError}</p>
+            {/if}
           {:else}
             <div class="row section-title">
               <span class="label hot">Chat</span>
@@ -897,23 +999,7 @@
               <span class="mono-dim">{chatCount}</span>
             </div>
 
-            <div class="thread-list">
-              <button class="ask-paper-row" type="button" onclick={openWholePaper}>
-                <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
-                <span class="ask-paper-title">Ask about this paper</span>
-                {#if documentThread && documentThread.entryCount > 0}
-                  <span class="mono-dim">{documentThread.entryCount}</span>
-                {/if}
-              </button>
-
-              {#each passageChats as chat (chat.id)}
-                <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>
-                  <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
-                  <span class="thread-row-title">{chat.title.trim() || anchorSelectedText(chat.anchor) || "Conversation"}</span>
-                  <span class="mono-dim">{chat.entryCount}</span>
-                </button>
-              {/each}
-            </div>
+            {@render chatListBody()}
 
             {#if visibleError}
               <p class="note-error">{visibleError}</p>
@@ -1017,6 +1103,23 @@
   .section-title {
     gap: 8px;
     align-items: center;
+  }
+
+  /* RFC 0073 (R2.4): the whole label is the collapse target, so it reads as one
+     disclosure control rather than a chevron sitting next to a heading. */
+  .list-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--fg-3);
+    cursor: pointer;
+  }
+
+  .list-toggle:hover {
+    color: var(--amber);
   }
 
   blockquote {

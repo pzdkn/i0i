@@ -147,6 +147,21 @@
     }
   }
 
+  // RFC 0073 (R2.2): scroll a passage into view by its text offsets, so opening
+  // a mark from the Marks list moves the reader. Same one-scroller `scrollBy`
+  // geometry as `focusMatch`, and for the same reason: `scrollIntoView` would
+  // also scroll the inspector panel the list sits in.
+  export function focusOffsets(startOffset: number, endOffset: number): void {
+    const range = rangeForMatch({ start: startOffset, end: endOffset });
+    const scroller = root?.closest(".html-reader") as HTMLElement | null;
+    if (!range || !scroller) return;
+    const rect = range.getBoundingClientRect();
+    if (!rect.height) return;
+    const scRect = scroller.getBoundingClientRect();
+    const delta = rect.top - scRect.top - scroller.clientHeight / 2 + rect.height / 2;
+    scroller.scrollBy({ top: delta, behavior: "smooth" });
+  }
+
   export function clearSearch(): void {
     const hl = highlightApi();
     searchMatches = [];
