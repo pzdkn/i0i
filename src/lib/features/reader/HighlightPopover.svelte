@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Highlight, HighlightColor } from "$lib/domain/highlight";
-  import { HIGHLIGHT_COLORS } from "$lib/domain/highlight";
+  import { HIGHLIGHT_COLORS, isStickyNote } from "$lib/domain/highlight";
   import { highlightFill } from "$lib/features/reader/highlight-colors";
 
   // Click-a-highlight popover (RFC 0058 Task 10): the after-the-fact actions
@@ -43,6 +43,9 @@
     }
   });
   const noteDirty = $derived(noteDraft.trim() !== (highlight.note ?? "").trim());
+  // RFC 0074: a sticky note is anchored to a point, so there is no passage to
+  // quote — asking about it would send the model an empty excerpt.
+  const isSticky = $derived(isStickyNote(highlight.locator));
 
   function saveNote() {
     void onSaveNote(noteDraft.trim().length ? noteDraft.trim() : null);
@@ -110,7 +113,7 @@
       class="hp-note-input"
       bind:value={noteDraft}
       aria-label="Note"
-      placeholder="Add a note… (Enter saves)"
+      placeholder={isSticky ? "Write your note… (Enter saves)" : "Add a note… (Enter saves)"}
       rows="2"
       onkeydown={handleNoteKeydown}
     ></textarea>
@@ -120,7 +123,9 @@
   </div>
 
   <div class="hp-actions">
-    <button class="hp-btn" type="button" onclick={onAsk}>{hasThread ? "Open thread" : "Ask"}</button>
+    {#if !isSticky}
+      <button class="hp-btn" type="button" onclick={onAsk}>{hasThread ? "Open thread" : "Ask"}</button>
+    {/if}
     <button class="hp-btn hp-remove" type="button" aria-label="Remove highlight" title="Remove" onclick={() => void onRemove()}>
       Remove
     </button>

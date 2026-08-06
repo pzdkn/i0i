@@ -1347,6 +1347,17 @@ impl LibraryStore {
                 rects_json,
                 ..
             } => (None, None, Some(*page_index), Some(rects_json.clone())),
+            // RFC 0074: a point rides in the existing columns — a zero-size rect
+            // carries x/y — so sticky notes need no schema migration.
+            Locator::PdfPoint {
+                page_index, x, y, ..
+            } => (
+                None,
+                None,
+                Some(*page_index),
+                Some(point_rects_json(*x, *y)),
+            ),
+            Locator::TextPoint { offset, .. } => (Some(*offset), Some(*offset), None, None),
         };
         conn.execute(
             "
@@ -1417,6 +1428,35 @@ impl LibraryStore {
                        and page_index = ?3 and rects_json = ?4
                      limit 1",
                     params![paper_id, source_id, page_index, rects_json],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?,
+            // A sticky note is idempotent on its exact placement (RFC 0074);
+            // two notes a pixel apart are deliberately two notes.
+            Locator::PdfPoint {
+                source_id,
+                page_index,
+                x,
+                y,
+            } => conn
+                .query_row(
+                    "select id from highlights
+                     where paper_id = ?1 and source_id = ?2 and locator_kind = 'pdf_point'
+                       and page_index = ?3 and rects_json = ?4
+                     limit 1",
+                    params![paper_id, source_id, page_index, point_rects_json(*x, *y)],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?,
+            Locator::TextPoint { source_id, offset } => conn
+                .query_row(
+                    "select id from highlights
+                     where paper_id = ?1 and source_id = ?2 and locator_kind = 'text_point'
+                       and start_offset = ?3
+                     limit 1",
+                    params![paper_id, source_id, offset],
                     |row| row.get(0),
                 )
                 .optional()
@@ -2695,6 +2735,30 @@ fn highlight_color_str(color: crate::domain::highlight::HighlightColor) -> Strin
         .unwrap_or_else(|| "yellow".to_string())
 }
 
+/// A sticky note's anchor, encoded as the zero-size rect the `rects_json` column
+/// already knows how to hold (RFC 0074). Keeping the point in the existing
+/// column is what lets sticky notes ship without a schema migration.
+fn point_rects_json(x: f64, y: f64) -> String {
+    format!("[{{\"x\":{x},\"y\":{y},\"width\":0,\"height\":0}}]")
+}
+
+/// Inverse of [`point_rects_json`]. Anything unparseable reads as the page
+/// origin — a misplaced sticky is recoverable, a dropped one is not.
+fn point_from_rects_json(raw: Option<&str>) -> (f64, f64) {
+    let Some(raw) = raw else {
+        return (0.0, 0.0);
+    };
+    let parsed: Option<Vec<serde_json::Value>> = serde_json::from_str(raw).ok();
+    let first = parsed.and_then(|rects| rects.into_iter().next());
+    let Some(first) = first else {
+        return (0.0, 0.0);
+    };
+    (
+        first.get("x").and_then(|v| v.as_f64()).unwrap_or_default(),
+        first.get("y").and_then(|v| v.as_f64()).unwrap_or_default(),
+    )
+}
+
 fn read_highlight(
     conn: &Connection,
     id: &str,
@@ -2720,18 +2784,33 @@ fn highlight_from_row(
 
     let source_id: String = row.get(2)?;
     let locator_kind: String = row.get(3)?;
-    let locator = if locator_kind == "pdf_rect" {
-        Locator::PdfRect {
+    let locator = match locator_kind.as_str() {
+        "pdf_rect" => Locator::PdfRect {
             source_id: source_id.clone(),
             page_index: row.get::<_, Option<i32>>(6)?.unwrap_or_default(),
             rects_json: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        },
+        // RFC 0074: the sticky's x/y live in the zero-size rect stored in
+        // `rects_json`; an unreadable one degrades to the page's top-left rather
+        // than losing the annotation.
+        "pdf_point" => {
+            let (x, y) = point_from_rects_json(row.get::<_, Option<String>>(7)?.as_deref());
+            Locator::PdfPoint {
+                source_id: source_id.clone(),
+                page_index: row.get::<_, Option<i32>>(6)?.unwrap_or_default(),
+                x,
+                y,
+            }
         }
-    } else {
-        Locator::TextOffset {
+        "text_point" => Locator::TextPoint {
+            source_id: source_id.clone(),
+            offset: row.get::<_, Option<i64>>(4)?.unwrap_or_default(),
+        },
+        _ => Locator::TextOffset {
             source_id: source_id.clone(),
             start_offset: row.get::<_, Option<i64>>(4)?.unwrap_or_default(),
             end_offset: row.get::<_, Option<i64>>(5)?.unwrap_or_default(),
-        }
+        },
     };
     // Color is nullable (RFC 0061): a null/blank color = no color mark.
     let color: Option<HighlightColor> = row

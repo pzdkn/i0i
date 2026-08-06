@@ -17,6 +17,9 @@
     Minimize2,
   } from "@lucide/svelte";
   import AiHighlightMenu from "$lib/features/reader/AiHighlightMenu.svelte";
+  import StickyGlyph from "$lib/features/reader/StickyGlyph.svelte";
+  import { highlightFill } from "$lib/features/reader/highlight-colors";
+  import { HIGHLIGHT_COLORS, type HighlightColor } from "$lib/domain/highlight";
   import type { AutoHighlightCategory } from "$lib/bridge/chat";
 
   // Persistent, document-level reader tool panel (RFC 0063, 0071). Presentational:
@@ -41,6 +44,11 @@
     onAutoHighlight,
     hasSelection = false,
     onHighlight,
+    toolsEnabled = false,
+    activeTool = null,
+    activeColor = "yellow",
+    onSelectTool,
+    onSelectColor,
     onNote,
     onChat,
     isFocusMode = false,
@@ -68,6 +76,14 @@
     // Highlight the current selection; enabled only while text is selected.
     hasSelection?: boolean;
     onHighlight?: () => void;
+    // RFC 0074: persistent annotation tools. `activeTool` is a mode — with
+    // Highlight active a drag marks instantly, with Note active a click places a
+    // sticky — and `activeColor` is what both of them (and the popover) use.
+    toolsEnabled?: boolean;
+    activeTool?: "highlight" | "note" | null;
+    activeColor?: HighlightColor;
+    onSelectTool?: (tool: "highlight" | "note") => void;
+    onSelectColor?: (color: HighlightColor) => void;
     // Reveal the inspector's Notes / Chat section.
     onNote?: () => void;
     onChat?: () => void;
@@ -78,6 +94,8 @@
   } = $props();
 
   let aiMenuOpen = $state(false);
+  // RFC 0074: the annotation-color dropdown.
+  let colorMenuOpen = $state(false);
   let aiButton: HTMLButtonElement | undefined = $state();
   // RFC 0066 (R5): the menu is `position: fixed` at coordinates computed from the
   // button, so no ancestor `overflow` clips it. Store its top-left.
@@ -133,7 +151,65 @@
 
     {#if showTools}
       <span class="divider" aria-hidden="true"></span>
-      {#if onHighlight}
+      {#if toolsEnabled}
+        <!-- RFC 0074: sticky tools, not a selection-gated action. The old
+             Highlight button was disabled whenever nothing was selected, which
+             is most of the time — a permanently greyed control. -->
+        <button
+          class="tool-btn icon"
+          class:on={activeTool === "highlight"}
+          type="button"
+          title="Highlight tool — select text to mark it"
+          aria-label="Highlight tool"
+          aria-pressed={activeTool === "highlight"}
+          onclick={() => onSelectTool?.("highlight")}
+        >
+          <Highlighter size={15} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+        <button
+          class="tool-btn icon"
+          class:on={activeTool === "note"}
+          type="button"
+          title="Note tool — click the page to place a note"
+          aria-label="Note tool"
+          aria-pressed={activeTool === "note"}
+          onclick={() => onSelectTool?.("note")}
+        >
+          <StickyGlyph color={activeColor} size={15} />
+        </button>
+        <div class="color-picker">
+          <button
+            class="tool-btn color-trigger"
+            type="button"
+            title="Annotation color"
+            aria-label="Annotation color"
+            aria-expanded={colorMenuOpen}
+            onclick={() => (colorMenuOpen = !colorMenuOpen)}
+          >
+            <span class="color-dot" style={`background:${highlightFill(activeColor)}`}></span>
+            <ChevronDown size={11} strokeWidth={2} aria-hidden="true" />
+          </button>
+          {#if colorMenuOpen}
+            <div class="color-menu">
+              {#each HIGHLIGHT_COLORS as color}
+                <button
+                  class="color-swatch"
+                  class:on={color === activeColor}
+                  type="button"
+                  aria-label={color}
+                  title={color}
+                  style={`background:${highlightFill(color)}`}
+                  onclick={() => {
+                    onSelectColor?.(color);
+                    colorMenuOpen = false;
+                  }}
+                ></button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <span class="divider" aria-hidden="true"></span>
+      {:else if onHighlight}
         <button class="tool-btn icon" type="button" title="Highlight selection" aria-label="Highlight selection" disabled={!hasSelection} onclick={onHighlight}>
           <Highlighter size={15} strokeWidth={1.75} aria-hidden="true" />
         </button>
@@ -365,5 +441,53 @@
     color: var(--fg-3);
     font-size: 10px;
     text-align: center;
+  }
+
+  /* RFC 0074: an engaged tool is a mode, so it has to look engaged. */
+  .tool-btn.on {
+    border-color: var(--amber);
+    color: var(--amber);
+    background: rgba(242, 169, 59, 0.12);
+  }
+
+  .color-picker {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .color-trigger {
+    gap: 4px;
+    padding: 0 5px;
+  }
+
+  .color-dot {
+    width: 12px;
+    height: 12px;
+    border: 1px solid var(--border-2);
+  }
+
+  .color-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 40;
+    display: flex;
+    gap: 4px;
+    padding: 5px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+  }
+
+  .color-swatch {
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: 1px solid var(--border-2);
+    cursor: pointer;
+  }
+
+  .color-swatch.on {
+    border-color: var(--amber);
+    box-shadow: 0 0 0 1px var(--amber);
   }
 </style>

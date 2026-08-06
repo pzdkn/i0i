@@ -21,7 +21,10 @@ pub enum HighlightColor {
 /// WHERE a highlight sits on a rendered source. Payloads mirror the legacy
 /// `ThreadAnchor` selection variants so migration is a field lift. Offsets are
 /// browser-space (RFC 0056); the backend never resolves them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: the point variants carry `f64` coordinates (RFC 0074). Nothing
+/// keys a map on a locator; equality is only ever used for comparison.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Locator {
     #[serde(rename = "textOffset")]
@@ -42,12 +45,35 @@ pub enum Locator {
         #[serde(rename = "rectsJson")]
         rects_json: String,
     },
+    /// A position rather than a range — where a standalone sticky note lives
+    /// (RFC 0074). `x`/`y` are normalized to the page box (0..1) so they survive
+    /// zoom. Stored in the existing columns (`page_index` + a zero-size rect in
+    /// `rects_json`), so this variant needs no schema migration.
+    #[serde(rename = "pdfPoint")]
+    PdfPoint {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "pageIndex")]
+        page_index: i32,
+        x: f64,
+        y: f64,
+    },
+    /// The HTML counterpart: a caret position in the source text (RFC 0074).
+    #[serde(rename = "textPoint")]
+    TextPoint {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        offset: i64,
+    },
 }
 
 impl Locator {
     pub fn source_id(&self) -> &str {
         match self {
-            Locator::TextOffset { source_id, .. } | Locator::PdfRect { source_id, .. } => source_id,
+            Locator::TextOffset { source_id, .. }
+            | Locator::PdfRect { source_id, .. }
+            | Locator::PdfPoint { source_id, .. }
+            | Locator::TextPoint { source_id, .. } => source_id,
         }
     }
 
@@ -56,6 +82,8 @@ impl Locator {
         match self {
             Locator::TextOffset { .. } => "text_offset",
             Locator::PdfRect { .. } => "pdf_rect",
+            Locator::PdfPoint { .. } => "pdf_point",
+            Locator::TextPoint { .. } => "text_point",
         }
     }
 }
@@ -87,7 +115,7 @@ impl HighlightAuthor {
 }
 
 /// The primitive, as returned across IPC.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Highlight {
     pub id: String,

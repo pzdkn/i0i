@@ -7,6 +7,7 @@
   import { markFill } from "$lib/features/reader/highlight-colors";
   import { resolveQuoteInText } from "$lib/features/reader/resolve-quote-html";
   import { debugLog } from "$lib/bridge/chat";
+  import StickyGlyph from "$lib/features/reader/StickyGlyph.svelte";
   import { StickyNote, MessageSquare } from "@lucide/svelte";
 
   type PendingNote = ReaderTextSelection & { x: number; y: number };
@@ -35,8 +36,11 @@
     selection,
     chatEnabled,
     sourceId,
+    activeTool = null,
     onSelectPassage,
     onHighlightClick,
+    onToolHighlight,
+    onPlaceNote,
   }: {
     pdfDocument: PDFDocumentProxy;
     pageNumber: number;
@@ -53,11 +57,18 @@
     selection: ReaderTextSelection | null;
     chatEnabled: boolean;
     sourceId: string;
+    // RFC 0074: the active annotation tool. `null` = today's behavior (a
+    // selection raises the Note/Ask/Highlight popover).
+    activeTool?: "highlight" | "note" | null;
     // RFC 0073: the popover says which pane the passage should open in. Without
     // it the landing section is whatever the rail was last left on, so "Ask"
     // opened the note editor.
     onSelectPassage: (selection: ReaderTextSelection, intent?: "notes" | "chat") => void;
     onHighlightClick: (highlightId: string, x: number, y: number) => void;
+    // RFC 0074: the Highlight tool marks a selection outright; the Note tool
+    // places a sticky at a normalized point on this page.
+    onToolHighlight?: (selection: ReaderTextSelection) => void;
+    onPlaceNote?: (pageIndex: number, x: number, y: number, clientX: number, clientY: number) => void;
   } = $props();
 
   let pageElement = $state<HTMLElement | null>(null);
@@ -106,6 +117,13 @@
         // Draw a mark if the passage has a color, a note, or a conversation
         // (RFC 0061 + RFC 0067: ask leaves the neutral marker).
         (mark.color !== null || mark.note !== null || Boolean(conversationIds?.has(mark.id))),
+    ),
+  );
+  // RFC 0074: standalone sticky notes on this page — annotations anchored to a
+  // point rather than a range. They render as a glyph, never as a band.
+  const pageStickies = $derived(
+    marks.filter(
+      (mark) => mark.locator.kind === "pdfPoint" && mark.locator.pageIndex === pageIndex,
     ),
   );
   const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
@@ -325,7 +343,7 @@
       return;
     }
 
-    pendingNote = {
+    const passage: ReaderTextSelection = {
       sourceId,
       startOffset: 0,
       endOffset: selectedText.length,
@@ -333,9 +351,51 @@
       anchorKind: "pdf_rect",
       pageIndex,
       rectsJson: JSON.stringify(rects),
+    };
+
+    // RFC 0074: with a tool active, the gesture belongs to the tool. Highlight
+    // marks the selection outright (the caller clears the selection, or the next
+    // mouseup would re-mark the same range); Note suppresses the popover so a
+    // drag still selects text for copying but places nothing.
+    if (activeTool === "highlight") {
+      pendingNote = null;
+      onToolHighlight?.(passage);
+      return;
+    }
+    if (activeTool === "note") {
+      pendingNote = null;
+      return;
+    }
+
+    pendingNote = {
+      ...passage,
       x: Math.min(anchorRect.right + 8, window.innerWidth - 40),
       y: Math.max(anchorRect.top - 4, 8),
     };
+  }
+
+  // RFC 0074: with the Note tool active, a plain click on the page places a
+  // sticky there. Normalized to the page box so the anchor survives zoom, and
+  // ignored when the click lands on an existing annotation (those stop
+  // propagation to open their own popover).
+  function handlePageClick(event: MouseEvent) {
+    if (activeTool !== "note" || !chatEnabled || !pageElement) {
+      return;
+    }
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) {
+      return; // a drag, not a click — leave the selection alone
+    }
+    const rect = pageElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return;
+    }
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) {
+      return;
+    }
+    onPlaceNote?.(pageIndex, x, y, event.clientX, event.clientY);
   }
 
   function rectsFromClientRects(clientRects: DOMRectList | DOMRect[]) {
@@ -480,16 +540,19 @@
 
 <svelte:window onmouseup={updateSelectionAffordance} onkeyup={updateSelectionAffordance} />
 
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events: placing a sticky is a pointer gesture on the page surface; the keyboard path is the toolbar's Note action on a selection. -->
 <article
   bind:this={pageElement}
   class="pdf-rendered-page"
+  class:placing-note={activeTool === "note"}
   style={`width: ${pageWidth}px; height: ${pageHeight}px; --scale-factor: ${scale}; --user-unit: 1; --total-scale-factor: ${scale}; --scale-round-x: 1px; --scale-round-y: 1px;`}
+  onclick={handlePageClick}
 >
   <canvas bind:this={canvasElement} aria-label={`PDF page ${pageNumber}`}></canvas>
   <div bind:this={textLayerElement} class="textLayer text-layer" aria-hidden="true"></div>
   <div class="annotation-layer" role="presentation">
     {#each pageMarks as mark}
-      {#each markRects(mark) as rect}
+      {#each markRects(mark) as rect, rectIndex}
         <button
           class="pdf-note-anchor"
           type="button"
@@ -500,7 +563,39 @@
             onHighlightClick(mark.id, event.clientX, event.clientY);
           }}
         ></button>
+        <!-- RFC 0074 R3: a commented highlight has to look different from a bare
+             one, or the two are indistinguishable on the page. The glyph rides
+             the END of the mark's last rect. -->
+        {#if rectIndex === markRects(mark).length - 1 && mark.note?.trim()}
+          <span
+            class="pdf-comment-glyph"
+            style={`left: ${(rect.x + rect.width) * 100}%; top: ${rect.y * 100}%;`}
+          >
+            <StickyGlyph color={mark.color} size={10} />
+          </span>
+        {/if}
       {/each}
+    {/each}
+
+    <!-- RFC 0074: a sticky note is its own click target — a ~10px glyph cannot
+         rely on the rect-overlap matching the bands use. -->
+    {#each pageStickies as sticky}
+      {@const point = sticky.locator}
+      {#if point.kind === "pdfPoint"}
+        <button
+          class="pdf-sticky"
+          type="button"
+          title={sticky.note?.trim() || "Note"}
+          aria-label={sticky.note?.trim() ? `Note: ${sticky.note.trim()}` : "Empty note"}
+          style={`left: ${point.x * 100}%; top: ${point.y * 100}%;`}
+          onclick={(event) => {
+            event.stopPropagation();
+            onHighlightClick(sticky.id, event.clientX, event.clientY);
+          }}
+        >
+          <StickyGlyph color={sticky.color} size={16} />
+        </button>
+      {/if}
     {/each}
 
     {#each draftRects as rect}
@@ -624,6 +719,36 @@
     position: absolute;
     border: 1px solid rgba(107, 160, 168, 0.95);
     background: rgba(107, 160, 168, 0.2);
+    pointer-events: none;
+  }
+
+  /* The Note tool takes over the pointer, so say so. */
+  .placing-note {
+    cursor: copy;
+  }
+
+  /* RFC 0074: the standalone sticky. Anchored by its top-left so the stored
+     point is the corner the user clicked, not a guessed centre. */
+  .pdf-sticky {
+    position: absolute;
+    display: inline-flex;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+    pointer-events: auto;
+  }
+
+  .pdf-sticky:hover {
+    transform: scale(1.12);
+  }
+
+  /* The comment marker on a highlight: nudged just past the end of the band and
+     never intercepting clicks — the band underneath is the click target. */
+  .pdf-comment-glyph {
+    position: absolute;
+    display: inline-flex;
+    margin-left: 2px;
     pointer-events: none;
   }
 

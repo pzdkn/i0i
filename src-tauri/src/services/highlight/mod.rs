@@ -98,6 +98,42 @@ mod tests {
         (HighlightService::new(store), paper_id)
     }
 
+    /// RFC 0074: a sticky note is an annotation whose locator is a *point*. It
+    /// rides in the existing columns (page_index + a zero-size rect), so this
+    /// test is the guard that the encode/decode pair stays symmetric — a broken
+    /// round-trip would silently move every sticky to the page corner.
+    #[tokio::test]
+    async fn point_locators_round_trip_through_storage() {
+        let (svc, paper) = service();
+
+        let pdf_point = Locator::PdfPoint {
+            source_id: "s".into(),
+            page_index: 3,
+            x: 0.8125,
+            y: 0.125,
+        };
+        let created = svc
+            .create_highlight(&paper, pdf_point.clone(), "", None, None, HighlightAuthor::User)
+            .await
+            .expect("sticky created");
+        assert_eq!(created.locator, pdf_point);
+
+        let text_point = Locator::TextPoint {
+            source_id: "s".into(),
+            offset: 4096,
+        };
+        let created = svc
+            .create_highlight(&paper, text_point.clone(), "", None, None, HighlightAuthor::User)
+            .await
+            .expect("html sticky created");
+        assert_eq!(created.locator, text_point);
+
+        // And they survive a list round-trip, not just the insert's own read.
+        let listed = svc.list(&paper).await.expect("list");
+        assert!(listed.iter().any(|hl| hl.locator == pdf_point));
+        assert!(listed.iter().any(|hl| hl.locator == text_point));
+    }
+
     #[tokio::test]
     async fn create_is_author_agnostic() {
         let (svc, paper) = service();

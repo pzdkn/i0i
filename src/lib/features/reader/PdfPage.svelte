@@ -23,8 +23,11 @@
     selection,
     chatEnabled,
     scale = 1.15,
+    activeTool = null,
     onSelectPassage,
     onHighlightClick,
+    onToolHighlight,
+    onPlaceNote,
   }: {
     pdfUrl: string;
     sourceId: string;
@@ -37,8 +40,12 @@
     // RFC 0073: forwarded verbatim to every page — the intent must survive this
     // hop, or Ask works from some pages and not others (an optional parameter
     // dropped here still type-checks).
+    // RFC 0074: the active annotation tool, forwarded to every page.
+    activeTool?: "highlight" | "note" | null;
     onSelectPassage: (selection: ReaderTextSelection, intent?: "notes" | "chat") => void;
     onHighlightClick: (highlightId: string, x: number, y: number) => void;
+    onToolHighlight?: (selection: ReaderTextSelection) => void;
+    onPlaceNote?: (pageIndex: number, x: number, y: number, clientX: number, clientY: number) => void;
   } = $props();
 
   let pdfDocument = $state<PDFDocumentProxy | null>(null);
@@ -54,8 +61,15 @@
 
   // Highlights anchored to this PDF source become the on-page marks (RFC 0056;
   // no longer gated on pinnedCount — asks persist their highlight too).
+  // RFC 0074: `pdfPoint` rides along here — sticky notes are annotations on this
+  // source too, and filtering them out at this hop would make every placed note
+  // invisible no matter what the page does with it.
   const pdfMarks = $derived(
-    highlights.filter((hl) => hl.locator.kind === "pdfRect" && hl.locator.sourceId === sourceId),
+    highlights.filter(
+      (hl) =>
+        (hl.locator.kind === "pdfRect" || hl.locator.kind === "pdfPoint") &&
+        hl.locator.sourceId === sourceId,
+    ),
   );
 
   $effect(() => {
@@ -262,8 +276,11 @@
             {selection}
             {chatEnabled}
             {sourceId}
+            {activeTool}
             {onSelectPassage}
             {onHighlightClick}
+            {onToolHighlight}
+            {onPlaceNote}
           />
         {/each}
       </div>

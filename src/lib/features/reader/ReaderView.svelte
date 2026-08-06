@@ -76,8 +76,97 @@
   let pins = $state<PinnedHighlight[]>([]);
   let highlights = $state<Highlight[]>([]);
   // RFC 0058 Phase 1 (Task 9): the last color picked (swatch or note/ask) is
-  // the sticky default for the next one-click highlight.
-  let stickyColor = $state<HighlightColor>("yellow");
+  // the sticky default for the next one-click highlight. RFC 0074 promotes it
+  // to the *active color* shared by the tools, the swatch row, and the popover.
+  let stickyColor = $state<HighlightColor>(loadActiveColor());
+  // RFC 0074: the active annotation tool. `null` = the reader behaves as it
+  // always has (a selection raises the Note/Ask/Highlight popover).
+  let activeTool = $state<"highlight" | "note" | null>(null);
+
+  const TOOL_COLOR_KEY = "i0i.reader-active-color";
+
+  function loadActiveColor(): HighlightColor {
+    if (typeof localStorage === "undefined") {
+      return "yellow";
+    }
+    const stored = localStorage.getItem(TOOL_COLOR_KEY);
+    return (HIGHLIGHT_COLORS as string[]).includes(stored ?? "")
+      ? (stored as HighlightColor)
+      : "yellow";
+  }
+
+  // The tool is deliberately NOT persisted: a mode restored on open is a mode
+  // you did not choose. The color is, since it is a preference (RFC 0074).
+  function setActiveColor(color: HighlightColor) {
+    stickyColor = color;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(TOOL_COLOR_KEY, color);
+    }
+  }
+
+  function setActiveTool(tool: "highlight" | "note" | null) {
+    activeTool = activeTool === tool ? null : tool;
+  }
+
+  // Escape leaves the mode. A tool you cannot see is a tool you cannot leave.
+  function handleToolKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape" && activeTool) {
+      activeTool = null;
+    }
+  }
+
+  // RFC 0074: the Highlight tool marks the selection outright, then clears it —
+  // `updateSelectionAffordance` runs on every window mouseup, so a live
+  // selection would be re-marked on the next click anywhere in the document.
+  async function highlightFromTool(passage: ReaderTextSelection) {
+    selection = passage;
+    await pickColor(stickyColor);
+  }
+
+  // RFC 0074: place a standalone sticky note at a point on a PDF page, then open
+  // its editor so it can be typed into immediately.
+  async function placeNote(
+    pageIndex: number,
+    x: number,
+    y: number,
+    clientX: number,
+    clientY: number,
+  ) {
+    if (!document || highlightActionInFlight) {
+      return;
+    }
+    const locator: Locator = {
+      kind: "pdfPoint",
+      sourceId: document.sourceId,
+      pageIndex,
+      x,
+      y,
+    };
+    highlightActionInFlight = true;
+    try {
+      const created = await createHighlight({
+        paperId: paper.id,
+        locator,
+        // A sticky is anchored to a spot, not to a passage — there is nothing to
+        // quote, and `excerpt` is non-null in storage.
+        excerpt: "",
+        color: stickyColor,
+      });
+      // Seed the new sticky locally before opening its editor: the popover looks
+      // its target up in `highlights`, and a reload that gets superseded (paper
+      // switch, concurrent refresh) would leave the id pointing at nothing.
+      if (!highlights.some((hl) => hl.id === created.id)) {
+        highlights = [...highlights, created];
+      }
+      openHighlightPopover(created.id, clientX, clientY);
+      await reloadChat();
+    } catch (error) {
+      readerLog("place-note-error", { error: errorDetail(error) }, "error");
+    } finally {
+      highlightActionInFlight = false;
+    }
+  }
+
   let requestedThreadId = $state<string | null>(null);
   // Click-a-highlight popover (RFC 0058 Task 10): which mark's popover is
   // open, and where to anchor it (viewport coords from the click event).
@@ -626,7 +715,9 @@
       const where =
         locator.kind === "pdfRect"
           ? `pdfRect page=${locator.pageIndex} rects=${JSON.parse(locator.rectsJson || "[]").length}`
-          : `textOffset [${locator.startOffset}, ${locator.endOffset}]`;
+          : locator.kind === "textOffset"
+            ? `textOffset [${locator.startOffset}, ${locator.endOffset}]`
+            : locator.kind;
       void debugLog(`resolve OK -> ${where}`);
       const created = await createAgentHighlight({
         paperId: paper.id,
@@ -824,6 +915,11 @@
       return;
     }
     const locator = highlight.locator;
+    // RFC 0074: a sticky note anchors to a point, so there is no passage to
+    // select — its editor is the popover, which the caller already opened.
+    if (locator.kind === "pdfPoint" || locator.kind === "textPoint") {
+      return;
+    }
     const sel: ReaderTextSelection =
       locator.kind === "pdfRect"
         ? {
@@ -850,11 +946,15 @@
   // including the inspector panel the list now lives in.
   function scrollToHighlight(highlight: Highlight) {
     const locator = highlight.locator;
-    if (locator.kind === "pdfRect") {
+    if (locator.kind === "pdfRect" || locator.kind === "pdfPoint") {
       pdfPageRef?.scrollToPage(locator.pageIndex);
       return;
     }
-    htmlReaderRef?.focusOffsets(locator.startOffset, locator.endOffset);
+    if (locator.kind === "textOffset") {
+      htmlReaderRef?.focusOffsets(locator.startOffset, locator.endOffset);
+      return;
+    }
+    htmlReaderRef?.focusOffsets(locator.offset, locator.offset);
   }
 
   function openHighlightById(highlightId: string) {
@@ -1009,6 +1109,8 @@
   }
 </script>
 
+<svelte:window onkeydown={handleToolKeydown} />
+
 <section class="reader-workspace col">
   <!-- RFC 0071: one tool panel. In normal mode it spans the full width above the
        split (so the collapse toggle stays put); in focus mode it lives inside the
@@ -1036,6 +1138,11 @@
           onAutoHighlight={runAutoHighlight}
           hasSelection={selection !== null}
           onHighlight={chatEnabled ? highlightSelection : undefined}
+          toolsEnabled={chatEnabled && !isHtml}
+          {activeTool}
+          activeColor={stickyColor}
+          onSelectTool={setActiveTool}
+          onSelectColor={setActiveColor}
           onNote={chatEnabled ? () => revealSection("notes") : undefined}
           onChat={chatEnabled ? () => revealSection("chat") : undefined}
           {isFocusMode}
@@ -1164,8 +1271,12 @@
                         {selection}
                         {chatEnabled}
                         scale={pdfScale}
+                        {activeTool}
                         onSelectPassage={selectPassage}
                         onHighlightClick={openHighlightPopover}
+                        onToolHighlight={(passage) => void highlightFromTool(passage)}
+                        onPlaceNote={(pageIndex, x, y, clientX, clientY) =>
+                          void placeNote(pageIndex, x, y, clientX, clientY)}
                       />
                     {:else if isAcquiringPdf}
                       <div class="missing-pdf col">

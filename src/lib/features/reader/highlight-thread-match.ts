@@ -19,12 +19,21 @@ type Passage = {
   endOffset?: number;
   pageIndex?: number;
   rectsJson?: string;
+  x?: number;
+  y?: number;
+  offset?: number;
 };
 
 export function samePassage(a: Passage, b: Passage): boolean {
   if (a.kind !== b.kind || a.kind === "document" || a.sourceId !== b.sourceId) return false;
   if (a.kind === "textOffset") return a.startOffset === b.startOffset && a.endOffset === b.endOffset;
   if (a.kind === "pdfRect") return a.pageIndex === b.pageIndex && a.rectsJson === b.rectsJson;
+  // RFC 0074: sticky notes compare on their exact placement. Two notes a pixel
+  // apart are deliberately two notes — but without these arms they would fall
+  // through to `false`, and every "does this collide with an existing mark"
+  // caller would create a duplicate row instead of reusing one.
+  if (a.kind === "pdfPoint") return a.pageIndex === b.pageIndex && a.x === b.x && a.y === b.y;
+  if (a.kind === "textPoint") return a.offset === b.offset;
   return false;
 }
 

@@ -19,7 +19,7 @@
     type PinnedHighlight,
     type ThreadAnchor,
   } from "$lib/domain/chat";
-  import { HIGHLIGHT_COLORS, type Highlight, type HighlightColor } from "$lib/domain/highlight";
+  import { HIGHLIGHT_COLORS, isStickyNote, type Highlight, type HighlightColor } from "$lib/domain/highlight";
   import type {
     MetadataAutofillProgress,
     MetadataCandidate,
@@ -27,6 +27,7 @@
   } from "$lib/domain/library";
   import type { ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
   import { highlightFill, markFill } from "$lib/features/reader/highlight-colors";
+  import StickyGlyph from "$lib/features/reader/StickyGlyph.svelte";
   import { samePassage } from "$lib/features/reader/highlight-thread-match";
   import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
 
@@ -243,7 +244,14 @@
   // invariant: every highlight appears in Marks ∪ Chats exactly once.
   const markRows = $derived(
     annotationRows.filter(
-      (row) => row.highlight.color !== null || row.hasNote || !row.hasConversation,
+      (row) =>
+        // RFC 0074: a sticky note is always a mark, even before it has been
+        // typed into — right after placement it has no note and no color rule
+        // should be able to hide it.
+        isStickyNote(row.highlight.locator) ||
+        row.highlight.color !== null ||
+        row.hasNote ||
+        !row.hasConversation,
     ),
   );
   // RFC 0067 (R1): the Chats section lists every passage conversation; the
@@ -948,7 +956,13 @@
               {:else if filteredAnnotations.length}
                 {#each filteredAnnotations as row (row.highlight.id)}
                   <button class="thread-row" type="button" onclick={() => onOpenHighlight(row.highlight.id)}>
-                    <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
+                    <!-- RFC 0074: the list mirrors the page — a sticky note reads
+                         as its glyph, a passage mark as its color chip. -->
+                    {#if isStickyNote(row.highlight.locator)}
+                      <StickyGlyph color={row.highlight.color} size={13} />
+                    {:else}
+                      <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
+                    {/if}
                     <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
                     {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                     {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
