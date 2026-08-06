@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal } from "@lucide/svelte";
+  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info } from "@lucide/svelte";
   import {
     askAtAnchorStreamed,
     askChatThreadStreamed,
@@ -30,7 +30,9 @@
   import { samePassage } from "$lib/features/reader/highlight-thread-match";
   import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
 
-  type InspectorTab = "annotations" | "meta";
+  // RFC 0071: the reader inspector is a Zotero-style sidebar whose right-edge
+  // icon rail switches between three sections.
+  type InspectorSection = "info" | "notes" | "chat";
   // Annotations-list filters (RFC 0062). Pins → the `starred` filter; Threads →
   // the `conversation` filter.
   type AuthorFilter = "all" | "me" | "ai";
@@ -45,6 +47,8 @@
     stickyColor,
     highlightBusy = false,
     requestedThreadId,
+    requestedSection = null,
+    onConsumeRequestedSection,
     isLoadingChat,
     chatError,
     metadataAutofillProgress,
@@ -76,6 +80,8 @@
     stickyColor: HighlightColor;
     highlightBusy?: boolean;
     requestedThreadId: string | null;
+    requestedSection?: InspectorSection | null;
+    onConsumeRequestedSection?: () => void;
     isLoadingChat: boolean;
     chatError: string;
     metadataAutofillProgress?: MetadataAutofillProgress;
@@ -106,15 +112,27 @@
     onDismissTurnAffordance?: () => void;
   } = $props();
 
-  let activeTab = $state<InspectorTab>("annotations");
+  // Persisted so the rail choice survives the inspector unmounting when the
+  // panel collapses (RFC 0071), and carries across paper switches.
+  const SECTION_KEY = "i0i.reader-inspector-section";
+  let activeSection = $state<InspectorSection>(loadActiveSection());
+
+  function loadActiveSection(): InspectorSection {
+    if (typeof localStorage === "undefined") {
+      return "notes";
+    }
+    const stored = localStorage.getItem(SECTION_KEY);
+    return stored === "info" || stored === "notes" || stored === "chat" ? stored : "notes";
+  }
+
+  $effect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(SECTION_KEY, activeSection);
+    }
+  });
   // Active annotation-list filters (RFC 0062); collapsed behind a labeled Filter
   // control (RFC 0066 R4).
   let filtersOpen = $state(false);
-  // RFC 0067 (R1): the Chats section under the Marks list, collapsible.
-  let chatsOpen = $state(true);
-  // RFC 0068 (R3): passage detail shows Note *or* Chat, one at a time, via a
-  // segmented switch. Pure view state, re-seeded per passage.
-  let detailView = $state<"note" | "chat">("note");
   let filterAuthor = $state<AuthorFilter>("all");
   let filterColor = $state<HighlightColor | null>(null);
   let filterHasNote = $state(false);
@@ -259,7 +277,7 @@
     openThread = virtualThread(anchorFromSelection(selection), selection.selectedText.trim() || "New thread");
     error = "";
     renaming = false;
-    activeTab = "annotations";
+    activeSection = "notes";
   });
 
   // A clicked margin mark (or pin) requests a specific thread to open.
@@ -268,9 +286,21 @@
     if (!threadId) {
       return;
     }
-    activeTab = "annotations";
+    activeSection = sectionForThread(threadId);
     void openThreadById(threadId);
     onConsumeRequestedThread();
+  });
+
+  // RFC 0071: the toolbar's Note/Chat buttons request a section through
+  // ReaderView; apply it and clear the request. Fires on mount too, so revealing
+  // a collapsed panel onto a requested section lands correctly.
+  $effect(() => {
+    const section = requestedSection;
+    if (!section) {
+      return;
+    }
+    activeSection = section;
+    onConsumeRequestedSection?.();
   });
 
   // Background title generation updates the parent `threads` list first; keep
@@ -340,19 +370,28 @@
     if (key !== noteLoadedFor) {
       noteLoadedFor = key;
       noteDraft = currentHighlight?.note ?? "";
-      // RFC 0068: default the passage sub-view — Note if it already has a note
-      // (so the list row title and the opened view agree), else Chat if it has a
-      // conversation, else Note (jotting is the lightweight default).
-      detailView = currentHighlight?.note?.trim()
-        ? "note"
-        : openThread.entries.length > 0
-          ? "chat"
-          : "note";
     }
   });
 
+  // The rail section a reopened thread should land in: Notes if the passage has
+  // a note, Chat if it has a conversation, else Notes (RFC 0071, replacing the
+  // old note/chat detail switch). Whole-paper threads always open in Chat.
+  function sectionForThread(threadId: string): InspectorSection {
+    const thread = threads.find((t) => t.id === threadId);
+    if (thread?.anchor.kind === "document") {
+      return "chat";
+    }
+    const highlight = thread
+      ? highlights.find((hl) => samePassage(thread.anchor, hl.locator))
+      : undefined;
+    if (highlight?.note?.trim()) {
+      return "notes";
+    }
+    return thread && thread.entryCount > 0 ? "chat" : "notes";
+  }
+
   function openWholePaper() {
-    activeTab = "annotations";
+    activeSection = "chat";
     error = "";
     if (documentThread) {
       void openThreadById(documentThread.id);
@@ -578,341 +617,324 @@
     return openPassage ? "Context: selected passage only" : "Context: title + metadata only";
   }
 
-  const tabs: Array<{ id: InspectorTab; label: string }> = [
-    { id: "annotations", label: "Annotations" },
-    { id: "meta", label: "Meta" },
-  ];
 </script>
 
 <aside class="reader-inspector hair-l">
-  <header class="hair-b">
-    <div class="paper-name truncate">{document.title}</div>
-    <div class="mono-dim">paper / selected / reader</div>
-  </header>
+  <div class="inspector-body">
+    <header class="hair-b">
+      <div class="paper-name truncate">{document.title}</div>
+      <div class="mono-dim">paper / selected / reader</div>
+    </header>
 
-  <nav class="inspector-tabs row hair-b" aria-label="Reader Inspector">
-    {#each tabs as tab}
-      <button class:active={activeTab === tab.id} type="button" onclick={() => (activeTab = tab.id)}>
-        {tab.label}
-      </button>
-    {/each}
-  </nav>
-
-  <div class="tab-panel">
-    {#if activeTab === "annotations"}
-      <section>
-        {#if !chatEnabled}
-          <div class="row section-title"><span class="label hot">Annotations</span></div>
-          <p class="empty-note">Add this paper to a Vault to annotate it.</p>
-        {:else if openThread}
-          <div class="row section-title">
-            <button class="link-btn" type="button" onclick={backToThreadList}>‹ Annotations</button>
-            <div class="flex1"></div>
-            {#if !isVirtual}
-              <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
-            {/if}
-            <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}><Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /></button>
+    <div class="tab-panel">
+      {#if activeSection === "info"}
+        <section class="metadata">
+          <div class="meta-grid">
+            <span>id</span><strong>{document.identifier}</strong>
+            <span>cite</span><strong>{document.citationKey}</strong>
+            <span>marks</span><strong>{document.marks.length}</strong>
           </div>
 
-          {#if renaming}
-            <input
-              class="rename-input"
-              bind:value={renameTitle}
-              aria-label="Thread title"
-              onkeydown={(event) => {
-                if (event.key === "Enter") void commitRename();
-                if (event.key === "Escape") renaming = false;
-              }}
-            />
-            <div class="row note-actions">
-              <button class="btn primary" type="button" onclick={() => void commitRename()}>Rename</button>
-            </div>
-          {:else if showTitle}
-            <h3 class="thread-title">{openThread.thread.title}</h3>
-          {/if}
-
-          {#if openPassage}
-            <blockquote>{openPassage}</blockquote>
-          {/if}
-
-          {#if selection}
-            <div class="row swatch-row" role="group" aria-label="Highlight color">
-              {#each HIGHLIGHT_COLORS as color}
-                <button
-                  class="swatch"
-                  class:active={color === stickyColor}
-                  type="button"
-                  disabled={highlightBusy}
-                  style={`background:${highlightFill(color)}`}
-                  aria-label={`Highlight ${color}`}
-                  title={`Highlight ${color}`}
-                  onclick={() => void onPickColor(color)}
-                ></button>
-              {/each}
-            </div>
-          {/if}
-
-          {#if openPassage}
-            <div class="row detail-switch" role="group" aria-label="Passage detail">
-              <button
-                class="switch-btn"
-                class:on={detailView === "note"}
-                type="button"
-                onclick={() => (detailView = "note")}
-              >
-                <StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /> Note
-              </button>
-              <button
-                class="switch-btn"
-                class:on={detailView === "chat"}
-                type="button"
-                onclick={() => (detailView = "chat")}
-              >
-                <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /> Chat
-              </button>
-            </div>
-          {/if}
-
-          {#if openPassage && detailView === "note"}
-            <div class="note-field">
-              <div class="row note-field-head">
-                <span class="label">Note</span>
-                {#if noteDraft.trim() !== (currentHighlight?.note ?? "").trim()}
-                  <button
-                    class="link-btn"
-                    type="button"
-                    disabled={isSavingNote}
-                    onclick={() => void saveNote()}
-                  >
-                    {isSavingNote ? "Saving…" : "Save"}
-                  </button>
-                {/if}
-              </div>
-              <textarea
-                bind:value={noteDraft}
-                aria-label="Note on this passage"
-                placeholder="Jot a note on this passage… (Enter saves, Shift+Enter newline)"
-                rows="2"
-                disabled={isSavingNote}
-                onkeydown={handleNoteKeydown}
-              ></textarea>
-            </div>
-          {/if}
-
-          {#if !openPassage || detailView === "chat"}
-          <div class="thread-view">
-            {#each openThread.entries as entry}
-              <div class="entry {entry.kind}">
-                <div class="row entry-head">
-                  <span class="label">{entryAuthor(entry)}</span>
-                  <div class="flex1"></div>
-                  <button
-                    class="pin-btn"
-                    class:pinned={entry.pinned}
-                    type="button"
-                    aria-label={entry.pinned ? "unpin" : "pin"}
-                    onclick={() => void togglePin(entry)}
-                  >
-                    {entry.pinned ? "★" : "☆"}
-                  </button>
-                </div>
-                <p>{entry.body}</p>
-                {#if entry.kind === "answer" && chatContextLabel(entry)}
-                  <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
-                {/if}
-              </div>
-            {/each}
-
-            {#if pendingQuestion !== null}
-              <div class="entry question">
-                <div class="label">You</div>
-                <p>{pendingQuestion}</p>
-              </div>
-              <div class="entry answer">
-                <div class="label">AI</div>
-                <p>{streamingAnswer ? streamingAnswer : "…"}</p>
-              </div>
-            {/if}
-
-            {#if !openThread.entries.length && pendingQuestion === null}
-              <p class="empty-note">Ask a question below to start a conversation about this passage.</p>
-            {/if}
-          </div>
-
-          <div class="thread-input">
-            <textarea
-              bind:value={chatInput}
-              aria-label="Ask a question"
-              placeholder="Ask the AI about this passage… (Enter sends, Shift+Enter newline)"
-              rows="3"
-              disabled={isBusy}
-              onkeydown={handleComposerKeydown}
-            ></textarea>
-            <div class="row note-actions">
-              <button class="btn primary" type="button" disabled={!canSubmit} onclick={() => void ask()}>
-                {isBusy ? "…" : "Ask"}
-              </button>
-            </div>
-          </div>
-          {/if}
-
-          {#if visibleError}
-            <p class="note-error">{visibleError}</p>
-          {/if}
-        {:else}
-          <div class="row section-title">
-            <span class="label hot">Marks</span>
-            <div class="flex1"></div>
-            <span class="mono-dim">{markRows.length}</span>
-          </div>
-
-          <div class="filter-control">
-            <div class="row filter-head">
-              <button class="filter-toggle" class:on={filtersOpen || anyFilterActive} type="button" onclick={() => (filtersOpen = !filtersOpen)}>
-                <SlidersHorizontal size={12} strokeWidth={1.75} aria-hidden="true" />
-                Filter{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
-              </button>
+          <MetadataPanel
+            paperId={document.paperId}
+            title={document.title}
+            authors={document.authors}
+            venue={document.venue}
+            year={document.year}
+            tags={document.tags}
+            progress={metadataAutofillProgress}
+            isAutofilling={isAutofillingMetadata}
+            onAutofill={onAutofillMetadata}
+            onApplyCandidate={onApplyMetadataCandidate}
+            onSaveMetadata={onUpdatePaperMetadata}
+          />
+        </section>
+      {:else}
+        <section>
+          {#if !chatEnabled}
+            <div class="row section-title"><span class="label hot">{activeSection === "chat" ? "Chat" : "Notes"}</span></div>
+            <p class="empty-note">Add this paper to a Vault to {activeSection === "chat" ? "chat about" : "annotate"} it.</p>
+          {:else if openThread && (activeSection === "chat" || openPassage)}
+            <!-- A focused passage (or the whole-paper thread) is open. The rail
+                 section decides the lens: Notes edits its note, Chat holds its
+                 conversation. `openThread` persists across a section switch. -->
+            <div class="row section-title">
+              <button class="link-btn" type="button" onclick={backToThreadList}>‹ {activeSection === "chat" ? "Chat" : "Marks"}</button>
               <div class="flex1"></div>
-              {#if anyFilterActive}
-                <button class="link-btn" type="button" onclick={clearFilters}>Clear</button>
+              {#if activeSection === "chat"}
+                {#if !isVirtual}
+                  <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
+                {/if}
+                <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}><Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /></button>
               {/if}
             </div>
 
-            {#if filtersOpen}
-              <div class="filter-panel">
-                <div class="filter-group">
-                  <span class="filter-label">Author</span>
-                  <div class="row filter-options">
-                    <button class="chip-btn" class:on={filterAuthor === "all"} type="button" onclick={() => (filterAuthor = "all")}>All</button>
-                    <button class="chip-btn" class:on={filterAuthor === "me"} type="button" onclick={() => (filterAuthor = "me")}>Me</button>
-                    <button class="chip-btn" class:on={filterAuthor === "ai"} type="button" onclick={() => (filterAuthor = "ai")}>
-                      <Sparkles size={11} strokeWidth={1.75} aria-hidden="true" /> AI
-                    </button>
-                  </div>
-                </div>
+            {#if renaming}
+              <input
+                class="rename-input"
+                bind:value={renameTitle}
+                aria-label="Thread title"
+                onkeydown={(event) => {
+                  if (event.key === "Enter") void commitRename();
+                  if (event.key === "Escape") renaming = false;
+                }}
+              />
+              <div class="row note-actions">
+                <button class="btn primary" type="button" onclick={() => void commitRename()}>Rename</button>
+              </div>
+            {:else if showTitle}
+              <h3 class="thread-title">{openThread.thread.title}</h3>
+            {/if}
 
-                <div class="filter-group">
-                  <span class="filter-label">Color</span>
-                  <div class="row filter-options">
+            {#if openPassage}
+              <blockquote>{openPassage}</blockquote>
+            {/if}
+
+            {#if activeSection === "notes"}
+              {#if selection}
+                <div class="row swatch-row" role="group" aria-label="Highlight color">
+                  {#each HIGHLIGHT_COLORS as color}
                     <button
-                      class="color-dot none"
-                      class:on={filterColor === null}
+                      class="swatch"
+                      class:active={color === stickyColor}
                       type="button"
-                      aria-label="Any color"
-                      title="Any color"
-                      onclick={() => (filterColor = null)}
+                      disabled={highlightBusy}
+                      style={`background:${highlightFill(color)}`}
+                      aria-label={`Highlight ${color}`}
+                      title={`Highlight ${color}`}
+                      onclick={() => void onPickColor(color)}
                     ></button>
-                    {#each HIGHLIGHT_COLORS as color}
-                      <button
-                        class="color-dot"
-                        class:on={filterColor === color}
-                        type="button"
-                        style={`background:${highlightFill(color)}`}
-                        aria-label={`Filter ${color}`}
-                        title={color}
-                        onclick={() => (filterColor = filterColor === color ? null : color)}
-                      ></button>
-                    {/each}
-                  </div>
+                  {/each}
                 </div>
+              {/if}
 
-                <div class="filter-group">
-                  <span class="filter-label">Has</span>
-                  <div class="row filter-options">
-                    <button class="chip-btn" class:on={filterHasNote} type="button" onclick={() => (filterHasNote = !filterHasNote)}>
-                      <StickyNote size={11} strokeWidth={1.75} aria-hidden="true" /> Note
+              <div class="note-field">
+                <div class="row note-field-head">
+                  <span class="label">Note</span>
+                  {#if noteDraft.trim() !== (currentHighlight?.note ?? "").trim()}
+                    <button
+                      class="link-btn"
+                      type="button"
+                      disabled={isSavingNote}
+                      onclick={() => void saveNote()}
+                    >
+                      {isSavingNote ? "Saving…" : "Save"}
                     </button>
-                    <button class="chip-btn" class:on={filterHasConversation} type="button" onclick={() => (filterHasConversation = !filterHasConversation)}>
-                      <MessageSquare size={11} strokeWidth={1.75} aria-hidden="true" /> Chat
-                    </button>
-                    <button class="chip-btn" class:on={filterStarred} type="button" onclick={() => (filterStarred = !filterStarred)}>
-                      <Star size={11} strokeWidth={1.75} aria-hidden="true" /> Starred
-                    </button>
+                  {/if}
+                </div>
+                <textarea
+                  bind:value={noteDraft}
+                  aria-label="Note on this passage"
+                  placeholder="Jot a note on this passage… (Enter saves, Shift+Enter newline)"
+                  rows="2"
+                  disabled={isSavingNote}
+                  onkeydown={handleNoteKeydown}
+                ></textarea>
+              </div>
+            {:else}
+              <div class="thread-view">
+                {#each openThread.entries as entry}
+                  <div class="entry {entry.kind}">
+                    <div class="row entry-head">
+                      <span class="label">{entryAuthor(entry)}</span>
+                      <div class="flex1"></div>
+                      <button
+                        class="pin-btn"
+                        class:pinned={entry.pinned}
+                        type="button"
+                        aria-label={entry.pinned ? "unpin" : "pin"}
+                        onclick={() => void togglePin(entry)}
+                      >
+                        {entry.pinned ? "★" : "☆"}
+                      </button>
+                    </div>
+                    <p>{entry.body}</p>
+                    {#if entry.kind === "answer" && chatContextLabel(entry)}
+                      <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
+                    {/if}
                   </div>
+                {/each}
+
+                {#if pendingQuestion !== null}
+                  <div class="entry question">
+                    <div class="label">You</div>
+                    <p>{pendingQuestion}</p>
+                  </div>
+                  <div class="entry answer">
+                    <div class="label">AI</div>
+                    <p>{streamingAnswer ? streamingAnswer : "…"}</p>
+                  </div>
+                {/if}
+
+                {#if !openThread.entries.length && pendingQuestion === null}
+                  <p class="empty-note">Ask a question below to start a conversation about this passage.</p>
+                {/if}
+              </div>
+
+              <div class="thread-input">
+                <textarea
+                  bind:value={chatInput}
+                  aria-label="Ask a question"
+                  placeholder="Ask the AI about this passage… (Enter sends, Shift+Enter newline)"
+                  rows="3"
+                  disabled={isBusy}
+                  onkeydown={handleComposerKeydown}
+                ></textarea>
+                <div class="row note-actions">
+                  <button class="btn primary" type="button" disabled={!canSubmit} onclick={() => void ask()}>
+                    {isBusy ? "…" : "Ask"}
+                  </button>
                 </div>
               </div>
             {/if}
-          </div>
 
-          <div class="thread-list">
-            {#if isLoadingChat}
-              <p class="empty-note">Loading annotations…</p>
-            {:else if filteredAnnotations.length}
-              {#each filteredAnnotations as row (row.highlight.id)}
-                <button class="thread-row" type="button" onclick={() => onOpenHighlight(row.highlight.id)}>
-                  <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
-                  <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
-                  {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                  {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                  {#if row.hasConversation}<span class="badge" title="has a conversation"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                  {#if row.starred}<span class="badge" title="starred"><Star size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                </button>
-              {/each}
-            {:else if anyFilterActive}
-              <p class="empty-note">No marks match these filters. <button class="link-btn" type="button" onclick={clearFilters}>Clear</button></p>
-            {:else}
-              <p class="empty-note">Highlight or note a passage in the Reader to see it here.</p>
+            {#if visibleError}
+              <p class="note-error">{visibleError}</p>
             {/if}
-          </div>
-
-          <div class="chats-section">
-            <div class="row filter-head">
-              <button class="filter-toggle chats-toggle" class:on={chatsOpen} type="button" onclick={() => (chatsOpen = !chatsOpen)}>
-                <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
-                Chats{chatCount > 0 ? ` · ${chatCount}` : ""}
-              </button>
+          {:else if activeSection === "notes"}
+            <div class="row section-title">
+              <span class="label hot">Marks</span>
+              <div class="flex1"></div>
+              <span class="mono-dim">{markRows.length}</span>
             </div>
 
-            {#if chatsOpen}
-              <div class="thread-list">
-                <button class="ask-paper-row" type="button" onclick={openWholePaper}>
-                  <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
-                  <span class="ask-paper-title">Ask about this paper</span>
-                  {#if documentThread && documentThread.entryCount > 0}
-                    <span class="mono-dim">{documentThread.entryCount}</span>
-                  {/if}
+            <div class="filter-control">
+              <div class="row filter-head">
+                <button class="filter-toggle" class:on={filtersOpen || anyFilterActive} type="button" onclick={() => (filtersOpen = !filtersOpen)}>
+                  <SlidersHorizontal size={12} strokeWidth={1.75} aria-hidden="true" />
+                  Filter{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
                 </button>
+                <div class="flex1"></div>
+                {#if anyFilterActive}
+                  <button class="link-btn" type="button" onclick={clearFilters}>Clear</button>
+                {/if}
+              </div>
 
-                {#each passageChats as chat (chat.id)}
-                  <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>
-                    <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
-                    <span class="thread-row-title">{chat.title.trim() || anchorSelectedText(chat.anchor) || "Conversation"}</span>
-                    <span class="mono-dim">{chat.entryCount}</span>
+              {#if filtersOpen}
+                <div class="filter-panel">
+                  <div class="filter-group">
+                    <span class="filter-label">Author</span>
+                    <div class="row filter-options">
+                      <button class="chip-btn" class:on={filterAuthor === "all"} type="button" onclick={() => (filterAuthor = "all")}>All</button>
+                      <button class="chip-btn" class:on={filterAuthor === "me"} type="button" onclick={() => (filterAuthor = "me")}>Me</button>
+                      <button class="chip-btn" class:on={filterAuthor === "ai"} type="button" onclick={() => (filterAuthor = "ai")}>
+                        <Sparkles size={11} strokeWidth={1.75} aria-hidden="true" /> AI
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="filter-group">
+                    <span class="filter-label">Color</span>
+                    <div class="row filter-options">
+                      <button
+                        class="color-dot none"
+                        class:on={filterColor === null}
+                        type="button"
+                        aria-label="Any color"
+                        title="Any color"
+                        onclick={() => (filterColor = null)}
+                      ></button>
+                      {#each HIGHLIGHT_COLORS as color}
+                        <button
+                          class="color-dot"
+                          class:on={filterColor === color}
+                          type="button"
+                          style={`background:${highlightFill(color)}`}
+                          aria-label={`Filter ${color}`}
+                          title={color}
+                          onclick={() => (filterColor = filterColor === color ? null : color)}
+                        ></button>
+                      {/each}
+                    </div>
+                  </div>
+
+                  <div class="filter-group">
+                    <span class="filter-label">Has</span>
+                    <div class="row filter-options">
+                      <button class="chip-btn" class:on={filterHasNote} type="button" onclick={() => (filterHasNote = !filterHasNote)}>
+                        <StickyNote size={11} strokeWidth={1.75} aria-hidden="true" /> Note
+                      </button>
+                      <button class="chip-btn" class:on={filterHasConversation} type="button" onclick={() => (filterHasConversation = !filterHasConversation)}>
+                        <MessageSquare size={11} strokeWidth={1.75} aria-hidden="true" /> Chat
+                      </button>
+                      <button class="chip-btn" class:on={filterStarred} type="button" onclick={() => (filterStarred = !filterStarred)}>
+                        <Star size={11} strokeWidth={1.75} aria-hidden="true" /> Starred
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+            </div>
+
+            <div class="thread-list">
+              {#if isLoadingChat}
+                <p class="empty-note">Loading annotations…</p>
+              {:else if filteredAnnotations.length}
+                {#each filteredAnnotations as row (row.highlight.id)}
+                  <button class="thread-row" type="button" onclick={() => onOpenHighlight(row.highlight.id)}>
+                    <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
+                    <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
+                    {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                    {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                    {#if row.hasConversation}<span class="badge" title="has a conversation"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                    {#if row.starred}<span class="badge" title="starred"><Star size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                   </button>
                 {/each}
-              </div>
+              {:else if anyFilterActive}
+                <p class="empty-note">No marks match these filters. <button class="link-btn" type="button" onclick={clearFilters}>Clear</button></p>
+              {:else}
+                <p class="empty-note">Highlight or note a passage in the Reader to see it here.</p>
+              {/if}
+            </div>
+
+            {#if visibleError}
+              <p class="note-error">{visibleError}</p>
             {/if}
-          </div>
+          {:else}
+            <div class="row section-title">
+              <span class="label hot">Chat</span>
+              <div class="flex1"></div>
+              <span class="mono-dim">{chatCount}</span>
+            </div>
 
-          {#if visibleError}
-            <p class="note-error">{visibleError}</p>
+            <div class="thread-list">
+              <button class="ask-paper-row" type="button" onclick={openWholePaper}>
+                <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
+                <span class="ask-paper-title">Ask about this paper</span>
+                {#if documentThread && documentThread.entryCount > 0}
+                  <span class="mono-dim">{documentThread.entryCount}</span>
+                {/if}
+              </button>
+
+              {#each passageChats as chat (chat.id)}
+                <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>
+                  <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
+                  <span class="thread-row-title">{chat.title.trim() || anchorSelectedText(chat.anchor) || "Conversation"}</span>
+                  <span class="mono-dim">{chat.entryCount}</span>
+                </button>
+              {/each}
+            </div>
+
+            {#if visibleError}
+              <p class="note-error">{visibleError}</p>
+            {/if}
           {/if}
-        {/if}
-      </section>
-    {:else}
-      <section class="metadata">
-        <div class="meta-grid">
-          <span>id</span><strong>{document.identifier}</strong>
-          <span>cite</span><strong>{document.citationKey}</strong>
-          <span>marks</span><strong>{document.marks.length}</strong>
-        </div>
-
-        <MetadataPanel
-          paperId={document.paperId}
-          title={document.title}
-          authors={document.authors}
-          venue={document.venue}
-          year={document.year}
-          tags={document.tags}
-          progress={metadataAutofillProgress}
-          isAutofilling={isAutofillingMetadata}
-          onAutofill={onAutofillMetadata}
-          onApplyCandidate={onApplyMetadataCandidate}
-          onSaveMetadata={onUpdatePaperMetadata}
-        />
-      </section>
-    {/if}
+        </section>
+      {/if}
+    </div>
   </div>
+
+  <nav class="section-rail" aria-label="Reader sections">
+    <button class="rail-btn" class:active={activeSection === "info"} type="button" title="Info" aria-label="Info" onclick={() => (activeSection = "info")}>
+      <Info size={16} strokeWidth={1.75} aria-hidden="true" />
+    </button>
+    <button class="rail-btn" class:active={activeSection === "notes"} type="button" title="Notes" aria-label="Notes" onclick={() => (activeSection = "notes")}>
+      <StickyNote size={16} strokeWidth={1.75} aria-hidden="true" />
+    </button>
+    <button class="rail-btn" class:active={activeSection === "chat"} type="button" title="Chat" aria-label="Chat" onclick={() => (activeSection = "chat")}>
+      <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />
+    </button>
+  </nav>
 </aside>
 
 <style>
@@ -921,9 +943,52 @@
     height: 100%;
     flex-shrink: 0;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     overflow: hidden;
     background: var(--panel);
+  }
+
+  .inspector-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* RFC 0071: the right-edge icon rail switches Info / Notes / Chat. */
+  .section-rail {
+    flex-shrink: 0;
+    width: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 0;
+    border-left: 1px solid var(--border);
+    background: var(--bg-1);
+  }
+
+  .rail-btn {
+    width: 40px;
+    height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-left: 2px solid transparent;
+    background: transparent;
+    color: var(--fg-3);
+    cursor: pointer;
+  }
+
+  .rail-btn:hover {
+    color: var(--fg-1);
+  }
+
+  .rail-btn.active {
+    border-left-color: var(--amber);
+    background: rgba(242, 169, 59, 0.06);
+    color: var(--amber);
   }
 
   header {
@@ -937,38 +1002,6 @@
     margin-bottom: 2px;
     color: var(--amber);
     font-size: 11px;
-  }
-
-  .inspector-tabs {
-    height: 30px;
-    flex-shrink: 0;
-    background: var(--bg);
-  }
-
-  .inspector-tabs button {
-    flex: 1;
-    border: 0;
-    border-right: 1px solid var(--border);
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--fg-3);
-    font: inherit;
-    font-size: 10px;
-    cursor: pointer;
-  }
-
-  .inspector-tabs button:last-child {
-    border-right: 0;
-  }
-
-  .inspector-tabs button:hover {
-    color: var(--fg-1);
-  }
-
-  .inspector-tabs button.active {
-    border-bottom-color: var(--amber);
-    background: rgba(242, 169, 59, 0.06);
-    color: var(--amber);
   }
 
   .tab-panel {
@@ -1018,42 +1051,6 @@
   .swatch.active {
     border-color: var(--fg-1);
     box-shadow: 0 0 0 1px var(--fg-1);
-  }
-
-  /* RFC 0068 (R3): Note/Chat segmented switch above the passage detail. */
-  .detail-switch {
-    margin-top: 10px;
-    gap: 0;
-    border: 1px solid var(--border-2);
-    border-radius: 5px;
-    overflow: hidden;
-    width: fit-content;
-  }
-
-  .switch-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 12px;
-    border: 0;
-    background: transparent;
-    color: var(--fg-3);
-    font: inherit;
-    font-size: 10px;
-    cursor: pointer;
-  }
-
-  .switch-btn + .switch-btn {
-    border-left: 1px solid var(--border-2);
-  }
-
-  .switch-btn:hover {
-    color: var(--fg-1);
-  }
-
-  .switch-btn.on {
-    background: rgba(242, 169, 59, 0.1);
-    color: var(--amber);
   }
 
   .note-field {
@@ -1318,13 +1315,6 @@
 
   .filter-control {
     margin-top: 10px;
-  }
-
-  /* RFC 0067 (R1): Chats section below the Marks list. */
-  .chats-section {
-    margin-top: 16px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
   }
 
   .filter-head {

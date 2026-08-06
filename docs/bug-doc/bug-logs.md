@@ -1,0 +1,11 @@
+# Bug lost
+- Title formatting ![alt text](<Screenshot 2026-08-06 at 10.06.05.png>)
+- Can't attach note ![alt text](<Screenshot 2026-08-06 at 10.09.08.png>)
+    - You need to change color first..
+- Passage marking not really working ![alt text](<Screenshot 2026-08-06 at 10.12.07.png>)
+- The list of marks should be blow the text-input dialogue
+- Ask in PDF leads to Note dialgue
+- Too Slow when marked and you navigate
+    - Scrolling is too slow
+    - Its faster when you zoom out
+- One needs to add a collapsable index structure on the left side

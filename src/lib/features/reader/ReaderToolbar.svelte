@@ -1,10 +1,26 @@
 <script lang="ts">
-  import { Search, ZoomIn, ZoomOut, ChevronUp, ChevronDown, X, Globe, Sparkles } from "@lucide/svelte";
+  import {
+    Search,
+    ZoomIn,
+    ZoomOut,
+    ChevronUp,
+    ChevronDown,
+    X,
+    Globe,
+    Sparkles,
+    PanelRightClose,
+    PanelRightOpen,
+    Highlighter,
+    StickyNote,
+    MessageSquare,
+    Maximize2,
+    Minimize2,
+  } from "@lucide/svelte";
   import AiHighlightMenu from "$lib/features/reader/AiHighlightMenu.svelte";
   import type { AutoHighlightCategory } from "$lib/bridge/chat";
 
-  // Persistent, document-level reader toolbar (RFC 0063). Presentational: it owns
-  // no document behavior — zoom, view, and search are delegated up to ReaderView.
+  // Persistent, document-level reader tool panel (RFC 0063, 0071). Presentational:
+  // it owns no document behavior — every action is delegated up to ReaderView.
   let {
     contentKind,
     zoomScale,
@@ -23,6 +39,14 @@
     aiEnabled = false,
     aiBusy = false,
     onAutoHighlight,
+    hasSelection = false,
+    onHighlight,
+    onNote,
+    onChat,
+    isFocusMode = false,
+    onToggleFocus,
+    inspectorCollapsed = false,
+    onToggleInspector,
   }: {
     contentKind?: string;
     zoomScale?: number;
@@ -41,6 +65,16 @@
     aiEnabled?: boolean;
     aiBusy?: boolean;
     onAutoHighlight?: (categories: AutoHighlightCategory[]) => void;
+    // Highlight the current selection; enabled only while text is selected.
+    hasSelection?: boolean;
+    onHighlight?: () => void;
+    // Reveal the inspector's Notes / Chat section.
+    onNote?: () => void;
+    onChat?: () => void;
+    isFocusMode?: boolean;
+    onToggleFocus?: () => void;
+    inspectorCollapsed?: boolean;
+    onToggleInspector?: () => void;
   } = $props();
 
   let aiMenuOpen = $state(false);
@@ -49,7 +83,7 @@
   // button, so no ancestor `overflow` clips it. Store its top-left.
   let aiMenuPos = $state<{ left: number; top: number } | null>(null);
 
-  const AI_MENU_WIDTH = 264;
+  const AI_MENU_WIDTH = 360;
 
   function toggleAiMenu() {
     if (aiMenuOpen) {
@@ -75,6 +109,7 @@
 
   const showZoom = $derived(zoomScale !== undefined);
   const viewLabel = $derived(contentKind === "html" ? "HTML" : "PDF");
+  const showTools = $derived(Boolean(onHighlight || onNote || onChat || aiEnabled));
 
   function handleSearchKeydown(event: KeyboardEvent) {
     if (event.key === "Enter") {
@@ -95,56 +130,91 @@
         <Globe size={13} strokeWidth={1.75} aria-hidden="true" /> Read as HTML
       </button>
     {/if}
-  </div>
 
-  <div class="row search" class:disabled={!searchEnabled}>
-    <Search size={13} strokeWidth={1.75} aria-hidden="true" />
-    <input
-      type="text"
-      value={searchQuery}
-      disabled={!searchEnabled}
-      placeholder={searchEnabled ? "Search in document…" : "Search (HTML only)"}
-      title={searchEnabled ? "Search in document" : "In-document search is available for HTML documents"}
-      aria-label="Search in document"
-      oninput={(event) => onSearch?.((event.currentTarget as HTMLInputElement).value)}
-      onkeydown={handleSearchKeydown}
-    />
-    {#if searchEnabled && searchQuery}
-      <span class="count mono-dim">{matchCount ? `${activeMatch + 1}/${matchCount}` : "0/0"}</span>
-      <button class="nav-btn" type="button" title="Previous match" aria-label="Previous match" disabled={!matchCount} onclick={() => onPrevMatch?.()}>
-        <ChevronUp size={13} strokeWidth={1.75} aria-hidden="true" />
-      </button>
-      <button class="nav-btn" type="button" title="Next match" aria-label="Next match" disabled={!matchCount} onclick={() => onNextMatch?.()}>
-        <ChevronDown size={13} strokeWidth={1.75} aria-hidden="true" />
-      </button>
-      <button class="nav-btn" type="button" title="Clear search" aria-label="Clear search" onclick={() => onClearSearch?.()}>
-        <X size={13} strokeWidth={1.75} aria-hidden="true" />
-      </button>
+    {#if showTools}
+      <span class="divider" aria-hidden="true"></span>
+      {#if onHighlight}
+        <button class="tool-btn icon" type="button" title="Highlight selection" aria-label="Highlight selection" disabled={!hasSelection} onclick={onHighlight}>
+          <Highlighter size={15} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+      {/if}
+      {#if onNote}
+        <button class="tool-btn icon" type="button" title="Notes" aria-label="Notes" onclick={onNote}>
+          <StickyNote size={15} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+      {/if}
+      {#if onChat}
+        <button class="tool-btn icon" type="button" title="Chat" aria-label="Chat" onclick={onChat}>
+          <MessageSquare size={15} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+      {/if}
+      {#if aiEnabled}
+        <button
+          bind:this={aiButton}
+          class="tool-btn ai icon"
+          class:on={aiMenuOpen}
+          type="button"
+          title="Highlight with AI"
+          aria-label="Highlight with AI"
+          onclick={toggleAiMenu}
+        >
+          <Sparkles size={15} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+        {#if aiMenuOpen && aiMenuPos}
+          <AiHighlightMenu
+            busy={aiBusy}
+            left={aiMenuPos.left}
+            top={aiMenuPos.top}
+            onRun={runAutoHighlight}
+            onClose={() => (aiMenuOpen = false)}
+          />
+        {/if}
+      {/if}
     {/if}
   </div>
 
-  <div class="row right">
-    {#if aiEnabled}
-      <button
-        bind:this={aiButton}
-        class="tool-btn ai"
-        class:on={aiMenuOpen}
-        type="button"
-        title="Highlight with AI"
-        onclick={toggleAiMenu}
-      >
-        <Sparkles size={13} strokeWidth={1.75} aria-hidden="true" />
-        {aiBusy ? "Marking…" : "Highlight with AI"}
-      </button>
-      {#if aiMenuOpen && aiMenuPos}
-        <AiHighlightMenu
-          busy={aiBusy}
-          left={aiMenuPos.left}
-          top={aiMenuPos.top}
-          onRun={runAutoHighlight}
-          onClose={() => (aiMenuOpen = false)}
-        />
+  {#if searchEnabled}
+    <div class="row search">
+      <Search size={13} strokeWidth={1.75} aria-hidden="true" />
+      <input
+        type="text"
+        value={searchQuery}
+        placeholder="Search in document…"
+        title="Search in document"
+        aria-label="Search in document"
+        oninput={(event) => onSearch?.((event.currentTarget as HTMLInputElement).value)}
+        onkeydown={handleSearchKeydown}
+      />
+      {#if searchQuery}
+        <span class="count mono-dim">{matchCount ? `${activeMatch + 1}/${matchCount}` : "0/0"}</span>
+        <button class="nav-btn" type="button" title="Previous match" aria-label="Previous match" disabled={!matchCount} onclick={() => onPrevMatch?.()}>
+          <ChevronUp size={13} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+        <button class="nav-btn" type="button" title="Next match" aria-label="Next match" disabled={!matchCount} onclick={() => onNextMatch?.()}>
+          <ChevronDown size={13} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+        <button class="nav-btn" type="button" title="Clear search" aria-label="Clear search" onclick={() => onClearSearch?.()}>
+          <X size={13} strokeWidth={1.75} aria-hidden="true" />
+        </button>
       {/if}
+    </div>
+  {/if}
+
+  <div class="row right">
+    {#if onToggleFocus}
+      <button
+        class="tool-btn icon"
+        type="button"
+        title={isFocusMode ? "Exit focus" : "Focus"}
+        aria-label={isFocusMode ? "Exit focus" : "Focus"}
+        onclick={onToggleFocus}
+      >
+        {#if isFocusMode}
+          <Minimize2 size={15} strokeWidth={1.75} aria-hidden="true" />
+        {:else}
+          <Maximize2 size={15} strokeWidth={1.75} aria-hidden="true" />
+        {/if}
+      </button>
     {/if}
     {#if showZoom}
       <div class="zoom-group row">
@@ -156,6 +226,22 @@
           <ZoomIn size={14} strokeWidth={1.75} aria-hidden="true" />
         </button>
       </div>
+    {/if}
+    {#if onToggleInspector}
+      <span class="divider" aria-hidden="true"></span>
+      <button
+        class="tool-btn icon"
+        type="button"
+        title={inspectorCollapsed ? "Show panel" : "Hide panel"}
+        aria-label={inspectorCollapsed ? "Show panel" : "Hide panel"}
+        onclick={onToggleInspector}
+      >
+        {#if inspectorCollapsed}
+          <PanelRightOpen size={15} strokeWidth={1.75} aria-hidden="true" />
+        {:else}
+          <PanelRightClose size={15} strokeWidth={1.75} aria-hidden="true" />
+        {/if}
+      </button>
     {/if}
   </div>
 </div>
@@ -182,14 +268,20 @@
     justify-content: flex-end;
   }
 
+  .divider {
+    width: 1px;
+    height: 18px;
+    flex-shrink: 0;
+    background: var(--border-2);
+  }
+
   .tool-btn.ai {
-    border-color: var(--border-2);
     color: var(--amber);
   }
 
   .tool-btn.ai:hover,
   .tool-btn.ai.on {
-    border-color: var(--amber);
+    border-color: var(--border-2);
     background: rgba(242, 169, 59, 0.08);
   }
 
@@ -213,10 +305,6 @@
     border-radius: 4px;
     background: var(--bg);
     color: var(--fg-3);
-  }
-
-  .search.disabled {
-    opacity: 0.55;
   }
 
   .search input {
@@ -245,6 +333,7 @@
     color: var(--fg-2);
     font: inherit;
     font-size: 10px;
+    line-height: 1;
     cursor: pointer;
     padding: 3px 6px;
     border-radius: 3px;

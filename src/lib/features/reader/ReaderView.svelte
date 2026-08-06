@@ -124,6 +124,40 @@
   let matchCount = $state(0);
   let activeMatch = $state(0);
 
+  // RFC 0071: the inspector can collapse to a full-width reading surface. The
+  // choice is remembered so reopening a paper keeps it.
+  const INSPECTOR_COLLAPSED_KEY = "i0i.reader-inspector-collapsed";
+  let inspectorCollapsed = $state(loadInspectorCollapsed());
+
+  function loadInspectorCollapsed(): boolean {
+    return typeof localStorage !== "undefined" && localStorage.getItem(INSPECTOR_COLLAPSED_KEY) === "1";
+  }
+
+  function toggleInspector() {
+    inspectorCollapsed = !inspectorCollapsed;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(INSPECTOR_COLLAPSED_KEY, inspectorCollapsed ? "1" : "0");
+    }
+  }
+
+  // RFC 0071: the toolbar's Note / Chat buttons ask the inspector to show a
+  // section, revealing the panel first if collapsed; ReaderInspector consumes
+  // the request. Highlight acts directly on the current selection.
+  let requestedSection = $state<"info" | "notes" | "chat" | null>(null);
+
+  function revealSection(section: "notes" | "chat") {
+    requestedSection = section;
+    openThreadsPanel();
+  }
+
+  function consumeRequestedSection() {
+    requestedSection = null;
+  }
+
+  function highlightSelection() {
+    void pickColor(stickyColor);
+  }
+
   const document = $derived<ReaderDocument | null>(readerDocument);
   const chatEnabled = $derived(isPaperInLibrary(paper.id));
   const activeCandidate = $derived(candidate && !chatEnabled ? candidate : undefined);
@@ -867,6 +901,11 @@
   function openThreadsPanel() {
     if (isFocusMode) {
       focusThreadsMode = "open";
+    } else if (inspectorCollapsed) {
+      // Annotating or asking reveals the panel for this session, but must not
+      // overwrite the saved collapse preference — only the toolbar toggle does
+      // that (RFC 0071). Otherwise an incidental text selection would erase it.
+      inspectorCollapsed = false;
     }
   }
 
@@ -897,6 +936,71 @@
 </script>
 
 <section class="reader-workspace col">
+  <!-- RFC 0071: one tool panel. In normal mode it spans the full width above the
+       split (so the collapse toggle stays put); in focus mode it lives inside the
+       reader pane. Defined once here, rendered in exactly one place per mode. -->
+  {#snippet toolbarStrip()}
+    {#if document}
+      <div class="toolbar-strip col">
+        <ReaderToolbar
+          contentKind={document.contentKind}
+          zoomScale={hasCachedPdf ? pdfScale : undefined}
+          onZoomIn={zoomIn}
+          onZoomOut={zoomOut}
+          {canReadAsHtml}
+          onReadAsHtml={() => void readAsHtml()}
+          searchEnabled={isHtml}
+          {searchQuery}
+          {matchCount}
+          {activeMatch}
+          onSearch={runSearch}
+          onNextMatch={nextMatch}
+          onPrevMatch={prevMatch}
+          onClearSearch={clearReaderSearch}
+          aiEnabled={chatEnabled}
+          {aiBusy}
+          onAutoHighlight={runAutoHighlight}
+          hasSelection={selection !== null}
+          onHighlight={chatEnabled ? highlightSelection : undefined}
+          onNote={chatEnabled ? () => revealSection("notes") : undefined}
+          onChat={chatEnabled ? () => revealSection("chat") : undefined}
+          {isFocusMode}
+          {onToggleFocus}
+          {inspectorCollapsed}
+          onToggleInspector={isFocusMode ? undefined : toggleInspector}
+        />
+        {#if aiBusy || showTurnAffordance || aiError || aiUnresolvedCount > 0}
+          <div class="ai-bar row hair-b">
+            {#if aiBusy}
+              <span class="ai-dot"></span>
+              <span>Marking…{aiMarkedCount > 0 ? ` ${aiMarkedCount} added` : ""}</span>
+            {:else if aiError}
+              <span class="ai-error">{aiError}</span>
+              <div class="flex1"></div>
+              <button class="ai-link" type="button" onclick={keepAi}>Dismiss</button>
+            {:else if turnHighlightIds.length > 0}
+              <span>
+                AI added {turnHighlightIds.length} highlight{turnHighlightIds.length === 1 ? "" : "s"}{aiUnresolvedCount > 0 ? ` · ${aiUnresolvedCount} not found` : ""}
+              </span>
+              <div class="flex1"></div>
+              <button class="ai-link" type="button" onclick={keepAi}>Keep</button>
+              <span class="mono-dim">·</span>
+              <button class="ai-link" type="button" onclick={() => void undoAi()}>Undo all</button>
+            {:else}
+              <span class="ai-error">Couldn't locate {aiUnresolvedCount} passage{aiUnresolvedCount === 1 ? "" : "s"} in this document.</span>
+              <div class="flex1"></div>
+              <button class="ai-link" type="button" onclick={keepAi}>Dismiss</button>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+  {/snippet}
+
+  {#if !isFocusMode}
+    {@render toolbarStrip()}
+  {/if}
+
   <div class="reader-body row">
     {#snippet readerPane()}
       <main class="reader-main col">
@@ -943,54 +1047,13 @@
                     {threadsCollapsed}
                     threadCount={threads.length}
                     pinCount={pins.length}
-                    {onToggleFocus}
                     onToggleThreads={toggleThreadsPanel}
                   />
                 </div>
               {:else}
                 <div class="reader-content col">
-                  <ReaderToolbar
-                    contentKind={document.contentKind}
-                    zoomScale={hasCachedPdf ? pdfScale : undefined}
-                    onZoomIn={zoomIn}
-                    onZoomOut={zoomOut}
-                    {canReadAsHtml}
-                    onReadAsHtml={() => void readAsHtml()}
-                    searchEnabled={isHtml}
-                    {searchQuery}
-                    {matchCount}
-                    {activeMatch}
-                    onSearch={runSearch}
-                    onNextMatch={nextMatch}
-                    onPrevMatch={prevMatch}
-                    onClearSearch={clearReaderSearch}
-                    aiEnabled={chatEnabled}
-                    {aiBusy}
-                    onAutoHighlight={runAutoHighlight}
-                  />
-                  {#if aiBusy || showTurnAffordance || aiError || aiUnresolvedCount > 0}
-                    <div class="ai-bar row hair-b">
-                      {#if aiBusy}
-                        <span class="ai-dot"></span>
-                        <span>Marking…{aiMarkedCount > 0 ? ` ${aiMarkedCount} added` : ""}</span>
-                      {:else if aiError}
-                        <span class="ai-error">{aiError}</span>
-                        <div class="flex1"></div>
-                        <button class="ai-link" type="button" onclick={keepAi}>Dismiss</button>
-                      {:else if turnHighlightIds.length > 0}
-                        <span>
-                          AI added {turnHighlightIds.length} highlight{turnHighlightIds.length === 1 ? "" : "s"}{aiUnresolvedCount > 0 ? ` · ${aiUnresolvedCount} not found` : ""}
-                        </span>
-                        <div class="flex1"></div>
-                        <button class="ai-link" type="button" onclick={keepAi}>Keep</button>
-                        <span class="mono-dim">·</span>
-                        <button class="ai-link" type="button" onclick={() => void undoAi()}>Undo all</button>
-                      {:else}
-                        <span class="ai-error">Couldn't locate {aiUnresolvedCount} passage{aiUnresolvedCount === 1 ? "" : "s"} in this document.</span>
-                        <div class="flex1"></div>
-                        <button class="ai-link" type="button" onclick={keepAi}>Dismiss</button>
-                      {/if}
-                    </div>
+                  {#if isFocusMode}
+                    {@render toolbarStrip()}
                   {/if}
                   <div class="reading-surface row">
                     {#if isHtml}
@@ -1085,6 +1148,8 @@
           {stickyColor}
           highlightBusy={highlightActionInFlight}
           {requestedThreadId}
+          {requestedSection}
+          onConsumeRequestedSection={consumeRequestedSection}
           {isLoadingChat}
           {chatError}
           {metadataAutofillProgress}
@@ -1150,7 +1215,7 @@
     {:else}
       <ResizableSplit
         storageKey="i0i.reader-split"
-        panes={document
+        panes={document && !inspectorCollapsed
           ? [
               { id: "reader", min: 360, default: 980 },
               { id: "inspector", min: 220, default: 340 },
@@ -1195,6 +1260,10 @@
     flex: 1;
     min-height: 0;
     align-items: stretch;
+  }
+
+  .toolbar-strip {
+    flex-shrink: 0;
   }
 
   .reader-main {

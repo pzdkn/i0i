@@ -117,7 +117,7 @@
   .menu {
     position: fixed;
     z-index: 60;
-    width: 260px;
+    width: 360px;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -145,6 +145,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
     padding: 5px 6px;
     border: 1px solid var(--border-2);
     border-radius: 4px;
