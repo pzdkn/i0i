@@ -1,0 +1,266 @@
+# RFC 0078: ChatAgent — the agent decides what it needs
+
+Status: Proposed
+Date: 2026-08-08
+Product: i0i
+Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
+Builds on: RFC 0077 (ContextManager), RFC 0076 (SearchService),
+RFC 0059 (agent-authored highlights), RFC 0034 (threads).
+
+## Summary
+
+RFC 0077 gave the agent a memory it does not control. Retrieval runs on **every**
+ask whether or not the question needs it, and the agent has no say in what ends
+up in front of it.
+
+This RFC hands over the wheel. The agent searches when it decides it needs to,
+keeps what it decides is worth keeping, and cites what it used.
+
+The mechanism is a **two-phase turn**:
+
+```text
+phase 1  retrieval loop     tools on,  no prose      (0-3 round trips)
+phase 2  the answer         tools off, prose streams (1 round trip)
+```
+
+RFC 0077 R1 said the answer path must stay free of tool-call generation so
+replies stream clean. That constraint survives — it just moves. All tool calling
+happens **before** the prose starts. Phase 2 is the same clean stream it is
+today.
+
+**Out of scope:** multi-paper agentic search (the scope stays the thread's
+paper), agent-initiated compaction, tool use during annotation.
+
+## What changes for you
+
+| Today (0077) | With this RFC |
+|---|---|
+| every ask searches, need it or not | the agent searches only when it decides to |
+| retrieved passages vanish after the turn | the agent can keep one, visibly |
+| citations exist but nothing chose them | the agent cites what it actually used |
+| one round trip | one to four, with a progress line |
+
+## Phase 1: the retrieval loop
+
+The model gets tools and a **reduced** system prompt: paper metadata, the
+current passage list, the question — no paper body text. It answers with tool
+calls or with nothing.
+
+```text
+┌─ loop, max 3 iterations ─────────────────────┐
+│  model → tool calls?                         │
+│    no  → break                               │
+│    yes → run them, append results, iterate   │
+└──────────────────────────────────────────────┘
+                  ↓
+   full assembly (ContextManager::get_context)
+                  ↓
+        phase 2: stream the answer
+```
+
+Three tools:
+
+| Tool | Does | Writes? |
+|---|---|---|
+| `search_context(query, limit)` | hybrid search in the thread's paper | no |
+| `add_context(chunk_id, why)` | keep a passage for later turns | yes |
+| `drop_context(item_id)` | remove a passage **it added** | yes |
+
+`search_context` returns id, page, heading, and a ~300-character preview — not
+full text. Full text arrives through the final assembly, once, rather than
+being paid for in every loop iteration.
+
+### The agent may delete only what it added
+
+`chat_context_items` grows an `origin` column (`'user' | 'agent'`). `drop_context`
+refuses an item the user kept.
+
+You curated that passage on purpose; an agent quietly removing it is the kind
+of surprise that makes a feature untrustworthy. The agent can always *say* a
+passage looks unhelpful. It cannot act on that alone.
+
+Agent-added items are **persistent and labelled**, not hidden. The RFC 0077
+context panel shows an `agent` tag next to them, and the ✕ works the same.
+That is the honest reading of "the agent adds it to state": visible, attributed,
+and reversible by you.
+
+### Bounds, and what happens at them
+
+| Bound | Value | On hitting it |
+|---|---|---|
+| iterations | 3 | stop retrieving, answer with what is held |
+| tool calls per iteration | 4 | ignore the rest, report |
+| chunks retrieved per turn | 12 | further searches return "budget spent" |
+
+Every cap is **reported**, never silent. A capped turn sets `retrieval_capped`
+on the context summary and the UI says so. RFC 0076 counts its holes and RFC
+0077 counts dropped items; a loop that quietly stopped short would read as an
+agent that decided it had enough.
+
+## Handles must be stable across the loop
+
+This is the subtle one, and the reason to write it down before building.
+
+RFC 0077 mints `[C1]`, `[C2]` … at assembly time, in emission order. In a loop
+that is a bug waiting to happen: the agent retrieves passage X in iteration 1,
+sees it referred to one way, retrieves passage Y in iteration 3, and the final
+assembly renumbers both. A marker the model formed an intention about now points
+at a different passage.
+
+So handles are assigned **once per turn**, as chunks first arrive, and are
+frozen:
+
+```text
+iteration 1   retrieves A, B   → C1, C2
+iteration 2   retrieves C      → C3
+final assembly                 → C1, C2, C3, unchanged
+```
+
+The final prompt may emit them in a different *order* (persistent items lead),
+but never under a different *number*. Handles stay per-turn — across turns the
+same chunk can be `C1` then `C3`, which is fine because each answer stores its
+own map.
+
+## What has to change underneath
+
+### `WireMessage` grows two optional fields
+
+```rust
+pub(crate) struct WireMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<WireToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+```
+
+`skip_serializing_if` on both, so every existing call site emits a
+byte-identical payload. `annotate_streamed` consumes tool calls fire-and-forget
+and never replays them, so it is untouched.
+
+### The tool-call id is currently thrown away
+
+A gap found while writing this, not a detail to discover later.
+`ToolCallDelta.id` is parsed and then dropped:
+
+```rust
+#[allow(dead_code)] // Present in the wire format; not needed for assembly.
+id: Option<String>,
+```
+
+`AssembledToolCall` is `{name, arguments}`. A loop **must** send each result back
+under its `tool_call_id`, so the decoder has to keep the id and
+`AssembledToolCall` has to carry it. Small change; blocking.
+
+### Progress events
+
+`ChatStreamEvent` is a tagged enum, so this is additive:
+
+```rust
+Searching { query: String },
+Retrieved { count: usize, total: usize },
+```
+
+Without them the panel sits dead through up to three round trips and the app
+looks hung. This is the difference between "thinking" and "broken".
+
+## Phase 2 and the UI
+
+Unchanged from RFC 0077: `[C1]` markers render as buttons, clicking scrolls to
+the page and flashes the passage, `keep:` chips promote an ephemeral passage.
+
+Two additions:
+
+- **A references block under each answer.** Today the `keep:` row lists bare
+  handles. It becomes a proper list — handle, page, heading, first line — so you
+  can see what the agent used without hunting for markers in the prose. Clicking
+  a row does what clicking `[C1]` does.
+- **An `agent` tag** on agent-added items in the context panel.
+
+## Cost
+
+Each loop iteration is a round trip with the reduced prompt (~600 tokens), not
+the full assembly (~8,000). A three-iteration turn costs roughly
+
+```text
+3 × 600  +  8,000        ≈  9,800 tokens
+```
+
+against 8,000 today — about 20% more for a turn that actually needed searching,
+and **less** than today for one that did not, since no retrieval runs at all.
+
+The loop runs on the **answer model**. Deciding what evidence a question needs
+is judgment, and the cheap `annotation_model` picking the wrong passages costs
+more in answer quality than it saves in tokens. Reconsider if the loop turns out
+to be the slow part.
+
+## The smaller alternative
+
+Worth naming, because it is genuinely cheaper to build and to bound:
+
+| | Single round | Full loop (recommended) |
+|---|---|---|
+| Agent decides *whether* to search | yes | yes |
+| Agent refines after seeing results | no | yes |
+| Agent manages context | no | yes |
+| Round trips | 1-2, fixed | 1-4 |
+| New machinery | tool-call id | tool-call id, message replay, bounds |
+
+Single-round gets the biggest win — no retrieval on questions that do not need
+it — for a fraction of the work. But it cannot do the thing you actually asked
+for: search, look, search again, keep the good one. If the loop turns out to be
+slow or unpredictable in practice, capping iterations at 1 turns it back into
+this without a redesign.
+
+## Risks
+
+**R1 — Latency becomes unpredictable.** A turn is now 1 to 4 round trips.
+Mitigated by the iteration cap and progress events; not eliminated. Measure
+before widening the cap.
+
+**R2 — The agent searches when it should just answer.** "What is this paper
+about?" needs no retrieval. The tool description has to say so explicitly, and
+`retrieval_capped` plus the searched-query log make over-searching visible
+rather than invisible.
+
+**R3 — Agent-added context accumulates.** Every turn can add. Bounded by the
+per-turn chunk cap and by compaction, and every item is visible with an ✕.
+A per-thread ceiling is the obvious next lever if it turns out to be needed.
+
+**R4 — A tool call the model malforms.** Invalid JSON arguments, an unknown
+chunk id, a `drop_context` on a user item. Each returns a tool *result*
+describing the failure rather than aborting the turn — the model can recover,
+and a turn that dies because the model mistyped an id is worse than one that
+answers slightly less well.
+
+## Success criteria
+
+| | Target |
+|---|---|
+| A question needing no retrieval | zero tool calls, one round trip |
+| Existing single-turn asks | same answer quality, no slower |
+| Handles | stable from first retrieval through the final prompt |
+| Capped turn | answers, and says it was capped |
+| Malformed tool call | turn completes |
+| `drop_context` on a user item | refused, and the agent is told why |
+| Existing `annotate_streamed` | byte-identical request payload |
+
+## Open decisions
+
+Say the word on any of these:
+
+1. **Full loop, cap 3** — not the single-round alternative. Your ask needs more
+   than one look.
+2. **Agent adds are persistent and labelled `agent`**, not ephemeral. This is
+   the literal reading of "adds it to state"; the alternative is that agent
+   finds stay ephemeral until you press `keep:`.
+3. **The agent may delete only its own additions.**
+4. **The loop runs on the answer model**, not the cheap one.
+5. **Search scope stays the thread's paper.** Cross-paper agentic search is a
+   later RFC — the scope plumbing already supports it.
+6. **`search_context` returns previews, not full text.** Full text arrives once,
+   in the final assembly.
+7. **Handles are frozen per turn**, assigned as chunks arrive.
+8. **No agent-initiated compaction.** Compaction is lossy and stays yours.
