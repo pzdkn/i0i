@@ -75,13 +75,16 @@ pub enum ContextKey {
 
 /// Context that lives for exactly one `get_context` call.
 ///
-/// `paper_id` is required because the anchor ask path has no thread yet — the
-/// paper cannot be derived from a thread that does not exist.
+/// Never stored. "Dropped when the selection changes" costs nothing if it was
+/// never written down, which also rules out every stale-selection bug.
+///
+/// `paper_id` is carried rather than derived from the thread because the anchor
+/// ask path has no thread yet, and because context can span papers — a passage
+/// from a different paper is labelled so the model does not conflate sources.
 #[derive(Debug, Clone, Default)]
 pub struct EphemeralContext {
     pub paper_id: String,
     pub selection: Option<String>,
-    pub page_index: Option<i32>,
 }
 
 /// Rectangles for one page, in reader space (normalized 0..1, origin top-left).

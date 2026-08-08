@@ -69,9 +69,9 @@ pub struct AssembledContext {
     pub system_prompt: String,
     /// Entries to replay, after the compaction watermark.
     pub entries: Vec<ChatEntry>,
+    /// Carries the citation map, so the answer that quotes `[C1]` is stored
+    /// with the thing that resolves it.
     pub summary: ChatContextSummary,
-    /// Resolves `[C1]` markers in the answer back to a place in the PDF.
-    pub citations: Vec<ContextCitation>,
 }
 
 #[derive(Clone)]
@@ -274,7 +274,7 @@ impl ContextManager {
             request.ephemeral.selection.as_deref(),
         );
 
-        let system_prompt = match assembly.passages_block() {
+        let system_prompt = match assembly.passages_block(&request.ephemeral.paper_id) {
             // No citable context: today's prompt exactly, down to the byte.
             None => bundle.system_prompt,
             Some(passages) => format!("{}\n\n{passages}", bundle.system_prompt),
@@ -296,7 +296,7 @@ impl ContextManager {
             system_prompt,
             entries,
             summary: ChatContextSummary {
-                citations: citations.clone(),
+                citations,
                 paper_title: request.paper.title.to_string(),
                 included_chars: bundle.summary.included_chars,
                 truncated: bundle.summary.truncated,
@@ -305,7 +305,6 @@ impl ContextManager {
                 unresolved_items: unresolved,
                 compacted: watermark.is_some(),
             },
-            citations,
         })
     }
 
@@ -389,7 +388,7 @@ impl ContextManager {
         }
 
         if let Some(chunk_id) = &item.chunk_id {
-            let found = self.store.chunks_by_ids(&[chunk_id.clone()])?;
+            let found = self.store.chunks_by_ids(std::slice::from_ref(chunk_id))?;
             if !found.is_empty() {
                 return Ok(Resolved::Chunks(found));
             }
@@ -533,7 +532,7 @@ impl Assembly {
     ///
     /// `None` when there is nothing citable, which is the case the
     /// byte-identical-prompt guarantee depends on.
-    fn passages_block(&mut self) -> Option<String> {
+    fn passages_block(&mut self, current_paper_id: &str) -> Option<String> {
         if self.passages.is_empty() {
             return None;
         }
@@ -544,10 +543,16 @@ impl Assembly {
         );
         for (index, passage) in self.passages.iter().enumerate() {
             let handle = format!("C{}", index + 1);
-            let location = match &passage.heading_path {
+            // Pages are 0-based in storage and 1-based to a reader.
+            let mut location = match &passage.heading_path {
                 Some(heading) => format!("p{} · {heading}", passage.page_start + 1),
                 None => format!("p{}", passage.page_start + 1),
             };
+            // Context can span papers. An unlabelled passage from elsewhere
+            // would read as part of the paper under discussion.
+            if !passage.paper_id.is_empty() && passage.paper_id != current_paper_id {
+                location.push_str(&format!(" · from {}", passage.paper_id));
+            }
             block.push_str(&format!("\n[{handle}] ({location})\n{}\n", passage.text));
 
             if !passage.paper_id.is_empty() {
@@ -760,7 +765,6 @@ mod tests {
         let ephemeral = EphemeralContext {
             paper_id: "vaswani2017".to_string(),
             selection: Some("scaled dot-product".to_string()),
-            page_index: Some(3),
         };
 
         let assembled = fixture
@@ -786,7 +790,7 @@ mod tests {
             Some("scaled dot-product"),
         );
         assert_eq!(assembled.system_prompt, today.system_prompt);
-        assert!(assembled.citations.is_empty());
+        assert!(assembled.summary.citations.is_empty());
         assert_eq!(assembled.summary.context_items, 0);
         assert!(!assembled.summary.compacted);
     }
@@ -825,15 +829,15 @@ mod tests {
             .expect("assembles");
 
         assert!(assembled.system_prompt.contains("[C1]"));
-        assert_eq!(assembled.citations.len(), chunks.len());
-        assert_eq!(assembled.citations[0].handle, "C1");
-        assert_eq!(assembled.citations[0].paper_id, paper_id);
-        assert_eq!(assembled.summary.context_items, assembled.citations.len());
+        assert_eq!(assembled.summary.citations.len(), chunks.len());
+        assert_eq!(assembled.summary.citations[0].handle, "C1");
+        assert_eq!(assembled.summary.citations[0].paper_id, paper_id);
+        assert_eq!(assembled.summary.context_items, assembled.summary.citations.len());
         // Handles are assigned in emission order, so C1 is the first passage
         // the model reads — not the most recently added. Selection under budget
         // pressure runs newest-first; these two orders are different and the
         // prompt must use the reading one.
-        for (index, citation) in assembled.citations.iter().enumerate() {
+        for (index, citation) in assembled.summary.citations.iter().enumerate() {
             assert_eq!(citation.handle, format!("C{}", index + 1));
         }
         let first = assembled

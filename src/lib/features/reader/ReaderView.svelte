@@ -35,7 +35,8 @@
     PaperMetadataUpdate,
   } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
-  import type { DiscoveryReaderCandidate, ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
+  import { citationRects, type ContextCitation } from "$lib/domain/context";
+  import type { DiscoveryReaderCandidate, PdfRect, ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
   import ReaderFooter from "$lib/features/reader/ReaderFooter.svelte";
   import ReaderHeader from "$lib/features/reader/ReaderHeader.svelte";
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
@@ -201,6 +202,12 @@
   // asynchronously against per-page text-content items.
   let htmlReaderRef = $state<HtmlReader | undefined>();
   let pdfPageRef = $state<PdfPage | undefined>();
+  // RFC 0077: the passage a citation points at, painted briefly so the eye can
+  // find it after the scroll. Transient by design — a persistent highlight
+  // would be indistinguishable from one the user made.
+  const CITATION_FLASH_MS = 2600;
+  let citationFlash = $state<{ pageIndex: number; rects: PdfRect[] } | null>(null);
+  let citationFlashTimer: ReturnType<typeof setTimeout> | undefined;
   // The chat model string to attribute agent-created highlights to, resolved
   // once from settings; falls back to a generic label if unset.
   let chatModel = $state("agent");
@@ -962,6 +969,25 @@
     htmlReaderRef?.focusOffsets(locator.offset, locator.offset);
   }
 
+  // RFC 0077: a `[C1]` marker in an answer, clicked. The chunk resolves to
+  // whole blocks, so the jump lands on the paragraph rather than the sentence.
+  // Rectangles can legitimately be empty (blocks written before RFC 0075 carry
+  // no geometry, and a re-resolved passage may lose it) — the page jump still
+  // works, which is why the flash is separate from the scroll.
+  function openCitation(citation: ContextCitation) {
+    pdfPageRef?.scrollToPage(citation.pageStart);
+
+    const pages = citationRects(citation);
+    const page = pages.find((entry) => entry.pageIndex === citation.pageStart) ?? pages[0];
+    if (!page || page.rects.length === 0) {
+      citationFlash = null;
+      return;
+    }
+    citationFlash = { pageIndex: page.pageIndex, rects: page.rects };
+    clearTimeout(citationFlashTimer);
+    citationFlashTimer = setTimeout(() => (citationFlash = null), CITATION_FLASH_MS);
+  }
+
   function openHighlightById(highlightId: string) {
     const highlight = highlights.find((hl) => hl.id === highlightId);
     if (highlight) {
@@ -1277,6 +1303,7 @@
                         {chatEnabled}
                         scale={pdfScale}
                         {activeTool}
+                        {citationFlash}
                         onSelectPassage={selectPassage}
                         onHighlightClick={openHighlightPopover}
                         onToolHighlight={(passage) => void highlightFromTool(passage)}
@@ -1365,6 +1392,7 @@
           onPickColor={pickColor}
           onEnsureHighlight={ensureHighlightForSelection}
           onOpenHighlight={openHighlightById}
+          onOpenCitation={openCitation}
           onHighlightIntent={handleHighlightIntent}
           onAskTurnStart={handleAskTurnStart}
           onAskTurnComplete={handleAskTurnComplete}

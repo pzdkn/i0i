@@ -43,6 +43,7 @@
     chatEnabled,
     sourceId,
     activeTool = null,
+    citationFlash = null,
     onSelectPassage,
     onHighlightClick,
     onToolHighlight,
@@ -66,6 +67,9 @@
     // RFC 0074: the active annotation tool. `null` = today's behavior (a
     // selection raises the Note/Ask/Highlight popover).
     activeTool?: "highlight" | "note" | null;
+    // RFC 0077: the passage a clicked `[C1]` citation points at. Only the page
+    // whose index matches paints it.
+    citationFlash?: { pageIndex: number; rects: PdfRect[] } | null;
     // RFC 0073: the popover says which pane the passage should open in. Without
     // it the landing section is whatever the rail was last left on, so "Ask"
     // opened the note editor.
@@ -133,6 +137,9 @@
     ),
   );
   const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
+  // RFC 0077: only the cited page paints. Transient on purpose — a persistent
+  // band would be indistinguishable from a highlight the user made.
+  const flashRects = $derived(citationFlash?.pageIndex === pageIndex ? citationFlash.rects : []);
 
   // RFC 0073 Phase 1: the text layer and the canvas bitmap are now rendered by
   // SEPARATE effects. They used to share one, which meant that re-rendering a
@@ -642,6 +649,10 @@
     {#each draftRects as rect}
       <div class="pdf-note-draft-anchor" style={rectStyle(rect)}></div>
     {/each}
+
+    {#each flashRects as rect, index (index)}
+      <div class="citation-flash" style={rectStyle(rect)}></div>
+    {/each}
   </div>
 
   {#if isRendering}
@@ -764,6 +775,23 @@
     padding: 0;
     cursor: pointer;
     pointer-events: auto;
+  }
+
+  /* RFC 0077: fades on its own so nothing has to clean it up visually. */
+  .citation-flash {
+    position: absolute;
+    z-index: 3;
+    border: 1px solid var(--amber);
+    background: color-mix(in srgb, var(--amber) 22%, transparent);
+    pointer-events: none;
+    animation: citation-fade 2.6s ease-out forwards;
+  }
+
+  @keyframes citation-fade {
+    0% { opacity: 0; }
+    12% { opacity: 1; }
+    70% { opacity: 1; }
+    100% { opacity: 0; }
   }
 
   .pdf-note-draft-anchor {

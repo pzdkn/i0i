@@ -446,7 +446,6 @@ impl ChatService {
         let ephemeral = EphemeralContext {
             paper_id: scope.id().to_string(),
             selection: anchor.selected_text().map(ToString::to_string),
-            page_index: None,
         };
         let retrieved = self.retrieve_for_turn(scope.id(), &user_body).await;
         let assembled = self.context.get_context(ContextRequest {
@@ -487,7 +486,6 @@ impl ChatService {
                 .anchor
                 .selected_text()
                 .map(ToString::to_string),
-            page_index: None,
         };
         let retrieved = self.retrieve_for_turn(&scope_id, &user_body).await;
         let assembled = self.context.get_context(ContextRequest {

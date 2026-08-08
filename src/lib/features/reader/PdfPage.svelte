@@ -6,7 +6,7 @@
   import { debugLog } from "$lib/bridge/chat";
   import type { ChatThreadSummary } from "$lib/domain/chat";
   import type { Highlight, Locator } from "$lib/domain/highlight";
-  import type { ReaderTextSelection } from "$lib/domain/reader";
+  import type { PdfRect, ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
   import PdfRenderedPage from "$lib/features/reader/PdfRenderedPage.svelte";
 
@@ -24,6 +24,7 @@
     chatEnabled,
     scale = 1.15,
     activeTool = null,
+    citationFlash = null,
     onSelectPassage,
     onHighlightClick,
     onToolHighlight,
@@ -42,6 +43,10 @@
     // dropped here still type-checks).
     // RFC 0074: the active annotation tool, forwarded to every page.
     activeTool?: "highlight" | "note" | null;
+    // RFC 0077: the passage a clicked `[C1]` citation points at, painted
+    // briefly after the scroll. Forwarded to every page; only the matching one
+    // draws it.
+    citationFlash?: { pageIndex: number; rects: PdfRect[] } | null;
     onSelectPassage: (selection: ReaderTextSelection, intent?: "notes" | "chat") => void;
     onHighlightClick: (highlightId: string, x: number, y: number) => void;
     onToolHighlight?: (selection: ReaderTextSelection) => void;
@@ -280,6 +285,7 @@
             {chatEnabled}
             {sourceId}
             {activeTool}
+            {citationFlash}
             {onSelectPassage}
             {onHighlightClick}
             {onToolHighlight}

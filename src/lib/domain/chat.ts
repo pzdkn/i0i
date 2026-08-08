@@ -2,6 +2,8 @@
 // `model` and `contextSummary` arrive as null (not omitted) for non-answer
 // entries, matching serde's Option serialization.
 
+import type { ContextCitation } from "$lib/domain/context";
+
 export type ChatScope = { kind: "paper"; paperId: string };
 
 export type ThreadAnchor =
@@ -13,6 +15,16 @@ export type ChatContextSummary = {
   paperTitle: string;
   includedChars: number;
   truncated: boolean;
+  /**
+   * RFC 0077. These arrive as 0/false/[] for answers written before the
+   * ContextManager existed — the Rust side defaults them, so they are never
+   * undefined.
+   */
+  contextItems: number;
+  droppedItems: number;
+  unresolvedItems: number;
+  compacted: boolean;
+  citations: ContextCitation[];
 };
 
 export type ChatEntryKind = "note" | "question" | "answer";

@@ -1,5 +1,8 @@
 <script lang="ts">
   import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
+  import CitedAnswer from "$lib/features/reader/CitedAnswer.svelte";
+  import { compactChatContext } from "$lib/bridge/context";
+  import type { ContextCitation } from "$lib/domain/context";
   import {
     askAtAnchorStreamed,
     askChatThreadStreamed,
@@ -71,6 +74,7 @@
     onKeepTurnHighlights,
     onUndoTurnHighlights,
     onDismissTurnAffordance,
+    onOpenCitation = () => {},
   }: {
     document: ReaderDocument;
     chatEnabled: boolean;
@@ -104,6 +108,8 @@
     onAskTurnComplete?: () => void;
     turnHighlightCount?: number;
     showTurnAffordance?: boolean;
+    /// RFC 0077: jump the reader to the passage behind a `[C1]` marker.
+    onOpenCitation?: (citation: ContextCitation) => void;
     onKeepTurnHighlights?: () => void;
     onUndoTurnHighlights?: () => void | Promise<void>;
     // Fired at the thread-close chokepoints (back to list, opening a
@@ -658,10 +664,52 @@
     return entry.kind === "note" ? "Note" : "You";
   }
 
+  let compacting = $state(false);
+
+  /**
+   * Compact the open thread's context (RFC 0077).
+   *
+   * Explicit, never automatic: it costs a model round-trip, and assembling a
+   * prompt has to stay fast and predictable. Nothing in the conversation is
+   * deleted — only what the next prompt carries shrinks.
+   */
+  async function compactOpenContext() {
+    if (!openThread || compacting) {
+      return;
+    }
+    compacting = true;
+    try {
+      await compactChatContext(openThread.thread.id);
+      await refreshOpenThread();
+    } catch (caught) {
+      error = String(caught);
+    } finally {
+      compacting = false;
+    }
+  }
+
   function chatContextLabel(entry: ChatEntry) {
     const summary = entry.contextSummary;
     if (!summary) {
       return "";
+    }
+    // RFC 0077: passages the model was actually given, and the ones it was
+    // not. A silent drop would be indistinguishable from a thin answer.
+    const parts: string[] = [];
+    if (summary.contextItems > 0) {
+      parts.push(`${summary.contextItems} passage${summary.contextItems === 1 ? "" : "s"}`);
+    }
+    if (summary.compacted) {
+      parts.push("compacted");
+    }
+    if (summary.droppedItems > 0) {
+      parts.push(`${summary.droppedItems} over budget`);
+    }
+    if (summary.unresolvedItems > 0) {
+      parts.push(`${summary.unresolvedItems} unresolved`);
+    }
+    if (parts.length) {
+      return `Context: ${parts.join(" · ")}`;
     }
     // `includedChars` counts the paper body text; the foregrounded passage (for
     // an anchored thread) is sent separately, so reflect that rather than
@@ -686,6 +734,19 @@
                 {#if activeSection === "chat"}
                   {#if !isVirtual}
                     <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
+                  {/if}
+                  {#if !isVirtual}
+                    <!-- RFC 0077: explicit, because it costs a model call and
+                         is lossy. The conversation itself is untouched. -->
+                    <button
+                      class="link-btn"
+                      type="button"
+                      disabled={compacting}
+                      title="Summarize this thread's context so later turns carry less"
+                      onclick={() => void compactOpenContext()}
+                    >
+                      {compacting ? "compacting…" : "compact"}
+                    </button>
                   {/if}
                   <button class="note-icon remove" type="button" aria-label="delete thread" onclick={() => void deleteOpenThread()}><Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /></button>
                 {/if}
@@ -770,7 +831,15 @@
                           {entry.pinned ? "★" : "☆"}
                         </button>
                       </div>
-                      <p>{entry.body}</p>
+                      {#if entry.kind === "answer"}
+                        <CitedAnswer
+                          body={entry.body}
+                          citations={entry.contextSummary?.citations ?? []}
+                          {onOpenCitation}
+                        />
+                      {:else}
+                        <p>{entry.body}</p>
+                      {/if}
                       {#if entry.kind === "answer" && chatContextLabel(entry)}
                         <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
                       {/if}
