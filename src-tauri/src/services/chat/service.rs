@@ -591,7 +591,10 @@ impl ChatService {
                 question: turn.question,
                 selection: turn.selection,
                 recent: turn.recent,
-                model: &self.config.model,
+                // The cheap model decides; the answer model writes. Phase 1 is
+                // pure latency in front of the first token, and picking a
+                // search query does not need the expensive one.
+                decide_model: &self.config.annotation_model,
                 url: &self.config.url,
                 api_key,
             },

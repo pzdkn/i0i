@@ -25,14 +25,21 @@ use crate::services::search::{SearchMode, SearchRequest};
 
 use super::context_manager::ContextManager;
 
-/// Round trips the model may spend deciding. Three is enough to search, read
-/// the previews, and refine once. Beyond that the turn stops feeling like an
-/// answer and starts feeling like a hang.
-const MAX_ITERATIONS: usize = 3;
+/// Round trips the model may spend deciding.
+///
+/// One. Every iteration is a full round trip the reader waits through before
+/// the first word of prose, and refining a query a second time is worth far
+/// less than answering sooner. The agent still *decides* — it just gets one
+/// look, and can issue more than one query in it.
+const MAX_ITERATIONS: usize = 1;
 
-/// Tool calls honoured per iteration. A model that asks for twelve searches at
-/// once is not refining, it is flailing.
-const MAX_CALLS_PER_ITERATION: usize = 4;
+/// Tool calls honoured in that one round. Two queries cover a question with two
+/// parts; more is flailing, and each one is a sequential search.
+const MAX_CALLS_PER_ITERATION: usize = 2;
+
+/// Ceiling on the deciding turn's output. It should emit tool calls and nothing
+/// else, so a low cap trims generation time off the critical path.
+const DECIDE_MAX_TOKENS: u32 = 512;
 
 /// Chunks the loop may pull into one turn, across every search.
 ///
@@ -86,6 +93,10 @@ pub struct LoopRequest<'a> {
     pub paper_title: &'a str,
     pub question: &'a str,
     pub selection: Option<&'a str>,
+    /// Model for the deciding round. The cheap one: choosing a search query is
+    /// a far lighter task than writing the answer, and this round sits on the
+    /// critical path before the first token of prose.
+    pub decide_model: &'a str,
     /// The last few turns, oldest first. Without them "why?" reaches the
     /// deciding model with no antecedent, and the prompt's claim that
     /// follow-ups need no lookup becomes something it cannot act on.
@@ -93,7 +104,6 @@ pub struct LoopRequest<'a> {
     /// A tail, not the whole thread: these messages are resent on every
     /// iteration, so history is the part that multiplies.
     pub recent: &'a [ChatEntry],
-    pub model: &'a str,
     pub url: &'a str,
     pub api_key: &'a str,
 }
@@ -129,10 +139,10 @@ where
             request.url,
             request.api_key,
             &CompletionRequest {
-                model: request.model.to_string(),
+                model: request.decide_model.to_string(),
                 messages: messages.clone(),
                 stream: true,
-                max_tokens: None,
+                max_tokens: Some(DECIDE_MAX_TOKENS),
                 response_format: None,
                 tools: Some(context_tools(request.thread_id.is_some())),
                 tool_choice: None,
@@ -185,13 +195,10 @@ where
             messages.push(WireMessage::tool_result(call.id.clone(), result));
         }
 
-        // Only a cap if the agent was still *gathering* when the loop ended. A
-        // final iteration that only wrote context was not cut off mid-search,
-        // and a notice on that turn would teach you to distrust the notice.
-        let still_searching = calls.iter().any(|call| call.name == "search_context");
-        if iteration + 1 == MAX_ITERATIONS && still_searching {
-            outcome.capped = true;
-        }
+        // Deliberately *not* flagged as capped. With a single round, stopping
+        // after it is the design rather than a limit hit, and a notice on every
+        // searching turn would teach you to ignore the notice. `capped` now
+        // means only: we refused work the agent asked for.
     }
 
     eprintln!(
@@ -371,7 +378,8 @@ fn system_prompt(request: &LoopRequest<'_>, context: &ContextManager) -> String 
          every passage competes for room with the paper text, so one you do not \
          end up citing cost the answer something.\n\
          \n\
-         You may search up to {MAX_ITERATIONS} times. Keep a passage with \
+         You get one round of searching, so make it count: issue one query, or \
+         two if the question genuinely has two parts. Keep a passage with \
          add_context only if later turns will need it.\n",
         request.paper_title,
     );
@@ -539,7 +547,7 @@ mod tests {
             question: "why scale?",
             selection: None,
             recent: &[],
-            model: "unused",
+            decide_model: "unused",
             url: "unused",
             api_key: "unused",
         }
@@ -642,6 +650,16 @@ mod tests {
 
         assert!(result.contains("Refused"), "{result}");
         assert_eq!(fixture.store.context_items(&thread_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn one_round_keeps_the_wait_in_front_of_the_answer_bounded() {
+        // The reader waits through every iteration before the first word of
+        // prose. This is the constant that decides how long that is, so it is
+        // pinned rather than left to drift back up.
+        assert_eq!(MAX_ITERATIONS, 1);
+        assert!(MAX_CALLS_PER_ITERATION <= 2);
+        assert!(SEARCH_LIMIT * MAX_CALLS_PER_ITERATION <= MAX_CHUNKS_PER_TURN);
     }
 
     #[tokio::test]

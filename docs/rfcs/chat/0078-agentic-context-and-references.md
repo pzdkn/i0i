@@ -88,9 +88,21 @@ and reversible by you.
 
 | Bound | Value | On hitting it |
 |---|---|---|
-| iterations | 3 | stop retrieving, answer with what is held |
-| tool calls per iteration | 4 | ignore the rest, report |
-| chunks retrieved per turn | 12 | further searches return "budget spent" |
+| iterations | **1** | one look, then answer |
+| tool calls in that round | 2 | ignore the rest, report |
+| chunks retrieved per turn | 6 | further searches return "budget spent" |
+
+**Revised down after using it.** The loop was 3 iterations and it made answers
+feel slow: every iteration is a full round trip the reader waits through before
+the first word of prose, and refining a query a second time is worth much less
+than answering sooner. One round still lets the agent *decide* — it just gets
+one look, and may issue two queries in it. The deciding round also runs on the
+cheap `annotation_model` with a 512-token ceiling, since choosing a search query
+is far lighter than writing the answer and this sits on the critical path.
+
+`capped` now means only "we refused work the agent asked for". Stopping after
+the single round is the design, not a limit hit, so it raises no notice — a
+notice on every searching turn is a notice you learn to ignore.
 
 Every cap is **reported**, never silent. A capped turn sets `retrieval_capped`
 on the context summary and the UI says so. RFC 0076 counts its holes and RFC
@@ -235,16 +247,16 @@ Each loop iteration is a round trip with the reduced prompt (~600 tokens), not
 the full assembly (~8,000). A three-iteration turn costs roughly
 
 ```text
-3 × 600  +  8,000        ≈  9,800 tokens
+1 × 600  +  8,000        ≈  8,600 tokens
 ```
 
-against 8,000 today — about 20% more for a turn that actually needed searching,
-and **less** than today for one that did not, since no retrieval runs at all.
+against 8,000 before — and the 600 is on the cheap model. A turn that needs no
+lookup costs *less* than the old unconditional search.
 
-The loop runs on the **answer model**. Deciding what evidence a question needs
-is judgment, and the cheap `annotation_model` picking the wrong passages costs
-more in answer quality than it saves in tokens. Reconsider if the loop turns out
-to be the slow part.
+The loop was originally specified to run on the answer model, on the grounds
+that deciding what evidence a question needs is judgment. Using it changed that:
+the wait in front of the first token is the thing the reader actually feels, and
+picking a search query is light enough for the fast model.
 
 ## The smaller alternative
 
@@ -327,7 +339,9 @@ Say the word on any of these:
    the literal reading of "adds it to state"; the alternative is that agent
    finds stay ephemeral until you press `keep:`.
 3. **The agent may delete only its own additions.**
-4. **The loop runs on the answer model**, not the cheap one.
+4. **The deciding round runs on the cheap `annotation_model`**, not the answer
+   model — reversed after measuring the wait. Picking a query is light; the
+   reader is staring at a spinner while it happens.
 5. **Search scope stays the thread's paper.** Cross-paper agentic search is a
    later RFC — the scope plumbing already supports it.
 6. **`search_context` returns previews, not full text.** Full text arrives once,
