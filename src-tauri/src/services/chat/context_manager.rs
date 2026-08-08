@@ -1072,6 +1072,66 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_may_drop_only_its_own_additions() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["First passage.", "Second passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+
+        let mine = fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
+            .expect("user adds");
+        let theirs = fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_AGENT)
+            .expect("agent adds");
+        // Same chunk, so this is the idempotent path — and it must not relabel
+        // a passage the reader kept as the agent's.
+        assert_eq!(mine.id, theirs.id);
+        assert_eq!(theirs.origin, ORIGIN_USER);
+
+        let refusal = fixture
+            .manager
+            .agent_delete_context(&thread_id, &mine.id)
+            .expect("answers rather than erroring");
+        assert!(refusal.contains("Refused"));
+        assert_eq!(fixture.store.context_items(&thread_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_agent_can_drop_a_passage_it_added_itself() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["Only passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        let item = fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_AGENT)
+            .expect("agent adds");
+
+        let result = fixture
+            .manager
+            .agent_delete_context(&thread_id, &item.id)
+            .expect("drops");
+        assert!(result.contains("Dropped"));
+        assert!(fixture.store.context_items(&thread_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dropping_an_unknown_item_answers_rather_than_failing_the_turn() {
+        let fixture = fixture(32_000);
+        let (paper_id, _) = seeded(&fixture, &["Only passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+
+        // A turn that dies because the model mistyped an id is worse than one
+        // that answers slightly less well.
+        let result = fixture
+            .manager
+            .agent_delete_context(&thread_id, "ctx_nope")
+            .expect("answers");
+        assert!(result.contains("No context item"));
+    }
+
+    #[test]
     fn entries_before_the_watermark_are_replaced_by_the_summary() {
         let entries = vec![
             entry("e1", "first question"),

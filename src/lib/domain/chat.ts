@@ -24,6 +24,8 @@ export type ChatContextSummary = {
   droppedItems: number;
   unresolvedItems: number;
   compacted: boolean;
+  /** RFC 0078: the retrieval loop hit a bound and stopped short. */
+  retrievalCapped: boolean;
   citations: ContextCitation[];
 };
 

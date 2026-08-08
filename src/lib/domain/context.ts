@@ -38,6 +38,8 @@ export type ContextItemView = {
   headingPath: string | null;
   text: string;
   tokenEstimate: number;
+  /** `"user"` or `"agent"` — who put this here (RFC 0078). */
+  origin: string;
   /** The chunk no longer resolves — reported rather than silently dropped. */
   unresolved: boolean;
 };
@@ -54,6 +56,7 @@ export type ContextItem = {
   sourceEnd: number | null;
   body: string | null;
   coversThroughEntryId: string | null;
+  origin: string;
   tokenEstimate: number;
   createdAt: string;
 };

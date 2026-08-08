@@ -1,5 +1,7 @@
 <script lang="ts">
   import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
+  import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import CitedAnswer from "$lib/features/reader/CitedAnswer.svelte";
   import { citationLabel } from "$lib/features/reader/cited-answer";
   import {
@@ -188,6 +190,9 @@
   let noteLoadedFor = "";
   let pendingQuestion = $state<string | null>(null);
   let streamingAnswer = $state<string | null>(null);
+  // RFC 0078: phase 1 can take up to three round trips before the first word of
+  // prose. Without a line here the panel looks hung rather than thinking.
+  let retrievalProgress = $state("");
   let error = $state("");
   // RFC 0072: marking the passage is a bonus on the ask path — a failure there
   // must not lose the user's question, so it surfaces as its own non-fatal
@@ -515,6 +520,7 @@
     passageWarning = "";
     pendingQuestion = body;
     streamingAnswer = "";
+    retrievalProgress = "";
     chatInput = "";
     try {
       if (virtual) {
@@ -533,6 +539,8 @@
       // chat message (no keyword gate, no prose-plus-marks).
       const onDelta = (text: string) => {
         if (activeAskId === askId) {
+          // The first token of prose means phase 1 is over.
+          retrievalProgress = "";
           streamingAnswer = (streamingAnswer ?? "") + text;
         }
       };
@@ -558,6 +566,7 @@
         isBusy = false;
         pendingQuestion = null;
         streamingAnswer = null;
+        retrievalProgress = "";
       }
     }
   }
@@ -702,6 +711,24 @@
     void refreshContext();
   });
 
+  // RFC 0078: a global event, not a per-ask channel — the reader has one
+  // conversation open at a time, and the ask channel is committed to deltas.
+  onMount(() => {
+    const unlisten = listen<{ event: string; query?: string; count?: number }>(
+      "chat://progress",
+      ({ payload }) => {
+        if (!isBusy) {
+          return;
+        }
+        retrievalProgress =
+          payload.event === "searching"
+            ? `searching: ${payload.query ?? ""}`
+            : `read ${payload.count ?? 0} passage${payload.count === 1 ? "" : "s"}…`;
+      },
+    );
+    return () => void unlisten.then((stop) => stop());
+  });
+
   async function refreshContext() {
     if (!openThread || isVirtual) {
       contextItems = [];
@@ -801,6 +828,11 @@
     }
     if (summary.unresolvedItems > 0) {
       parts.push(`${summary.unresolvedItems} unresolved`);
+    }
+    // RFC 0078: the loop stopped at a bound. Said out loud, because a capped
+    // turn otherwise reads as an agent that decided it had enough.
+    if (summary.retrievalCapped) {
+      parts.push("search capped");
     }
     if (parts.length) {
       return `Context: ${parts.join(" · ")}`;
@@ -938,6 +970,9 @@
                       {#each contextItems as item (item.id)}
                         <div class="row context-item" class:unresolved={item.unresolved}>
                           <span class="context-label">{contextItemLabel(item)}</span>
+                          {#if item.origin === "agent"}
+                            <span class="origin-tag" title="Added by the AI">agent</span>
+                          {/if}
                           <div class="flex1"></div>
                           <button
                             class="note-icon remove"
@@ -1020,7 +1055,11 @@
                     </div>
                     <div class="entry answer">
                       <div class="label">AI</div>
-                      <p>{streamingAnswer ? streamingAnswer : "…"}</p>
+                      {#if !streamingAnswer && retrievalProgress}
+                        <p class="mono-dim">{retrievalProgress}</p>
+                      {:else}
+                        <p>{streamingAnswer ? streamingAnswer : "…"}</p>
+                      {/if}
                     </div>
                   {/if}
 
@@ -1643,6 +1682,15 @@
 
   .context-warn {
     color: var(--red);
+  }
+
+  /* The agent's additions are visible and attributed, never silent. */
+  .origin-tag {
+    flex-shrink: 0;
+    padding: 0 3px;
+    border: 1px solid var(--border-2);
+    color: var(--fg-3);
+    font-size: 9px;
   }
 
   .context-note {
