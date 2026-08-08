@@ -27,6 +27,11 @@ use crate::domain::research::{
 
 type StoreResult<T> = Result<T, String>;
 
+/// Width of the `vec0` embedding column. Must match the active model's output
+/// (`services::embedding::MODEL_DIMENSIONS`); a mismatch is caught at write
+/// time by `index_chunk_vector` rather than silently indexing garbage.
+const VECTOR_DIMENSIONS: usize = 384;
+
 #[derive(Clone)]
 pub struct LibraryStore {
     db_path: PathBuf,
@@ -656,7 +661,104 @@ impl LibraryStore {
             ],
         )
         .map_err(|error| error.to_string())?;
+
+        index_chunk_vector(&conn, chunk_id, &blob, embedding.len())?;
         Ok(())
+    }
+
+    /// Index every embedding that has no vector yet (RFC 0076).
+    ///
+    /// The startup backfill, and the repair path if the index is ever dropped.
+    /// Mirrors RFC 0075 R6: the work list is a query, so running it twice is a
+    /// no-op and a crash needs no recovery. Costs no re-embedding — the vectors
+    /// already exist, this only inserts them into `vec0`.
+    pub fn index_missing_chunk_vectors(&self) -> StoreResult<usize> {
+        let conn = self.open_connection()?;
+        if !sqlite_vec_available(&conn) {
+            return Ok(0);
+        }
+
+        // Scoped so the statement — and with it SQLite's read transaction — is
+        // dropped before the writes below. A live statement on the same
+        // connection keeps the read open, and the first insert then fails with
+        // "database is locked".
+        let pending: Vec<(String, Vec<u8>, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "
+                    select e.chunk_id, e.embedding, e.dimensions
+                    from document_chunk_embeddings e
+                    where not exists (
+                      select 1 from document_chunk_vectors v where v.chunk_id = e.chunk_id
+                    )
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?
+        };
+
+        let mut indexed = 0;
+        for (chunk_id, blob, dimensions) in pending {
+            index_chunk_vector(&conn, &chunk_id, &blob, dimensions as usize)?;
+            indexed += 1;
+        }
+        Ok(indexed)
+    }
+
+    /// KNN over `paper_ids`, nearest first. Returns chunk ids and L2 distance.
+    ///
+    /// Empty when `vec0` is unavailable or nothing is indexed — the caller
+    /// distinguishes those cases through `embedding_coverage`, because "no
+    /// index" and "no matches" mean very different things to a user.
+    pub fn semantic_chunk_ranking(
+        &self,
+        paper_ids: &[String],
+        query_vector: &[f32],
+        limit: i64,
+    ) -> StoreResult<Vec<(String, f64)>> {
+        if paper_ids.is_empty() || query_vector.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.open_connection()?;
+        if !sqlite_vec_available(&conn) {
+            return Ok(Vec::new());
+        }
+
+        let blob: Vec<u8> = query_vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        // The partition filter takes a set, which is what lets one query serve
+        // any scope — verified by `vec0_partition_filter_accepts_a_set_of_papers`.
+        let sql = format!(
+            "
+            select chunk_id, distance
+            from document_chunk_vectors
+            where embedding match ?
+              and k = ?
+              and paper_id in ({})
+            order by distance
+            ",
+            placeholders(paper_ids.len())
+        );
+
+        let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(blob) as Box<dyn rusqlite::ToSql>,
+            Box::new(limit),
+        ];
+        for paper_id in paper_ids {
+            bindings.push(Box::new(paper_id.clone()));
+        }
+
+        let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
     }
 
     /// How much of a paper is embedded. A missing embedding is a retrieval hole
@@ -693,43 +795,66 @@ impl LibraryStore {
         .map_err(|error| error.to_string())
     }
 
-    /// Every paper id in the given papers and vaults, deduplicated.
+    /// Resolve a search scope: `paper_ids` **AND** `vault_ids` (RFC 0076).
     ///
-    /// The union, not the intersection: naming a vault *and* a paper outside it
-    /// means "search both", which is what a user assembling a context expects.
+    /// Each list is OR-ed within itself and intersected across the two, with an
+    /// empty list meaning "unconstrained on this dimension":
+    ///
+    /// | papers | vaults | result |
+    /// |--------|--------|--------|
+    /// | `[]`   | `[]`   | the whole library — global search |
+    /// | `[p]`  | `[]`   | paper `p` |
+    /// | `[]`   | `[v]`  | every paper in `v` |
+    /// | `[p]`  | `[v]`  | `p` if `p ∈ v`, otherwise nothing |
+    ///
+    /// This composes: the reader passes a paper and its vault, the vault view
+    /// passes a vault, global search passes neither, and an agent can express
+    /// any subset — all through one call with no new endpoint.
+    ///
+    /// An empty result is a legitimate answer, not an error. Everything goes
+    /// through the `papers` table, so an id that does not exist drops out here
+    /// rather than producing a query against nothing.
     pub fn resolve_search_scope(
         &self,
         paper_ids: &[String],
         vault_ids: &[String],
     ) -> StoreResult<Vec<String>> {
         let conn = self.open_connection()?;
-        let mut resolved: Vec<String> = Vec::new();
 
-        for paper_id in paper_ids {
-            if !resolved.contains(paper_id) {
-                resolved.push(paper_id.clone());
+        let mut clauses: Vec<String> = Vec::new();
+        let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if !paper_ids.is_empty() {
+            clauses.push(format!("p.id in ({})", placeholders(paper_ids.len())));
+            for paper_id in paper_ids {
+                bindings.push(Box::new(paper_id.clone()));
             }
         }
-
         if !vault_ids.is_empty() {
-            let sql = format!(
-                "select distinct paper_id from vault_papers where vault_id in ({})",
+            clauses.push(format!(
+                "exists (select 1 from vault_papers vp
+                         where vp.paper_id = p.id and vp.vault_id in ({}))",
                 placeholders(vault_ids.len())
-            );
-            let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(vault_ids), |row| {
-                    row.get::<_, String>(0)
-                })
-                .map_err(|error| error.to_string())?;
-            for paper_id in collect_rows::<String>(rows)? {
-                if !resolved.contains(&paper_id) {
-                    resolved.push(paper_id);
-                }
+            ));
+            for vault_id in vault_ids {
+                bindings.push(Box::new(vault_id.clone()));
             }
         }
 
-        Ok(resolved)
+        let where_clause = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("where {}", clauses.join(" and "))
+        };
+        let sql = format!("select p.id from papers p {where_clause} order by p.id");
+
+        let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
     }
 
     /// BM25-ranked chunk ids for a query, scoped to `paper_ids`.
@@ -774,55 +899,6 @@ impl LibraryStore {
         let rows = stmt
             .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
                 Ok((row.get::<_, String>(0)?, -row.get::<_, f64>(1)?))
-            })
-            .map_err(|error| error.to_string())?;
-        collect_rows(rows)
-    }
-
-    /// Stored vectors for every chunk in `paper_ids` at the given model.
-    ///
-    /// Loaded in full and scored in memory. At this scale that is the right
-    /// call: a vault of a dozen papers is a few thousand vectors, roughly a
-    /// megabyte, and cosine over it is sub-millisecond — far cheaper than the
-    /// operational cost of a vector index. Around ~100k chunks this stops being
-    /// true, and that is when sqlite-vec earns its place.
-    pub fn chunk_vectors_for_papers(
-        &self,
-        paper_ids: &[String],
-        model: &str,
-        model_version: &str,
-    ) -> StoreResult<Vec<(String, Vec<f32>)>> {
-        if paper_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let conn = self.open_connection()?;
-        let sql = format!(
-            "
-            select e.chunk_id, e.embedding
-            from document_chunk_embeddings e
-            join document_chunks c on c.id = e.chunk_id
-            where c.paper_id in ({})
-              and e.model = ?
-              and e.model_version = ?
-              and e.chunk_version = c.chunk_version
-            ",
-            placeholders(paper_ids.len())
-        );
-
-        let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = paper_ids
-            .iter()
-            .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>)
-            .collect();
-        bindings.push(Box::new(model.to_string()));
-        bindings.push(Box::new(model_version.to_string()));
-
-        let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
-                let chunk_id: String = row.get(0)?;
-                let blob: Vec<u8> = row.get(1)?;
-                Ok((chunk_id, decode_embedding(&blob)))
             })
             .map_err(|error| error.to_string())?;
         collect_rows(rows)
@@ -2097,6 +2173,7 @@ impl LibraryStore {
     }
 
     fn open_connection(&self) -> StoreResult<Connection> {
+        register_sqlite_vec();
         let conn = Connection::open(&self.db_path).map_err(|error| error.to_string())?;
         conn.execute_batch("pragma foreign_keys = on;")
             .map_err(|error| error.to_string())?;
@@ -2482,6 +2559,12 @@ impl LibraryStore {
             ",
         )
         .map_err(|error| error.to_string())?;
+
+        // The vector index (RFC 0076). Separate from create_schema's batch
+        // because it needs the embedding dimensions interpolated, and because a
+        // vec0 failure must not take the rest of the schema down with it —
+        // lexical search and the reader work fine without it.
+        create_vector_index(conn)?;
 
         add_column_if_missing(conn, "papers", "active_source_id", "text")?;
         add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
@@ -4240,22 +4323,160 @@ fn document_extraction_id(source_id: &str, extractor: &str) -> String {
     format!("extraction:{extractor}:{source_id}")
 }
 
+/// Insert one chunk's vector into the `vec0` index.
+///
+/// Silently skips when the index is unavailable, and *refuses* a
+/// dimension mismatch rather than letting `vec0` reject it mid-batch: a vector
+/// of the wrong width means the row came from a different model, and indexing
+/// it would put two vector spaces in one index where nothing downstream could
+/// tell them apart.
+fn index_chunk_vector(
+    conn: &Connection,
+    chunk_id: &str,
+    blob: &[u8],
+    dimensions: usize,
+) -> StoreResult<()> {
+    if !sqlite_vec_available(conn) {
+        return Ok(());
+    }
+    if dimensions != VECTOR_DIMENSIONS {
+        eprintln!(
+            "[search] skipping {chunk_id}: {dimensions} dimensions, index expects {VECTOR_DIMENSIONS}"
+        );
+        return Ok(());
+    }
+
+    let paper_id: Option<String> = conn
+        .query_row(
+            "select paper_id from document_chunks where id = ?1",
+            params![chunk_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(paper_id) = paper_id else {
+        return Ok(());
+    };
+
+    // vec0 has no upsert; a re-embed of the same chunk must replace, not stack.
+    conn.execute(
+        "delete from document_chunk_vectors where chunk_id = ?1",
+        params![chunk_id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "
+        insert into document_chunk_vectors (paper_id, chunk_id, embedding)
+        values (?1, ?2, ?3)
+        ",
+        params![paper_id, chunk_id, blob],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Create the `vec0` index and the trigger that keeps it in step.
+///
+/// Returns `Ok(())` even when `vec0` is unavailable: semantic search is the
+/// only casualty, and `SemanticStatus` reports it on every response rather than
+/// the app failing to start.
+fn create_vector_index(conn: &Connection) -> StoreResult<()> {
+    if !sqlite_vec_available(conn) {
+        eprintln!("[search] sqlite-vec unavailable; semantic search disabled");
+        return Ok(());
+    }
+
+    // `paper_id` is a partition key, not a metadata column. A plain `k = n` KNN
+    // searches globally and filters afterwards, so scoping to one paper could
+    // return nothing when that paper's chunks all rank below the global top-n —
+    // and the failure would read as "this PDF has nothing relevant" rather than
+    // a bug. A partition key makes `k` mean "k within this scope" (RFC 0076).
+    //
+    // Dimensions are fixed in the table definition, so this column encodes the
+    // current model. Changing models is a rebuild plus a re-embed, which is
+    // already the expected path — every embedding row records its own model,
+    // version, and dimensions so the mismatch is detectable.
+    let create = format!(
+        "
+        create virtual table if not exists document_chunk_vectors using vec0(
+          paper_id text partition key,
+          chunk_id text primary key,
+          embedding float[{VECTOR_DIMENSIONS}]
+        );
+        "
+    );
+    if let Err(error) = conn.execute_batch(&create) {
+        eprintln!("[search] could not create vector index: {error}");
+        return Ok(());
+    }
+
+    // Same hazard as the FTS index, same fix. `document_chunk_embeddings` is
+    // reachable by cascade from chunks, papers, sources, and extractions, and a
+    // cascade never runs the code at the call site. An orphaned vector is worse
+    // than an orphaned FTS row: it returns a chunk id that no longer resolves,
+    // so hydration drops it and the search quietly returns fewer results than
+    // it found.
+    conn.execute_batch(
+        "
+        create trigger if not exists trg_document_chunk_vectors_delete
+        after delete on document_chunk_embeddings
+        begin
+          delete from document_chunk_vectors where chunk_id = old.chunk_id;
+        end;
+        ",
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+/// Make `vec0` available to every connection opened from here on (RFC 0076).
+///
+/// Static registration, not a loadable extension: `sqlite-vec` compiles into
+/// the binary, so there is no `.dylib` to bundle, sign, or find at runtime.
+/// `sqlite3_auto_extension` installs an initializer that SQLite runs for each
+/// new connection, so this must happen before the first `Connection::open` —
+/// hence the call at the top of `open_connection` rather than in `init`, which
+/// not every code path reaches first.
+///
+/// Idempotent via `Once`. SQLite also de-duplicates auto-extensions, but doing
+/// the FFI call once keeps the unsafe block off the hot path.
+fn register_sqlite_vec() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        // SAFETY: `sqlite3_vec_init` has the signature SQLite expects of an
+        // extension entry point; the transmute only adds the `sqlite3_api_routines`
+        // parameter that the C ABI passes and the Rust binding omits. This is the
+        // registration form the sqlite-vec crate documents.
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(sqlite_vec::sqlite3_vec_init as *const ())));
+        }
+    });
+}
+
+/// Whether `vec0` is actually usable on this connection.
+///
+/// Static linking makes a missing extension a compile error rather than a
+/// runtime one, but this also catches a vector table that failed to create.
+/// Visible, not fatal: refusing to start would take away a reader and a lexical
+/// search that both work, over a feature that degrades cleanly (RFC 0076).
+fn sqlite_vec_available(conn: &Connection) -> bool {
+    conn.query_row("select vec_version()", [], |row| row.get::<_, String>(0))
+        .is_ok()
+}
+
 /// `?, ?, ?` for an `in (...)` clause of `count` bindings.
 fn placeholders(count: usize) -> String {
     std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Little-endian f32 back out of a stored blob.
-///
-/// A trailing partial float is dropped rather than erroring: the only way to
-/// produce one is a corrupted row, and a short vector fails the length check in
-/// `cosine_similarity` and scores as "no signal".
-fn decode_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        .collect()
 }
 
 /// Turn user input into an FTS5 MATCH expression.
@@ -6494,6 +6715,210 @@ mod tests {
         let pool = db.store.list_search_candidates(&search.id)?;
         assert!(pool[0].seen);
         assert!(pool[0].saved);
+        Ok(())
+    }
+
+    // ---- RFC 0076: scope resolution, vector index ----
+
+    /// The conjunction table from RFC 0076, exhaustively.
+    ///
+    /// Scope is the part callers get wrong, and every wrong answer is silent:
+    /// too wide searches the library when you meant one PDF, too narrow returns
+    /// nothing and looks like "no matches".
+    #[test]
+    fn search_scope_intersects_papers_and_vaults() -> StoreResult<()> {
+        let db = test_db()?;
+        // Seeded library: vault "attention" holds "vaswani2017".
+        let snapshot = db.store.create_vault(&VaultDraft {
+            path: format!("{}/other-vault", db.dir.display()),
+        })?;
+        let other_vault = snapshot
+            .vaults
+            .iter()
+            .find(|vault| vault.path.ends_with("other-vault"))
+            .expect("created vault should be in the snapshot")
+            .id
+            .clone();
+        db.store
+            .add_paper_to_vaults(&paper_draft("lonely"), &[other_vault.clone()])?;
+
+        let none: Vec<String> = Vec::new();
+
+        // Both empty: the whole library.
+        let all = db.store.resolve_search_scope(&none, &none)?;
+        assert!(all.contains(&"vaswani2017".to_string()));
+        assert!(all.contains(&"lonely".to_string()));
+
+        // Paper only.
+        assert_eq!(
+            db.store
+                .resolve_search_scope(&["vaswani2017".to_string()], &none)?,
+            vec!["vaswani2017".to_string()]
+        );
+
+        // Vault only.
+        assert_eq!(
+            db.store.resolve_search_scope(&none, &[other_vault.clone()])?,
+            vec!["lonely".to_string()]
+        );
+
+        // Both, intersecting.
+        assert_eq!(
+            db.store.resolve_search_scope(
+                &["vaswani2017".to_string()],
+                &["attention".to_string()]
+            )?,
+            vec!["vaswani2017".to_string()]
+        );
+
+        // Both, disjoint: the paper is not in that vault. Empty, not an error.
+        assert!(db
+            .store
+            .resolve_search_scope(&["lonely".to_string()], &["attention".to_string()])?
+            .is_empty());
+
+        // An id that does not exist drops out rather than being searched for.
+        assert!(db
+            .store
+            .resolve_search_scope(&["ghost".to_string()], &none)?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_ranking_returns_nearest_chunks_within_scope() -> StoreResult<()> {
+        let db = test_db()?;
+        let near = extracted_paper(&db, "near-paper", &[("paragraph", "attention text")])?;
+        let far = extracted_paper(&db, "far-paper", &[("paragraph", "unrelated text")])?;
+
+        // Hand-built vectors: near-paper sits on the query axis, far-paper does not.
+        let near_chunk = db.store.chunks_for_extraction(&near.id)?.remove(0);
+        let far_chunk = db.store.chunks_for_extraction(&far.id)?.remove(0);
+        let mut on_axis = vec![0.0f32; VECTOR_DIMENSIONS];
+        on_axis[0] = 1.0;
+        let mut off_axis = vec![0.0f32; VECTOR_DIMENSIONS];
+        off_axis[1] = 1.0;
+
+        db.store
+            .save_chunk_embedding(&near_chunk.id, "m", "1", CHUNK_VERSION, &on_axis)?;
+        db.store
+            .save_chunk_embedding(&far_chunk.id, "m", "1", CHUNK_VERSION, &off_axis)?;
+
+        let both = vec!["near-paper".to_string(), "far-paper".to_string()];
+        let ranked = db.store.semantic_chunk_ranking(&both, &on_axis, 10)?;
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].0, near_chunk.id, "nearest must rank first");
+
+        // Scoping to the far paper returns *its* chunk, not the globally nearer
+        // one — the whole reason paper_id is a partition key.
+        let scoped =
+            db.store
+                .semantic_chunk_ranking(&["far-paper".to_string()], &on_axis, 10)?;
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].0, far_chunk.id);
+        Ok(())
+    }
+
+    #[test]
+    fn a_re_embed_replaces_the_vector_rather_than_stacking() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "reembed-paper", &[("paragraph", "text")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+
+        let mut vector = vec![0.0f32; VECTOR_DIMENSIONS];
+        vector[0] = 1.0;
+        db.store
+            .save_chunk_embedding(&chunk.id, "m", "1", CHUNK_VERSION, &vector)?;
+        db.store
+            .save_chunk_embedding(&chunk.id, "m", "1", CHUNK_VERSION, &vector)?;
+
+        let ranked = db
+            .store
+            .semantic_chunk_ranking(&["reembed-paper".to_string()], &vector, 10)?;
+        assert_eq!(ranked.len(), 1, "vec0 has no upsert; the insert must replace");
+        Ok(())
+    }
+
+    /// The vector index is a virtual table: no foreign keys, no cascade. Only
+    /// the trigger keeps it consistent, and an orphaned vector is worse than an
+    /// orphaned FTS row — it returns a chunk id that no longer resolves, so
+    /// hydration drops it and a search quietly returns fewer results.
+    #[test]
+    fn deleting_a_paper_leaves_no_orphaned_vectors() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "vector-doomed", &[("paragraph", "text")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let mut vector = vec![0.0f32; VECTOR_DIMENSIONS];
+        vector[0] = 1.0;
+        db.store
+            .save_chunk_embedding(&chunk.id, "m", "1", CHUNK_VERSION, &vector)?;
+
+        db.store.delete_paper_globally("vector-doomed")?;
+
+        let conn = db.store.open_connection()?;
+        let remaining: i64 = conn
+            .query_row("select count(*) from document_chunk_vectors", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        assert_eq!(remaining, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn vector_backfill_indexes_embeddings_and_is_idempotent() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "backfill-paper", &[("paragraph", "text")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let mut vector = vec![0.0f32; VECTOR_DIMENSIONS];
+        vector[0] = 1.0;
+        db.store
+            .save_chunk_embedding(&chunk.id, "m", "1", CHUNK_VERSION, &vector)?;
+
+        // Simulate an embedding written before the index existed.
+        let conn = db.store.open_connection()?;
+        conn.execute("delete from document_chunk_vectors", [])
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(db.store.index_missing_chunk_vectors()?, 1);
+        assert_eq!(
+            db.store.index_missing_chunk_vectors()?,
+            0,
+            "a second backfill must be a no-op"
+        );
+        Ok(())
+    }
+
+    /// A vector of the wrong width means the row came from a different model.
+    /// Indexing it would put two vector spaces in one index, and nothing
+    /// downstream could tell them apart.
+    #[test]
+    fn a_dimension_mismatch_is_skipped_not_indexed() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "mismatch-paper", &[("paragraph", "text")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+
+        db.store
+            .save_chunk_embedding(&chunk.id, "other-model", "1", CHUNK_VERSION, &[0.5; 8])?;
+
+        let conn = db.store.open_connection()?;
+        let indexed: i64 = conn
+            .query_row("select count(*) from document_chunk_vectors", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        assert_eq!(indexed, 0);
+
+        // The embedding itself is still stored — it is canonical, and a later
+        // index rebuilt for that model can use it.
+        let stored: i64 = conn
+            .query_row(
+                "select count(*) from document_chunk_embeddings",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(stored, 1);
         Ok(())
     }
 

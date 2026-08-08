@@ -157,7 +157,19 @@ impl ChunkEmbeddingWorker {
             Err(error) => eprintln!("[embedding] could not list stale extractions: {error}"),
         }
 
-        self.sweep().await
+        let outcome = self.sweep().await;
+
+        // Index anything embedded before the vector index existed, or left
+        // behind if it was ever dropped (RFC 0076). Costs no re-embedding — the
+        // vectors already exist, this only inserts them into vec0. After the
+        // sweep, so newly written embeddings are included in one pass.
+        match self.store.index_missing_chunk_vectors() {
+            Ok(0) => {}
+            Ok(indexed) => eprintln!("[search] indexed {indexed} chunk vectors"),
+            Err(error) => eprintln!("[search] vector backfill failed: {error}"),
+        }
+
+        outcome
     }
 }
 

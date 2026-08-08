@@ -115,11 +115,17 @@ pub fn run() {
             // Spawned rather than awaited: a first run over an existing library
             // is minutes of CPU, and the app is fully usable without it —
             // lexical search answers on its own.
+            let embedder_for_search = embedder.clone();
             let chunk_embedder = services::embedding::chunk_worker::ChunkEmbeddingWorker::new(
                 store.clone(),
                 embedder,
             );
             eprintln!("[embedding] chunk worker ready={}", chunk_embedder.is_ready());
+
+            // Search within our own papers (RFC 0076) — not deep-research
+            // discovery, which is SearchManager above.
+            let search_service =
+                services::search::SearchService::new(store.clone(), embedder_for_search);
             {
                 let worker = chunk_embedder.clone();
                 tauri::async_runtime::spawn(async move {
@@ -153,6 +159,7 @@ pub fn run() {
             app.manage(search_manager);
             app.manage(embedding_reranker);
             app.manage(chunk_embedder);
+            app.manage(search_service);
             app.manage(query_expander);
             app.manage(settings_store);
             Ok(())
@@ -167,6 +174,8 @@ pub fn run() {
             commands::settings::test_provider_key,
             commands::settings::get_reranker_status,
             commands::library::get_library,
+            commands::search::search_chunks,
+            commands::search::chunk_embedding_coverage,
             commands::library::add_paper_to_vaults,
             commands::library::import_local_pdfs,
             commands::library::import_html_url,

@@ -4,6 +4,7 @@ pub mod highlight;
 pub mod library;
 pub mod reader;
 pub mod research;
+pub mod search;
 pub mod settings;
 pub mod source_acquisition;
 pub mod vault;

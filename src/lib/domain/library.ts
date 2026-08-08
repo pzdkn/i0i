@@ -87,6 +87,31 @@ export type DocumentSpan = {
   bboxJson: string;
 };
 
+/**
+ * A retrieval-sized slice of an extraction (RFC 0075).
+ *
+ * Derived data — regenerable from blocks and torn down with them.
+ * `sourceStart`/`sourceEnd` index the canonical `sourceText`; `blockIds` is the
+ * path back to spans and therefore to rectangles on the page.
+ */
+export type DocumentChunk = {
+  id: string;
+  paperId: string;
+  sourceId: string;
+  extractionId: string;
+  chunkIndex: number;
+  chunker: string;
+  chunkVersion: number;
+  pageStart: number;
+  pageEnd: number;
+  headingPath?: string;
+  text: string;
+  tokenEstimate: number;
+  sourceStart: number;
+  sourceEnd: number;
+  blockIds: string[];
+};
+
 export type DocumentAsset = {
   id: string;
   paperId: string;
