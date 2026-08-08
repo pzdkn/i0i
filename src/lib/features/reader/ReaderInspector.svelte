@@ -1153,7 +1153,10 @@
                           {/if}
                         </p>
                       {:else}
-                        <p>{streamingAnswer}</p>
+                        <!-- The same renderer as a finished answer, so nothing
+                             reflows when the stream ends. Half-written syntax
+                             renders literally, which is what the parser does. -->
+                        <CitedAnswer body={streamingAnswer} />
                       {/if}
                     </div>
                   {/if}
