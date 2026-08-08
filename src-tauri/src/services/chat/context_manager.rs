@@ -303,8 +303,14 @@ impl ContextManager {
 
         let system_prompt = match assembly.passages_block(&request.ephemeral.paper_id) {
             // No citable context: today's prompt exactly, down to the byte.
-            None => bundle.system_prompt,
-            Some(passages) => format!("{}\n\n{passages}", bundle.system_prompt),
+            None => {
+                eprintln!("[chat] assembled 0 passages — this answer cannot cite");
+                bundle.system_prompt
+            }
+            Some(passages) => {
+                eprintln!("[chat] assembled {} passage(s)", assembly.included);
+                format!("{}\n\n{passages}", bundle.system_prompt)
+            }
         };
 
         // Rectangles last, and only for what actually made it into the prompt.
@@ -627,6 +633,15 @@ impl Assembly {
 /// asks for a marker on anything load-bearing.
 pub fn retain_cited(summary: &mut ChatContextSummary, answer: &str) {
     let cited = |handle: &str| answer.contains(&format!("[{handle}]"));
+    let kept = summary
+        .citations
+        .iter()
+        .filter(|citation| cited(&citation.handle))
+        .count();
+    eprintln!(
+        "[chat] answer cited {kept}/{} offered passage(s)",
+        summary.citations.len()
+    );
     // `passages` keeps everything — the drawer shows what the agent read — and
     // only records which ones earned a reference.
     for passage in &mut summary.passages {

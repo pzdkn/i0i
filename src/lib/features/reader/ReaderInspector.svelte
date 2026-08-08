@@ -191,8 +191,22 @@
   let pendingQuestion = $state<string | null>(null);
   let streamingAnswer = $state<string | null>(null);
   // RFC 0078: phase 1 can take up to three round trips before the first word of
-  // prose. Without a line here the panel looks hung rather than thinking.
+  // prose. Without a live indicator the panel looks hung rather than thinking —
+  // and a static line looks hung too, so the glyph has to move.
   let retrievalProgress = $state("");
+  let retrievalCount = $state(0);
+  const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let spinnerFrame = $state(0);
+
+  $effect(() => {
+    if (!isBusy || streamingAnswer) {
+      return;
+    }
+    const timer = setInterval(() => {
+      spinnerFrame = (spinnerFrame + 1) % SPINNER.length;
+    }, 90);
+    return () => clearInterval(timer);
+  });
   let error = $state("");
   // RFC 0072: marking the passage is a bonus on the ask path — a failure there
   // must not lose the user's question, so it surfaces as its own non-fatal
@@ -521,6 +535,7 @@
     pendingQuestion = body;
     streamingAnswer = "";
     retrievalProgress = "";
+    retrievalCount = 0;
     chatInput = "";
     try {
       if (virtual) {
@@ -541,6 +556,7 @@
         if (activeAskId === askId) {
           // The first token of prose means phase 1 is over.
           retrievalProgress = "";
+          retrievalCount = 0;
           streamingAnswer = (streamingAnswer ?? "") + text;
         }
       };
@@ -567,6 +583,7 @@
         pendingQuestion = null;
         streamingAnswer = null;
         retrievalProgress = "";
+        retrievalCount = 0;
       }
     }
   }
@@ -722,12 +739,14 @@
         }
         // "deciding" fires before the first round trip, so the panel says
         // something even on a turn that ends up searching nothing.
-        retrievalProgress =
-          payload.event === "deciding"
-            ? "reading the question…"
-            : payload.event === "searching"
-              ? `searching: ${payload.query ?? ""}`
-              : `read ${payload.count ?? 0} passage${payload.count === 1 ? "" : "s"}…`;
+        if (payload.event === "deciding") {
+          retrievalCount = 0;
+          retrievalProgress = "";
+        } else if (payload.event === "searching") {
+          retrievalProgress = payload.query ?? "";
+        } else {
+          retrievalCount = payload.count ?? 0;
+        }
       },
     );
     return () => void unlisten.then((stop) => stop());
@@ -1103,10 +1122,20 @@
                     </div>
                     <div class="entry answer">
                       <div class="label">AI</div>
-                      {#if !streamingAnswer && retrievalProgress}
-                        <p class="mono-dim">{retrievalProgress}</p>
+                      {#if !streamingAnswer}
+                        <p class="working">
+                          <span class="spin">{SPINNER[spinnerFrame]}</span>
+                          {#if retrievalProgress}
+                            <span class="working-query">{retrievalProgress}</span>
+                          {/if}
+                          {#if retrievalCount}
+                            <span class="working-count"
+                              >{retrievalCount} passage{retrievalCount === 1 ? "" : "s"}</span
+                            >
+                          {/if}
+                        </p>
                       {:else}
-                        <p>{streamingAnswer ? streamingAnswer : "…"}</p>
+                        <p>{streamingAnswer}</p>
                       {/if}
                     </div>
                   {/if}
@@ -1796,6 +1825,34 @@
   .ref-handle {
     flex-shrink: 0;
     color: var(--amber);
+  }
+
+  .working {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    margin: 0;
+    color: var(--fg-3);
+    font-size: 10px;
+  }
+
+  /* A glyph that moves. A static "thinking…" is indistinguishable from a hang,
+     which is the thing this line exists to rule out. */
+  .spin {
+    flex-shrink: 0;
+    color: var(--amber);
+  }
+
+  .working-query {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .working-count {
+    flex-shrink: 0;
+    margin-left: auto;
+    color: var(--amber-dim);
   }
 
   .drawer-toggle {

@@ -151,6 +151,12 @@ where
         };
 
         if completion.tool_calls.is_empty() {
+            if iteration == 0 {
+                // The single most useful line when references do not appear:
+                // it separates "the agent chose not to look" from "the loop
+                // never ran" from "the model cited a number we did not mint".
+                eprintln!("[chat] agent declined to search");
+            }
             break;
         }
 
@@ -188,6 +194,12 @@ where
         }
     }
 
+    eprintln!(
+        "[chat] retrieval done queries={:?} chunks={} capped={}",
+        outcome.queries,
+        outcome.chunks.len(),
+        outcome.capped
+    );
     outcome
 }
 
@@ -345,19 +357,22 @@ fn system_prompt(request: &LoopRequest<'_>, context: &ContextManager) -> String 
     let mut prompt = format!(
         "You are preparing to answer a question about the paper \"{}\".\n\
          \n\
-         Decide whether you need to look anything up. Many questions — what the \
-         paper is about, what a term means, follow-ups to what was just said — \
-         need no lookup at all. If you do not need one, reply with no tool calls \
-         and no text.\n\
+         Your only job right now is to fetch evidence. Do not answer — reply \
+         with tool calls, or with nothing at all.\n\
          \n\
-         If you do, call search_context — and read as little as possible. \
-         Prefer one precise search over three broad ones, and stop as soon as \
-         you have what the question needs. Every passage you pull competes for \
-         room with the paper itself, so a passage you do not end up citing is a \
-         passage that cost the answer something.\n\
+         Call search_context whenever the answer will rest on something \
+         specific in the paper: a claim, number, method, definition, result, or \
+         comparison. That covers most real questions, and a cited answer is \
+         worth far more than a fast one. Skip the search only when the question \
+         is about the conversation itself, or is small talk.\n\
+         \n\
+         Read as little as possible. One precise query beats three broad ones, \
+         and you should stop as soon as you have what the question needs — \
+         every passage competes for room with the paper text, so one you do not \
+         end up citing cost the answer something.\n\
          \n\
          You may search up to {MAX_ITERATIONS} times. Keep a passage with \
-         add_context only if later turns in this conversation will need it.\n",
+         add_context only if later turns will need it.\n",
         request.paper_title,
     );
 
