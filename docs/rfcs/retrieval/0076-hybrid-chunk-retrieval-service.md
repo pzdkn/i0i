@@ -1,4 +1,4 @@
-# RFC 0076: Hybrid chunk retrieval service
+# RFC 0076: SearchService — hybrid retrieval over our own papers
 
 Status: Proposed
 Date: 2026-08-08
@@ -10,53 +10,209 @@ RFC 0054 (local ONNX embedding model), RFC 0023 (reader document model).
 ## Summary
 
 RFC 0075 built the derived-data layer and stopped before querying it. This RFC
-queries it.
-
-One entry point:
+queries it, through one service with one entry point:
 
 ```text
 search(query, paper_ids, vault_ids, mode) → scored chunks
 ```
 
-Lexical retrieval through FTS5/BM25, semantic retrieval through cosine over the
-`f32` blobs RFC 0075 already stores, and the two fused by Reciprocal Rank
-Fusion. Every hit carries its provenance and its per-signal scores.
+Lexical retrieval through FTS5/BM25, semantic retrieval through **sqlite-vec**
+KNN, fused by Reciprocal Rank Fusion. Every hit carries its provenance and its
+per-signal scores.
 
-**Out of scope, still deferred:** `readDocumentRanges`, the chat context model
-(explicit / ambient / retrieved), neural reranking, context compression, and
-OCR. This RFC delivers retrieval; wiring retrieval *into* chat is the next one.
+**Out of scope:** `readDocumentRanges`, the chat context model (explicit /
+ambient / retrieved), neural reranking, context compression, OCR. This RFC
+delivers the retrieval primitive; wiring it into chat is the next one.
 
-## Naming: this is retrieval, not search
+## The service is a shared primitive
 
-`SearchManager` already exists (`services/research/manager.rs:30`), along with
-`searches`, `search_runs`, `search_candidates`, and a `search_papers` command.
-In this codebase **"search" means deep-research discovery** — finding papers
-that are not in the library yet.
+SearchService means *search within papers we already hold* — distinct from
+deep-research discovery, which finds papers we do not have.
 
-What this RFC builds is the opposite motion: finding passages *inside* papers
-already held. Calling it `SearchService` would put two unrelated concepts one
-autocomplete apart, in a codebase where one of them already owns four tables.
+It is deliberately **agnostic about its caller**. The known consumers already
+differ in scope and intent:
 
-So: module `services/retrieval`, type `RetrievalService`, command
-`retrieve_chunks`. The user-facing verb stays "search" — that is what the
-operation is called in the product — but the code says retrieval.
+```text
+reader          search inside the open PDF
+vault view      search across one vault
+global search   search everything in the library
+agent           search to enrich its own context
+```
 
-This RFC also opens `docs/rfcs/retrieval/`. RFC 0075 stayed in `reader/`
-because it was mostly about the document model; from here the series is
-retrieval proper.
+Three consequences follow, and they shape every decision below:
+
+1. **No "current" anything.** Current paper and current vault are UI state. The
+   service takes an explicit scope; the command layer fills it in from whatever
+   "current" means to that caller. A service that knew about the open PDF could
+   not serve the agent or global search.
+2. **Scope is a filter, not a mode.** There is no `searchDocument` versus
+   `searchLibrary`. One call, and the scope narrows it.
+3. **No caller-specific ranking.** Everyone gets the same ordering. If the agent
+   eventually needs different behaviour, that is a parameter, not a fork.
+
+### On the name
+
+`SearchManager` already exists (`services/research/manager.rs:30`) with
+`searches`, `search_runs`, `search_candidates`, and a `search_papers` command —
+all deep-research discovery. Two things called "search" will sit one
+autocomplete apart.
+
+Keeping `SearchService` as the name (it is what the operation is called in the
+product) but placing it at `services/search/` with a module doc that states the
+distinction in its first line. The collision is noted here so it is a known
+cost rather than a surprise.
+
+## Scope is a conjunction
+
+`paper_ids` and `vault_ids` are **AND-ed filters**, each empty meaning
+"unconstrained on this dimension":
+
+| `paper_ids` | `vault_ids` | resolves to |
+| --- | --- | --- |
+| `[]` | `[]` | every paper in the library — global search |
+| `[p]` | `[]` | paper `p`, wherever it lives |
+| `[]` | `[v]` | every paper in vault `v` |
+| `[p]` | `[v]` | `p` **if** `p ∈ v`, otherwise **nothing** |
+| `[p, q]` | `[v, w]` | those of `p, q` that are in `v` or `w` |
+
+Within a list the members are OR-ed; across the two lists they intersect. This
+is ordinary filter semantics, and it composes: "this PDF in this vault" is the
+reader's call, "this vault" is the vault view's, "everything" is global search,
+and the agent can express any subset without a new endpoint.
+
+### The empty intersection warns, it does not throw
+
+Asking for a paper that is not in the named vault is a legitimate question with
+the honest answer "nothing". It is not an error:
+
+```rust
+if resolved.is_empty() && !(paper_ids.is_empty() && vault_ids.is_empty()) {
+    log::warn!("search scope is empty: papers {paper_ids:?} ∩ vaults {vault_ids:?}");
+}
+```
+
+The response reports it explicitly rather than looking like a query that simply
+found no matches:
+
+```rust
+pub struct ScopeSummary {
+    pub paper_ids: Vec<String>,   // after resolution
+    pub empty_reason: Option<EmptyScope>,  // NoIntersection | NoPapers
+}
+```
+
+Throwing would be wrong: it turns a routine UI state — a paper open outside the
+active vault — into an error dialog. Returning zero hits silently would also be
+wrong: the caller cannot tell "nothing matched" from "you asked for an
+impossible scope".
+
+## Semantic search: sqlite-vec
+
+Three spikes ran before this section was written, and all three pass in
+`library_store.rs`'s test module:
+
+| Spike | Result |
+| --- | --- |
+| `sqlite_vec_registers_and_answers_knn` | `vec_version()` resolves; `vec0` KNN returns the nearest vector |
+| `vec0_partition_key_scopes_knn_per_paper` | `k = 2` within one partition returns that paper's chunks, not the globally nearer ones |
+| `vec0_partition_filter_accepts_a_set_of_papers` | `paper_id in (...)` is honoured — out-of-scope partitions do not leak |
+
+That third one is what makes the scope design work with a single query. Without
+it, a multi-paper scope would need one KNN per paper, merged.
+
+### It links statically
+
+`sqlite-vec = "=0.1.9"`, registered through `sqlite3_auto_extension` before any
+connection opens. **There is no `.dylib` to bundle, sign, or locate at
+runtime** — the extension compiles into the binary. The bundled SQLite already
+sets `SQLITE_ENABLE_LOAD_EXTENSION=1` (`libsqlite3-sys` `build.rs:132`), and
+static registration does not even need it.
+
+Version pinned exactly: **`0.1.10-alpha.4` ships a broken package** — its
+`sqlite-vec.c` includes `sqlite-vec-diskann.c`, which is not in the published
+crate, so it fails to compile. `0.1.9` builds and passes all three spikes. The
+`=` pin is deliberate; a caret range would drift onto that alpha.
+
+### Partitioning is the design, not a detail
+
+```sql
+create virtual table document_chunk_vectors using vec0(
+  paper_id  text partition key,
+  chunk_id  text primary key,
+  embedding float[384]
+);
+```
+
+`paper_id` as partition key rather than a metadata column. A plain `k = n` KNN
+searches globally and *then* filters, so scoping to one paper could return zero
+hits when that paper's chunks all rank below the global top-n — the failure
+would look like "this PDF has nothing relevant" rather than a bug. With a
+partition key, `k` means "k within this scope", which is what every caller
+actually wants.
+
+Dimensions are fixed in the table definition, so the column encodes the current
+model. Changing models is a table rebuild plus a re-embed, which RFC 0075
+already treats as the expected path — `model`, `model_version`, and
+`dimensions` are on every `document_chunk_embeddings` row precisely so this is
+detectable.
+
+### Two tables for one fact, and why
+
+`document_chunk_embeddings` stays as the canonical store; `document_chunk_vectors`
+is the index built from it. Not redundancy — a division of labour:
+
+- The table survives a model change, a `vec0` format change, and a corrupted
+  index. The index is rebuildable from it in one pass, with no re-embedding.
+- `vec0` is a virtual table: it cannot hold a foreign key, cannot cascade, and
+  cannot be queried for anything but KNN.
+
+Which raises the same hazard RFC 0075 hit with FTS5 — and the same fix.
+`document_chunks` is reachable by cascade from papers, sources, and
+extractions, and a cascade never runs the code at the call site. So the vector
+index gets a trigger, exactly like `trg_document_chunks_fts_delete`:
+
+```sql
+create trigger trg_document_chunk_vectors_delete
+after delete on document_chunk_embeddings
+begin
+  delete from document_chunk_vectors where chunk_id = old.chunk_id;
+end;
+```
+
+Tested against both cascade paths, as the FTS trigger already is. An orphaned
+vector is worse than an orphaned FTS row: it returns a chunk id that no longer
+resolves, and the hydration step drops it, so a search silently returns fewer
+results than it found.
+
+### Startup verification
+
+The originating spec asked to verify the extension at startup and fail visibly.
+With static linking a missing extension is a compile error rather than a
+runtime one, but the check is one query and it also catches a `vec0` table that
+failed to create:
+
+```text
+select vec_version()  →  ok    semantic search enabled
+                      →  err   log error, SemanticStatus::Unavailable, keep serving lexical
+```
+
+**Visible, not fatal.** Refusing to start would take away a reader and a
+lexical search that both work perfectly, over a feature that degrades cleanly.
+Visibility comes from `SemanticStatus` on every response, so a caller can say
+"semantic search is unavailable" instead of quietly returning worse results.
 
 ## The API
 
 ```rust
-pub struct RetrievalRequest {
+pub struct SearchRequest {
     pub query: String,
     pub paper_ids: Vec<String>,
     pub vault_ids: Vec<String>,
-    pub mode: RetrievalMode,   // Lexical | Semantic | Hybrid (default)
-    pub limit: usize,          // default 12
+    pub mode: SearchMode,   // Lexical | Semantic | Hybrid (default)
+    pub limit: usize,       // default 12
 }
 
-pub struct RetrievalResponse {
+pub struct SearchResponse {
     pub hits: Vec<ChunkHit>,
     pub scope: ScopeSummary,
     pub semantic: SemanticStatus,
@@ -66,76 +222,18 @@ pub struct ChunkHit {
     pub chunk: DocumentChunk,     // text, page range, heading path, block ids
     pub score: f64,               // the ranking score actually used
     pub lexical: Option<Signal>,  // rank + BM25, when lexical ran and matched
-    pub semantic: Option<Signal>, // rank + cosine, when semantic ran and matched
+    pub semantic: Option<Signal>, // rank + distance, when semantic ran and matched
 }
 
-pub struct Signal {
-    pub rank: usize,
-    pub score: f64,
+pub struct Signal { pub rank: usize, pub score: f64 }
+
+pub enum SemanticStatus {
+    Ran { coverage: EmbeddingCoverage },
+    Unavailable,     // sqlite-vec or the model failed to initialize
+    NotRequested,    // mode = Lexical
+    NoEmbeddings,    // scope has chunks, none embedded yet
 }
 ```
-
-### Scope, and a conflict in the original spec
-
-The originating spec said `paper_ids` defaults to the current paper and
-`vault_ids` defaults to the current vault. Those two defaults contradict each
-other: applied together they resolve to the whole current vault, which makes
-the paper default dead code, and every "search this PDF" call would silently
-search twelve papers.
-
-Resolved as:
-
-- **Empty request scope means the current paper.** Narrowest and most
-  predictable; it is what "search this document" must mean.
-- **`vault_ids` is opt-in.** Naming a vault widens the scope; nothing widens it
-  implicitly.
-- **Papers and vaults union.** Naming a vault *and* a paper outside it means
-  "search both" — that is what someone assembling a context expects.
-
-And the part that cannot live in the backend: **"current" is not a concept the
-store has.** The service takes an explicit scope; the Tauri command layer fills
-in the current paper from reader state. An empty scope reaching the service
-searches nothing and says so in `ScopeSummary`, rather than quietly falling
-back to the entire library — a query that silently searches 500 papers instead
-of one is worse than a query that returns nothing.
-
-## Semantic search without sqlite-vec
-
-The originating spec was explicit: use sqlite-vec, verify the extension loads
-at startup, fail visibly if it does not. This RFC does not, and the reason is
-worth stating plainly rather than burying.
-
-**Brute-force cosine is faster than the index at this library's size.** The
-vectors are already stored as little-endian `f32` (RFC 0075). Loading a scope's
-worth and scoring them in Rust costs:
-
-| scope | chunks | vector bytes | cosine cost |
-| --- | ---: | ---: | ---: |
-| one paper | ~60 | ~92 KB | ~0.1 ms |
-| one vault (12 papers) | ~700 | ~1.1 MB | ~1 ms |
-| whole library today | ~700 | ~1.1 MB | ~1 ms |
-| 100 papers | ~6,000 | ~9 MB | ~10 ms |
-
-384 dimensions at 4 bytes each is 1.5 KB per chunk. A dot product over 6,000 of
-them is a few million flops — below the noise floor of the IPC round trip that
-delivers the result.
-
-What sqlite-vec would add today: a native extension to bundle and load per
-platform, a startup health check, a second index to keep in sync with
-`document_chunks`, and a new failure mode where the app refuses to start
-because a `.dylib` did not load. What it would buy: nothing measurable until
-roughly **100k chunks**, around 1,500 papers.
-
-So the exclusion is not a deferral of quality, it is a deferral of operational
-cost, and it is reversible for free — the stored blob format is exactly what
-`vec0` consumes, so adopting it later is an index build over existing rows with
-no re-embedding. **The threshold is written into the code as a logged warning**
-when a scope exceeds 50k chunks, so the decision revisits itself rather than
-depending on someone remembering this document.
-
-This does mean the originating spec's "verify sqlite-vec at startup and fail
-visibly" has no subject in v1. Its intent — never silently degrade to lexical
-while pretending to be hybrid — is served instead by `SemanticStatus` below.
 
 ## Fusion
 
@@ -146,142 +244,147 @@ score(chunk) = Σ  1 / (k + rank_in_that_ranking)
              signals
 ```
 
-RRF because **BM25 and cosine cannot be compared numerically.** BM25 is
-unbounded and depends on corpus statistics; cosine is bounded in `[-1, 1]` and
-depends on the model. Any weighted blend of the two raw numbers requires a
-calibration nobody has measured, and it would silently change meaning as the
-library grows and BM25's IDF terms shift. RRF discards the magnitudes and uses
-only the ordering, which is the only part of each signal that is trustworthy
-across both.
+RRF because **BM25 and vector distance cannot be compared numerically.** BM25 is
+unbounded and depends on corpus statistics that shift as the library grows;
+`vec0` returns an L2 distance where lower is better. Any weighted blend of the
+two needs a calibration nobody has measured, and it would silently change
+meaning over time. RRF discards magnitudes and uses only ordering — the part of
+each signal that is trustworthy across both.
 
-`k = 60` is the standard constant from the original RRF paper. It flattens the
-difference between ranks 1 and 2 relative to the difference between "ranked at
-all" and "absent", which is the behaviour we want: a chunk both signals agree
-on should beat a chunk that one signal loved and the other did not see.
+`k = 60` is the constant from the original RRF paper. It flattens the gap
+between ranks 1 and 2 relative to the gap between "ranked" and "absent", which
+is the behaviour we want: agreement between signals should outrank a single
+signal's enthusiasm.
 
-Each signal retrieves `limit * 4` candidates before fusion, so a chunk ranked
-15th lexically and 3rd semantically still surfaces in a top-12 request.
+Each signal fetches `limit * 4` candidates before fusion, so a chunk ranked 15th
+lexically and 3rd semantically still reaches a top-12 response.
 
 ### What `score` means
 
-`score` is **the number this response was sorted by, comparable only within
-this response.** In `Hybrid` it is the RRF sum; in `Lexical` it is the negated
-BM25; in `Semantic` it is the cosine.
+**The number this response was sorted by, comparable only within this
+response.** RRF sum in `Hybrid`, negated BM25 in `Lexical`, negated distance in
+`Semantic`.
 
-Deliberately not normalized to a friendly 0–100. A normalized score invites
-comparison across queries and across modes, and every such comparison would be
-meaningless. The per-signal `lexical` and `semantic` fields are there so a UI
-can explain *why* a hit ranked where it did, which is the honest version of
+Not normalized to a friendly 0–100 — that invites comparison across queries and
+modes, and every such comparison is meaningless. The per-signal fields let a UI
+explain *why* something ranked where it did, which is the honest version of
 what a percentage pretends to offer.
 
 ## Degradation is reported, not hidden
 
-Continuing RFC 0075's policy: the reranker degrades silently, retrieval counts
+Continuing RFC 0075's split: the reranker degrades silently, retrieval counts
 its holes.
 
-```rust
-pub enum SemanticStatus {
-    Ran { coverage: EmbeddingCoverage },
-    ModelUnavailable,       // no embedder loaded
-    NotRequested,           // mode = Lexical
-    NoEmbeddings,           // scope has chunks, none embedded yet
-}
-```
-
 A `Hybrid` request against a paper whose embeddings are still being written
-returns lexical results and says `NoEmbeddings` — it does not pretend to have
-run a hybrid search. This is the case that will actually happen: the startup
-sweep takes minutes on an existing library, and a user opening a PDF in that
-window would otherwise get quietly worse results with no indication why.
+returns lexical hits and reports `NoEmbeddings`. It does not claim to have run
+a hybrid search. This case *will* happen — RFC 0075's startup sweep takes
+minutes on an existing library, and a user opening a PDF in that window would
+otherwise get quietly worse results with nothing to explain it.
 
 ## Query embedding
 
-Every semantic request embeds the query — one forward pass, ~10 ms on CPU for
-BGE-small. Not cached. A cache would need invalidation on model change and
-would save single-digit milliseconds on repeated identical queries, which is
-not a thing users do.
-
-The embedding runs in `spawn_blocking`, like every other use of the model.
+Every semantic request embeds the query: one forward pass, ~10 ms on CPU for
+BGE-small, in `spawn_blocking` like every other use of the model. Not cached —
+a cache needs invalidation on model change and saves single-digit milliseconds
+on repeated identical queries, which is not a thing users do.
 
 ## Provenance, and getting back to the page
 
 Each hit carries what RFC 0075 stored: `paper_id`, `page_start`/`page_end`,
-`heading_path`, `source_start`/`source_end`, and `block_ids`.
+`heading_path`, `source_start`/`source_end`, `block_ids`.
 
-That is enough to *name* the location but not to draw it. Turning a hit into
-rectangles is `block_ids → document_spans → bbox_json`, which is a second query
-and a payload several times the size of the text. Retrieval does not do it — a
-result list shows text and a page number, and only a click needs geometry.
+Enough to *name* a location, not to draw it. Rectangles are
+`block_ids → document_spans → bbox_json`: a second query and a payload several
+times the size of the text. Search does not walk it — a result list shows text
+and a page number; only a click needs geometry.
 
-The resolve step (`chunk_rects(chunk_id) → Vec<PdfRect>`) belongs with the
-chat-context RFC that will use it. Naming it here so the chain RFC 0075 built
-is visibly complete: **chunk → blocks → spans → rectangles** works today; this
-RFC simply does not walk it on every search.
+`chunk_rects(chunk_id) → Vec<PdfRect>` belongs with the chat-context RFC that
+will use it. Named here so the chain RFC 0075 built is visibly complete:
+**chunk → blocks → spans → rectangles** works; this RFC just does not walk it on
+every search.
 
-## Storage additions
+## Storage
 
-None. This RFC is queries over RFC 0075's schema.
+One new virtual table, one trigger, one backfill. `document_chunk_embeddings`
+is unchanged — the index is derived from it.
+
+The backfill mirrors RFC 0075 R6: a startup pass inserting into
+`document_chunk_vectors` any embedding row with no vector, so an existing
+library indexes itself without re-embedding. The embedding worker also inserts
+into both on each write.
 
 New store methods:
 
 | method | purpose |
 | --- | --- |
-| `resolve_search_scope(paper_ids, vault_ids)` | union of papers and vault members |
+| `resolve_search_scope(paper_ids, vault_ids)` | the conjunction above |
 | `lexical_chunk_ranking(paper_ids, query, limit)` | chunk ids + negated BM25 |
-| `chunk_vectors_for_papers(paper_ids, model, version)` | vectors for in-memory cosine |
+| `semantic_chunk_ranking(paper_ids, vector, limit)` | chunk ids + distance, via `vec0` |
 | `chunks_by_ids(ids)` | hydrate the fused ranking |
+| `index_missing_chunk_vectors()` | backfill |
 
-The split between "rank ids" and "hydrate text" is deliberate: fusion needs
-only ids and scores, so text is loaded once, for the ~12 chunks that survive,
-instead of for the ~100 candidates each signal produced.
+Ranking and hydration are split deliberately: fusion needs only ids and scores,
+so text is loaded once for the ~12 survivors instead of the ~100 candidates the
+two signals produced.
 
-### FTS5 query escaping
+### FTS5 escaping
 
-FTS5 `MATCH` takes a query *language* — bare `AND`/`OR`/`NEAR`, `"`, `*`, and
-`(` all have meaning. A user typing `BLEU (revised)` or `C++` gets a syntax
-error, not a search. Every token is quoted before it reaches `MATCH`, making
-each a literal phrase and the whole query an implicit AND. Already implemented
-and tested in RFC 0075 (`fts_match_query`).
+Already implemented and tested in RFC 0075 (`fts_match_query`). FTS5 `MATCH`
+takes a query *language* — `AND`, `OR`, `NEAR`, `"`, `*`, `(` all have meaning,
+so `BLEU (revised)` is a syntax error, not a search. Every token is quoted,
+making each a literal phrase and the whole query an implicit AND.
 
 ## Testing
 
 | Unit | Test |
 | --- | --- |
-| Scope resolution | Papers ∪ vault members, deduplicated; empty scope stays empty |
-| Lexical ranking | Known corpus, expected order; BM25 returned positive-is-better |
-| Semantic ranking | Stub embedder with hand-built vectors; nearest chunk ranks first |
-| RRF | Pure function over two synthetic rankings, including disjoint ones |
-| Mode | `Lexical` never loads vectors; `Semantic` never touches FTS |
-| Degradation | No embedder → lexical hits plus `ModelUnavailable`, not an error |
+| Scope conjunction | Every row of the table above, including `p ∉ v` → empty |
+| Empty scope | Warns and reports `EmptyScope`; never returns `Err` |
+| Global scope | Both lists empty searches the whole library |
+| Lexical ranking | Known corpus, expected order, positive-is-better |
+| Semantic ranking | Stub embedder with hand-built vectors; nearest ranks first |
+| Partition scoping | A paper's chunks are returned even when globally out-ranked |
+| RRF | Pure function over synthetic rankings, including disjoint ones |
+| Mode | `Lexical` never touches `vec0`; `Semantic` never touches FTS |
+| Vector teardown | Both cascade paths leave no orphaned vector |
+| Backfill | Embeddings without vectors get indexed; running twice is a no-op |
+| Degradation | No `vec0` → lexical hits plus `Unavailable`, not an error |
 | Partial coverage | Half-embedded scope reports `Ran { coverage }` with the gap |
-| Escaping | `(`, `*`, `AND`, unbalanced quotes all return results, never an error |
 | Hydration order | Fused rank order survives `chunks_by_ids` |
 
-Fusion and scoring are pure functions over synthetic rankings — no database, no
-model — for the same reason the chunker is: the part most likely to need tuning
-should be the part testable in microseconds.
+Fusion and scope resolution are pure functions — no database, no model — for
+the same reason the chunker is.
 
 ## Budgets
 
 | Operation | Target |
 | --- | --- |
-| Lexical search, one paper | < 10 ms |
-| Hybrid search, one paper | < 50 ms (dominated by query embedding) |
-| Hybrid search, one vault | < 100 ms |
+| Lexical, one paper | < 10 ms |
+| Hybrid, one paper | < 50 ms (dominated by query embedding) |
+| Hybrid, one vault | < 100 ms |
+| Hybrid, whole library | < 250 ms |
+| Vector backfill, existing library | < 5 s |
 
 ## Alternatives considered
 
-**sqlite-vec now.** Covered above: real operational cost, no measurable benefit
-below ~100k chunks, and free to adopt later because the blob format already
-matches.
+**Brute-force cosine over stored blobs instead of `vec0`.** Genuinely viable at
+today's size — a vault is ~1.1 MB of vectors and cosine over it is ~1 ms. It was
+the earlier draft of this RFC. Rejected because the operational cost that
+argument rested on turned out not to exist: the crate links statically, so there
+is no library to bundle or locate, and the spikes proved partition-scoped KNN
+works. Brute force would have to be replaced at ~100k chunks anyway, and the
+index costs one table and one trigger now.
 
-**Weighted score blending instead of RRF.** Requires calibrating two
-incomparable scales, and the calibration drifts as the corpus grows. RRF needs
-no constants beyond `k`.
+**A metadata column instead of a partition key.** Filters after the KNN, so a
+scoped search can return zero hits when the scope's chunks rank below the global
+top-k — a failure that reads as "nothing relevant here".
+
+**Weighted score blending instead of RRF.** Needs a calibration between two
+incomparable scales, and the calibration drifts as the corpus grows.
+
+**Union instead of intersection for scope.** Would make "this paper in this
+vault" mean "this paper, plus everything in the vault" — the opposite of the
+reader's intent, and it makes narrowing impossible to express.
 
 **Returning rectangles with every hit.** Multiplies the payload for data a
-result list does not draw. Deferred to a resolve call.
-
-**Defaulting an empty scope to the whole library.** Rejected — the failure is
-silent and expensive, and it turns "search this PDF" into a library scan when a
-caller forgets to pass scope.
+result list does not draw.

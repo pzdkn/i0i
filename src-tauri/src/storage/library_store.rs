@@ -693,32 +693,169 @@ impl LibraryStore {
         .map_err(|error| error.to_string())
     }
 
-    /// Lexical retrieval over chunk text (RFC 0075). Ranked by BM25, which FTS5
-    /// returns as a negative score — lower is better, hence the plain ascending
-    /// sort.
+    /// Every paper id in the given papers and vaults, deduplicated.
+    ///
+    /// The union, not the intersection: naming a vault *and* a paper outside it
+    /// means "search both", which is what a user assembling a context expects.
+    pub fn resolve_search_scope(
+        &self,
+        paper_ids: &[String],
+        vault_ids: &[String],
+    ) -> StoreResult<Vec<String>> {
+        let conn = self.open_connection()?;
+        let mut resolved: Vec<String> = Vec::new();
+
+        for paper_id in paper_ids {
+            if !resolved.contains(paper_id) {
+                resolved.push(paper_id.clone());
+            }
+        }
+
+        if !vault_ids.is_empty() {
+            let sql = format!(
+                "select distinct paper_id from vault_papers where vault_id in ({})",
+                placeholders(vault_ids.len())
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(vault_ids), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| error.to_string())?;
+            for paper_id in collect_rows::<String>(rows)? {
+                if !resolved.contains(&paper_id) {
+                    resolved.push(paper_id);
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    /// BM25-ranked chunk ids for a query, scoped to `paper_ids`.
+    ///
+    /// Returns ids and scores rather than whole chunks so the caller can fuse
+    /// this ranking with a semantic one before paying to load any text. FTS5
+    /// returns BM25 as a *negative* number where more negative is better; it is
+    /// negated here so every score in this module means "higher is better".
+    pub fn lexical_chunk_ranking(
+        &self,
+        paper_ids: &[String],
+        query: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<(String, f64)>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() || paper_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.open_connection()?;
+        let sql = format!(
+            "
+            select c.id, bm25(document_chunks_fts)
+            from document_chunks c
+            join document_chunks_fts f on f.chunk_id = c.id
+            where c.paper_id in ({})
+              and document_chunks_fts match ?
+            order by bm25(document_chunks_fts)
+            limit ?
+            ",
+            placeholders(paper_ids.len())
+        );
+
+        let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = paper_ids
+            .iter()
+            .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        bindings.push(Box::new(fts_match_query(trimmed)));
+        bindings.push(Box::new(limit));
+
+        let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, -row.get::<_, f64>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
+    /// Stored vectors for every chunk in `paper_ids` at the given model.
+    ///
+    /// Loaded in full and scored in memory. At this scale that is the right
+    /// call: a vault of a dozen papers is a few thousand vectors, roughly a
+    /// megabyte, and cosine over it is sub-millisecond — far cheaper than the
+    /// operational cost of a vector index. Around ~100k chunks this stops being
+    /// true, and that is when sqlite-vec earns its place.
+    pub fn chunk_vectors_for_papers(
+        &self,
+        paper_ids: &[String],
+        model: &str,
+        model_version: &str,
+    ) -> StoreResult<Vec<(String, Vec<f32>)>> {
+        if paper_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.open_connection()?;
+        let sql = format!(
+            "
+            select e.chunk_id, e.embedding
+            from document_chunk_embeddings e
+            join document_chunks c on c.id = e.chunk_id
+            where c.paper_id in ({})
+              and e.model = ?
+              and e.model_version = ?
+              and e.chunk_version = c.chunk_version
+            ",
+            placeholders(paper_ids.len())
+        );
+
+        let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = paper_ids
+            .iter()
+            .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        bindings.push(Box::new(model.to_string()));
+        bindings.push(Box::new(model_version.to_string()));
+
+        let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
+                let chunk_id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((chunk_id, decode_embedding(&blob)))
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
+    pub fn chunks_by_ids(&self, ids: &[String]) -> StoreResult<Vec<DocumentChunk>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.open_connection()?;
+        let tail = format!("where c.id in ({})", placeholders(ids.len()));
+        read_chunks(&conn, &tail, rusqlite::params_from_iter(ids))
+    }
+
+    /// Lexical retrieval returning whole chunks. A convenience over
+    /// `lexical_chunk_ranking` for callers that want text and not scores.
     pub fn search_chunks_lexical(
         &self,
         paper_id: &str,
         query: &str,
         limit: i64,
     ) -> StoreResult<Vec<DocumentChunk>> {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let conn = self.open_connection()?;
-        read_chunks(
-            &conn,
-            "
-            join document_chunks_fts f on f.chunk_id = c.id
-            where c.paper_id = ?1
-              and document_chunks_fts match ?2
-            order by bm25(document_chunks_fts)
-            limit ?3
-            ",
-            params![paper_id, fts_match_query(trimmed), limit],
-        )
+        let ranking =
+            self.lexical_chunk_ranking(&[paper_id.to_string()], query, limit)?;
+        let ids: Vec<String> = ranking.iter().map(|(id, _)| id.clone()).collect();
+        let mut chunks = self.chunks_by_ids(&ids)?;
+        // `chunks_by_ids` returns rows in table order; restore rank order.
+        chunks.sort_by_key(|chunk| {
+            ids.iter()
+                .position(|id| *id == chunk.id)
+                .unwrap_or(usize::MAX)
+        });
+        Ok(chunks)
     }
 
     pub fn set_document_extraction_failed(
@@ -4103,6 +4240,24 @@ fn document_extraction_id(source_id: &str, extractor: &str) -> String {
     format!("extraction:{extractor}:{source_id}")
 }
 
+/// `?, ?, ?` for an `in (...)` clause of `count` bindings.
+fn placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Little-endian f32 back out of a stored blob.
+///
+/// A trailing partial float is dropped rather than erroring: the only way to
+/// produce one is a corrupted row, and a short vector fails the length check in
+/// `cosine_similarity` and scores as "no signal".
+fn decode_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect()
+}
+
 /// Turn user input into an FTS5 MATCH expression.
 ///
 /// FTS5 query syntax is a language: bare `AND`/`OR`/`NEAR`, quotes, and `*` all
@@ -6340,6 +6495,210 @@ mod tests {
         assert!(pool[0].seen);
         assert!(pool[0].saved);
         Ok(())
+    }
+
+    /// Spike (RFC 0076): does sqlite-vec register and answer a KNN query
+    /// against our bundled SQLite? Statically linked via `sqlite3_auto_extension`,
+    /// so there is no `.dylib` to find at runtime — but the crate is alpha and
+    /// links its own SQLite symbols, so this is worth proving rather than
+    /// assuming.
+    #[test]
+    fn sqlite_vec_registers_and_answers_knn() -> StoreResult<()> {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(sqlite_vec::sqlite3_vec_init as *const ())));
+        }
+
+        let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
+
+        let version: String = conn
+            .query_row("select vec_version()", [], |row| row.get(0))
+            .map_err(|error| format!("vec_version failed: {error}"))?;
+        assert!(!version.is_empty(), "sqlite-vec did not register");
+
+        conn.execute_batch(
+            "create virtual table v using vec0(chunk_id text primary key, embedding float[4]);",
+        )
+        .map_err(|error| format!("vec0 create failed: {error}"))?;
+
+        for (id, vector) in [
+            ("a", [1.0f32, 0.0, 0.0, 0.0]),
+            ("b", [0.0f32, 1.0, 0.0, 0.0]),
+        ] {
+            let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            conn.execute(
+                "insert into v (chunk_id, embedding) values (?1, ?2)",
+                params![id, blob],
+            )
+            .map_err(|error| format!("vec0 insert failed: {error}"))?;
+        }
+
+        let query: Vec<u8> = [0.9f32, 0.1, 0.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let nearest: String = conn
+            .query_row(
+                "select chunk_id from v where embedding match ?1 and k = 1 order by distance",
+                params![query],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("knn failed: {error}"))?;
+
+        assert_eq!(nearest, "a");
+        Ok(())
+    }
+
+    /// Spike (RFC 0076): can a KNN query be *scoped* to a set of papers?
+    ///
+    /// This decides whether semantic search can honour the scope filter at all.
+    /// A plain `k = n` KNN searches globally, so post-filtering to one paper
+    /// could return zero hits when that paper's chunks all rank below the
+    /// global top-n. A partition key makes `k` mean "k within this paper".
+    #[test]
+    fn vec0_partition_key_scopes_knn_per_paper() -> StoreResult<()> {
+        register_sqlite_vec_for_test();
+        let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
+
+        conn.execute_batch(
+            "
+            create virtual table v using vec0(
+              paper_id text partition key,
+              chunk_id text primary key,
+              embedding float[4]
+            );
+            ",
+        )
+        .map_err(|error| format!("partitioned vec0 create failed: {error}"))?;
+
+        // Paper A holds everything close to the query; paper B holds only
+        // distant vectors. A global top-2 would be entirely paper A.
+        let rows: [(&str, &str, [f32; 4]); 4] = [
+            ("paper-a", "a1", [1.0, 0.0, 0.0, 0.0]),
+            ("paper-a", "a2", [0.99, 0.01, 0.0, 0.0]),
+            ("paper-b", "b1", [0.0, 0.0, 1.0, 0.0]),
+            ("paper-b", "b2", [0.0, 0.0, 0.0, 1.0]),
+        ];
+        for (paper_id, chunk_id, vector) in rows {
+            let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            conn.execute(
+                "insert into v (paper_id, chunk_id, embedding) values (?1, ?2, ?3)",
+                params![paper_id, chunk_id, blob],
+            )
+            .map_err(|error| format!("partitioned insert failed: {error}"))?;
+        }
+
+        let query: Vec<u8> = [1.0f32, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+
+        let mut stmt = conn
+            .prepare(
+                "
+                select chunk_id from v
+                where embedding match ?1 and k = 2 and paper_id = ?2
+                order by distance
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let scoped: Vec<String> = stmt
+            .query_map(params![query, "paper-b"], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("partitioned knn failed: {error}"))?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(|error| error.to_string())?;
+
+        // The whole point: asking for 2 within paper-b returns paper-b's two
+        // chunks, not paper-a's globally-nearer ones.
+        assert_eq!(scoped.len(), 2);
+        assert!(scoped.iter().all(|id| id.starts_with('b')));
+        Ok(())
+    }
+
+    /// A partition filter must accept a *set* of papers (RFC 0076).
+    ///
+    /// The whole multi-paper scope design rests on this: one KNN with
+    /// `paper_id in (...)` serves any scope. Without it we would need one query
+    /// per paper merged afterwards. Asserted rather than assumed, because the
+    /// dangerous failure is an `in` clause that compiles and is then ignored —
+    /// that returns out-of-scope chunks with no error.
+    #[test]
+    fn vec0_partition_filter_accepts_a_set_of_papers() -> StoreResult<()> {
+        register_sqlite_vec_for_test();
+        let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
+        conn.execute_batch(
+            "
+            create virtual table v using vec0(
+              paper_id text partition key,
+              chunk_id text primary key,
+              embedding float[4]
+            );
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+        for (paper_id, chunk_id, vector) in [
+            ("paper-a", "a1", [1.0f32, 0.0, 0.0, 0.0]),
+            ("paper-b", "b1", [0.9f32, 0.1, 0.0, 0.0]),
+            ("paper-c", "c1", [0.0f32, 0.0, 1.0, 0.0]),
+        ] {
+            let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            conn.execute(
+                "insert into v (paper_id, chunk_id, embedding) values (?1, ?2, ?3)",
+                params![paper_id, chunk_id, blob],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        let query: Vec<u8> = [1.0f32, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+
+        let attempted = conn
+            .prepare(
+                "
+                select chunk_id from v
+                where embedding match ?1 and k = 5
+                  and paper_id in ('paper-a', 'paper-b')
+                order by distance
+                ",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map(params![query], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()
+            });
+
+        let hits = attempted.map_err(|error| format!("`in` partition filter rejected: {error}"))?;
+
+        assert_eq!(hits.len(), 2, "expected both in-scope papers: {hits:?}");
+        assert!(
+            !hits.iter().any(|id| id.starts_with('c')),
+            "out-of-scope paper leaked through the filter: {hits:?}"
+        );
+        Ok(())
+    }
+
+    /// Registering twice in one test binary is harmless — SQLite keeps a list of
+    /// auto-extensions and skips duplicates — but the tests share a process, so
+    /// this keeps the intent obvious at each call site.
+    fn register_sqlite_vec_for_test() {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(sqlite_vec::sqlite3_vec_init as *const ())));
+        }
     }
 
     // ---- RFC 0075: chunks, FTS5, embeddings ----
