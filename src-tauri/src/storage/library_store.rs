@@ -27,10 +27,14 @@ use crate::domain::research::{
 
 type StoreResult<T> = Result<T, String>;
 
-/// Width of the `vec0` embedding column. Must match the active model's output
-/// (`services::embedding::MODEL_DIMENSIONS`); a mismatch is caught at write
-/// time by `index_chunk_vector` rather than silently indexing garbage.
-const VECTOR_DIMENSIONS: usize = 384;
+/// Width of the `vec0` embedding column, tied to the active model rather than
+/// restated.
+///
+/// If these drifted apart, `index_chunk_vector` would skip every chunk on a
+/// dimension mismatch and semantic search would return nothing forever, with
+/// only a log line to explain it — so the two are the same constant, not two
+/// constants that agree today.
+const VECTOR_DIMENSIONS: usize = crate::services::embedding::MODEL_DIMENSIONS;
 
 #[derive(Clone)]
 pub struct LibraryStore {
@@ -730,6 +734,22 @@ impl LibraryStore {
 
         let blob: Vec<u8> = query_vector.iter().flat_map(|v| v.to_le_bytes()).collect();
 
+        // `k` in a partitioned vec0 query is **per-partition**, not a total —
+        // see `vec0_partition_filter_accepts_a_set_of_papers`. Passing the
+        // caller's budget straight through would fetch it once per paper, so a
+        // whole-library search would pull tens of thousands of rows and still
+        // look correct while missing its latency budget by an order of
+        // magnitude.
+        //
+        // Dividing keeps the row count near the budget. Once the scope has more
+        // papers than the budget has slots, every paper contributes its single
+        // best chunk — which is the right degradation: broad-but-shallow beats
+        // deep-in-the-first-few-papers when someone searches their whole
+        // library.
+        let per_partition_k = (limit as usize)
+            .div_ceil(paper_ids.len())
+            .max(1) as i64;
+
         // The partition filter takes a set, which is what lets one query serve
         // any scope — verified by `vec0_partition_filter_accepts_a_set_of_papers`.
         let sql = format!(
@@ -746,7 +766,7 @@ impl LibraryStore {
 
         let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = vec![
             Box::new(blob) as Box<dyn rusqlite::ToSql>,
-            Box::new(limit),
+            Box::new(per_partition_k),
         ];
         for paper_id in paper_ids {
             bindings.push(Box::new(paper_id.clone()));
@@ -758,7 +778,14 @@ impl LibraryStore {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             })
             .map_err(|error| error.to_string())?;
-        collect_rows(rows)
+
+        // Per-partition k means the union can exceed the caller's budget; the
+        // ORDER BY is within each partition's result set, so re-sort globally
+        // and truncate to what was actually asked for.
+        let mut ranked: Vec<(String, f64)> = collect_rows(rows)?;
+        ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(limit as usize);
+        Ok(ranked)
     }
 
     /// How much of a paper is embedded. A missing embedding is a retrieval hole
@@ -7068,10 +7095,21 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
 
+        // Three chunks per paper, and `k = 2` below. The counts discriminate:
+        // 2 rows means `k` is a total across the filtered partitions, 4 means
+        // it is per-partition. That distinction sets how `candidates` must be
+        // sized — a per-partition `k` would make a whole-library search fetch
+        // `limit * 4` rows *per paper* and quietly blow the latency budget.
         for (paper_id, chunk_id, vector) in [
             ("paper-a", "a1", [1.0f32, 0.0, 0.0, 0.0]),
+            ("paper-a", "a2", [0.98f32, 0.02, 0.0, 0.0]),
+            ("paper-a", "a3", [0.96f32, 0.04, 0.0, 0.0]),
             ("paper-b", "b1", [0.9f32, 0.1, 0.0, 0.0]),
+            ("paper-b", "b2", [0.88f32, 0.12, 0.0, 0.0]),
+            ("paper-b", "b3", [0.86f32, 0.14, 0.0, 0.0]),
             ("paper-c", "c1", [0.0f32, 0.0, 1.0, 0.0]),
+            ("paper-c", "c2", [0.0f32, 0.0, 0.9, 0.1]),
+            ("paper-c", "c3", [0.0f32, 0.0, 0.8, 0.2]),
         ] {
             let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
             conn.execute(
@@ -7090,7 +7128,7 @@ mod tests {
             .prepare(
                 "
                 select chunk_id from v
-                where embedding match ?1 and k = 5
+                where embedding match ?1 and k = 2
                   and paper_id in ('paper-a', 'paper-b')
                 order by distance
                 ",
@@ -7102,10 +7140,25 @@ mod tests {
 
         let hits = attempted.map_err(|error| format!("`in` partition filter rejected: {error}"))?;
 
-        assert_eq!(hits.len(), 2, "expected both in-scope papers: {hits:?}");
         assert!(
             !hits.iter().any(|id| id.starts_with('c')),
             "out-of-scope paper leaked through the filter: {hits:?}"
+        );
+
+        // `k` is a total across the filtered partitions, not per-partition.
+        // `semantic_chunk_ranking` therefore passes `limit * 4` once, whatever
+        // the scope size; if this ever flips, that constant has to be divided
+        // by the number of papers or the whole-library path drowns in rows.
+        // `k` is **per-partition**, not a total: `k = 2` over two partitions
+        // returns four rows. `semantic_chunk_ranking` divides its candidate
+        // budget by the scope size because of this — passing the budget through
+        // unchanged would fetch `limit * 4` rows *per paper*, which is ~24,000
+        // rows for a 500-paper library and silently blows the latency budget
+        // while still returning correct results.
+        assert_eq!(
+            hits.len(),
+            4,
+            "k is per-partition; if this changes, revisit per_partition_k"
         );
         Ok(())
     }
@@ -7270,13 +7323,21 @@ mod tests {
 
         let chunks = db.store.chunks_for_extraction(&extraction.id)?;
         assert!(!chunks.is_empty());
-        db.store.save_chunk_embedding(
-            &chunks[0].id,
-            "test-model",
-            "1",
-            CHUNK_VERSION,
-            &[0.1, 0.2, 0.3],
-        )?;
+        // Full width, so it actually reaches the vector index — a short vector
+        // would be skipped by the dimension guard and this test would pass
+        // without ever proving the vector teardown works.
+        let mut vector = vec![0.0f32; VECTOR_DIMENSIONS];
+        vector[0] = 1.0;
+        db.store
+            .save_chunk_embedding(&chunks[0].id, "test-model", "1", CHUNK_VERSION, &vector)?;
+        let conn = db.store.open_connection()?;
+        let indexed: i64 = conn
+            .query_row("select count(*) from document_chunk_vectors", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        assert_eq!(indexed, 1, "vector must be indexed before we test teardown");
+        drop(conn);
 
         // Forcing a restart tears the extraction's children down.
         db.store.start_document_extraction(
@@ -7288,23 +7349,30 @@ mod tests {
         )?;
 
         let conn = db.store.open_connection()?;
-        let counts: (i64, i64, i64, i64) = conn
+        let counts: (i64, i64, i64, i64, i64) = conn
             .query_row(
                 "
                 select
                   (select count(*) from document_chunks),
                   (select count(*) from document_chunk_blocks),
                   (select count(*) from document_chunk_embeddings),
-                  (select count(*) from document_chunks_fts)
+                  (select count(*) from document_chunks_fts),
+                  (select count(*) from document_chunk_vectors)
                 ",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .map_err(|error| error.to_string())?;
 
-        // The FTS count is the one that matters: virtual tables do not cascade,
-        // and an orphaned FTS row stays searchable.
-        assert_eq!(counts, (0, 0, 0, 0), "chunks/blocks/embeddings/fts");
+        // The two virtual tables are what matter: neither participates in
+        // foreign key cascades, so only their triggers keep them consistent.
+        // This is also the path that runs on the user's next launch, when the
+        // EXTRACTOR_VERSION bump re-extracts everything.
+        assert_eq!(
+            counts,
+            (0, 0, 0, 0, 0),
+            "chunks/blocks/embeddings/fts/vectors"
+        );
         Ok(())
     }
 
