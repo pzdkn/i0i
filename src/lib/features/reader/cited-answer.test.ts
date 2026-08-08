@@ -11,6 +11,7 @@ function citation(handle: string, overrides: Partial<ContextCitation> = {}): Con
     pageStart: 2,
     headingPath: null,
     chunkId: `chunk-${handle}`,
+    preview: "We divide by sqrt(d_k).",
     rectsJson: "[]",
     ...overrides,
   };

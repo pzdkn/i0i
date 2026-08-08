@@ -24,6 +24,8 @@ export type ContextCitation = {
   pageStart: number;
   headingPath: string | null;
   chunkId: string | null;
+  /** The opening of the passage — a page number alone says where, not what. */
+  preview: string;
   /** JSON-encoded `PageRects[]`. `"[]"` when the blocks carry no geometry. */
   rectsJson: string;
 };
@@ -40,6 +42,7 @@ export type PassageRef = {
   pageStart: number;
   headingPath: string | null;
   chunkId: string | null;
+  preview: string;
   cited: boolean;
 };
 

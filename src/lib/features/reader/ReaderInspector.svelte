@@ -1066,17 +1066,23 @@
                         <div class="references">
                           <div class="mono-dim ref-title">References</div>
                           {#each entry.contextSummary.citations as citation (citation.handle)}
-                            <div class="row ref-row">
+                            <div class="ref-row">
                               <button
                                 class="ref-open"
                                 type="button"
                                 title="Jump to this passage"
                                 onclick={() => onOpenCitation(citation)}
                               >
-                                <span class="ref-handle">{citation.handle}</span>
-                                <span class="ref-where">{citationLabel(citation)}</span>
+                                <span class="row ref-top">
+                                  <span class="ref-handle">[{citation.handle}]</span>
+                                  <span class="ref-where">{citationLabel(citation)}</span>
+                                </span>
+                                <!-- What the passage says, not just where it is.
+                                     Taken from the text rather than summarized:
+                                     a model call per reference would cost more
+                                     latency than the answer itself. -->
+                                <span class="ref-preview">{citation.preview}</span>
                               </button>
-                              <div class="flex1"></div>
                               {#if citation.chunkId && !isVirtual}
                                 <!-- Retrieved passages are ephemeral, re-selected
                                      each turn. Keeping one makes it persistent. -->
@@ -1112,7 +1118,7 @@
                           {#each entry.contextSummary.passages as passage (passage.handle)}
                             <div class="row drawer-row" class:uncited={!passage.cited}>
                               <span class="ref-handle">[{passage.handle}]</span>
-                              <span class="ref-where">{passageLabel(passage)}</span>
+                              <span class="ref-where">{passageLabel(passage)} — {passage.preview}</span>
                               <div class="flex1"></div>
                               {#if !passage.cited}
                                 <span class="mono-dim">not cited</span>
@@ -1180,7 +1186,7 @@
               <div class="thread-list">
                 <button class="ask-paper-row" type="button" onclick={openWholePaper}>
                   <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
-                  <span class="ask-paper-title">New chat about this paper</span>
+                  <span class="ask-paper-title">New chat</span>
                 </button>
 
                 {#each paperChats as chat (chat.id)}
@@ -1822,21 +1828,42 @@
   }
 
   .ref-row {
+    display: flex;
     gap: 6px;
+    align-items: flex-start;
+    padding: 2px 0;
     font-size: 10px;
   }
 
   .ref-open {
-    display: flex;
-    gap: 6px;
+    display: block;
+    flex: 1;
     min-width: 0;
-    padding: 1px 0;
+    padding: 0;
     border: 0;
     background: transparent;
     font: inherit;
     font-size: 10px;
     text-align: left;
     cursor: pointer;
+  }
+
+  .ref-top {
+    gap: 6px;
+  }
+
+  .ref-preview {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--fg-3);
+    line-height: 1.35;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .ref-open:hover .ref-preview {
+    color: var(--fg-2);
   }
 
   .ref-handle {

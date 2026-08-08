@@ -22,7 +22,7 @@ use crate::domain::chat::{ChatContextSummary, ChatEntry};
 use crate::domain::chunking::{estimate_tokens, CHARS_PER_TOKEN};
 use crate::domain::context::{
     ContextCitation, ContextItem, ContextItemDraft, ContextItemView, ContextKey, EphemeralContext,
-    PassageRef, CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY, ORIGIN_AGENT, ORIGIN_USER,
+    preview_of, PassageRef, CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY, ORIGIN_AGENT, ORIGIN_USER,
 };
 use crate::domain::library::DocumentChunk;
 use crate::services::chat::context::build_context;
@@ -613,6 +613,7 @@ impl Assembly {
                     page_start: passage.page_start,
                     heading_path: passage.heading_path.clone(),
                     chunk_id: passage.chunk_id.clone(),
+                    preview: preview_of(&passage.text),
                     rects_json: "[]".to_string(),
                 });
             }
@@ -1058,6 +1059,7 @@ mod tests {
                     page_start: 0,
                     heading_path: None,
                     chunk_id: Some(format!("chunk-{handle}")),
+                    preview: String::new(),
                     rects_json: "[]".to_string(),
                 })
                 .collect(),

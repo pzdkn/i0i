@@ -121,9 +121,28 @@ pub struct ContextCitation {
     /// The chunk the rectangles came from. Lets the UI offer "add to context"
     /// on a citation the agent retrieved but nobody committed.
     pub chunk_id: Option<String>,
+    /// The opening of the passage, flattened and clipped. A page number alone
+    /// is cryptic — "p7 · Method" tells you where it is, not what it said.
+    /// Taken from the text rather than generated: a summary would cost a model
+    /// call per reference, on a path already fighting for latency.
+    pub preview: String,
     /// A JSON array of `PageRects`. `"[]"` when the blocks carry no geometry —
     /// the citation then degrades to a page number rather than failing.
     pub rects_json: String,
+}
+
+/// Characters of a passage shown in a reference row. About one line at the
+/// panel's width — enough to recognize the passage, short enough not to
+/// compete with the answer.
+pub const PREVIEW_CHARS: usize = 140;
+
+/// Flatten and clip a passage for display.
+pub fn preview_of(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(PREVIEW_CHARS) {
+        Some((index, _)) => format!("{}…", flat[..index].trim_end()),
+        None => flat,
+    }
 }
 
 /// A passage the model was shown this turn (RFC 0078).
@@ -140,6 +159,7 @@ pub struct PassageRef {
     pub page_start: i32,
     pub heading_path: Option<String>,
     pub chunk_id: Option<String>,
+    pub preview: String,
     /// The answer cited this one.
     pub cited: bool,
 }
@@ -153,6 +173,7 @@ impl PassageRef {
             page_start: citation.page_start,
             heading_path: citation.heading_path.clone(),
             chunk_id: citation.chunk_id.clone(),
+            preview: citation.preview.clone(),
             cited: false,
         }
     }
@@ -175,4 +196,29 @@ pub struct ContextItemView {
     pub origin: String,
     /// The chunk no longer resolves — reported, never silently dropped.
     pub unresolved: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_preview_is_flattened_to_one_line() {
+        assert_eq!(preview_of("  We divide\n  by sqrt(d_k).  "), "We divide by sqrt(d_k).");
+    }
+
+    #[test]
+    fn a_long_preview_is_clipped_without_a_trailing_space() {
+        let preview = preview_of(&"word ".repeat(200));
+        assert!(preview.ends_with("…"));
+        assert!(!preview.contains(" …"), "clipped mid-space leaves a gap: {preview}");
+        assert!(preview.chars().count() <= PREVIEW_CHARS + 1);
+    }
+
+    #[test]
+    fn a_multibyte_preview_does_not_split_a_codepoint() {
+        // Slicing on a byte index inside a codepoint would panic.
+        let preview = preview_of(&"é".repeat(PREVIEW_CHARS + 40));
+        assert!(preview.ends_with('…'));
+    }
 }

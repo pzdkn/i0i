@@ -85,6 +85,7 @@ mod tests {
                 page_start: 2,
                 heading_path: Some("Method".to_string()),
                 chunk_id: Some("chunk_1".to_string()),
+                preview: "We divide by sqrt(d_k)…".to_string(),
                 rects_json: "[]".to_string(),
             }],
             ..ChatContextSummary::default()
@@ -101,6 +102,7 @@ mod tests {
             "pageStart",
             "headingPath",
             "chunkId",
+            "preview",
             "rectsJson",
         ] {
             assert!(json.contains(&format!("\"{field}\"")), "missing {field}");
