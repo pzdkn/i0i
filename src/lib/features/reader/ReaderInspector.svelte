@@ -1,8 +1,13 @@
 <script lang="ts">
   import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
   import CitedAnswer from "$lib/features/reader/CitedAnswer.svelte";
-  import { compactChatContext } from "$lib/bridge/context";
-  import type { ContextCitation } from "$lib/domain/context";
+  import {
+    addChatContext,
+    compactChatContext,
+    deleteChatContext,
+    listChatContext,
+  } from "$lib/bridge/context";
+  import type { ContextCitation, ContextItemView } from "$lib/domain/context";
   import {
     askAtAnchorStreamed,
     askChatThreadStreamed,
@@ -483,6 +488,7 @@
     if (openThread?.thread.id === threadId) {
       openThread = view;
     }
+    await refreshContext();
   }
 
   function handleComposerKeydown(event: KeyboardEvent) {
@@ -665,6 +671,81 @@
   }
 
   let compacting = $state(false);
+  let contextNote = $state("");
+  // RFC 0077: the thread's *persistent* context. The current selection and this
+  // turn's retrieval are ephemeral and deliberately absent — they are assembled
+  // at ask time and never stored, so there is nothing here to remove.
+  let contextItems = $state<ContextItemView[]>([]);
+
+  const contextTokens = $derived(
+    contextItems.reduce((total, item) => total + item.tokenEstimate, 0),
+  );
+
+  // Keyed on the thread id, so switching threads never leaves the previous
+  // thread's context on screen. Cheap: one indexed read per open.
+  $effect(() => {
+    const threadId = openThread?.thread.id ?? "";
+    contextNote = "";
+    if (!threadId) {
+      contextItems = [];
+      return;
+    }
+    void refreshContext();
+  });
+
+  async function refreshContext() {
+    if (!openThread || isVirtual) {
+      contextItems = [];
+      return;
+    }
+    const threadId = openThread.thread.id;
+    try {
+      const items = await listChatContext(threadId);
+      if (openThread?.thread.id === threadId) {
+        contextItems = items;
+      }
+    } catch (caught) {
+      error = String(caught);
+    }
+  }
+
+  /** Keep a passage the agent cited, so later turns carry it deliberately. */
+  async function keepCitation(citation: ContextCitation) {
+    if (!openThread || isVirtual || !citation.chunkId) {
+      return;
+    }
+    try {
+      await addChatContext(openThread.thread.id, citation.chunkId);
+      contextNote = `Kept ${citation.handle}`;
+      await refreshContext();
+    } catch (caught) {
+      error = String(caught);
+    }
+  }
+
+  async function dropContextItem(item: ContextItemView) {
+    if (!openThread) {
+      return;
+    }
+    try {
+      await deleteChatContext(openThread.thread.id, { kind: "item", id: item.id });
+      contextNote = "";
+      await refreshContext();
+    } catch (caught) {
+      error = String(caught);
+    }
+  }
+
+  function contextItemLabel(item: ContextItemView) {
+    if (item.kind === "summary") {
+      return "Summary of earlier context";
+    }
+    if (item.unresolved) {
+      return "Passage no longer in the document";
+    }
+    const page = item.pageStart === null ? "" : `p${item.pageStart + 1}`;
+    return item.headingPath ? `${page} · ${item.headingPath}` : page || "Passage";
+  }
 
   /**
    * Compact the open thread's context (RFC 0077).
@@ -680,6 +761,10 @@
     compacting = true;
     try {
       await compactChatContext(openThread.thread.id);
+      // The conversation is untouched by design, so the thread re-renders
+      // identically — without a word here, a successful compaction looks like
+      // a button that did nothing.
+      contextNote = "Context compacted — the conversation above is unchanged.";
       await refreshOpenThread();
     } catch (caught) {
       error = String(caught);
@@ -815,6 +900,33 @@
                   ></textarea>
                 </div>
               {:else}
+                {#if contextItems.length || contextNote}
+                  <div class="context-panel">
+                    <div class="row context-head">
+                      <span class="label">Context</span>
+                      <div class="flex1"></div>
+                      {#if contextItems.length}
+                        <span class="mono-dim">{contextItems.length} · ~{contextTokens} tok</span>
+                      {/if}
+                    </div>
+                    {#if contextNote}
+                      <div class="context-note mono-dim">{contextNote}</div>
+                    {/if}
+                    {#each contextItems as item (item.id)}
+                      <div class="row context-item" class:unresolved={item.unresolved}>
+                        <span class="context-label">{contextItemLabel(item)}</span>
+                        <div class="flex1"></div>
+                        <button
+                          class="note-icon remove"
+                          type="button"
+                          aria-label="remove from context"
+                          onclick={() => void dropContextItem(item)}
+                        >×</button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+
                 <div class="thread-view">
                   {#each openThread.entries as entry}
                     <div class="entry {entry.kind}">
@@ -839,6 +951,24 @@
                         />
                       {:else}
                         <p>{entry.body}</p>
+                      {/if}
+                      {#if entry.kind === "answer" && entry.contextSummary?.citations?.length && !isVirtual}
+                        <!-- RFC 0077: retrieved passages are ephemeral — they
+                             are re-selected every turn. Keeping one promotes it
+                             to persistent context. -->
+                        <div class="row keep-row">
+                          <span class="mono-dim">keep:</span>
+                          {#each entry.contextSummary.citations as citation (citation.handle)}
+                            {#if citation.chunkId}
+                              <button
+                                class="keep-chip"
+                                type="button"
+                                title={`Keep ${citation.handle} in this thread's context`}
+                                onclick={() => void keepCitation(citation)}
+                              >{citation.handle}</button>
+                            {/if}
+                          {/each}
+                        </div>
                       {/if}
                       {#if entry.kind === "answer" && chatContextLabel(entry)}
                         <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
@@ -1451,6 +1581,64 @@
   .entry-context {
     margin-top: 6px;
     font-size: 9px;
+  }
+
+  /* RFC 0077 */
+  .context-panel {
+    margin-bottom: 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-1);
+  }
+
+  .context-head {
+    gap: 6px;
+    margin-bottom: 4px;
+    font-size: 10px;
+  }
+
+  .context-note {
+    margin-bottom: 4px;
+    font-size: 9px;
+  }
+
+  .context-item {
+    gap: 6px;
+    font-size: 10px;
+  }
+
+  /* Reported, never silently dropped — a shrinking context you cannot see is
+     worse than a visible hole. */
+  .context-item.unresolved .context-label {
+    color: var(--red);
+  }
+
+  .context-label {
+    overflow: hidden;
+    color: var(--fg-2);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .keep-row {
+    gap: 4px;
+    margin-top: 6px;
+    font-size: 9px;
+  }
+
+  .keep-chip {
+    padding: 0 4px;
+    border: 1px solid var(--border-2);
+    background: transparent;
+    color: var(--amber);
+    font: inherit;
+    font-size: 9px;
+    cursor: pointer;
+  }
+
+  .keep-chip:hover {
+    border-color: var(--border-hot);
+    background: var(--bg-2);
   }
 
   .pin-btn {

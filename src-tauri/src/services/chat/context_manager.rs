@@ -327,12 +327,13 @@ impl ContextManager {
         Fut: std::future::Future<Output = Result<String, String>>,
     {
         let items = self.store.context_items(thread_id)?;
+        // Every current item, chunks *and* earlier summaries. The new summary
+        // is built from `material`, which already contains the old one, so
+        // keeping it would emit the same content twice and charge for it twice
+        // — and a second compaction would make three.
+        //
         // Captured before the model call: anything added while it runs survives.
-        let superseded: Vec<String> = items
-            .iter()
-            .filter(|item| item.kind == CONTEXT_KIND_CHUNK)
-            .map(|item| item.id.clone())
-            .collect();
+        let superseded: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
 
         let mut material = String::new();
         for item in &items {
@@ -429,10 +430,16 @@ struct Assembly {
     dropped: usize,
 }
 
+/// Emission tiers. Separate from the within-tier index so ordering never has
+/// to do arithmetic near an integer boundary.
+const SUMMARY_TIER: i8 = 0;
+const PERSISTENT_TIER: i8 = 1;
+const RETRIEVED_TIER: i8 = 2;
+
 struct Passage {
-    /// Sort key: `position` for persistent items, and after them, retrieval
-    /// order for this turn's hits.
-    order: i64,
+    /// Sort key: `(tier, index)`. Summaries lead, then persistent items in
+    /// `position` order, then this turn's retrieval.
+    order: (i8, i64),
     item_id: String,
     paper_id: String,
     page_start: i32,
@@ -469,7 +476,7 @@ impl Assembly {
         self.spent += cost;
         self.included += 1;
         self.passages.push(Passage {
-            order: i64::MIN,
+            order: (SUMMARY_TIER, 0),
             item_id: String::new(),
             paper_id: String::new(),
             page_start: 0,
@@ -492,7 +499,7 @@ impl Assembly {
         self.spent += cost;
         self.included += 1;
         self.passages.push(Passage {
-            order: item.position as i64,
+            order: (PERSISTENT_TIER, item.position as i64),
             item_id: item.id.clone(),
             paper_id: first.paper_id.clone(),
             page_start: first.page_start,
@@ -513,8 +520,11 @@ impl Assembly {
         self.spent += cost;
         self.included += 1;
         self.passages.push(Passage {
-            // After every persistent item, in retrieval rank order.
-            order: i64::MAX - (RETRIEVAL_LIMIT as i64) + self.passages.len() as i64,
+            // A separate tier after every persistent item, in retrieval rank
+            // order. Arithmetic near i64::MAX would overflow once six passages
+            // had been pushed — a panic in debug, and a negative sort key that
+            // puts retrieval *first* in release.
+            order: (RETRIEVED_TIER, self.passages.len() as i64),
             item_id: String::new(),
             paper_id: chunk.paper_id.clone(),
             page_start: chunk.page_start,
@@ -1030,6 +1040,86 @@ mod tests {
         assert_eq!(item.covers_through_entry_id.as_deref(), Some("e2"));
         let items = fixture.store.context_items(&thread_id).expect("items");
         assert_eq!(items.len(), 1, "chunk items were superseded");
+    }
+
+    #[tokio::test]
+    async fn compacting_twice_leaves_one_summary_not_two() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["First passage.", "Second passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        for chunk in &chunks {
+            fixture
+                .manager
+                .add_context(&thread_id, &chunk.id)
+                .expect("adds");
+        }
+
+        for round in 0..2 {
+            fixture
+                .manager
+                .compact_context(&thread_id, &[entry("e1", "a turn")], move |_| async move {
+                    Ok(format!("summary round {round}"))
+                })
+                .await
+                .expect("compacts");
+        }
+
+        // The second summary is built from material that already contains the
+        // first, so keeping both would emit the same content twice and charge
+        // the budget twice — and a third compaction would make three.
+        let items = fixture.store.context_items(&thread_id).expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].body.as_deref(), Some("summary round 1"));
+    }
+
+    #[test]
+    fn retrieved_passages_are_emitted_after_persistent_ones() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &[&"Committed passage. ".repeat(200)]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds");
+
+        // More than the six that used to overflow the old sort key.
+        let (_, other) = (0, chunks.clone());
+        let retrieved: Vec<DocumentChunk> = other
+            .iter()
+            .cycle()
+            .take(8)
+            .enumerate()
+            .map(|(index, chunk)| DocumentChunk {
+                id: format!("retrieved-{index}"),
+                text: format!("Retrieved passage {index}."),
+                ..chunk.clone()
+            })
+            .collect();
+
+        let authors = vec!["A. Vaswani".to_string()];
+        let assembled = fixture
+            .manager
+            .get_context(ContextRequest {
+                thread_id: Some(&thread_id),
+                paper: facts("body", &authors),
+                entries: &[],
+                ephemeral: &EphemeralContext {
+                    paper_id,
+                    ..Default::default()
+                },
+                retrieved: &retrieved,
+            })
+            .expect("assembles");
+
+        let committed = assembled
+            .system_prompt
+            .find("Committed passage")
+            .expect("the committed passage is in the prompt");
+        let first_retrieved = assembled
+            .system_prompt
+            .find("Retrieved passage 0")
+            .expect("retrieval is in the prompt");
+        assert!(committed < first_retrieved);
     }
 
     #[tokio::test]

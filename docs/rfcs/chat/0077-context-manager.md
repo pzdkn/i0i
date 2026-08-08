@@ -278,9 +278,16 @@ budget is tight, and *emitted* in `position` ascending so the prompt reads in
 the order the context was built. `added_chunks_appear_as_numbered_citable_passages`
 pins the emission order.
 
-Row 5 keeps the current experience intact for a thread with no context items —
-which is every existing thread. Without it, this RFC would be a regression on
-day one.
+Row 5 keeps the paper-text path intact for a thread with no context items —
+which is every thread that exists today. Without it, this RFC would be a
+regression on day one.
+
+**But note what pre-answer retrieval costs.** It runs on every ask and charges
+up to `RETRIEVAL_LIMIT` chunks against the same budget, so roughly 2,000 tokens
+of paper head-text is displaced on *every* turn, including threads with no
+context items. That is the trade the feature makes — targeted passages instead
+of the first 32,000 characters — and it is a better one, but it is a real
+change to what the model sees. Row 5 is now a remainder, not a guarantee.
 
 `ChatContextSummary` grows to report the outcome:
 
@@ -416,12 +423,13 @@ to show it.
 | | Target |
 |---|---|
 | `get_context` | < 20 ms, no network |
-| Existing threads with no context items | byte-identical prompt to today, anchored or not |
+| Threads with no context items **and no retrieval** | byte-identical prompt to today, anchored or not |
 | Old `chat_entries.context_json` rows | deserialize unchanged |
 | Compaction | ≥ 5× token reduction on a 10-entry thread |
 | Failed compaction | zero rows written |
 | Rechunked paper | context items resolve, none silently vanish |
 | Clicking a `[C3]` citation | reader opens the right page, passage painted |
+| Compacting twice | one summary, not two |
 
 ## Open decisions
 
