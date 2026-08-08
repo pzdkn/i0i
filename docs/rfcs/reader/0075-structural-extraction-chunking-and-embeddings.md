@@ -172,14 +172,45 @@ against the reference vault is part of this work, not an afterthought.
 `reader_service` then filters by `extraction_id` in memory
 (`reader_service.rs:503, 522`).
 
-Today that is nearly free: spans number zero, and blocks number one per page.
-After R1 a single paper carries ~40 blocks and ~1,500 spans. A fifty-paper
-library becomes ~75,000 rows deserialized on every library read, to render a
-list of paper titles.
+`get_library` is a Tauri command (`commands/library.rs:20`), so the snapshot is
+not merely built in memory — it is serialized to JSON, pushed across IPC, and
+parsed by the frontend. And it is not only a startup cost: six store mutations
+return a full snapshot — `create_vault`, `rename_vault`, `delete_vault`,
+`remove_paper_from_vault`, `delete_paper_globally`, `add_local_pdf_to_vault`.
+
+Measured against the current reference library (12 papers, 269 pages, 269
+blocks, 0 spans, 975 KB of block text), **renaming a vault already ships ~1.3 MB
+of PDF body text through IPC to redraw a label.** So this is not a purely
+pre-emptive fix; R1 makes an existing problem acute.
+
+The identity columns are what scale badly. Measured averages: block id ~70
+chars, `extraction_id` ~59, `source_id` ~35, `paper_id` ~18. A span row carries
+all of those plus a `block_id`, so it costs ~250 bytes of identifiers and ~120
+bytes of JSON field names — **~370 bytes before any text**. At ~10 blocks and
+~60 line segments per page:
+
+| | today | after R1 |
+| --- | ---: | ---: |
+| blocks | 269 | ~2,700 |
+| spans | 0 | ~16,000 |
+| identifier + field-name overhead | ~90 KB | ~6.8 MB |
+| text (duplicated at span level) | 975 KB | ~1.9 MB |
+| **snapshot JSON per call** | **~1.3 MB** | **~8.7 MB** |
+
+That is twelve papers, and it scales linearly: a hundred-paper library
+approaches 70 MB per call.
+
+The waste is structural rather than incidental. Every consumer already narrows
+to a single `extraction_id`, so rendering one open paper loads all twelve and
+discards eleven-twelfths.
 
 `document_blocks` and `document_spans` come out of `LibrarySnapshot`. The
-reader loads them per-extraction through a new store method. This is scope this
-RFC adds to the originating spec; R1 is not shippable without it.
+reader loads them per-extraction through a new store method — which is what the
+callers were doing by hand anyway. This is scope this RFC adds to the
+originating spec; R1 is not shippable without it.
+
+Paginating or caching the snapshot would treat the size as the problem. The
+problem is that document-scoped data is living in a library-scoped struct.
 
 `LibrarySnapshot` is a bridge contract, not only a Rust struct — removing two
 fields changes `src/lib/bridge/library.ts` and every consumer of the snapshot
