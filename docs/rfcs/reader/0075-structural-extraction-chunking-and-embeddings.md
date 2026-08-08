@@ -106,10 +106,39 @@ becomes `"heading"`; everything else stays `"paragraph"`. This is deliberately
 crude. Real layout classification is what MinerU is for; here we need only
 enough signal to give the chunker a boundary worth respecting.
 
-`EXTRACTOR_VERSION` (`pdf_extraction.rs:25`) bumps to `0.2.0`. That is the
-whole migration: `stale_document_extractions` already re-queues every
-extraction whose version does not match, and `clear_extraction_children`
-already tears down the old rows.
+### Canonical offsets
+
+R1 multiplies the `"\n\n"` separators in `source_text`, which makes the offset
+contract load-bearing where it previously could not be observed. Stated once:
+
+- `source_text` is block `text` joined by `"\n\n"`, in reading order.
+- Each block satisfies `text == source_text[source_start..source_end)`.
+- Spans within a block are joined by a single space, and every span's range
+  nests inside its block's range.
+
+Without this written down, `chunk → block → span → bbox` drifts by a character
+or two per block and surfaces much later as a highlight landing a line off.
+
+### Version bump, but not a rename
+
+`EXTRACTOR_VERSION` (`pdf_extraction.rs:25`) bumps to `0.2.0`. That is the whole
+migration: `stale_document_extractions` already re-queues every extraction whose
+version does not match, and `clear_extraction_children` already tears down the
+old rows.
+
+`EXTRACTOR` stays `"pdfium_basic"` even though the adapter is no longer basic,
+and the name is doing more work than it looks. It is a component of two derived
+identifiers — `document_extraction_id` = `extraction:{extractor}:{source_id}`
+(`library_store.rs:3833`) and `annotation_source_id` = `{EXTRACTOR}:{source_id}`
+(`pdf_extraction.rs:493`). Renaming it does not re-key existing extractions; it
+mints *new* ones beside them, and the originals become invisible to
+`stale_document_extractions`, which filters by extractor name. They would never
+be cleaned up.
+
+Marks survive a rename either way — they carry `document_sources.id`, which
+`ReaderDocument.source_id` exposes (`reader_service.rs:591`), not the annotation
+source id — but there is no reason to leave orphans behind for a cosmetic
+change. A rename is a migration, and it is not this RFC's.
 
 ### This cannot mis-anchor an existing mark
 
@@ -126,7 +155,11 @@ block granularity can move them.
 (`src-tauri/src/services/reader_service.rs:558`) and never persisted, so no
 stored offset is measured against it. The `Locator::TextOffset` and
 `TextPoint` variants are the HTML ingestion path, which this RFC does not
-touch.
+touch — and that holds for R3 as well, because `finish_document_extraction`
+has exactly one caller, `pdf_extraction.rs:269`. HTML documents never reach it,
+so putting chunking inside it cannot reach HTML marks. Chunking HTML is
+probably worth doing later; it is not something this RFC should acquire by
+accident.
 
 **Risk that does remain:** the reader renders its text layer from blocks. Going
 from 1 block per page to ~40 changes what it draws. Verifying the reader
@@ -147,6 +180,10 @@ list of paper titles.
 `document_blocks` and `document_spans` come out of `LibrarySnapshot`. The
 reader loads them per-extraction through a new store method. This is scope this
 RFC adds to the originating spec; R1 is not shippable without it.
+
+`LibrarySnapshot` is a bridge contract, not only a Rust struct — removing two
+fields changes `src/lib/bridge/library.ts` and every consumer of the snapshot
+type. Small, but it is a frontend change hiding inside a storage refactor.
 
 ## R3 — Chunking
 
@@ -309,6 +346,17 @@ The worker sweeps for chunks with no `document_chunk_embeddings` row at the
 current model, model version, and chunk version; embeds them in batches inside
 `spawn_blocking`; writes the vectors. Absence of a row *is* the "not yet
 embedded" state — no status column, no state machine, nothing to recover.
+
+It runs at two moments, mirroring how extraction is already driven
+(`pdf_extraction.rs:158, 197`):
+
+- **On extraction ready** — the extraction that just wrote chunks enqueues them.
+- **On startup** — a sweep across the library, which is what picks up chunks
+  left behind by a crash, a model change, or a `chunk_version` bump.
+
+Because the sweep is defined by a query rather than by a queue, those two
+triggers are the same code path with a different scope, and running both twice
+is harmless.
 
 ### Failure policy: two contracts, deliberately
 
