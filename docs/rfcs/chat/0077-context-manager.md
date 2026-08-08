@@ -199,6 +199,11 @@ Two consequences worth stating:
   range — but if extraction itself changed, `rects` can come back empty. Then
   the citation degrades to a page number rather than failing.
 
+> **Superseded in part by RFC 0078.** As shipped, *every* passage in the prompt
+> becomes a stored citation. RFC 0078 filters the map against the answer text
+> first, so only passages the model actually cited are kept — what was offered
+> is not evidence.
+
 The answer text is persisted with `[C3]` markers in it, and the citation map is
 persisted next to it on the answer entry. Without that, reopening a thread would
 show markers that resolve to nothing.

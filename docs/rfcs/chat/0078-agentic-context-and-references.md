@@ -166,18 +166,70 @@ Retrieved { count: usize, total: usize },
 Without them the panel sits dead through up to three round trips and the app
 looks hung. This is the difference between "thinking" and "broken".
 
-## Phase 2 and the UI
+## References are what the agent used, not what it was given
+
+This corrects shipped RFC 0077 behaviour, not just a plan.
+
+Today the assembly mints a citation for **every** passage in the prompt, stores
+all of them on the answer, and the `keep:` row lists all of them. So an answer
+that leaned on one passage shows five references, and four of them are noise
+that looks like evidence.
+
+The prompt still offers every passage a handle — the model has to be able to
+cite anything it reads. But when the answer lands:
+
+```text
+answer text → scan for [Cn] markers → keep only those citations
+```
+
+Everything else is discarded before the answer is persisted. A passage the model
+read and did not cite leaves no trace, which is the honest record: it was
+context, not evidence.
+
+Consequences worth stating:
+
+- **An answer that cites nothing has no references.** Correct. Some questions
+  are answered from the paper text, and a reference list would be inventing
+  provenance.
+- **A paraphrase without a marker is invisible to us.** The model can use a
+  passage and not cite it, and nothing here detects that. The tool description
+  asks for markers on anything load-bearing; that is the whole lever.
+- **`keep:` chips shrink to cited passages only.** You can no longer keep
+  something the agent read past — which is the point.
+
+## The context panel is collapsed by default
+
+Same principle one level up. The panel currently lists every persistent item
+whenever a thread has any. It becomes a single line:
+
+```text
+Context (3) ▸                                    compact
+```
+
+Click to expand, ✕ to drop, `agent` tags on the agent's additions. Closed is the
+resting state: context is plumbing, and plumbing you have to look at every time
+you read an answer is a leak.
+
+**One exception.** If anything is `unresolved` or was dropped over budget, the
+line says so and opens itself:
+
+```text
+Context (3) · 1 unresolved ▾
+```
+
+RFC 0076 counts its holes and RFC 0077 counts dropped items precisely so they
+cannot hide. Collapsing the panel must not undo that — a hole you never see is
+the failure mode both RFCs were written against.
+
+## Phase 2 and the rest of the UI
 
 Unchanged from RFC 0077: `[C1]` markers render as buttons, clicking scrolls to
-the page and flashes the passage, `keep:` chips promote an ephemeral passage.
+the page and flashes the passage.
 
-Two additions:
-
-- **A references block under each answer.** Today the `keep:` row lists bare
-  handles. It becomes a proper list — handle, page, heading, first line — so you
-  can see what the agent used without hunting for markers in the prose. Clicking
-  a row does what clicking `[C1]` does.
-- **An `agent` tag** on agent-added items in the context panel.
+One addition: **a references block under each answer**, listing only the cited
+passages — handle, page, heading, first line — so you can see what the answer
+rested on without hunting for markers in the prose. Clicking a row does what
+clicking `[C1]` does.
 
 ## Cost
 
@@ -244,6 +296,9 @@ answers slightly less well.
 | Handles | stable from first retrieval through the final prompt |
 | Capped turn | answers, and says it was capped |
 | Malformed tool call | turn completes |
+| An answer citing 1 of 5 passages | 1 reference stored, not 5 |
+| An answer citing nothing | no references block at all |
+| A thread with an unresolved item | panel opens itself and says so |
 | `drop_context` on a user item | refused, and the agent is told why |
 | Existing `annotate_streamed` | byte-identical request payload |
 
@@ -264,3 +319,9 @@ Say the word on any of these:
    in the final assembly.
 7. **Handles are frozen per turn**, assigned as chunks arrive.
 8. **No agent-initiated compaction.** Compaction is lossy and stays yours.
+9. **Only cited passages become references** — and this is applied to RFC 0077's
+   shipped behaviour too, not held back for the agentic loop. It is a small
+   change (filter the map against the answer text before persisting) and the
+   current behaviour is wrong today.
+10. **The context panel is collapsed by default**, and opens itself only when
+    something is unresolved or was dropped.
