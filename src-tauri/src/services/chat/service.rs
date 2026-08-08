@@ -448,11 +448,15 @@ impl ChatService {
         };
         let retrieval = self
             .retrieve_for_turn(
-                scope.id(),
-                None,
-                &document.title,
-                anchor.selected_text(),
-                &user_body,
+                TurnFacts {
+                    paper_id: scope.id(),
+                    thread_id: None,
+                    paper_title: &document.title,
+                    selection: anchor.selected_text(),
+                    // The anchor path has no thread, so no history exists yet.
+                    recent: &[],
+                    question: &user_body,
+                },
                 &api_key,
             )
             .await;
@@ -498,11 +502,14 @@ impl ChatService {
         };
         let retrieval = self
             .retrieve_for_turn(
-                &scope_id,
-                Some(thread_id),
-                &document.title,
-                view.thread.anchor.selected_text(),
-                &user_body,
+                TurnFacts {
+                    paper_id: &scope_id,
+                    thread_id: Some(thread_id),
+                    paper_title: &document.title,
+                    selection: view.thread.anchor.selected_text(),
+                    recent: recent_turns(&view.entries),
+                    question: &user_body,
+                },
                 &api_key,
             )
             .await;
@@ -570,11 +577,7 @@ impl ChatService {
     /// errors and returns whatever it managed to find.
     async fn retrieve_for_turn(
         &self,
-        paper_id: &str,
-        thread_id: Option<&str>,
-        paper_title: &str,
-        selection: Option<&str>,
-        question: &str,
+        turn: TurnFacts<'_>,
         api_key: &str,
     ) -> RetrievalOutcome {
         let app = self.app.clone();
@@ -582,11 +585,12 @@ impl ChatService {
             &self.client,
             &self.context,
             agent_loop::LoopRequest {
-                paper_id,
-                thread_id,
-                paper_title,
-                question,
-                selection,
+                paper_id: turn.paper_id,
+                thread_id: turn.thread_id,
+                paper_title: turn.paper_title,
+                question: turn.question,
+                selection: turn.selection,
+                recent: turn.recent,
                 model: &self.config.model,
                 url: &self.config.url,
                 api_key,
@@ -868,6 +872,22 @@ const COMPACTION_PROMPT: &str = "Summarize the research conversation and source 
 
 /// Enough for a dense summary, short enough that compacting is fast.
 const COMPACTION_MAX_TOKENS: u32 = 700;
+
+/// What phase 1 needs to know about the turn it is deciding for.
+struct TurnFacts<'a> {
+    paper_id: &'a str,
+    thread_id: Option<&'a str>,
+    paper_title: &'a str,
+    selection: Option<&'a str>,
+    recent: &'a [ChatEntry],
+    question: &'a str,
+}
+
+/// The tail of a thread the deciding model sees (RFC 0078).
+fn recent_turns(entries: &[ChatEntry]) -> &[ChatEntry] {
+    let start = entries.len().saturating_sub(agent_loop::RECENT_TURNS);
+    &entries[start..]
+}
 
 /// Read the paper facts ContextManager needs off a loaded reader document.
 fn paper_facts(document: &crate::domain::reader::ReaderDocument) -> PaperFacts<'_> {

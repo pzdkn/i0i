@@ -1,6 +1,6 @@
 # RFC 0078: ChatAgent — the agent decides what it needs
 
-Status: Proposed
+Status: Implemented
 Date: 2026-08-08
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -299,6 +299,23 @@ answers slightly less well.
 | A thread with an unresolved item | panel opens itself and says so |
 | `drop_context` on a user item | refused, and the agent is told why |
 | Existing `annotate_streamed` | byte-identical request payload |
+
+### What landed
+
+| Piece | Where |
+|---|---|
+| `tool_calls` / `tool_call_id` on the wire, call ids kept | `services/llm.rs` |
+| the loop, tools, bounds | `services/chat/agent_loop.rs` |
+| `origin` column + agent-scoped delete | `library_store.rs`, `context_manager.rs` |
+| citations filtered to what was cited | `context_manager::retain_cited` |
+| progress line, references block, collapsed panel, `agent` tags | `ReaderInspector.svelte` |
+
+Two things resolved differently from the plan above, both simpler:
+
+- **Handles never enter the loop**, so there is nothing to freeze (see above).
+- **Phase 1 sees the last four turns.** Without them the prompt's claim that
+  follow-ups need no lookup is one the model cannot act on — "why?" arrives with
+  no antecedent. A tail, not the thread: history is resent every iteration.
 
 ## Open decisions
 

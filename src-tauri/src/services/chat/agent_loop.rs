@@ -14,6 +14,7 @@
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::domain::chat::{ChatEntry, ENTRY_ANSWER};
 use crate::domain::context::ORIGIN_AGENT;
 use crate::domain::library::DocumentChunk;
 use crate::services::llm::{
@@ -44,6 +45,10 @@ const SEARCH_LIMIT: usize = 5;
 /// text — which arrives once, in the final assembly, if the passage is used.
 const PREVIEW_CHARS: usize = 300;
 
+/// Turns of history the deciding model sees. Enough to resolve "why?" against
+/// what was just said; short enough that resending it three times is cheap.
+pub const RECENT_TURNS: usize = 4;
+
 /// What phase 1 produced.
 #[derive(Debug, Default)]
 pub struct RetrievalOutcome {
@@ -73,6 +78,13 @@ pub struct LoopRequest<'a> {
     pub paper_title: &'a str,
     pub question: &'a str,
     pub selection: Option<&'a str>,
+    /// The last few turns, oldest first. Without them "why?" reaches the
+    /// deciding model with no antecedent, and the prompt's claim that
+    /// follow-ups need no lookup becomes something it cannot act on.
+    ///
+    /// A tail, not the whole thread: these messages are resent on every
+    /// iteration, so history is the part that multiplies.
+    pub recent: &'a [ChatEntry],
     pub model: &'a str,
     pub url: &'a str,
     pub api_key: &'a str,
@@ -90,10 +102,16 @@ where
     F: FnMut(LoopEvent),
 {
     let mut outcome = RetrievalOutcome::default();
-    let mut messages = vec![
-        WireMessage::text("system", system_prompt(&request, context)),
-        WireMessage::text("user", request.question.to_string()),
-    ];
+    let mut messages = vec![WireMessage::text("system", system_prompt(&request, context))];
+    for entry in request.recent {
+        let role = if entry.kind == ENTRY_ANSWER {
+            "assistant"
+        } else {
+            "user"
+        };
+        messages.push(WireMessage::text(role, entry.body.clone()));
+    }
+    messages.push(WireMessage::text("user", request.question.to_string()));
 
     for iteration in 0..MAX_ITERATIONS {
         let completion = openrouter::complete_streamed(
@@ -151,7 +169,11 @@ where
             messages.push(WireMessage::tool_result(call.id.clone(), result));
         }
 
-        if iteration + 1 == MAX_ITERATIONS {
+        // Only a cap if the agent was still *gathering* when the loop ended. A
+        // final iteration that only wrote context was not cut off mid-search,
+        // and a notice on that turn would teach you to distrust the notice.
+        let still_searching = calls.iter().any(|call| call.name == "search_context");
+        if iteration + 1 == MAX_ITERATIONS && still_searching {
             outcome.capped = true;
         }
     }
@@ -246,7 +268,14 @@ where
     }
 
     let room = MAX_CHUNKS_PER_TURN - outcome.chunks.len();
-    if response.hits.len() > room {
+    // Counted against what we would actually have stored: surplus hits that are
+    // duplicates of passages already held cost nothing and cap nothing.
+    let fresh = response
+        .hits
+        .iter()
+        .filter(|hit| !outcome.chunks.iter().any(|held| held.id == hit.chunk.id))
+        .count();
+    if fresh > room {
         outcome.capped = true;
     }
 
@@ -428,6 +457,299 @@ struct ItemArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::context::ORIGIN_USER;
+    use crate::services::search::SearchService;
+    use crate::storage::library_store::LibraryStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    struct Fixture {
+        manager: ContextManager,
+        store: LibraryStore,
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The tool branches below never touch the network — `model`, `url`, and
+    /// `api_key` are unused on them — so a store is all the fixture needs.
+    fn fixture() -> Fixture {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "i0i-agent-loop-test-{}-{nanos}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let store = LibraryStore::for_test(dir.join("library.sqlite"));
+        store.init().expect("schema");
+        let search = Arc::new(SearchService::new(store.clone(), None));
+        Fixture {
+            manager: ContextManager::new(store.clone(), search, 32_000),
+            store,
+            dir,
+        }
+    }
+
+    fn request<'a>(thread_id: Option<&'a str>) -> LoopRequest<'a> {
+        LoopRequest {
+            paper_id: "vaswani2017",
+            thread_id,
+            paper_title: "Attention Is All You Need",
+            question: "why scale?",
+            selection: None,
+            recent: &[],
+            model: "unused",
+            url: "unused",
+            api_key: "unused",
+        }
+    }
+
+    fn call(name: &str, arguments: &str) -> openrouter::AssembledToolCall {
+        openrouter::AssembledToolCall {
+            id: "call_1".to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        }
+    }
+
+    async fn run_one(
+        fixture: &Fixture,
+        thread_id: Option<&str>,
+        call: &openrouter::AssembledToolCall,
+        outcome: &mut RetrievalOutcome,
+    ) -> String {
+        run_tool(
+            &fixture.manager,
+            &request(thread_id),
+            call,
+            outcome,
+            &mut |_| {},
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn malformed_arguments_answer_the_call_instead_of_killing_the_turn() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+
+        for (name, expected) in [
+            ("search_context", "query"),
+            ("add_context", "chunk_id"),
+            ("drop_context", "item_id"),
+        ] {
+            let result = run_one(
+                &fixture,
+                Some("thread-1"),
+                &call(name, "{ not json"),
+                &mut outcome,
+            )
+            .await;
+            assert!(
+                result.contains("Could not parse") && result.contains(expected),
+                "{name}: {result}"
+            );
+        }
+        assert!(outcome.chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_name_answers_rather_than_failing() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+        let result = run_one(&fixture, Some("t"), &call("teleport", "{}"), &mut outcome).await;
+        assert!(result.contains("No tool named teleport"));
+    }
+
+    #[tokio::test]
+    async fn the_write_tools_decline_politely_when_there_is_no_thread() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+
+        let result = run_one(
+            &fixture,
+            None,
+            &call("add_context", r#"{"chunk_id":"c1"}"#),
+            &mut outcome,
+        )
+        .await;
+        assert!(result.contains("no history yet"));
+
+        let result = run_one(
+            &fixture,
+            None,
+            &call("drop_context", r#"{"item_id":"i1"}"#),
+            &mut outcome,
+        )
+        .await;
+        assert!(result.contains("no kept context"));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_passage_the_reader_kept_is_refused() {
+        let fixture = fixture();
+        let (thread_id, item_id) = seeded_user_item(&fixture);
+        let mut outcome = RetrievalOutcome::default();
+
+        let result = run_one(
+            &fixture,
+            Some(&thread_id),
+            &call("drop_context", &format!(r#"{{"item_id":"{item_id}"}}"#)),
+            &mut outcome,
+        )
+        .await;
+
+        assert!(result.contains("Refused"), "{result}");
+        assert_eq!(fixture.store.context_items(&thread_id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_spent_chunk_budget_declines_further_searches_and_reports_it() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+        // Pretend the turn already pulled its allowance.
+        outcome.chunks = (0..MAX_CHUNKS_PER_TURN)
+            .map(|index| stub_chunk(&format!("chunk-{index}")))
+            .collect();
+
+        let result = run_one(
+            &fixture,
+            Some("t"),
+            &call("search_context", r#"{"query":"scaling"}"#),
+            &mut outcome,
+        )
+        .await;
+
+        assert!(result.contains("budget for this turn is spent"), "{result}");
+        assert!(outcome.capped, "a refused search must be reported");
+        assert_eq!(outcome.chunks.len(), MAX_CHUNKS_PER_TURN);
+        // A declined search is not a search that ran.
+        assert!(outcome.queries.is_empty());
+    }
+
+    fn stub_chunk(id: &str) -> DocumentChunk {
+        DocumentChunk {
+            id: id.to_string(),
+            paper_id: "vaswani2017".to_string(),
+            source_id: "s".to_string(),
+            extraction_id: "e".to_string(),
+            chunk_index: 0,
+            chunker: "structural".to_string(),
+            chunk_version: 2,
+            page_start: 0,
+            page_end: 0,
+            heading_path: None,
+            text: "body".to_string(),
+            token_estimate: 1,
+            source_start: 0,
+            source_end: 4,
+            block_ids: Vec::new(),
+        }
+    }
+
+    /// A thread holding one passage the *user* kept.
+    fn seeded_user_item(fixture: &Fixture) -> (String, String) {
+        let draft = crate::domain::library::PaperDraft {
+            id: "vaswani2017".to_string(),
+            title: "Attention Is All You Need".to_string(),
+            authors: vec!["A. Vaswani".to_string()],
+            venue: "NeurIPS".to_string(),
+            year: 2017,
+            citations: 0,
+            tags: Vec::new(),
+            status: "unread".to_string(),
+            abstract_text: None,
+            sources: vec![crate::domain::library::PaperSourceDraft {
+                source_kind: "pdf".to_string(),
+                source_url: "https://example.test/a.pdf".to_string(),
+                landing_url: None,
+            }],
+        };
+        fixture
+            .store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])
+            .expect("paper");
+        let source = fixture
+            .store
+            .get_document_sources("vaswani2017")
+            .expect("sources")
+            .remove(0);
+        fixture
+            .store
+            .set_document_source_cached(&source.id, "/tmp/a.pdf")
+            .expect("cached");
+        let extraction = fixture
+            .store
+            .start_document_extraction(
+                &source.id,
+                "pdfium_basic",
+                "0.2.0",
+                &format!("pdfium_basic:{}", source.id),
+                false,
+            )
+            .expect("extraction");
+        let block = crate::domain::library::DocumentBlock {
+            id: format!("{}:block:0:0", extraction.id),
+            paper_id: "vaswani2017".to_string(),
+            source_id: source.id.clone(),
+            extraction_id: extraction.id.clone(),
+            page_index: 0,
+            block_index: 0,
+            reading_order: 0,
+            kind: "paragraph".to_string(),
+            text: Some("A kept passage.".to_string()),
+            asset_id: None,
+            source_start: Some(0),
+            source_end: Some(15),
+            bbox_json: None,
+        };
+        let page = crate::domain::library::DocumentPage {
+            id: format!("{}:page:0", extraction.id),
+            paper_id: "vaswani2017".to_string(),
+            source_id: source.id.clone(),
+            extraction_id: extraction.id.clone(),
+            page_index: 0,
+            width: 612.0,
+            height: 792.0,
+        };
+        fixture
+            .store
+            .finish_document_extraction(&extraction.id, &[page], &[block], &[])
+            .expect("finish");
+
+        let chunk = fixture
+            .store
+            .chunks_for_extraction(&extraction.id)
+            .expect("chunks")
+            .remove(0);
+        let thread_id = fixture
+            .store
+            .add_note_at_anchor(
+                "paper",
+                "vaswani2017",
+                &crate::domain::chat::ThreadAnchor::Document,
+                "n",
+            )
+            .expect("thread")
+            .thread
+            .id;
+        let item = fixture
+            .manager
+            .add_context(&thread_id, &chunk.id, ORIGIN_USER)
+            .expect("adds");
+        (thread_id, item.id)
+    }
 
     #[test]
     fn a_preview_is_flattened_and_bounded() {

@@ -90,3 +90,4 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [x] RFC 0075 - PDFs now extract into sub-page blocks and spans, chunk structurally, and embed locally.
 - [x] RFC 0076 - Papers can be searched by wording and by meaning at once, from the title bar or any scope.
 - [x] RFC 0077 - Chat has a ContextManager: passages can be added, compacted, and cited back to the page they came from.
+- [x] RFC 0078 - The AI now decides for itself when to search the paper, keeps what it needs, and lists only the passages it actually used.
