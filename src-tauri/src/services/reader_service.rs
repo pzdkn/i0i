@@ -499,11 +499,14 @@ impl ReaderService {
                     })
                     .collect();
 
-                let blocks: Vec<ReaderBlock> = snapshot
-                    .document_blocks
-                    .iter()
-                    .filter(|b| b.extraction_id == extraction.id)
-                    .cloned()
+                // Loaded per-extraction rather than filtered out of the library
+                // snapshot (RFC 0075 R2) — this is the one extraction we need,
+                // and the snapshot used to carry every paper's.
+                let structure = self.store.extraction_structure(&extraction.id)?;
+
+                let blocks: Vec<ReaderBlock> = structure
+                    .blocks
+                    .into_iter()
                     .map(|b| ReaderBlock {
                         id: b.id,
                         page_index: b.page_index,
@@ -518,11 +521,9 @@ impl ReaderService {
                     })
                     .collect();
 
-                let spans: Vec<ReaderSpan> = snapshot
-                    .document_spans
-                    .iter()
-                    .filter(|s| s.extraction_id == extraction.id)
-                    .cloned()
+                let spans: Vec<ReaderSpan> = structure
+                    .spans
+                    .into_iter()
                     .map(|s| ReaderSpan {
                         id: s.id,
                         block_id: s.block_id,

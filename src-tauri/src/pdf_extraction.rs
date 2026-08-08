@@ -15,14 +15,33 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
-use crate::domain::library::{DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource};
+use crate::domain::library::{
+    DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource, DocumentSpan,
+};
+use crate::pdf_layout::{group_page, TextFragment};
 use crate::storage::library_store::LibraryStore;
 
 const DEFAULT_MAX_CONCURRENT_EXTRACTIONS: usize = 1;
 const DEFAULT_PAGE_CAP: usize = 200;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+/// The extractor's *name* is a component of `document_extraction_id` and
+/// `annotation_source_id`, so renaming it does not re-key existing extractions —
+/// it mints new ones beside them and orphans the originals, which
+/// `stale_document_extractions` then cannot see to clean up. The name stays;
+/// only the version moves (RFC 0075 R1).
 const EXTRACTOR: &str = "pdfium_basic";
-const EXTRACTOR_VERSION: &str = "0.1.0";
+
+/// 0.2.0 = structural extraction: sub-page blocks, spans, and geometry.
+/// Bumping this is the entire migration — `stale_document_extractions` re-queues
+/// every extraction below it and `clear_extraction_children` tears down the old
+/// rows.
+const EXTRACTOR_VERSION: &str = "0.2.0";
+
+/// Characters `"\n\n"` contributes between blocks in the canonical
+/// `source_text`. Named because the offset arithmetic below is meaningless
+/// without it.
+const BLOCK_JOIN_CHARS: i64 = 2;
 
 type ExtractionResult<T> = Result<T, String>;
 
@@ -270,6 +289,7 @@ impl PdfExtractionManager {
                     &extraction.id,
                     &document.pages,
                     &document.blocks,
+                    &document.spans,
                 )?;
                 self.emit_update(&extraction);
                 extraction_log(format!(
@@ -322,6 +342,7 @@ impl PdfExtractionManager {
 struct ExtractedDocumentRows {
     pages: Vec<DocumentPage>,
     blocks: Vec<DocumentBlock>,
+    spans: Vec<DocumentSpan>,
 }
 
 struct PdfiumBasicAdapter {
@@ -358,7 +379,9 @@ impl PdfiumBasicAdapter {
 
         let mut pages = Vec::new();
         let mut blocks = Vec::new();
+        let mut spans = Vec::new();
         let mut source_offset = 0_i64;
+        let mut reading_order = 0_i32;
 
         for (index, page) in document
             .pages()
@@ -368,48 +391,84 @@ impl PdfiumBasicAdapter {
         {
             let page_index = i32::try_from(index)
                 .map_err(|_| format!("PDF page index is too large: {index}"))?;
+            let page_width = page.width().value;
+            let page_height = page.height().value;
+
             pages.push(DocumentPage {
                 id: format!("{}:page:{page_index}", extraction.id),
                 paper_id: extraction.paper_id.clone(),
                 source_id: extraction.source_id.clone(),
                 extraction_id: extraction.id.clone(),
                 page_index,
-                width: f64::from(page.width().value),
-                height: f64::from(page.height().value),
+                width: f64::from(page_width),
+                height: f64::from(page_height),
             });
-
-            if !blocks.is_empty() {
-                // ReaderService joins persisted block text with "\n\n"; keep
-                // offsets aligned with that canonical source_text.
-                source_offset += 2;
-            }
 
             let text = page
                 .text()
-                .map_err(|error| format!("Pdfium could not read page {page_index} text: {error}"))?
-                .all();
-            let source_start = source_offset;
-            source_offset += text.chars().count() as i64;
-            let source_end = source_offset;
+                .map_err(|error| format!("Pdfium could not read page {page_index} text: {error}"))?;
+            let fragments = page_fragments(&text);
+            let laid_out = group_page(&fragments, page_width, page_height);
 
-            blocks.push(DocumentBlock {
-                id: format!("{}:block:{page_index}:0", extraction.id),
-                paper_id: extraction.paper_id.clone(),
-                source_id: extraction.source_id.clone(),
-                extraction_id: extraction.id.clone(),
-                page_index,
-                block_index: 0,
-                reading_order: page_index,
-                kind: "paragraph".to_string(),
-                text: Some(text),
-                asset_id: None,
-                source_start: Some(source_start),
-                source_end: Some(source_end),
-                bbox_json: None,
-            });
+            for (block_index, layout) in laid_out.into_iter().enumerate() {
+                // The canonical `source_text` is block text joined by "\n\n"
+                // (RFC 0075). Every offset below is measured against that
+                // string, and in *characters* — the reader's offsets are
+                // browser-space, not bytes.
+                if !blocks.is_empty() {
+                    source_offset += BLOCK_JOIN_CHARS;
+                }
+
+                let block_id =
+                    format!("{}:block:{page_index}:{block_index}", extraction.id);
+                let block_start = source_offset;
+                source_offset += layout.text.chars().count() as i64;
+
+                for (span_index, span) in layout.spans.iter().enumerate() {
+                    spans.push(DocumentSpan {
+                        id: format!("{block_id}:span:{span_index}"),
+                        paper_id: extraction.paper_id.clone(),
+                        source_id: extraction.source_id.clone(),
+                        extraction_id: extraction.id.clone(),
+                        block_id: block_id.clone(),
+                        page_index,
+                        text: span.text.clone(),
+                        // Span offsets nest inside their block's range, which
+                        // is what lets a retrieved chunk resolve to rectangles.
+                        source_start: block_start + span.start as i64,
+                        source_end: block_start + span.end as i64,
+                        bbox_json: serde_json::to_string(&span.rect)
+                            .map_err(|error| format!("span bbox serialize failed: {error}"))?,
+                    });
+                }
+
+                blocks.push(DocumentBlock {
+                    id: block_id,
+                    paper_id: extraction.paper_id.clone(),
+                    source_id: extraction.source_id.clone(),
+                    extraction_id: extraction.id.clone(),
+                    page_index,
+                    block_index: block_index as i32,
+                    reading_order,
+                    kind: layout.kind.to_string(),
+                    text: Some(layout.text),
+                    asset_id: None,
+                    source_start: Some(block_start),
+                    source_end: Some(source_offset),
+                    bbox_json: Some(
+                        serde_json::to_string(&layout.rect)
+                            .map_err(|error| format!("block bbox serialize failed: {error}"))?,
+                    ),
+                });
+                reading_order += 1;
+            }
         }
 
-        Ok(ExtractedDocumentRows { pages, blocks })
+        Ok(ExtractedDocumentRows {
+            pages,
+            blocks,
+            spans,
+        })
     }
 
     fn bind_pdfium(&self) -> ExtractionResult<Pdfium> {
@@ -470,6 +529,47 @@ impl PdfiumBasicAdapter {
 
         candidates
     }
+}
+
+/// Pdfium's text segments as layout fragments.
+///
+/// A segment is a run of text sharing a style and a line, which is exactly the
+/// granularity `document_spans` wants. Font size comes from the segment's first
+/// character — a segment is a single style run, so one sample is the run.
+fn page_fragments(text: &PdfPageText<'_>) -> Vec<TextFragment> {
+    text.segments()
+        .iter()
+        .filter_map(|segment| {
+            let content = segment.text();
+            if content.trim().is_empty() {
+                return None;
+            }
+            let bounds = segment.bounds();
+            Some(TextFragment {
+                text: content,
+                left: bounds.left().value,
+                right: bounds.right().value,
+                bottom: bounds.bottom().value,
+                top: bounds.top().value,
+                font_size: segment_font_size(&segment),
+            })
+        })
+        .collect()
+}
+
+/// Falls back to the segment's own height when the character API is
+/// unavailable. Height overstates font size slightly (it spans the full glyph
+/// box) but every threshold in `pdf_layout` is a *ratio* between sizes on the
+/// same page, so a consistent overstatement cancels out.
+fn segment_font_size(segment: &PdfPageTextSegment<'_>) -> f32 {
+    segment
+        .chars()
+        .ok()
+        .and_then(|chars| chars.iter().next().map(|c| c.scaled_font_size().value))
+        .unwrap_or_else(|| {
+            let bounds = segment.bounds();
+            bounds.top().value - bounds.bottom().value
+        })
 }
 
 fn bind_pdfium_library(path: &Path) -> ExtractionResult<Pdfium> {

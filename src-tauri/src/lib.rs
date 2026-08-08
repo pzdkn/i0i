@@ -2,6 +2,7 @@ mod commands;
 mod domain;
 mod html_ingestion;
 mod pdf_extraction;
+mod pdf_layout;
 mod pdf_ingestion;
 mod services;
 mod shared;

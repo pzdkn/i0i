@@ -232,6 +232,48 @@ pub struct DocumentSpan {
     pub bbox_json: String,
 }
 
+/// A retrieval-sized slice of an extraction (RFC 0075).
+///
+/// Derived data: everything here is regenerable from pages/blocks/spans, and is
+/// torn down with them on re-extraction. `source_start`/`source_end` index the
+/// canonical `source_text` — blocks joined by `"\n\n"` — because a chunk can
+/// cover part of its first or last block, which `document_chunk_blocks` alone
+/// cannot express.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentChunk {
+    pub id: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub extraction_id: String,
+    /// Reading order within the extraction, dense from 0.
+    pub chunk_index: i32,
+    pub chunker: String,
+    pub chunk_version: i32,
+    pub page_start: i32,
+    pub page_end: i32,
+    /// `"Introduction > Motivation"`, or `None` above the first heading.
+    pub heading_path: Option<String>,
+    pub text: String,
+    pub token_estimate: i32,
+    pub source_start: i64,
+    pub source_end: i64,
+    /// Blocks this chunk covers, in reading order. Not a database column —
+    /// carried alongside so a chunk and its provenance write as one unit.
+    pub block_ids: Vec<String>,
+}
+
+/// Coverage of chunk embeddings for one paper (RFC 0075).
+///
+/// A missing embedding is a retrieval hole the user cannot see on their own,
+/// so it is counted rather than swallowed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingCoverage {
+    pub chunks: i64,
+    pub embedded: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentAsset {
@@ -257,7 +299,18 @@ pub struct LibrarySnapshot {
     pub document_sources: Vec<DocumentSource>,
     pub document_extractions: Vec<DocumentExtraction>,
     pub document_pages: Vec<DocumentPage>,
-    pub document_blocks: Vec<DocumentBlock>,
-    pub document_spans: Vec<DocumentSpan>,
     pub document_assets: Vec<DocumentAsset>,
+}
+
+/// One extraction's blocks and spans, loaded on demand (RFC 0075 R2).
+///
+/// Deliberately *not* part of `LibrarySnapshot`: this is document-scoped data,
+/// and every consumer narrows to a single extraction anyway. Carrying it in the
+/// library snapshot meant serializing every paper's full text across IPC to
+/// render a list of titles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractionStructure {
+    pub blocks: Vec<DocumentBlock>,
+    pub spans: Vec<DocumentSpan>,
 }

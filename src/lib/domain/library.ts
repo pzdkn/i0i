@@ -167,9 +167,18 @@ export type LibrarySnapshot = {
   documentSources: DocumentSource[];
   documentExtractions: DocumentExtraction[];
   documentPages: DocumentPage[];
-  documentBlocks: DocumentBlock[];
-  documentSpans: DocumentSpan[];
   documentAssets: DocumentAsset[];
+};
+
+/// One extraction's blocks and spans, fetched on demand (RFC 0075 R2).
+///
+/// Deliberately not part of `LibrarySnapshot`: carrying every paper's blocks
+/// and spans there meant shipping the full text of the whole library across IPC
+/// to render a list of titles, and every consumer narrowed to one extraction
+/// anyway.
+export type ExtractionStructure = {
+  blocks: DocumentBlock[];
+  spans: DocumentSpan[];
 };
 
 export type VaultWorkspace = {

@@ -11,11 +11,14 @@ use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatThread, ChatThreadSummary, ChatThreadView,
     PinnedHighlight, ThreadAnchor, ENTRY_ANSWER, ENTRY_NOTE, ENTRY_QUESTION,
 };
+use crate::domain::chunking::{chunk_blocks, CHUNK_VERSION};
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
-    CiteRecord, DocumentAsset, DocumentBlock, DocumentExtraction, DocumentPage, DocumentSource,
-    DocumentSpan, LibrarySnapshot, Paper, PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate,
-    PaperSourceDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
+    CiteRecord, DocumentAsset, DocumentBlock, DocumentChunk, DocumentExtraction, DocumentPage,
+    DocumentSource, DocumentSpan, EmbeddingCoverage, ExtractionStructure, LibrarySnapshot, Paper,
+    PaperDraft,
+    PaperMetadataEnrichment, PaperMetadataUpdate, PaperSourceDraft, Vault, VaultDraft, VaultPaper,
+    VaultRenameDraft,
 };
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, Search, SearchCandidate, SearchDraft, SearchRun,
@@ -416,11 +419,18 @@ impl LibraryStore {
         read_document_extraction(&conn, &extraction_id)
     }
 
+    /// Persist an extraction's structure and mark it ready.
+    ///
+    /// Chunking happens here, inside the same transaction (RFC 0075 R3): an
+    /// extraction is therefore never `ready` without its chunks. The
+    /// alternative — a second queue with its own status column and recovery
+    /// path — buys nothing, because chunking needs no model and no network.
     pub fn finish_document_extraction(
         &self,
         extraction_id: &str,
         pages: &[DocumentPage],
         blocks: &[DocumentBlock],
+        spans: &[DocumentSpan],
     ) -> StoreResult<DocumentExtraction> {
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
@@ -476,6 +486,33 @@ impl LibraryStore {
             .map_err(|error| error.to_string())?;
         }
 
+        for span in spans {
+            tx.execute(
+                "
+                insert into document_spans (
+                  id, paper_id, source_id, extraction_id, block_id, page_index,
+                  text, source_start, source_end, bbox_json
+                )
+                values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ",
+                params![
+                    span.id,
+                    span.paper_id,
+                    span.source_id,
+                    span.extraction_id,
+                    span.block_id,
+                    span.page_index,
+                    span.text,
+                    span.source_start,
+                    span.source_end,
+                    span.bbox_json,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        insert_chunks(&tx, &chunk_blocks(blocks))?;
+
         tx.execute(
             "
             update document_extractions
@@ -501,6 +538,187 @@ impl LibraryStore {
         tx.commit().map_err(|error| error.to_string())?;
         let conn = self.open_connection()?;
         read_document_extraction(&conn, extraction_id)
+    }
+
+    /// Blocks and spans for one extraction (RFC 0075 R2).
+    pub fn extraction_structure(&self, extraction_id: &str) -> StoreResult<ExtractionStructure> {
+        let conn = self.open_connection()?;
+        Ok(ExtractionStructure {
+            blocks: read_document_blocks_for_extraction(&conn, extraction_id)?,
+            spans: read_document_spans_for_extraction(&conn, extraction_id)?,
+        })
+    }
+
+    pub fn chunks_for_extraction(&self, extraction_id: &str) -> StoreResult<Vec<DocumentChunk>> {
+        let conn = self.open_connection()?;
+        read_chunks(&conn, "where c.extraction_id = ?1", params![extraction_id])
+    }
+
+    /// Extractions that are ready but whose chunks predate the current chunker
+    /// (RFC 0075 R6). Covers a `CHUNK_VERSION` bump without forcing a full
+    /// re-extraction, and heals anything a crash left half-written.
+    pub fn extractions_needing_rechunk(&self) -> StoreResult<Vec<String>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "
+                select e.id
+                from document_extractions e
+                where e.status = 'ready'
+                  and not exists (
+                    select 1 from document_chunks c
+                    where c.extraction_id = e.id and c.chunk_version = ?1
+                  )
+                order by e.id
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![CHUNK_VERSION], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
+    /// Re-chunk one extraction from its stored blocks, replacing whatever
+    /// chunks it had. Blocks are canonical; chunks are disposable.
+    pub fn rechunk_extraction(&self, extraction_id: &str) -> StoreResult<usize> {
+        let mut conn = self.open_connection()?;
+        let blocks = read_document_blocks_for_extraction(&conn, extraction_id)?;
+        let chunks = chunk_blocks(&blocks);
+
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        clear_extraction_chunks(&tx, extraction_id)?;
+        insert_chunks(&tx, &chunks)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(chunks.len())
+    }
+
+    /// Chunks with no embedding at the current model and chunk version.
+    ///
+    /// Absence of a row *is* the "not yet embedded" state — there is no status
+    /// column and nothing to recover, so this query is the entire work queue.
+    pub fn chunks_missing_embedding(
+        &self,
+        model: &str,
+        model_version: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<DocumentChunk>> {
+        let conn = self.open_connection()?;
+        read_chunks(
+            &conn,
+            "
+            where c.chunk_version = ?1
+              and not exists (
+                select 1 from document_chunk_embeddings e
+                where e.chunk_id = c.id
+                  and e.model = ?2
+                  and e.model_version = ?3
+                  and e.chunk_version = c.chunk_version
+              )
+            limit ?4
+            ",
+            params![CHUNK_VERSION, model, model_version, limit],
+        )
+    }
+
+    pub fn save_chunk_embedding(
+        &self,
+        chunk_id: &str,
+        model: &str,
+        model_version: &str,
+        chunk_version: i32,
+        embedding: &[f32],
+    ) -> StoreResult<()> {
+        // Little-endian f32, which is byte-for-byte what sqlite-vec's vec0
+        // consumes. Phase 2 builds its index straight from these blobs rather
+        // than re-embedding anything (RFC 0075).
+        let mut blob = Vec::with_capacity(embedding.len() * 4);
+        for value in embedding {
+            blob.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let conn = self.open_connection()?;
+        conn.execute(
+            "
+            insert or replace into document_chunk_embeddings (
+              chunk_id, model, model_version, dimensions, chunk_version,
+              embedding, created_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+            ",
+            params![
+                chunk_id,
+                model,
+                model_version,
+                embedding.len() as i64,
+                chunk_version,
+                blob,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// How much of a paper is embedded. A missing embedding is a retrieval hole
+    /// the user cannot see on their own, so it is counted rather than swallowed
+    /// (RFC 0075 R5).
+    pub fn embedding_coverage(
+        &self,
+        paper_id: &str,
+        model: &str,
+        model_version: &str,
+    ) -> StoreResult<EmbeddingCoverage> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "
+            select
+              count(*),
+              coalesce(sum(case when e.chunk_id is null then 0 else 1 end), 0)
+            from document_chunks c
+            left join document_chunk_embeddings e
+              on e.chunk_id = c.id
+             and e.model = ?2
+             and e.model_version = ?3
+             and e.chunk_version = c.chunk_version
+            where c.paper_id = ?1
+            ",
+            params![paper_id, model, model_version],
+            |row| {
+                Ok(EmbeddingCoverage {
+                    chunks: row.get(0)?,
+                    embedded: row.get(1)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Lexical retrieval over chunk text (RFC 0075). Ranked by BM25, which FTS5
+    /// returns as a negative score — lower is better, hence the plain ascending
+    /// sort.
+    pub fn search_chunks_lexical(
+        &self,
+        paper_id: &str,
+        query: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<DocumentChunk>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.open_connection()?;
+        read_chunks(
+            &conn,
+            "
+            join document_chunks_fts f on f.chunk_id = c.id
+            where c.paper_id = ?1
+              and document_chunks_fts match ?2
+            order by bm25(document_chunks_fts)
+            limit ?3
+            ",
+            params![paper_id, fts_match_query(trimmed), limit],
+        )
     }
 
     pub fn set_document_extraction_failed(
@@ -1904,6 +2122,87 @@ impl LibraryStore {
             create index if not exists idx_document_assets_extraction_id
               on document_assets(extraction_id);
 
+            create table if not exists document_chunks (
+              id text primary key,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              chunk_index integer not null,
+              chunker text not null,
+              chunk_version integer not null,
+              page_start integer not null,
+              page_end integer not null,
+              heading_path text,
+              text text not null,
+              token_estimate integer not null,
+              source_start integer not null,
+              source_end integer not null,
+              created_at text not null,
+              unique (extraction_id, chunk_index),
+              foreign key (paper_id) references papers(id) on delete cascade,
+              foreign key (source_id) references document_sources(id) on delete cascade,
+              foreign key (extraction_id) references document_extractions(id) on delete cascade
+            );
+
+            create index if not exists idx_document_chunks_extraction_id
+              on document_chunks(extraction_id);
+
+            create index if not exists idx_document_chunks_paper_id
+              on document_chunks(paper_id);
+
+            create table if not exists document_chunk_blocks (
+              chunk_id text not null,
+              block_id text not null,
+              ordinal integer not null,
+              primary key (chunk_id, block_id),
+              foreign key (chunk_id) references document_chunks(id) on delete cascade,
+              foreign key (block_id) references document_blocks(id) on delete cascade
+            );
+
+            -- The reverse lookup: which chunk covers this block? Needed to
+            -- highlight a retrieved chunk, and to find the chunk behind a
+            -- passage the user selected.
+            create index if not exists idx_document_chunk_blocks_block_id
+              on document_chunk_blocks(block_id);
+
+            -- Standalone, NOT content='document_chunks' (RFC 0075). External
+            -- content keys on rowid, and this store rebuilds tables (see
+            -- relax_highlight_color_not_null) — a rebuild would silently
+            -- renumber rowids and leave every FTS row pointing at the wrong
+            -- chunk, with no error. Duplicating disposable derived text is the
+            -- cheaper failure mode.
+            create virtual table if not exists document_chunks_fts using fts5(
+              chunk_id unindexed,
+              text,
+              tokenize = 'unicode61 remove_diacritics 2'
+            );
+
+            -- Keeps the FTS index consistent no matter *how* a chunk dies.
+            -- Explicit deletes are not enough: `document_chunks` is reachable by
+            -- ON DELETE CASCADE from papers, sources, and extractions, and a
+            -- cascade never runs the code at the call site. An orphaned FTS row
+            -- has no error to report — it just keeps answering searches with a
+            -- chunk id that no longer resolves.
+            create trigger if not exists trg_document_chunks_fts_delete
+            after delete on document_chunks
+            begin
+              delete from document_chunks_fts where chunk_id = old.id;
+            end;
+
+            create table if not exists document_chunk_embeddings (
+              chunk_id text primary key,
+              model text not null,
+              model_version text not null,
+              dimensions integer not null,
+              chunk_version integer not null,
+              embedding blob not null,
+              created_at text not null,
+              foreign key (chunk_id) references document_chunks(id) on delete cascade
+            );
+
+            create index if not exists idx_document_chunk_embeddings_model
+              on document_chunk_embeddings(model, model_version);
+
             create table if not exists chat_threads (
               id text primary key,
               scope_kind text not null,
@@ -2130,8 +2429,6 @@ impl LibraryStore {
             document_sources: read_document_sources(conn)?,
             document_extractions: read_document_extractions(conn)?,
             document_pages: read_document_pages(conn)?,
-            document_blocks: read_document_blocks(conn)?,
-            document_spans: read_document_spans(conn)?,
             document_assets: read_document_assets(conn)?,
         })
     }
@@ -2553,72 +2850,44 @@ fn read_document_pages(conn: &Connection) -> StoreResult<Vec<DocumentPage>> {
     collect_rows(rows)
 }
 
-fn read_document_blocks(conn: &Connection) -> StoreResult<Vec<DocumentBlock>> {
-    let mut stmt = conn
-        .prepare(
-            "
-            select id, paper_id, source_id, extraction_id, page_index,
-                   block_index, reading_order, kind, text, asset_id,
-                   source_start, source_end, bbox_json
-            from document_blocks
-            order by extraction_id, reading_order, block_index
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+// Blocks and spans are read per-extraction, never library-wide (RFC 0075 R2) —
+// see `read_document_blocks_for_extraction`. `LibrarySnapshot` used to carry
+// every block and span in the library and let callers filter in memory, which
+// was nearly free while a block was a whole page and spans did not exist. With
+// structural extraction it is ~370 bytes of identifiers per span row, crossing
+// IPC as JSON on every library read and on six different mutations.
 
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(DocumentBlock {
-                id: row.get(0)?,
-                paper_id: row.get(1)?,
-                source_id: row.get(2)?,
-                extraction_id: row.get(3)?,
-                page_index: row.get(4)?,
-                block_index: row.get(5)?,
-                reading_order: row.get(6)?,
-                kind: row.get(7)?,
-                text: row.get(8)?,
-                asset_id: row.get(9)?,
-                source_start: row.get(10)?,
-                source_end: row.get(11)?,
-                bbox_json: row.get(12)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-
-    collect_rows(rows)
+fn document_block_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentBlock> {
+    Ok(DocumentBlock {
+        id: row.get(0)?,
+        paper_id: row.get(1)?,
+        source_id: row.get(2)?,
+        extraction_id: row.get(3)?,
+        page_index: row.get(4)?,
+        block_index: row.get(5)?,
+        reading_order: row.get(6)?,
+        kind: row.get(7)?,
+        text: row.get(8)?,
+        asset_id: row.get(9)?,
+        source_start: row.get(10)?,
+        source_end: row.get(11)?,
+        bbox_json: row.get(12)?,
+    })
 }
 
-fn read_document_spans(conn: &Connection) -> StoreResult<Vec<DocumentSpan>> {
-    let mut stmt = conn
-        .prepare(
-            "
-            select id, paper_id, source_id, extraction_id, block_id, page_index,
-                   text, source_start, source_end, bbox_json
-            from document_spans
-            order by extraction_id, source_start, id
-            ",
-        )
-        .map_err(|error| error.to_string())?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(DocumentSpan {
-                id: row.get(0)?,
-                paper_id: row.get(1)?,
-                source_id: row.get(2)?,
-                extraction_id: row.get(3)?,
-                block_id: row.get(4)?,
-                page_index: row.get(5)?,
-                text: row.get(6)?,
-                source_start: row.get(7)?,
-                source_end: row.get(8)?,
-                bbox_json: row.get(9)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-
-    collect_rows(rows)
+fn document_span_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentSpan> {
+    Ok(DocumentSpan {
+        id: row.get(0)?,
+        paper_id: row.get(1)?,
+        source_id: row.get(2)?,
+        extraction_id: row.get(3)?,
+        block_id: row.get(4)?,
+        page_index: row.get(5)?,
+        text: row.get(6)?,
+        source_start: row.get(7)?,
+        source_end: row.get(8)?,
+        bbox_json: row.get(9)?,
+    })
 }
 
 fn read_document_assets(conn: &Connection) -> StoreResult<Vec<DocumentAsset>> {
@@ -3834,7 +4103,199 @@ fn document_extraction_id(source_id: &str, extractor: &str) -> String {
     format!("extraction:{extractor}:{source_id}")
 }
 
+/// Turn user input into an FTS5 MATCH expression.
+///
+/// FTS5 query syntax is a language: bare `AND`/`OR`/`NEAR`, quotes, and `*` all
+/// mean something, so a user typing `C++ (revised)` is a syntax error rather
+/// than a search. Quoting each token makes every term a literal phrase and the
+/// whole query an implicit AND.
+fn fts_match_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Read chunks with an arbitrary tail (`where`/`join`/`order`/`limit`).
+///
+/// The chunk row and its `block_ids` come back together, because a chunk
+/// without its provenance is not usable for anything this RFC builds.
+fn read_chunks<P: rusqlite::Params>(
+    conn: &Connection,
+    tail: &str,
+    params: P,
+) -> StoreResult<Vec<DocumentChunk>> {
+    let sql = format!(
+        "
+        select c.id, c.paper_id, c.source_id, c.extraction_id, c.chunk_index,
+               c.chunker, c.chunk_version, c.page_start, c.page_end,
+               c.heading_path, c.text, c.token_estimate, c.source_start,
+               c.source_end
+        from document_chunks c
+        {tail}
+        "
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok(DocumentChunk {
+                id: row.get(0)?,
+                paper_id: row.get(1)?,
+                source_id: row.get(2)?,
+                extraction_id: row.get(3)?,
+                chunk_index: row.get(4)?,
+                chunker: row.get(5)?,
+                chunk_version: row.get(6)?,
+                page_start: row.get(7)?,
+                page_end: row.get(8)?,
+                heading_path: row.get(9)?,
+                text: row.get(10)?,
+                token_estimate: row.get(11)?,
+                source_start: row.get(12)?,
+                source_end: row.get(13)?,
+                block_ids: Vec::new(),
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let mut chunks: Vec<DocumentChunk> = collect_rows(rows)?;
+
+    for chunk in &mut chunks {
+        let mut stmt = conn
+            .prepare(
+                "
+                select block_id from document_chunk_blocks
+                where chunk_id = ?1
+                order by ordinal
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![chunk.id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        chunk.block_ids = collect_rows(rows)?;
+    }
+
+    Ok(chunks)
+}
+
+fn read_document_blocks_for_extraction(
+    conn: &Connection,
+    extraction_id: &str,
+) -> StoreResult<Vec<DocumentBlock>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, page_index,
+                   block_index, reading_order, kind, text, asset_id,
+                   source_start, source_end, bbox_json
+            from document_blocks
+            where extraction_id = ?1
+            order by reading_order, block_index
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![extraction_id], document_block_from_row)
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn read_document_spans_for_extraction(
+    conn: &Connection,
+    extraction_id: &str,
+) -> StoreResult<Vec<DocumentSpan>> {
+    let mut stmt = conn
+        .prepare(
+            "
+            select id, paper_id, source_id, extraction_id, block_id, page_index,
+                   text, source_start, source_end, bbox_json
+            from document_spans
+            where extraction_id = ?1
+            order by source_start, id
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![extraction_id], document_span_from_row)
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+/// Drop an extraction's chunks without touching its pages, blocks, or spans.
+/// FTS rows follow via `trg_document_chunks_fts_delete`.
+fn clear_extraction_chunks(conn: &Connection, extraction_id: &str) -> StoreResult<()> {
+    conn.execute(
+        "delete from document_chunks where extraction_id = ?1",
+        params![extraction_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Write chunks, their block provenance, and their FTS rows.
+///
+/// All three in one place because they are one fact recorded three ways —
+/// splitting them across call sites is how an FTS index drifts from its table.
+fn insert_chunks(conn: &Connection, chunks: &[DocumentChunk]) -> StoreResult<()> {
+    for chunk in chunks {
+        conn.execute(
+            "
+            insert into document_chunks (
+              id, paper_id, source_id, extraction_id, chunk_index, chunker,
+              chunk_version, page_start, page_end, heading_path, text,
+              token_estimate, source_start, source_end, created_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
+            ",
+            params![
+                chunk.id,
+                chunk.paper_id,
+                chunk.source_id,
+                chunk.extraction_id,
+                chunk.chunk_index,
+                chunk.chunker,
+                chunk.chunk_version,
+                chunk.page_start,
+                chunk.page_end,
+                chunk.heading_path,
+                chunk.text,
+                chunk.token_estimate,
+                chunk.source_start,
+                chunk.source_end,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        for (ordinal, block_id) in chunk.block_ids.iter().enumerate() {
+            conn.execute(
+                "
+                insert into document_chunk_blocks (chunk_id, block_id, ordinal)
+                values (?1, ?2, ?3)
+                ",
+                params![chunk.id, block_id, ordinal as i64],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        conn.execute(
+            "insert into document_chunks_fts (chunk_id, text) values (?1, ?2)",
+            params![chunk.id, chunk.text],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn clear_extraction_children(conn: &Connection, extraction_id: &str) -> StoreResult<()> {
+    // Cascades to document_chunk_blocks and document_chunk_embeddings; the
+    // FTS row goes with it via trg_document_chunks_fts_delete.
+    conn.execute(
+        "delete from document_chunks where extraction_id = ?1",
+        params![extraction_id],
+    )
+    .map_err(|error| error.to_string())?;
     conn.execute(
         "delete from document_spans where extraction_id = ?1",
         params![extraction_id],
@@ -4461,8 +4922,6 @@ mod tests {
         assert!(snapshot.document_sources.is_empty());
         assert!(snapshot.document_extractions.is_empty());
         assert!(snapshot.document_pages.is_empty());
-        assert!(snapshot.document_blocks.is_empty());
-        assert!(snapshot.document_spans.is_empty());
         assert!(snapshot.document_assets.is_empty());
         assert!(has_vault(&snapshot, "attention"));
         assert!(has_paper(&snapshot, "vaswani2017"));
@@ -4797,6 +5256,7 @@ mod tests {
             &extraction.id,
             &[page.clone()],
             &[block.clone()],
+            &[],
         )?;
         let snapshot = db.store.get_library()?;
 
@@ -4811,8 +5271,9 @@ mod tests {
             .document_pages
             .iter()
             .any(|row| row.id == page.id && row.extraction_id == extraction.id));
-        assert!(snapshot
-            .document_blocks
+        let structure = db.store.extraction_structure(&extraction.id)?;
+        assert!(structure
+            .blocks
             .iter()
             .any(|row| row.id == block.id
                 && row.text.as_deref() == Some("Real extracted page text.")));
@@ -4849,6 +5310,7 @@ mod tests {
             &extraction.id,
             &[extraction_page(&extraction)],
             &[block],
+            &[],
         )?;
 
         let existing = db.store.start_document_extraction(
@@ -4860,7 +5322,9 @@ mod tests {
         )?;
         assert_eq!(existing.status, "ready");
         assert_eq!(
-            db.store.get_library()?.document_blocks[0].text.as_deref(),
+            db.store.extraction_structure(&existing.id)?.blocks[0]
+                .text
+                .as_deref(),
             Some("Original text.")
         );
 
@@ -4872,7 +5336,7 @@ mod tests {
             true,
         )?;
         assert_eq!(forced.status, "extracting");
-        assert!(db.store.get_library()?.document_blocks.is_empty());
+        assert!(db.store.extraction_structure(&forced.id)?.blocks.is_empty());
 
         Ok(())
     }
@@ -5875,6 +6339,342 @@ mod tests {
         let pool = db.store.list_search_candidates(&search.id)?;
         assert!(pool[0].seen);
         assert!(pool[0].saved);
+        Ok(())
+    }
+
+    // ---- RFC 0075: chunks, FTS5, embeddings ----
+
+    /// A ready extraction carrying `blocks`, so the chunk tests can start from
+    /// a realistic document rather than poking rows in by hand.
+    fn extracted_paper(
+        db: &TestDb,
+        paper_id: &str,
+        blocks: &[(&str, &str)],
+    ) -> StoreResult<DocumentExtraction> {
+        let draft = paper_draft_with_pdf(paper_id, &format!("https://example.test/{paper_id}.pdf"));
+        db.store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])?;
+        let source = db.store.get_document_sources(paper_id)?.remove(0);
+        db.store
+            .set_document_source_cached(&source.id, "/tmp/chunked.pdf")?;
+
+        let extraction = db.store.start_document_extraction(
+            &source.id,
+            "pdfium_basic",
+            "0.2.0",
+            &format!("pdfium_basic:{}", source.id),
+            false,
+        )?;
+
+        let mut offset = 0_i64;
+        let rows: Vec<DocumentBlock> = blocks
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, text))| {
+                if index > 0 {
+                    offset += 2;
+                }
+                let start = offset;
+                offset += text.chars().count() as i64;
+                DocumentBlock {
+                    id: format!("{}:block:0:{index}", extraction.id),
+                    paper_id: extraction.paper_id.clone(),
+                    source_id: extraction.source_id.clone(),
+                    extraction_id: extraction.id.clone(),
+                    page_index: 0,
+                    block_index: index as i32,
+                    reading_order: index as i32,
+                    kind: (*kind).to_string(),
+                    text: Some((*text).to_string()),
+                    asset_id: None,
+                    source_start: Some(start),
+                    source_end: Some(offset),
+                    bbox_json: None,
+                }
+            })
+            .collect();
+
+        db.store.finish_document_extraction(
+            &extraction.id,
+            &[extraction_page(&extraction)],
+            &rows,
+            &[],
+        )
+    }
+
+    #[test]
+    fn finishing_an_extraction_writes_chunks_in_the_same_transaction() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "chunked-paper",
+            &[
+                ("heading", "Introduction"),
+                ("paragraph", "Transformers rely entirely on attention."),
+            ],
+        )?;
+
+        // The invariant: a ready extraction always has chunks.
+        assert_eq!(extraction.status, "ready");
+        let chunks = db.store.chunks_for_extraction(&extraction.id)?;
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].heading_path.as_deref(), Some("Introduction"));
+        assert_eq!(chunks[0].chunk_version, CHUNK_VERSION);
+        assert!(!chunks[0].block_ids.is_empty());
+        Ok(())
+    }
+
+    /// Not a formality: FTS5 is a compile-time option, and every chunk search
+    /// silently returns nothing if the bundled SQLite lacks it.
+    #[test]
+    fn fts5_round_trips_chunk_text() -> StoreResult<()> {
+        let db = test_db()?;
+        extracted_paper(
+            &db,
+            "searchable-paper",
+            &[(
+                "paragraph",
+                "The encoder contains a stack of six identical layers.",
+            )],
+        )?;
+
+        let hits = db
+            .store
+            .search_chunks_lexical("searchable-paper", "identical layers", 10)?;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.contains("identical layers"));
+
+        let misses = db
+            .store
+            .search_chunks_lexical("searchable-paper", "convolutional", 10)?;
+        assert!(misses.is_empty());
+        Ok(())
+    }
+
+    /// FTS5 query syntax is a language — an unescaped `(` or a bare `AND` is a
+    /// syntax error, not a search. Users type these.
+    #[test]
+    fn lexical_search_survives_punctuation_in_the_query() -> StoreResult<()> {
+        let db = test_db()?;
+        extracted_paper(
+            &db,
+            "punctuation-paper",
+            &[("paragraph", "We evaluate BLEU (revised) on the task.")],
+        )?;
+
+        for query in ["BLEU (revised)", "AND", "\"quoted", "*", "NEAR the"] {
+            db.store
+                .search_chunks_lexical("punctuation-paper", query, 10)
+                .unwrap_or_else(|error| panic!("query {query:?} should not error: {error}"));
+        }
+
+        let hits = db
+            .store
+            .search_chunks_lexical("punctuation-paper", "BLEU (revised)", 10)?;
+        assert_eq!(hits.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn re_extraction_leaves_no_orphaned_chunk_rows() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "reextracted-paper",
+            &[("paragraph", "Original body text about attention.")],
+        )?;
+
+        let chunks = db.store.chunks_for_extraction(&extraction.id)?;
+        assert!(!chunks.is_empty());
+        db.store.save_chunk_embedding(
+            &chunks[0].id,
+            "test-model",
+            "1",
+            CHUNK_VERSION,
+            &[0.1, 0.2, 0.3],
+        )?;
+
+        // Forcing a restart tears the extraction's children down.
+        db.store.start_document_extraction(
+            &extraction.source_id,
+            "pdfium_basic",
+            "0.2.0",
+            &format!("pdfium_basic:{}", extraction.source_id),
+            true,
+        )?;
+
+        let conn = db.store.open_connection()?;
+        let counts: (i64, i64, i64, i64) = conn
+            .query_row(
+                "
+                select
+                  (select count(*) from document_chunks),
+                  (select count(*) from document_chunk_blocks),
+                  (select count(*) from document_chunk_embeddings),
+                  (select count(*) from document_chunks_fts)
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
+
+        // The FTS count is the one that matters: virtual tables do not cascade,
+        // and an orphaned FTS row stays searchable.
+        assert_eq!(counts, (0, 0, 0, 0), "chunks/blocks/embeddings/fts");
+        Ok(())
+    }
+
+    /// The other cascade path: papers → extractions → chunks. It never runs
+    /// `clear_extraction_children`, so only the trigger keeps FTS consistent.
+    #[test]
+    fn deleting_a_paper_leaves_no_orphaned_fts_rows() -> StoreResult<()> {
+        let db = test_db()?;
+        extracted_paper(
+            &db,
+            "doomed-paper",
+            &[("paragraph", "Text that should not outlive its paper.")],
+        )?;
+
+        db.store.delete_paper_globally("doomed-paper")?;
+
+        let conn = db.store.open_connection()?;
+        let fts_rows: i64 = conn
+            .query_row("select count(*) from document_chunks_fts", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        assert_eq!(fts_rows, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_coverage_counts_the_gap() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "coverage-paper",
+            &[
+                ("heading", "First"),
+                ("paragraph", &"word ".repeat(600)),
+                ("heading", "Second"),
+                ("paragraph", &"other ".repeat(600)),
+            ],
+        )?;
+
+        let chunks = db.store.chunks_for_extraction(&extraction.id)?;
+        assert!(chunks.len() >= 2, "expected several chunks to embed");
+
+        let before = db
+            .store
+            .embedding_coverage("coverage-paper", "test-model", "1")?;
+        assert_eq!(before.embedded, 0);
+        assert_eq!(before.chunks, chunks.len() as i64);
+
+        db.store
+            .save_chunk_embedding(&chunks[0].id, "test-model", "1", CHUNK_VERSION, &[0.5; 8])?;
+
+        let after = db
+            .store
+            .embedding_coverage("coverage-paper", "test-model", "1")?;
+        assert_eq!(after.embedded, 1);
+
+        // A different model shares no coverage — that is what makes a model
+        // swap a re-embed rather than a silent mix of vector spaces.
+        let other = db
+            .store
+            .embedding_coverage("coverage-paper", "other-model", "1")?;
+        assert_eq!(other.embedded, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn chunks_missing_embedding_is_the_whole_work_queue() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "queue-paper",
+            &[("paragraph", &"token ".repeat(900))],
+        )?;
+        let chunks = db.store.chunks_for_extraction(&extraction.id)?;
+        assert!(chunks.len() >= 2);
+
+        let pending = db.store.chunks_missing_embedding("m", "1", 100)?;
+        assert_eq!(pending.len(), chunks.len());
+
+        db.store
+            .save_chunk_embedding(&chunks[0].id, "m", "1", CHUNK_VERSION, &[0.1; 4])?;
+
+        let pending = db.store.chunks_missing_embedding("m", "1", 100)?;
+        assert_eq!(pending.len(), chunks.len() - 1);
+        assert!(pending.iter().all(|chunk| chunk.id != chunks[0].id));
+        Ok(())
+    }
+
+    #[test]
+    fn embeddings_round_trip_as_little_endian_f32() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "blob-paper", &[("paragraph", "vector text")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+
+        let vector: Vec<f32> = vec![-1.5, 0.0, 0.25, 12345.678];
+        db.store
+            .save_chunk_embedding(&chunk.id, "m", "1", CHUNK_VERSION, &vector)?;
+
+        let conn = db.store.open_connection()?;
+        let (blob, dimensions): (Vec<u8>, i64) = conn
+            .query_row(
+                "select embedding, dimensions from document_chunk_embeddings where chunk_id = ?1",
+                params![chunk.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+
+        // sqlite-vec reads exactly this layout, which is why phase 2 can build
+        // an index without re-embedding anything.
+        assert_eq!(dimensions, 4);
+        assert_eq!(blob.len(), 16);
+        let decoded: Vec<f32> = blob
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect();
+        assert_eq!(decoded, vector);
+        Ok(())
+    }
+
+    #[test]
+    fn rechunking_replaces_chunks_without_touching_blocks() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "rechunk-paper",
+            &[("paragraph", "Body text that will be re-chunked.")],
+        )?;
+
+        let before = db.store.chunks_for_extraction(&extraction.id)?;
+        let blocks_before = db.store.extraction_structure(&extraction.id)?.blocks.len();
+
+        let count = db.store.rechunk_extraction(&extraction.id)?;
+        assert_eq!(count, before.len());
+
+        let after = db.store.chunks_for_extraction(&extraction.id)?;
+        assert_eq!(after.len(), before.len());
+        assert_eq!(
+            db.store.extraction_structure(&extraction.id)?.blocks.len(),
+            blocks_before,
+            "blocks are canonical; re-chunking must not disturb them"
+        );
+
+        // FTS rows were replaced, not duplicated.
+        let hits = db
+            .store
+            .search_chunks_lexical("rechunk-paper", "re-chunked", 10)?;
+        assert_eq!(hits.len(), 1);
+
+        // Nothing is left needing a re-chunk at the current version.
+        assert!(!db
+            .store
+            .extractions_needing_rechunk()?
+            .contains(&extraction.id));
         Ok(())
     }
 }
