@@ -436,6 +436,61 @@ mod tests {
         }
     }
 
+    /// The exact payload `searchChunks` sends must deserialize.
+    ///
+    /// This is the Tauri failure that produces no error anywhere: a field the
+    /// backend spells `paper_ids` and the frontend spells `paperIds` makes the
+    /// whole command reject, and the UI just shows nothing. Pinning the wire
+    /// shape here means a rename on either side fails a test instead.
+    #[test]
+    fn the_frontend_request_shape_deserializes() {
+        let from_bridge = serde_json::json!({
+            "query": "attention",
+            "vaultIds": ["attention"],
+            "mode": "hybrid",
+            "limit": 8
+        });
+        let request: SearchRequest = serde_json::from_value(from_bridge).expect("bridge payload");
+        assert_eq!(request.vault_ids, vec!["attention".to_string()]);
+        assert_eq!(request.mode, SearchMode::Hybrid);
+        assert_eq!(request.limit, Some(8));
+        // Omitted by the bridge when the caller passes no papers.
+        assert!(request.paper_ids.is_empty());
+
+        // Every optional field really is optional.
+        let minimal: SearchRequest =
+            serde_json::from_value(serde_json::json!({"query": "x"})).expect("minimal payload");
+        assert_eq!(minimal.mode, SearchMode::Hybrid, "hybrid is the default");
+        assert!(minimal.limit.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_response_serializes_to_the_shape_the_bridge_reads() {
+        let fx = fixture();
+        embed_all(&fx.store);
+        let service = SearchService::new(fx.store.clone(), Some(Arc::new(AxisEmbedder)));
+
+        let response = service.search(request("attention")).await.expect("search");
+        let json = serde_json::to_value(&response).expect("serialize");
+
+        let hit = &json["hits"][0];
+        for field in ["score", "chunk", "lexical", "semantic"] {
+            assert!(hit.get(field).is_some(), "hit is missing {field}");
+        }
+        for field in ["paperId", "pageStart", "pageEnd", "headingPath", "text", "blockIds"] {
+            assert!(
+                hit["chunk"].get(field).is_some(),
+                "chunk is missing {field} — src/lib/domain/library.ts reads it"
+            );
+        }
+        assert!(hit["lexical"].get("rank").is_some());
+
+        // The tagged enum the bridge switches on.
+        assert_eq!(json["semantic"]["status"], "ran");
+        assert!(json["semantic"]["coverage"]["embedded"].is_number());
+        assert!(json["scope"].get("paperIds").is_some());
+    }
+
     #[tokio::test]
     async fn hybrid_search_finds_the_relevant_paper() {
         let fx = fixture();

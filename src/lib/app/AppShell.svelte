@@ -4,6 +4,7 @@
   import StatusBar from "$lib/app/StatusBar.svelte";
   import TitleBar from "$lib/app/TitleBar.svelte";
   import type { VaultStatus } from "$lib/domain/vault";
+  import type { ChunkHit } from "$lib/domain/search";
 
   let {
     activeMode = "V",
@@ -14,6 +15,9 @@
     onSelectMode = () => {},
     onOpenSettings = () => {},
     settingsAttention = false,
+    searchVaultId = "",
+    resolvePaperTitle = (paperId: string) => paperId,
+    onOpenSearchResult = () => {},
     children,
   }: {
     activeMode?: string;
@@ -24,12 +28,22 @@
     onSelectMode?: (mode: string) => void;
     onOpenSettings?: () => void;
     settingsAttention?: boolean;
+    /** Scope for the title-bar search. Empty searches the whole library. */
+    searchVaultId?: string;
+    resolvePaperTitle?: (paperId: string) => string;
+    onOpenSearchResult?: (paperId: string, hit: ChunkHit) => void;
     children: Snippet;
   } = $props();
 </script>
 
 <div class="crt app-shell">
-  <TitleBar {vaultStatus} {currentPath} />
+  <TitleBar
+    {vaultStatus}
+    {currentPath}
+    vaultId={searchVaultId}
+    {resolvePaperTitle}
+    onOpenResult={onOpenSearchResult}
+  />
   <div class="app-body row">
     {#if !readerFocusMode}
       <ActivityRail active={activeMode} {onSelectMode} {onOpenSettings} {settingsAttention} />

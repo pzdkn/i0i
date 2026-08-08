@@ -39,6 +39,7 @@
   import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
   import type { DiscoveryReaderCandidate } from "$lib/domain/reader";
+  import type { ChunkHit } from "$lib/domain/search";
   import type { VaultStatus } from "$lib/domain/vault";
   import type { WorkspaceTab } from "$lib/domain/workspace";
   import DiscoverView from "$lib/features/discover/DiscoverView.svelte";
@@ -276,6 +277,20 @@
 
     tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
     activeTabId = readerTab.id;
+  }
+
+  const resolvePaperTitle = (paperId: string) => getPaperTitle(paperId);
+
+  /**
+   * Open the paper a title-bar search hit belongs to (RFC 0076).
+   *
+   * Stops at the paper for now. Jumping to the hit's page needs the reader to
+   * accept a target page on open, and scrolling to the exact passage needs the
+   * chunk resolved through its blocks to spans and rectangles — both real, both
+   * more than wiring up a dead input.
+   */
+  function openSearchResult(paperId: string, _hit: ChunkHit) {
+    openPaper(paperId);
   }
 
   function enterReaderFocus() {
@@ -816,7 +831,7 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-<AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} readerFocusMode={isReaderFocusMode} onSelectMode={handleModeSelect} onOpenSettings={() => (settingsOpen = true)} {settingsAttention}>
+<AppShell {activeMode} {currentPath} {vaultStatus} {bridgeError} readerFocusMode={isReaderFocusMode} onSelectMode={handleModeSelect} onOpenSettings={() => (settingsOpen = true)} {settingsAttention} searchVaultId={activeVaultId} {resolvePaperTitle} onOpenSearchResult={openSearchResult}>
   {#if isReaderFocusMode && activePaper}
     <section class="workspace focus-workspace col">
       <ReaderView
