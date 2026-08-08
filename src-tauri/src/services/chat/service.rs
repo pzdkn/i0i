@@ -274,17 +274,14 @@ impl ChatService {
     {
         let prep = self.prepare_ask_at_anchor(scope, &anchor, body).await?;
         let mut messages = Vec::with_capacity(prep.request_messages.len() + 1);
-        messages.push(WireMessage {
-            role: "system".to_string(),
-            content: "You mark passages in a paper by calling the `highlight` tool. \
+        messages.push(WireMessage::text("system", "You mark passages in a paper by calling the `highlight` tool. \
                       For each passage the user wants marked, quote a SHORT phrase — a \
                       single sentence or less — copied EXACTLY and VERBATIM from the \
                       paper text provided, character for character (do not paraphrase, \
                       shorten, or fix typos). Prefer a distinctive short span over a long \
                       one. Call `highlight` once per passage, choosing a fitting color. \
                       Do not answer in prose; only call the tool."
-                .to_string(),
-        });
+                .to_string()));
         messages.extend(prep.request_messages);
         let request = CompletionRequest {
             model: self.config.annotation_model.clone(),
@@ -394,17 +391,14 @@ impl ChatService {
                 .to_string());
         }
         let mut messages = Vec::with_capacity(prep.request_messages.len() + 1);
-        messages.push(WireMessage {
-            role: "system".to_string(),
-            content: "You mark passages in a paper. Return ONLY a JSON object matching the schema \
+        messages.push(WireMessage::text("system", "You mark passages in a paper. Return ONLY a JSON object matching the schema \
                       { \"highlights\": [ { \"quote\", \"color\", \"label\" } ] }. Each `quote` must \
                       be a SHORT phrase — a single sentence or less — copied EXACTLY and VERBATIM \
                       from the paper text provided (character for character; do not paraphrase, \
                       shorten, or fix typos). Use the requested color for each category and set \
                       `label` to the category name. Prefer a distinctive short span. If nothing \
                       matches, return an empty list."
-                .to_string(),
-        });
+                .to_string()));
         messages.extend(prep.request_messages);
         let request = CompletionRequest {
             model: self.config.annotation_model.clone(),
@@ -535,10 +529,7 @@ impl ChatService {
             .compact_context(thread_id, &view.entries, move |material| async move {
                 let request = CompletionRequest {
                     model,
-                    messages: vec![WireMessage {
-                        role: "user".to_string(),
-                        content: format!("{COMPACTION_PROMPT}\n\n{material}"),
-                    }],
+                    messages: vec![WireMessage::text("user", format!("{COMPACTION_PROMPT}\n\n{material}"))],
                     stream: false,
                     max_tokens: Some(COMPACTION_MAX_TOKENS),
                     response_format: None,
@@ -857,25 +848,16 @@ fn build_wire_messages(
     new_question: &str,
 ) -> Vec<WireMessage> {
     let mut messages = Vec::with_capacity(entries.len() + 2);
-    messages.push(WireMessage {
-        role: "system".to_string(),
-        content: system_prompt,
-    });
+    messages.push(WireMessage::text("system", system_prompt));
     for entry in entries {
         let role = if entry.kind == ENTRY_ANSWER {
             "assistant"
         } else {
             "user"
         };
-        messages.push(WireMessage {
-            role: role.to_string(),
-            content: entry.body.clone(),
-        });
+        messages.push(WireMessage::text(role, entry.body.clone()));
     }
-    messages.push(WireMessage {
-        role: "user".to_string(),
-        content: new_question.to_string(),
-    });
+    messages.push(WireMessage::text("user", new_question.to_string()));
     messages
 }
 
@@ -895,10 +877,7 @@ fn build_title_messages(first_entry_body: &str, selected_text: Option<&str>) -> 
     prompt.push_str("First user entry:\n");
     prompt.push_str(first_entry_body.trim());
 
-    vec![WireMessage {
-        role: "user".to_string(),
-        content: prompt,
-    }]
+    vec![WireMessage::text("user", prompt)]
 }
 
 fn clean_generated_title(raw: &str) -> Option<String> {

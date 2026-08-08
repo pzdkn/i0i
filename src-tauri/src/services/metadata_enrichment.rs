@@ -769,14 +769,8 @@ impl MetadataEnrichmentService {
         let request = CompletionRequest {
             model: config.model.clone(),
             messages: vec![
-                WireMessage {
-                    role: "system".to_string(),
-                    content: LLM_METADATA_SYSTEM_PROMPT.to_string(),
-                },
-                WireMessage {
-                    role: "user".to_string(),
-                    content: llm_metadata_user_prompt(evidence, current_paper),
-                },
+                WireMessage::text("system", LLM_METADATA_SYSTEM_PROMPT.to_string()),
+                WireMessage::text("user", llm_metadata_user_prompt(evidence, current_paper)),
             ],
             stream: false,
             max_tokens: Some(LLM_METADATA_MAX_TOKENS),

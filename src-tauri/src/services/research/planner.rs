@@ -165,14 +165,8 @@ impl OpenRouterPlanner {
         let request = CompletionRequest {
             model: self.model.clone(),
             messages: vec![
-                WireMessage {
-                    role: "system".to_string(),
-                    content: system.to_string(),
-                },
-                WireMessage {
-                    role: "user".to_string(),
-                    content: user.to_string(),
-                },
+                WireMessage::text("system", system.to_string()),
+                WireMessage::text("user", user.to_string()),
             ],
             stream: false,
             max_tokens: None,

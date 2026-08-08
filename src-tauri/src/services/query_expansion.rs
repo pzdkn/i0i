@@ -119,14 +119,8 @@ impl Inner {
         let request = CompletionRequest {
             model: self.model.clone(),
             messages: vec![
-                WireMessage {
-                    role: "system".to_string(),
-                    content: EXPAND_SYSTEM.to_string(),
-                },
-                WireMessage {
-                    role: "user".to_string(),
-                    content: query.trim().to_string(),
-                },
+                WireMessage::text("system", EXPAND_SYSTEM.to_string()),
+                WireMessage::text("user", query.trim().to_string()),
             ],
             stream: false,
             max_tokens: Some(160),

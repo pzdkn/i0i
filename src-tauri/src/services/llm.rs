@@ -9,10 +9,68 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// One message in the OpenAI-compatible `messages` array.
+///
+/// `tool_calls` and `tool_call_id` exist for the agentic retrieval loop
+/// (RFC 0078), which has to replay what the model asked for and what came back.
+/// Both are skipped when `None`, so every pre-0078 call site emits a
+/// byte-identical payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireMessage {
     pub role: String,
     pub content: String,
+    /// Set on an `assistant` message replaying tool calls the model made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<WireToolCall>>,
+    /// Set on a `tool` message carrying one call's result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl WireMessage {
+    /// An ordinary `system` / `user` / `assistant` message.
+    pub fn text(role: &str, content: String) -> Self {
+        Self {
+            role: role.to_string(),
+            content,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// The assistant turn that requested `calls`, replayed back to the model.
+    pub fn tool_request(calls: Vec<WireToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_calls: Some(calls),
+            tool_call_id: None,
+        }
+    }
+
+    /// One tool's result, answering the call with id `tool_call_id`.
+    pub fn tool_result(tool_call_id: String, content: String) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id),
+        }
+    }
+}
+
+/// A tool call as it goes back *out* on the wire, replaying what the model asked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WireToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String, // "function"
+    pub function: WireToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WireToolCallFunction {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,7 +301,8 @@ struct StreamDelta {
 #[derive(Debug, Deserialize)]
 struct ToolCallDelta {
     index: usize,
-    #[allow(dead_code)] // Present in the wire format; not needed for assembly.
+    /// Needed to answer the call: a `tool` message must name the id it responds
+    /// to. Arrives on the first fragment only, so it is kept, not overwritten.
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -261,6 +320,10 @@ struct FunctionDelta {
 /// A fully assembled tool call: fragments concatenated in arrival order.
 #[derive(Debug, PartialEq)]
 pub(crate) struct AssembledToolCall {
+    /// Provider-assigned call id. Empty if the provider omitted it — the loop
+    /// synthesizes one rather than failing, since a missing id only breaks the
+    /// reply pairing, not the call itself.
+    pub id: String,
     pub name: String,
     pub arguments: String,
 }
@@ -282,7 +345,8 @@ pub(crate) enum SseEvent {
 /// the fully assembled calls in index order.
 pub(crate) struct SseDecoder {
     buffer: Vec<u8>,
-    tool_calls: BTreeMap<usize, (String, String)>,
+    /// index → (id, name, arguments)
+    tool_calls: BTreeMap<usize, (String, String, String)>,
 }
 
 impl SseDecoder {
@@ -334,13 +398,20 @@ impl SseDecoder {
                 let entry = self
                     .tool_calls
                     .entry(fragment.index)
-                    .or_insert_with(|| (String::new(), String::new()));
+                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                // The id arrives on the first fragment only; later fragments
+                // carry arguments alone and must not blank it.
+                if let Some(id) = fragment.id {
+                    if !id.is_empty() {
+                        entry.0 = id;
+                    }
+                }
                 if let Some(function) = fragment.function {
                     if let Some(name) = function.name {
-                        entry.0 = name;
+                        entry.1 = name;
                     }
                     if let Some(arguments) = function.arguments {
-                        entry.1.push_str(&arguments);
+                        entry.2.push_str(&arguments);
                     }
                 }
             }
@@ -358,7 +429,11 @@ impl SseDecoder {
     pub(crate) fn finish(&mut self) -> Vec<AssembledToolCall> {
         std::mem::take(&mut self.tool_calls)
             .into_iter()
-            .map(|(_, (name, arguments))| AssembledToolCall { name, arguments })
+            .map(|(_, (id, name, arguments))| AssembledToolCall {
+                id,
+                name,
+                arguments,
+            })
             .collect()
     }
 }
@@ -543,6 +618,37 @@ mod tests {
     }
 
     #[test]
+    fn an_ordinary_message_serializes_without_the_tool_fields() {
+        // Every pre-RFC-0078 call site must emit a byte-identical payload:
+        // annotate_streamed and the research planners share this transport, and
+        // a stray `"tool_calls": null` is a wire change nothing asked for.
+        let json = serde_json::to_string(&WireMessage::text("user", "hi".to_string()))
+            .expect("serializes");
+        assert_eq!(json, r#"{"role":"user","content":"hi"}"#);
+    }
+
+    #[test]
+    fn tool_request_and_result_carry_their_pairing_id() {
+        let request = WireMessage::tool_request(vec![WireToolCall {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: WireToolCallFunction {
+                name: "search_context".to_string(),
+                arguments: r#"{"query":"scaling"}"#.to_string(),
+            },
+        }]);
+        let json = serde_json::to_string(&request).expect("serializes");
+        assert!(json.contains(r#""tool_calls""#));
+        assert!(json.contains(r#""call_1""#));
+        assert!(!json.contains("tool_call_id"));
+
+        let result = WireMessage::tool_result("call_1".to_string(), "3 hits".to_string());
+        let json = serde_json::to_string(&result).expect("serializes");
+        assert!(json.contains(r#""tool_call_id":"call_1""#));
+        assert!(!json.contains(r#""tool_calls""#));
+    }
+
+    #[test]
     fn decoder_parses_a_single_delta_line() {
         let mut decoder = SseDecoder::new();
         let events = decoder.push(&delta_line("Hello"));
@@ -620,6 +726,9 @@ mod tests {
         assert_eq!(
             decoder.finish(),
             vec![AssembledToolCall {
+                // The id arrives on the first fragment only; the second carries
+                // arguments alone and must not blank it (RFC 0078).
+                id: "c1".to_string(),
                 name: "highlight".to_string(),
                 arguments: r#"{"quote":"abc","color":"red"}"#.to_string(),
             }]
@@ -647,10 +756,12 @@ mod tests {
             decoder.finish(),
             vec![
                 AssembledToolCall {
+                    id: "c1".to_string(),
                     name: "highlight".to_string(),
                     arguments: r#"{"quote":"abc"}"#.to_string(),
                 },
                 AssembledToolCall {
+                    id: "c2".to_string(),
                     name: "note".to_string(),
                     arguments: r#"{"text":"hi"}"#.to_string(),
                 },
@@ -692,6 +803,7 @@ mod tests {
 
         assert_eq!(outcome.text, "Hello world");
         assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.tool_calls[0].id, "c1");
         assert_eq!(outcome.tool_calls[0].name, "highlight");
         assert_eq!(outcome.tool_calls[0].arguments, r#"{"quote":"abc"}"#);
     }

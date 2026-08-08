@@ -191,10 +191,7 @@ async fn test_openrouter() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let request = CompletionRequest {
         model: config.title_model.clone().unwrap_or(config.model),
-        messages: vec![WireMessage {
-            role: "user".to_string(),
-            content: "ping".to_string(),
-        }],
+        messages: vec![WireMessage::text("user", "ping".to_string())],
         stream: false,
         max_tokens: Some(1),
         response_format: None,
