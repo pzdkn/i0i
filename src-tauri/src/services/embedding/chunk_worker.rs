@@ -40,6 +40,9 @@ const MAX_BATCHES_PER_SWEEP: usize = 200;
 pub struct ChunkEmbeddingWorker {
     store: LibraryStore,
     embedder: Option<Arc<dyn TextEmbedder>>,
+    /// Wakes `run_forever`. `Notify` coalesces, so eleven extractions finishing
+    /// at once produce one sweep rather than eleven.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -50,11 +53,48 @@ pub struct SweepOutcome {
 
 impl ChunkEmbeddingWorker {
     pub fn new(store: LibraryStore, embedder: Option<Arc<dyn TextEmbedder>>) -> Self {
-        Self { store, embedder }
+        Self {
+            store,
+            embedder,
+            wake: Arc::new(tokio::sync::Notify::new()),
+        }
     }
 
     pub fn is_ready(&self) -> bool {
         self.embedder.is_some()
+    }
+
+    /// Ask for a sweep. Cheap, non-blocking, and safe to call on every
+    /// extraction-ready event.
+    pub fn request_sweep(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Sweep whenever woken, forever.
+    ///
+    /// Without this the only sweep is the one at startup — which, on the launch
+    /// that re-extracts an upgraded library, runs *before* the new chunks
+    /// exist. The reference vault landed at 1,032 chunks and zero embeddings
+    /// exactly that way: re-extraction cascaded the old embeddings away and
+    /// nothing re-embedded until the next launch.
+    ///
+    /// `Notify` holds at most one permit, so a burst of extractions collapses
+    /// into a single sweep, and a wake arriving *during* a sweep schedules
+    /// exactly one more — which is what picks up whatever finished while it ran.
+    pub async fn run_forever(self) {
+        loop {
+            self.wake.notified().await;
+            let outcome = self.sweep().await;
+            if outcome.embedded > 0 || outcome.failed > 0 {
+                eprintln!(
+                    "[embedding] sweep embedded={} failed={}",
+                    outcome.embedded, outcome.failed
+                );
+            }
+            if let Err(error) = self.store.index_missing_chunk_vectors() {
+                eprintln!("[search] vector index failed: {error}");
+            }
+        }
     }
 
     /// Embed everything currently missing an embedding.

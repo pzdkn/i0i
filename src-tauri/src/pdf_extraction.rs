@@ -226,6 +226,32 @@ impl PdfExtractionManager {
             .store
             .cached_pdf_sources_without_ready_extraction(EXTRACTOR)?;
         self.queue_sources(sources, false);
+
+        // Re-extract anything produced by an older extractor (RFC 0075 R1).
+        //
+        // This is what makes an `EXTRACTOR_VERSION` bump actually migrate an
+        // existing library. Neither sweep above notices a version change: the
+        // first looks only at status, and the second skips any source that has
+        // *a* ready extraction whatever version made it. Without this, only new
+        // papers would get the new extractor.
+        //
+        // Forced, because the extraction is `ready` — the non-forced path would
+        // see that and skip. Forcing deletes the old extraction, and its pages,
+        // blocks, spans, chunks, and embeddings cascade away with it. That is
+        // correct: all of it is derived from the PDF.
+        let outdated = self
+            .store
+            .outdated_document_extractions(EXTRACTOR, EXTRACTOR_VERSION)?;
+        if !outdated.is_empty() {
+            extraction_log(format!(
+                "re-extracting {} document(s) below version {EXTRACTOR_VERSION}",
+                outdated.len()
+            ));
+        }
+        for extraction in outdated {
+            self.queue_source(extraction.source_id, true);
+        }
+
         Ok(())
     }
 

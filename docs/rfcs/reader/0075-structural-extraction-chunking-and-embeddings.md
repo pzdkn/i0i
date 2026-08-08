@@ -121,10 +121,23 @@ or two per block and surfaces much later as a highlight landing a line off.
 
 ### Version bump, but not a rename
 
-`EXTRACTOR_VERSION` (`pdf_extraction.rs:25`) bumps to `0.2.0`. That is the whole
-migration: `stale_document_extractions` already re-queues every extraction whose
-version does not match, and `clear_extraction_children` already tears down the
-old rows.
+`EXTRACTOR_VERSION` (`pdf_extraction.rs:25`) bumps to `0.2.0`.
+
+**The bump alone is inert, which this RFC originally got wrong.** An earlier
+draft claimed `stale_document_extractions` re-queues anything whose version does
+not match. It does not — it selects on `status = 'extracting'`, i.e. crash
+recovery, and never looks at the version. Nor does
+`cached_pdf_sources_without_ready_extraction`, which skips any source holding
+*a* ready extraction whatever version produced it. The error survived every unit
+test and was caught only by running against the reference vault, where all 11
+extractions sat at `0.1.0` with page-sized blocks and zero spans while the new
+code reported success.
+
+So the migration needs a third sweep, `outdated_document_extractions`, which
+`recover_and_queue_startup_extractions` runs with `force = true` (the extraction
+is `ready`, so the non-forced path would skip it). Forcing deletes the old
+extraction; its pages, blocks, spans, chunks, and embeddings cascade away with
+it, which is correct — all of it is derived from the PDF.
 
 `EXTRACTOR` stays `"pdfium_basic"` even though the adapter is no longer basic,
 and the name is doing more work than it looks. It is a component of two derived
@@ -232,14 +245,24 @@ walk blocks in reading order
                   → close only if the chunk already meets the minimum
 ```
 
-Two details the shape above is carrying:
+Three details the shape above is carrying:
 
 A heading **opens** the chunk that follows it rather than closing the one
 before it. A heading stranded at the tail of the preceding chunk describes text
 it does not introduce, which is exactly backwards for retrieval. `heading_path`
-accumulates as the walk descends and unwinds by level, so every chunk knows
-which section it came from even when the heading itself sits several chunks
-back.
+carries the nearest heading in force, so every chunk knows which section it came
+from even when the heading itself sits several chunks back. (True section
+nesting waits for an extractor that reports heading *levels*; the font-size
+heuristic in R1 does not.)
+
+**A heading does not close a chunk that is only headings.** Consecutive headings
+are everywhere — "4 Experiments" then "4.1 Setup", and a title page where title,
+authors, and affiliation are all large type. Without this guard each becomes its
+own chunk: on the reference vault, **259 of 1,032 chunks came back under 20
+tokens**, each costing an embedding and competing for a slot in the results
+while carrying nothing retrievable. With it, 18 of 786. The label snapshots to
+the *nearest* heading while the chunk is still headings-only, and fixes once
+body text arrives.
 
 A page break is **soft**, not hard. Making it hard would guarantee no chunk
 spans pages — tidy, and it would render `page_start`/`page_end` permanently
@@ -381,13 +404,21 @@ embedded" state — no status column, no state machine, nothing to recover.
 It runs at two moments, mirroring how extraction is already driven
 (`pdf_extraction.rs:158, 197`):
 
-- **On extraction ready** — the extraction that just wrote chunks enqueues them.
-- **On startup** — a sweep across the library, which is what picks up chunks
-  left behind by a crash, a model change, or a `chunk_version` bump.
+- **On startup** — one sweep, which picks up chunks left behind by a crash, a
+  model change, or a `chunk_version` bump.
+- **On extraction ready** — woken by the `document_extraction_updated` event
+  that the extractor already emits, so the extractor never has to know this
+  worker exists.
 
-Because the sweep is defined by a query rather than by a queue, those two
-triggers are the same code path with a different scope, and running both twice
-is harmless.
+**Both are required, and the second is easy to skip.** On the launch that
+migrates an upgraded library, the startup sweep runs *before* re-extraction has
+written any new chunks — so it embeds nothing, and re-extraction then cascades
+away the embeddings that did exist. The reference vault landed at 1,032 chunks
+and **zero** embeddings exactly that way. A `tokio::sync::Notify` coalesces the
+burst, so eleven extractions finishing together produce one sweep.
+
+Because the work list is a query rather than a queue, both triggers are the same
+code path and running them twice is harmless.
 
 ### Failure policy: two contracts, deliberately
 

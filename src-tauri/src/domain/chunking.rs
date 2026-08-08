@@ -16,7 +16,9 @@ pub const CHUNKER: &str = "structural";
 
 /// Bump when the chunking *rules* change. The startup sweep re-chunks any
 /// extraction sitting below the current value (RFC 0075 R6).
-pub const CHUNK_VERSION: i32 = 1;
+///
+/// 2: consecutive headings merge instead of each becoming a chunk.
+pub const CHUNK_VERSION: i32 = 2;
 
 /// Tokens are estimated, never counted. A real tokenizer is not worth a
 /// dependency for a bound this soft — every threshold below is a preference,
@@ -98,6 +100,9 @@ struct ChunkBuilder {
     /// The heading in force when the pending chunk opened. Snapshotted at open
     /// time so a heading appearing mid-chunk cannot retroactively relabel it.
     pending_heading: Option<String>,
+    /// Whether the pending chunk has any non-heading text yet. Guards the
+    /// heading boundary — see `should_close`.
+    pending_has_body: bool,
 }
 
 /// The identity fields a chunk copies from its blocks.
@@ -124,11 +129,17 @@ impl ChunkBuilder {
         if piece.is_heading {
             self.current_heading = Some(piece.text.trim().to_string());
         }
-        if self.pending.is_empty() {
+        // Snapshot the label while the chunk is still all headings, so a run of
+        // "4 Experiments" then "4.1 Setup" is labelled by the *nearest* heading
+        // — the more specific one, and the one the body actually sits under.
+        // Once body text has arrived the label is fixed, which is what stops a
+        // heading appearing mid-chunk from relabelling text above it.
+        if !self.pending_has_body {
             self.pending_heading = self.current_heading.clone();
         }
 
         self.pending_chars += self.join_cost() + piece_chars;
+        self.pending_has_body |= !piece.is_heading;
         self.pending.push((
             BlockRef {
                 id: block.id.clone(),
@@ -165,12 +176,20 @@ impl ChunkBuilder {
             return false;
         };
 
-        // A heading always opens a new chunk. Left at the tail of the previous
-        // one it would describe text it does not introduce — backwards for
-        // retrieval, where the heading is the strongest topical signal a chunk
+        // A heading opens a new chunk — left at the tail of the previous one it
+        // would describe text it does not introduce, which is backwards for
+        // retrieval, where a heading is the strongest topical signal a chunk
         // carries.
+        //
+        // Unless the pending chunk is *only* headings. Consecutive headings are
+        // everywhere in a paper — "4 Experiments" then "4.1 Setup", and a title
+        // page where title, authors, and affiliation are all large type — and
+        // closing between them emits chunks like "A Appendix": four tokens of
+        // pure noise that still cost an embedding and still compete for a slot
+        // in the results. Measured on the reference vault, this rule is the
+        // difference between 259 sub-20-token chunks and a handful.
         if piece.is_heading {
-            return true;
+            return self.pending_has_body;
         }
 
         if tokens_for_chars(self.pending_chars + self.join_cost() + piece_chars) > MAX_TOKENS {
@@ -192,6 +211,7 @@ impl ChunkBuilder {
 
         let pieces = std::mem::take(&mut self.pending);
         self.pending_chars = 0;
+        self.pending_has_body = false;
 
         let first = &pieces[0].0;
         let text = pieces
@@ -374,6 +394,55 @@ mod tests {
         assert_eq!(chunks[0].heading_path, None);
         assert!(chunks[1].text.starts_with("Methods"));
         assert_eq!(chunks[1].heading_path.as_deref(), Some("Methods"));
+    }
+
+    /// Consecutive headings must not each become their own chunk.
+    ///
+    /// Found by running against the reference vault: 259 of 1,032 chunks came
+    /// back under 20 tokens — "4 Experiments", "A Appendix", and title-page
+    /// lines where the title, authors, and affiliation are all large type. Each
+    /// cost an embedding and competed for a slot in the results while carrying
+    /// no retrievable content.
+    #[test]
+    fn consecutive_headings_do_not_each_become_a_chunk() {
+        let chunks = chunk_blocks(&[
+            block(0, 0, "heading", "4 Experiments"),
+            block(1, 0, "heading", "4.1 Setup"),
+            block(2, 0, "paragraph", "We evaluate on four benchmarks."),
+        ]);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.starts_with("4 Experiments"));
+        assert!(chunks[0].text.contains("4.1 Setup"));
+        // The *nearest* heading labels the chunk.
+        assert_eq!(chunks[0].heading_path.as_deref(), Some("4.1 Setup"));
+    }
+
+    #[test]
+    fn a_title_page_of_headings_becomes_one_chunk() {
+        let chunks = chunk_blocks(&[
+            block(0, 0, "heading", "Attention Is All You Need"),
+            block(1, 0, "heading", "Vaswani, Shazeer, Parmar"),
+            block(2, 0, "heading", "Google Brain"),
+        ]);
+
+        assert_eq!(chunks.len(), 1, "a title page is one chunk, not three");
+    }
+
+    /// The guard must not defeat the rule it guards: once a chunk has body
+    /// text, the next heading still opens a new chunk.
+    #[test]
+    fn a_heading_after_body_still_opens_a_new_chunk() {
+        let chunks = chunk_blocks(&[
+            block(0, 0, "heading", "3 Method"),
+            block(1, 0, "paragraph", "We describe the architecture."),
+            block(2, 0, "heading", "4 Experiments"),
+            block(3, 0, "paragraph", "We evaluate on four benchmarks."),
+        ]);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].heading_path.as_deref(), Some("3 Method"));
+        assert_eq!(chunks[1].heading_path.as_deref(), Some("4 Experiments"));
     }
 
     #[test]

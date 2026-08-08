@@ -336,12 +336,60 @@ impl LibraryStore {
         collect_rows(rows)
     }
 
+    /// Extractions left mid-flight by a crash. Status-based, *not* version-based
+    /// — see `outdated_document_extractions` for the version sweep.
     pub fn stale_document_extractions(
         &self,
         extractor: &str,
     ) -> StoreResult<Vec<DocumentExtraction>> {
         let conn = self.open_connection()?;
         read_document_extractions_by_status(&conn, extractor, "extracting")
+    }
+
+    /// Ready extractions produced by an older version of the extractor.
+    ///
+    /// Without this, bumping `EXTRACTOR_VERSION` does nothing to a library that
+    /// already has extractions: `stale_document_extractions` only looks at
+    /// status, and `cached_pdf_sources_without_ready_extraction` skips any
+    /// source that has *a* ready extraction regardless of which version made
+    /// it. Only brand-new papers would get the new extractor, and the old ones
+    /// would silently keep their old structure forever (RFC 0075 R1).
+    pub fn outdated_document_extractions(
+        &self,
+        extractor: &str,
+        current_version: &str,
+    ) -> StoreResult<Vec<DocumentExtraction>> {
+        let conn = self.open_connection()?;
+        let mut stmt = conn
+            .prepare(
+                "
+                select id, paper_id, source_id, extractor, extractor_version,
+                       annotation_source_id, status, error, created_at, updated_at
+                from document_extractions
+                where extractor = ?1
+                  and status = 'ready'
+                  and extractor_version <> ?2
+                order by updated_at asc, id
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![extractor, current_version], |row| {
+                Ok(DocumentExtraction {
+                    id: row.get(0)?,
+                    paper_id: row.get(1)?,
+                    source_id: row.get(2)?,
+                    extractor: row.get(3)?,
+                    extractor_version: row.get(4)?,
+                    annotation_source_id: row.get(5)?,
+                    status: row.get(6)?,
+                    error: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
     }
 
     pub fn ready_document_extraction_for_source(
@@ -6742,6 +6790,52 @@ mod tests {
         let pool = db.store.list_search_candidates(&search.id)?;
         assert!(pool[0].seen);
         assert!(pool[0].saved);
+        Ok(())
+    }
+
+    /// An `EXTRACTOR_VERSION` bump must actually migrate an existing library.
+    ///
+    /// This is the test that was missing: RFC 0075 claimed the bump alone was
+    /// the whole migration, but `stale_document_extractions` only looks at
+    /// status and `cached_pdf_sources_without_ready_extraction` accepts a ready
+    /// extraction of any version. A real library sat at the old extractor —
+    /// page-sized blocks, no spans — while every unit test passed.
+    #[test]
+    fn an_extractor_version_bump_marks_existing_extractions_outdated() -> StoreResult<()> {
+        let db = test_db()?;
+        // extracted_paper() writes at "0.2.0".
+        let extraction = extracted_paper(&db, "aging-paper", &[("paragraph", "body")])?;
+        assert_eq!(extraction.status, "ready");
+
+        // Same version: nothing to do.
+        assert!(db
+            .store
+            .outdated_document_extractions("pdfium_basic", "0.2.0")?
+            .is_empty());
+
+        // A newer extractor must see it as outdated...
+        let outdated = db
+            .store
+            .outdated_document_extractions("pdfium_basic", "0.3.0")?;
+        assert_eq!(outdated.len(), 1);
+        assert_eq!(outdated[0].id, extraction.id);
+
+        // ...while the sweeps that already existed do not, which is exactly why
+        // this method has to exist.
+        assert!(db
+            .store
+            .stale_document_extractions("pdfium_basic")?
+            .is_empty());
+        assert!(db
+            .store
+            .cached_pdf_sources_without_ready_extraction("pdfium_basic")?
+            .is_empty());
+
+        // A different extractor's rows are not ours to re-run.
+        assert!(db
+            .store
+            .outdated_document_extractions("mineru", "0.3.0")?
+            .is_empty());
         Ok(())
     }
 

@@ -16,7 +16,7 @@ use services::reader_service::ReaderService;
 use services::research::manager::SearchManager;
 use services::source_acquisition::SourceAcquisitionService;
 use storage::library_store::LibraryStore;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -134,6 +134,23 @@ pub fn run() {
                         "[embedding] startup sweep embedded={} failed={}",
                         outcome.embedded, outcome.failed
                     );
+                });
+
+                // Then keep sweeping on demand. The startup sweep alone is not
+                // enough: on the launch that re-extracts an upgraded library it
+                // runs before the new chunks exist, so nothing would be embedded
+                // until the launch after that.
+                let worker = chunk_embedder.clone();
+                tauri::async_runtime::spawn(worker.run_forever());
+
+                // Extraction-ready is the signal. Listening to the event that
+                // already exists keeps the extractor from having to know the
+                // embedding worker exists at all.
+                let worker = chunk_embedder.clone();
+                app.handle().listen("document_extraction_updated", move |event| {
+                    if event.payload().contains("\"status\":\"ready\"") {
+                        worker.request_sweep();
+                    }
                 });
             }
             let search_manager = SearchManager::new(
