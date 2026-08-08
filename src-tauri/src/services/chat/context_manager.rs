@@ -593,3 +593,481 @@ fn join_chunk_text(chunks: &[DocumentChunk]) -> String {
 fn chars_for_tokens(tokens: usize) -> usize {
     tokens.saturating_mul(CHARS_PER_TOKEN)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::chat::ENTRY_ANSWER;
+    use crate::domain::library::PaperDraft;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    struct Fixture {
+        manager: ContextManager,
+        store: LibraryStore,
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn fixture(max_context_chars: usize) -> Fixture {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "i0i-context-test-{}-{nanos}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let store = LibraryStore::for_test(dir.join("library.sqlite"));
+        store.init().expect("schema");
+        let search = Arc::new(SearchService::new(store.clone(), None));
+        Fixture {
+            manager: ContextManager::new(store.clone(), search, max_context_chars),
+            store,
+            dir,
+        }
+    }
+
+    /// A paper with one extraction and `blocks` worth of text, plus a thread.
+    fn seeded(fixture: &Fixture, blocks: &[&str]) -> (String, Vec<DocumentChunk>) {
+        let paper_id = "vaswani2017";
+        let draft = PaperDraft {
+            id: paper_id.to_string(),
+            title: "Attention Is All You Need".to_string(),
+            authors: vec!["A. Vaswani".to_string()],
+            venue: "NeurIPS".to_string(),
+            year: 2017,
+            citations: 0,
+            tags: Vec::new(),
+            status: "unread".to_string(),
+            abstract_text: None,
+            sources: vec![crate::domain::library::PaperSourceDraft {
+                source_kind: "pdf".to_string(),
+                source_url: "https://example.test/context.pdf".to_string(),
+                landing_url: None,
+            }],
+        };
+        fixture
+            .store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])
+            .expect("paper");
+        let source = fixture
+            .store
+            .get_document_sources(paper_id)
+            .expect("sources")
+            .remove(0);
+        fixture
+            .store
+            .set_document_source_cached(&source.id, "/tmp/context.pdf")
+            .expect("cached");
+        let extraction = fixture
+            .store
+            .start_document_extraction(
+                &source.id,
+                "pdfium_basic",
+                "0.2.0",
+                &format!("pdfium_basic:{}", source.id),
+                false,
+            )
+            .expect("extraction");
+
+        let mut offset = 0_i64;
+        let rows: Vec<crate::domain::library::DocumentBlock> = blocks
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                if index > 0 {
+                    offset += 2;
+                }
+                let start = offset;
+                offset += text.chars().count() as i64;
+                crate::domain::library::DocumentBlock {
+                    id: format!("{}:block:0:{index}", extraction.id),
+                    paper_id: paper_id.to_string(),
+                    source_id: source.id.clone(),
+                    extraction_id: extraction.id.clone(),
+                    page_index: 0,
+                    block_index: index as i32,
+                    reading_order: index as i32,
+                    kind: "paragraph".to_string(),
+                    text: Some((*text).to_string()),
+                    asset_id: None,
+                    source_start: Some(start),
+                    source_end: Some(offset),
+                    bbox_json: None,
+                }
+            })
+            .collect();
+        let page = crate::domain::library::DocumentPage {
+            id: format!("{}:page:0", extraction.id),
+            paper_id: paper_id.to_string(),
+            source_id: source.id.clone(),
+            extraction_id: extraction.id.clone(),
+            page_index: 0,
+            width: 612.0,
+            height: 792.0,
+        };
+        fixture
+            .store
+            .finish_document_extraction(&extraction.id, &[page], &rows, &[])
+            .expect("finish");
+
+        let chunks = fixture
+            .store
+            .chunks_for_extraction(&extraction.id)
+            .expect("chunks");
+        (paper_id.to_string(), chunks)
+    }
+
+    fn thread_for(fixture: &Fixture, paper_id: &str) -> String {
+        fixture
+            .store
+            .add_note_at_anchor(
+                "paper",
+                paper_id,
+                &crate::domain::chat::ThreadAnchor::Document,
+                "n",
+            )
+            .expect("thread")
+            .thread
+            .id
+    }
+
+    fn facts<'a>(source_text: &'a str, authors: &'a [String]) -> PaperFacts<'a> {
+        PaperFacts {
+            title: "Attention Is All You Need",
+            authors,
+            venue: "NeurIPS",
+            year: 2017,
+            source_text,
+        }
+    }
+
+    #[test]
+    fn a_thread_with_no_context_gets_todays_prompt_byte_for_byte() {
+        let fixture = fixture(32_000);
+        let authors = vec!["A. Vaswani".to_string()];
+        let source_text = "The body of the paper.";
+        let ephemeral = EphemeralContext {
+            paper_id: "vaswani2017".to_string(),
+            selection: Some("scaled dot-product".to_string()),
+            page_index: Some(3),
+        };
+
+        let assembled = fixture
+            .manager
+            .get_context(ContextRequest {
+                thread_id: None,
+                paper: facts(source_text, &authors),
+                entries: &[],
+                ephemeral: &ephemeral,
+                retrieved: &[],
+            })
+            .expect("assembles");
+
+        // This is the regression that matters: every thread that exists today
+        // has no context items, and none of them may change.
+        let today = build_context(
+            "Attention Is All You Need",
+            &authors,
+            "NeurIPS",
+            2017,
+            source_text,
+            32_000,
+            Some("scaled dot-product"),
+        );
+        assert_eq!(assembled.system_prompt, today.system_prompt);
+        assert!(assembled.citations.is_empty());
+        assert_eq!(assembled.summary.context_items, 0);
+        assert!(!assembled.summary.compacted);
+    }
+
+    #[test]
+    fn added_chunks_appear_as_numbered_citable_passages() {
+        let fixture = fixture(32_000);
+        // Two blocks long enough not to merge into one chunk, so emission
+        // order is actually exercised.
+        let (paper_id, chunks) = seeded(
+            &fixture,
+            &[&"First passage. ".repeat(200), &"Second passage. ".repeat(200)],
+        );
+        assert!(chunks.len() >= 2, "the fixture must produce several chunks");
+        let thread_id = thread_for(&fixture, &paper_id);
+        for chunk in &chunks {
+            fixture
+                .manager
+                .add_context(&thread_id, &chunk.id)
+                .expect("adds");
+        }
+
+        let authors = vec!["A. Vaswani".to_string()];
+        let assembled = fixture
+            .manager
+            .get_context(ContextRequest {
+                thread_id: Some(&thread_id),
+                paper: facts("body", &authors),
+                entries: &[],
+                ephemeral: &EphemeralContext {
+                    paper_id: paper_id.clone(),
+                    ..Default::default()
+                },
+                retrieved: &[],
+            })
+            .expect("assembles");
+
+        assert!(assembled.system_prompt.contains("[C1]"));
+        assert_eq!(assembled.citations.len(), chunks.len());
+        assert_eq!(assembled.citations[0].handle, "C1");
+        assert_eq!(assembled.citations[0].paper_id, paper_id);
+        assert_eq!(assembled.summary.context_items, assembled.citations.len());
+        // Handles are assigned in emission order, so C1 is the first passage
+        // the model reads — not the most recently added. Selection under budget
+        // pressure runs newest-first; these two orders are different and the
+        // prompt must use the reading one.
+        for (index, citation) in assembled.citations.iter().enumerate() {
+            assert_eq!(citation.handle, format!("C{}", index + 1));
+        }
+        let first = assembled
+            .system_prompt
+            .find("First passage")
+            .expect("first chunk is in the prompt");
+        let second = assembled
+            .system_prompt
+            .find("Second passage")
+            .expect("second chunk is in the prompt");
+        assert!(first < second, "passages are emitted in position order");
+    }
+
+    #[test]
+    fn adding_the_same_chunk_twice_is_one_item() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["Only passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+
+        let first = fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds");
+        let second = fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds again");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(fixture.store.context_items(&thread_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn items_over_the_budget_are_dropped_and_counted() {
+        // 40 chars ≈ 10 tokens: room for nothing but the smallest passage.
+        let fixture = fixture(40);
+        let (paper_id, chunks) = seeded(
+            &fixture,
+            &["A passage long enough to exceed a ten token budget on its own."],
+        );
+        let thread_id = thread_for(&fixture, &paper_id);
+        fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds");
+
+        let authors = vec!["A. Vaswani".to_string()];
+        let assembled = fixture
+            .manager
+            .get_context(ContextRequest {
+                thread_id: Some(&thread_id),
+                paper: facts("body", &authors),
+                entries: &[],
+                ephemeral: &EphemeralContext {
+                    paper_id,
+                    ..Default::default()
+                },
+                retrieved: &[],
+            })
+            .expect("assembles");
+
+        assert_eq!(assembled.summary.dropped_items, 1);
+        assert_eq!(assembled.summary.context_items, 0);
+        // Dropped, not silently absorbed: no marker the model could cite.
+        assert!(!assembled.system_prompt.contains("[C1]"));
+    }
+
+    #[test]
+    fn an_unresolvable_item_is_reported_not_dropped_in_silence() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["A passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds");
+
+        // Break both paths: the chunk id and the durable anchor.
+        let conn = rusqlite::Connection::open(fixture.dir.join("library.sqlite")).expect("conn");
+        conn.execute(
+            "update chat_context_items set chunk_id = 'gone', paper_id = 'nobody'",
+            [],
+        )
+        .expect("break");
+        drop(conn);
+
+        let authors = vec!["A. Vaswani".to_string()];
+        let assembled = fixture
+            .manager
+            .get_context(ContextRequest {
+                thread_id: Some(&thread_id),
+                paper: facts("body", &authors),
+                entries: &[],
+                ephemeral: &EphemeralContext {
+                    paper_id,
+                    ..Default::default()
+                },
+                retrieved: &[],
+            })
+            .expect("assembles");
+
+        assert_eq!(assembled.summary.unresolved_items, 1);
+        assert_eq!(assembled.summary.context_items, 0);
+    }
+
+    #[test]
+    fn a_rechunked_paper_still_resolves_through_the_durable_anchor() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["A durable passage worth keeping."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds");
+
+        let extraction_id = chunks[0].extraction_id.clone();
+        fixture
+            .store
+            .rechunk_extraction(&extraction_id)
+            .expect("rechunk");
+
+        let listed = fixture.manager.list_context(&thread_id).expect("lists");
+        assert_eq!(listed.len(), 1);
+        assert!(
+            !listed[0].unresolved,
+            "the chunk id is gone but the character range still names the passage"
+        );
+        assert!(listed[0].text.contains("durable passage"));
+    }
+
+    #[test]
+    fn entries_before_the_watermark_are_replaced_by_the_summary() {
+        let entries = vec![
+            entry("e1", "first question"),
+            entry("e2", "first answer"),
+            entry("e3", "second question"),
+        ];
+
+        assert_eq!(entries_after(&entries, None).len(), 3);
+        let kept = entries_after(&entries, Some("e2"));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "e3");
+    }
+
+    #[test]
+    fn a_deleted_watermark_entry_replays_everything_rather_than_nothing() {
+        let entries = vec![entry("e1", "a"), entry("e2", "b")];
+        // The safe reading: the summary is redundant, not wrong. Returning an
+        // empty replay would silently erase the conversation from the prompt.
+        assert_eq!(entries_after(&entries, Some("deleted")).len(), 2);
+    }
+
+    fn entry(id: &str, body: &str) -> ChatEntry {
+        ChatEntry {
+            id: id.to_string(),
+            thread_id: "t".to_string(),
+            kind: ENTRY_ANSWER.to_string(),
+            body: body.to_string(),
+            model: None,
+            context_summary: None,
+            pinned: false,
+            created_at: "2026-08-08T00:00:00Z".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_replaces_chunk_items_and_sets_the_watermark() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["First passage.", "Second passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        for chunk in &chunks {
+            fixture
+                .manager
+                .add_context(&thread_id, &chunk.id)
+                .expect("adds");
+        }
+        let entries = vec![entry("e1", "what did they find"), entry("e2", "they found x")];
+
+        let item = fixture
+            .manager
+            .compact_context(&thread_id, &entries, |material| async move {
+                assert!(material.contains("First passage"));
+                assert!(material.contains("they found x"));
+                Ok("They found x, using passages one and two.".to_string())
+            })
+            .await
+            .expect("compacts");
+
+        assert_eq!(item.kind, "summary");
+        assert_eq!(item.covers_through_entry_id.as_deref(), Some("e2"));
+        let items = fixture.store.context_items(&thread_id).expect("items");
+        assert_eq!(items.len(), 1, "chunk items were superseded");
+    }
+
+    #[tokio::test]
+    async fn a_failed_summarization_leaves_the_thread_untouched() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["First passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds");
+
+        let error = fixture
+            .manager
+            .compact_context(&thread_id, &[], |_| async {
+                Err("provider is down".to_string())
+            })
+            .await
+            .expect_err("propagates");
+        assert!(error.contains("provider is down"));
+
+        let items = fixture.store.context_items(&thread_id).expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "chunk", "nothing was written or removed");
+    }
+
+    #[tokio::test]
+    async fn an_empty_summary_is_rejected_rather_than_stored() {
+        let fixture = fixture(32_000);
+        let (paper_id, chunks) = seeded(&fixture, &["First passage."]);
+        let thread_id = thread_for(&fixture, &paper_id);
+        fixture
+            .manager
+            .add_context(&thread_id, &chunks[0].id)
+            .expect("adds");
+
+        let error = fixture
+            .manager
+            .compact_context(&thread_id, &[], |_| async { Ok("   ".to_string()) })
+            .await
+            .expect_err("rejects");
+        assert!(error.contains("empty"));
+        assert_eq!(fixture.store.context_items(&thread_id).unwrap().len(), 1);
+    }
+}

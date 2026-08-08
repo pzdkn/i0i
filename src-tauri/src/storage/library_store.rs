@@ -7839,6 +7839,235 @@ mod tests {
         Ok(())
     }
 
+    // ---- Chat context items (RFC 0077) ----
+
+    fn chunk_context_draft(chunk: &DocumentChunk) -> ContextItemDraft {
+        ContextItemDraft {
+            kind: crate::domain::context::CONTEXT_KIND_CHUNK.to_string(),
+            chunk_id: Some(chunk.id.clone()),
+            paper_id: Some(chunk.paper_id.clone()),
+            source_start: Some(chunk.source_start),
+            source_end: Some(chunk.source_end),
+            body: None,
+            covers_through_entry_id: None,
+            token_estimate: chunk.token_estimate,
+        }
+    }
+
+    #[test]
+    fn context_items_get_dense_positions_in_insertion_order() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "vaswani2017",
+            &[("paragraph", "First passage."), ("paragraph", "Second passage.")],
+        )?;
+        let chunks = db.store.chunks_for_extraction(&extraction.id)?;
+        let thread = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "n")?
+            .thread;
+
+        for chunk in &chunks {
+            db.store
+                .insert_context_item(&thread.id, &chunk_context_draft(chunk))?;
+        }
+
+        let items = db.store.context_items(&thread.id)?;
+        assert_eq!(items.len(), chunks.len());
+        let positions: Vec<i32> = items.iter().map(|item| item.position).collect();
+        assert_eq!(positions, (0..chunks.len() as i32).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
+    fn context_items_delete_by_item_id_or_chunk_id() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "vaswani2017", &[("paragraph", "A passage.")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let thread = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "n")?
+            .thread;
+
+        let item = db
+            .store
+            .insert_context_item(&thread.id, &chunk_context_draft(&chunk))?;
+        assert!(db
+            .store
+            .delete_context_item(&thread.id, &ContextKey::Item(item.id.clone()))?);
+        assert!(db.store.context_items(&thread.id)?.is_empty());
+
+        db.store
+            .insert_context_item(&thread.id, &chunk_context_draft(&chunk))?;
+        assert!(db
+            .store
+            .delete_context_item(&thread.id, &ContextKey::Chunk(chunk.id.clone()))?);
+        assert!(db.store.context_items(&thread.id)?.is_empty());
+
+        // Deleting what is already gone is not an error.
+        assert!(!db
+            .store
+            .delete_context_item(&thread.id, &ContextKey::Chunk(chunk.id))?);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_a_thread_takes_its_context_with_it() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "vaswani2017", &[("paragraph", "A passage.")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let thread = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "n")?
+            .thread;
+        db.store
+            .insert_context_item(&thread.id, &chunk_context_draft(&chunk))?;
+
+        db.store.delete_chat_thread(&thread.id)?;
+
+        // The cascade, not an explicit delete in delete_chat_thread — the same
+        // structural fix the FTS trigger made in RFC 0075.
+        let conn = db.store.open_connection()?;
+        let remaining: i64 = conn
+            .query_row(
+                "select count(*) from chat_context_items where thread_id = ?1",
+                params![thread.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(remaining, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn compaction_swaps_chunk_items_for_one_summary_atomically() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "vaswani2017",
+            &[("paragraph", "First passage."), ("paragraph", "Second passage.")],
+        )?;
+        let chunks = db.store.chunks_for_extraction(&extraction.id)?;
+        let thread = db
+            .store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "n")?
+            .thread;
+        let mut superseded = Vec::new();
+        for chunk in &chunks {
+            superseded.push(
+                db.store
+                    .insert_context_item(&thread.id, &chunk_context_draft(chunk))?
+                    .id,
+            );
+        }
+
+        db.store.compact_context_items(
+            &thread.id,
+            &ContextItemDraft {
+                kind: crate::domain::context::CONTEXT_KIND_SUMMARY.to_string(),
+                chunk_id: None,
+                paper_id: None,
+                source_start: None,
+                source_end: None,
+                body: Some("They discussed passages.".to_string()),
+                covers_through_entry_id: Some("entry-9".to_string()),
+                token_estimate: 6,
+            },
+            &superseded,
+        )?;
+
+        let items = db.store.context_items(&thread.id)?;
+        assert_eq!(items.len(), 1, "the chunk items were replaced, not added to");
+        assert_eq!(items[0].kind, "summary");
+        assert_eq!(items[0].covers_through_entry_id.as_deref(), Some("entry-9"));
+
+        // The chat itself is untouched: compaction shrinks context, not history.
+        assert_eq!(db.store.get_chat_thread(&thread.id)?.entries.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn chunks_overlapping_finds_the_passage_after_its_chunk_id_is_gone() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(&db, "vaswani2017", &[("paragraph", "A durable passage.")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let (start, end) = (chunk.source_start, chunk.source_end);
+
+        // A rechunk re-mints ids. The character range still names the passage.
+        db.store.rechunk_extraction(&extraction.id)?;
+
+        let found = db.store.chunks_overlapping("vaswani2017", start, end)?;
+        assert!(!found.is_empty(), "the durable anchor must still resolve");
+        assert!(found[0].text.contains("durable passage"));
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_rects_groups_block_geometry_by_page_and_skips_blocks_without_it() -> StoreResult<()> {
+        let db = test_db()?;
+        let draft = paper_draft_with_pdf("vaswani2017", "https://example.test/geometry.pdf");
+        db.store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])?;
+        let source = db.store.get_document_sources("vaswani2017")?.remove(0);
+        db.store
+            .set_document_source_cached(&source.id, "/tmp/geometry.pdf")?;
+        let extraction = db.store.start_document_extraction(
+            &source.id,
+            "pdfium_basic",
+            "0.2.0",
+            &format!("pdfium_basic:{}", source.id),
+            false,
+        )?;
+
+        let geometry = serde_json::json!({"x": 0.1, "y": 0.2, "width": 0.5, "height": 0.05});
+        let blocks: Vec<DocumentBlock> = ["First line here.", "Second line here.", "Third line."]
+            .iter()
+            .enumerate()
+            .map(|(index, text)| DocumentBlock {
+                id: format!("{}:block:0:{index}", extraction.id),
+                paper_id: extraction.paper_id.clone(),
+                source_id: extraction.source_id.clone(),
+                extraction_id: extraction.id.clone(),
+                page_index: 0,
+                block_index: index as i32,
+                reading_order: index as i32,
+                kind: "paragraph".to_string(),
+                text: Some((*text).to_string()),
+                asset_id: None,
+                source_start: Some(index as i64 * 20),
+                source_end: Some(index as i64 * 20 + 18),
+                // The last block predates RFC 0075 geometry.
+                bbox_json: (index < 2).then(|| geometry.to_string()),
+            })
+            .collect();
+        db.store.finish_document_extraction(
+            &extraction.id,
+            &[extraction_page(&extraction)],
+            &blocks,
+            &[],
+        )?;
+
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let pages = db.store.chunk_rects(&chunk.id)?;
+
+        assert_eq!(pages.len(), 1, "all three blocks are on page 0");
+        assert_eq!(pages[0].page_index, 0);
+        assert_eq!(
+            pages[0].rects.len(),
+            2,
+            "the block without bbox_json contributes nothing rather than failing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_rects_is_empty_rather_than_an_error_for_an_unknown_chunk() -> StoreResult<()> {
+        let db = test_db()?;
+        assert!(db.store.chunk_rects("no-such-chunk")?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn rechunking_replaces_chunks_without_touching_blocks() -> StoreResult<()> {
         let db = test_db()?;
