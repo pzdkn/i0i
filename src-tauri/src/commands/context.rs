@@ -92,6 +92,7 @@ mod tests {
         let json = serde_json::to_string(&summary).expect("serializes");
 
         for field in [
+            "passages",
             "contextItems",
             "droppedItems",
             "unresolvedItems",
@@ -116,5 +117,8 @@ mod tests {
 
         let json = serde_json::to_string(&ChatProgress::Retrieved { count: 3 }).expect("serializes");
         assert_eq!(json, r#"{"event":"retrieved","count":3}"#);
+
+        let json = serde_json::to_string(&ChatProgress::Deciding).expect("serializes");
+        assert_eq!(json, r#"{"event":"deciding"}"#);
     }
 }

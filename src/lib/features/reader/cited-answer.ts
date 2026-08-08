@@ -1,21 +1,22 @@
 import type { ContextCitation } from "$lib/domain/context";
 
 /**
- * An answer split into prose and `[C1]`-style citation markers (RFC 0077).
+ * An answer split into prose and `[1]`-style citation markers (RFC 0078).
  *
  * A piece with a `citation` renders as a clickable marker; everything else is
  * literal text.
  */
 export type AnswerPiece = { text: string; citation: ContextCitation | null };
 
-const MARKER = /\[(C\d+)\]/g;
+const MARKER = /\[(\d+)\]/g;
 
 /**
  * Split `body` on the citation markers the assembly actually minted.
  *
- * Unknown markers are deliberately left as literal text. The model can write
- * `[C9]` for a passage it never saw — that happens — and a button that jumps
- * nowhere is worse than the characters it replaced.
+ * Unknown numbers are deliberately left as literal text, which matters more
+ * with bare `[n]` than it did with `[Cn]`: papers are full of their own
+ * bracketed citations, and the model quoting "as shown in [12]" must not
+ * produce a link. Only numbers this turn actually handed out become buttons.
  */
 export function splitCitedAnswer(body: string, citations: ContextCitation[]): AnswerPiece[] {
   const byHandle = new Map(citations.map((citation) => [citation.handle, citation]));

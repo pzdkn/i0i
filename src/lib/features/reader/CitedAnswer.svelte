@@ -23,9 +23,7 @@
         type="button"
         title={citationLabel(piece.citation)}
         onclick={() => onOpenCitation(piece.citation!)}
-      >
-        {piece.text}
-      </button>
+      >[{piece.text}]</button>
     {:else}
       {piece.text}
     {/if}
@@ -41,13 +39,11 @@
   /* Reads as part of the sentence, not as a control that interrupts it. */
   .cite {
     display: inline;
-    padding: 0 3px;
+    padding: 0;
     border: 0;
-    border-bottom: 1px solid var(--amber-dim);
     background: transparent;
     color: var(--amber);
     font: inherit;
-    font-size: 0.9em;
     cursor: pointer;
   }
 

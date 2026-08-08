@@ -22,40 +22,40 @@ test("an answer with no citations comes back as one literal piece", () => {
 });
 
 test("known markers become citation pieces, prose around them survives", () => {
-  const pieces = splitCitedAnswer("They scale by 1/sqrt(d) [C1] to keep softmax sharp.", [
-    citation("C1"),
+  const pieces = splitCitedAnswer("They scale by 1/sqrt(d) [1] to keep softmax sharp.", [
+    citation("1"),
   ]);
 
   assert.deepEqual(
     pieces.map((piece) => piece.text),
-    ["They scale by 1/sqrt(d) ", "C1", " to keep softmax sharp."],
+    ["They scale by 1/sqrt(d) ", "1", " to keep softmax sharp."],
   );
-  assert.equal(pieces[1].citation?.handle, "C1");
+  assert.equal(pieces[1].citation?.handle, "1");
   assert.equal(pieces[0].citation, null);
 });
 
 test("a marker the assembly never minted stays literal text", () => {
   // The model can cite a passage it was never given. A button that jumps
   // nowhere is worse than the characters it replaced.
-  const pieces = splitCitedAnswer("As shown in [C9], it works.", [citation("C1")]);
-  assert.deepEqual(pieces, [{ text: "As shown in [C9], it works.", citation: null }]);
+  const pieces = splitCitedAnswer("As shown in [9], it works.", [citation("1")]);
+  assert.deepEqual(pieces, [{ text: "As shown in [9], it works.", citation: null }]);
 });
 
 test("adjacent markers each become their own piece", () => {
-  const pieces = splitCitedAnswer("Both agree [C1][C2].", [citation("C1"), citation("C2")]);
+  const pieces = splitCitedAnswer("Both agree [1][2].", [citation("1"), citation("2")]);
   assert.deepEqual(
     pieces.map((piece) => piece.text),
-    ["Both agree ", "C1", "C2", "."],
+    ["Both agree ", "1", "2", "."],
   );
-  assert.equal(pieces[1].citation?.handle, "C1");
-  assert.equal(pieces[2].citation?.handle, "C2");
+  assert.equal(pieces[1].citation?.handle, "1");
+  assert.equal(pieces[2].citation?.handle, "2");
 });
 
 test("markers at the very start and very end are not dropped", () => {
-  const pieces = splitCitedAnswer("[C1] is the claim [C1]", [citation("C1")]);
+  const pieces = splitCitedAnswer("[1] is the claim [1]", [citation("1")]);
   assert.deepEqual(
     pieces.map((piece) => piece.text),
-    ["C1", " is the claim ", "C1"],
+    ["1", " is the claim ", "1"],
   );
 });
 

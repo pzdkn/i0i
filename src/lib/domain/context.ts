@@ -28,6 +28,21 @@ export type ContextCitation = {
   rectsJson: string;
 };
 
+/**
+ * A passage the model was shown this turn, cited or not (RFC 0078).
+ *
+ * Distinct from `ContextCitation`, which is only what the answer cited.
+ * References stay honest; this powers the "what the agent read" drawer.
+ */
+export type PassageRef = {
+  handle: string;
+  paperId: string;
+  pageStart: number;
+  headingPath: string | null;
+  chunkId: string | null;
+  cited: boolean;
+};
+
 /** A persistent context item, resolved to its text. */
 export type ContextItemView = {
   id: string;

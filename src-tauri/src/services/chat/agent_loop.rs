@@ -34,12 +34,16 @@ const MAX_ITERATIONS: usize = 3;
 /// once is not refining, it is flailing.
 const MAX_CALLS_PER_ITERATION: usize = 4;
 
-/// Chunks the loop may pull into one turn, across every search. They all
-/// compete with the paper text for the same assembly budget.
-const MAX_CHUNKS_PER_TURN: usize = 12;
+/// Chunks the loop may pull into one turn, across every search.
+///
+/// Deliberately tight. Every passage competes with the paper text for the same
+/// assembly budget, and a long reference list is worse than a short one: it
+/// spreads the reader's attention over material the answer did not need.
+const MAX_CHUNKS_PER_TURN: usize = 6;
 
-/// Hits one `search_context` call returns.
-const SEARCH_LIMIT: usize = 5;
+/// Hits one `search_context` call returns. Three good ones beat five, and the
+/// agent can always search again with better wording.
+const SEARCH_LIMIT: usize = 3;
 
 /// Preview length per hit. Enough to judge relevance, far short of the full
 /// text — which arrives once, in the final assembly, if the passage is used.
@@ -66,6 +70,10 @@ pub struct RetrievalOutcome {
 /// Progress emitted while the loop runs, so the panel is not dead through up to
 /// three round trips.
 pub enum LoopEvent {
+    /// Phase 1 has started. Emitted before the first round trip so the panel
+    /// says something immediately — deciding *not* to search still takes a
+    /// round trip, and silence through it reads as a hang.
+    Deciding,
     Searching { query: String },
     Retrieved { count: usize },
 }
@@ -101,6 +109,8 @@ pub async fn run<F>(
 where
     F: FnMut(LoopEvent),
 {
+    on_event(LoopEvent::Deciding);
+
     let mut outcome = RetrievalOutcome::default();
     let mut messages = vec![WireMessage::text("system", system_prompt(&request, context))];
     for entry in request.recent {
@@ -340,9 +350,14 @@ fn system_prompt(request: &LoopRequest<'_>, context: &ContextManager) -> String 
          need no lookup at all. If you do not need one, reply with no tool calls \
          and no text.\n\
          \n\
-         If you do, call search_context. You may search up to {MAX_ITERATIONS} \
-         times, refining as you see results. Keep a passage with add_context \
-         only if later turns in this conversation will need it.\n",
+         If you do, call search_context — and read as little as possible. \
+         Prefer one precise search over three broad ones, and stop as soon as \
+         you have what the question needs. Every passage you pull competes for \
+         room with the paper itself, so a passage you do not end up citing is a \
+         passage that cost the answer something.\n\
+         \n\
+         You may search up to {MAX_ITERATIONS} times. Keep a passage with \
+         add_context only if later turns in this conversation will need it.\n",
         request.paper_title,
     );
 
@@ -388,7 +403,7 @@ fn context_tools(can_write: bool) -> Vec<Tool> {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "What to look for, in your own words."
+                        "description": "What to look for, in your own words. Be specific — a narrow query returns the passage you need instead of five you do not."
                     }
                 },
                 "required": ["query"]

@@ -216,6 +216,7 @@ pub struct PinnedHighlight {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum ChatProgress {
+    Deciding,
     Searching { query: String },
     Retrieved { count: usize },
 }
@@ -257,7 +258,12 @@ pub struct ChatContextSummary {
     /// so a capped turn does not read as an agent that decided it had enough.
     #[serde(default)]
     pub retrieval_capped: bool,
-    /// Resolves the `[C1]` markers in this answer back to places in the PDF.
+    /// Every passage the model was shown this turn, cited or not (RFC 0078).
+    /// Powers the "what the agent read" drawer; `citations` stays the honest
+    /// reference list.
+    #[serde(default)]
+    pub passages: Vec<crate::domain::context::PassageRef>,
+    /// Resolves the `[1]` markers in this answer back to places in the PDF.
     ///
     /// Stored with the answer rather than recomputed: handles are assigned per
     /// assembly, so the same chunk is `[C3]` in one turn and `[C1]` in the next.

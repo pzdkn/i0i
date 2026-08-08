@@ -10,7 +10,7 @@
     deleteChatContext,
     listChatContext,
   } from "$lib/bridge/context";
-  import type { ContextCitation, ContextItemView } from "$lib/domain/context";
+  import type { ContextCitation, ContextItemView, PassageRef } from "$lib/domain/context";
   import {
     askAtAnchorStreamed,
     askChatThreadStreamed,
@@ -720,10 +720,14 @@
         if (!isBusy) {
           return;
         }
+        // "deciding" fires before the first round trip, so the panel says
+        // something even on a turn that ends up searching nothing.
         retrievalProgress =
-          payload.event === "searching"
-            ? `searching: ${payload.query ?? ""}`
-            : `read ${payload.count ?? 0} passage${payload.count === 1 ? "" : "s"}…`;
+          payload.event === "deciding"
+            ? "reading the question…"
+            : payload.event === "searching"
+              ? `searching: ${payload.query ?? ""}`
+              : `read ${payload.count ?? 0} passage${payload.count === 1 ? "" : "s"}…`;
       },
     );
     return () => void unlisten.then((stop) => stop());
@@ -770,6 +774,20 @@
     } catch (caught) {
       error = String(caught);
     }
+  }
+
+  // RFC 0078: which answers have their "what the agent read" drawer open.
+  // Per entry, and closed by default — references are the answer's evidence,
+  // this is the audit trail behind them.
+  let openPassageDrawers = $state<Record<string, boolean>>({});
+
+  function togglePassageDrawer(entryId: string) {
+    openPassageDrawers = { ...openPassageDrawers, [entryId]: !openPassageDrawers[entryId] };
+  }
+
+  function passageLabel(passage: PassageRef) {
+    const page = `p${passage.pageStart + 1}`;
+    return passage.headingPath ? `${page} · ${passage.headingPath}` : page;
   }
 
   function contextItemLabel(item: ContextItemView) {
@@ -1041,6 +1059,36 @@
                             </div>
                           {/each}
                         </div>
+                      {/if}
+                      {#if entry.kind === "answer" && entry.contextSummary?.passages?.length}
+                        <!-- RFC 0078: everything the agent read this turn,
+                             including what it chose not to cite. Closed by
+                             default — the References above are the evidence,
+                             this is the audit trail. -->
+                        <button
+                          class="drawer-toggle mono-dim"
+                          type="button"
+                          aria-expanded={Boolean(openPassageDrawers[entry.id])}
+                          onclick={() => togglePassageDrawer(entry.id)}
+                        >
+                          {openPassageDrawers[entry.id] ? "▾" : "▸"}
+                          read {entry.contextSummary.passages.length} passage{entry
+                            .contextSummary.passages.length === 1
+                            ? ""
+                            : "s"}
+                        </button>
+                        {#if openPassageDrawers[entry.id]}
+                          {#each entry.contextSummary.passages as passage (passage.handle)}
+                            <div class="row drawer-row" class:uncited={!passage.cited}>
+                              <span class="ref-handle">[{passage.handle}]</span>
+                              <span class="ref-where">{passageLabel(passage)}</span>
+                              <div class="flex1"></div>
+                              {#if !passage.cited}
+                                <span class="mono-dim">not cited</span>
+                              {/if}
+                            </div>
+                          {/each}
+                        {/if}
                       {/if}
                       {#if entry.kind === "answer" && chatContextLabel(entry)}
                         <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
@@ -1748,6 +1796,30 @@
   .ref-handle {
     flex-shrink: 0;
     color: var(--amber);
+  }
+
+  .drawer-toggle {
+    display: block;
+    margin-top: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-size: 9px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .drawer-row {
+    gap: 6px;
+    padding-left: 10px;
+    font-size: 10px;
+  }
+
+  /* Dimmed, not hidden: the agent read it and passed on it, and that is worth
+     being able to see without it competing with the actual references. */
+  .drawer-row.uncited {
+    opacity: 0.55;
   }
 
   .ref-where {

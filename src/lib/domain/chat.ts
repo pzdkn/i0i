@@ -2,7 +2,7 @@
 // `model` and `contextSummary` arrive as null (not omitted) for non-answer
 // entries, matching serde's Option serialization.
 
-import type { ContextCitation } from "$lib/domain/context";
+import type { ContextCitation, PassageRef } from "$lib/domain/context";
 
 export type ChatScope = { kind: "paper"; paperId: string };
 
@@ -26,6 +26,9 @@ export type ChatContextSummary = {
   compacted: boolean;
   /** RFC 0078: the retrieval loop hit a bound and stopped short. */
   retrievalCapped: boolean;
+  /** Every passage the model was shown this turn, cited or not (RFC 0078). */
+  passages: PassageRef[];
+  /** Only the passages the answer actually cited. */
   citations: ContextCitation[];
 };
 

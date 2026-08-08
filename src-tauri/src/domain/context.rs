@@ -126,6 +126,38 @@ pub struct ContextCitation {
     pub rects_json: String,
 }
 
+/// A passage the model was shown this turn (RFC 0078).
+///
+/// Distinct from [`ContextCitation`], which is only what the answer *cited*.
+/// References must stay honest — what was offered is not evidence — but you
+/// should still be able to open a drawer and see everything the agent read.
+/// Deliberately light: no text, no rectangles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassageRef {
+    pub handle: String,
+    pub paper_id: String,
+    pub page_start: i32,
+    pub heading_path: Option<String>,
+    pub chunk_id: Option<String>,
+    /// The answer cited this one.
+    pub cited: bool,
+}
+
+impl PassageRef {
+    /// Every passage starts uncited; `retain_cited` decides after the answer.
+    pub fn from_citation(citation: &ContextCitation) -> Self {
+        Self {
+            handle: citation.handle.clone(),
+            paper_id: citation.paper_id.clone(),
+            page_start: citation.page_start,
+            heading_path: citation.heading_path.clone(),
+            chunk_id: citation.chunk_id.clone(),
+            cited: false,
+        }
+    }
+}
+
 /// One context item as the UI lists it: resolved, with its text.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -599,6 +599,7 @@ impl ChatService {
                 // The panel would otherwise sit dead through up to three round
                 // trips, which reads as hung rather than thinking.
                 let payload = match event {
+                    agent_loop::LoopEvent::Deciding => ChatProgress::Deciding,
                     agent_loop::LoopEvent::Searching { query } => {
                         ChatProgress::Searching { query }
                     }

@@ -22,7 +22,7 @@ use crate::domain::chat::{ChatContextSummary, ChatEntry};
 use crate::domain::chunking::{estimate_tokens, CHARS_PER_TOKEN};
 use crate::domain::context::{
     ContextCitation, ContextItem, ContextItemDraft, ContextItemView, ContextKey, EphemeralContext,
-    CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY, ORIGIN_AGENT, ORIGIN_USER,
+    PassageRef, CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY, ORIGIN_AGENT, ORIGIN_USER,
 };
 use crate::domain::library::DocumentChunk;
 use crate::services::chat::context::build_context;
@@ -323,6 +323,7 @@ impl ContextManager {
             system_prompt,
             entries,
             summary: ChatContextSummary {
+                passages: citations.iter().map(PassageRef::from_citation).collect(),
                 citations,
                 paper_title: request.paper.title.to_string(),
                 included_chars: bundle.summary.included_chars,
@@ -579,11 +580,13 @@ impl Assembly {
         }
 
         let mut block = String::from(
-            "Context passages. Cite the ones you use by their marker, like [C1].\n\
-             Do not invent markers.\n",
+            "Passages from this paper, numbered. When a sentence rests on one, \n\
+             end it with that number in brackets, like [1]. Cite only numbers \n\
+             listed below, and only where the passage actually supports the \n\
+             claim — an uncited sentence is fine, a wrong number is not.\n",
         );
         for (index, passage) in self.passages.iter().enumerate() {
-            let handle = format!("C{}", index + 1);
+            let handle = (index + 1).to_string();
             // Pages are 0-based in storage and 1-based to a reader.
             let mut location = match &passage.heading_path {
                 Some(heading) => format!("p{} · {heading}", passage.page_start + 1),
@@ -623,9 +626,13 @@ impl Assembly {
 /// one it ignored — nothing here can tell them apart, which is why the prompt
 /// asks for a marker on anything load-bearing.
 pub fn retain_cited(summary: &mut ChatContextSummary, answer: &str) {
-    summary
-        .citations
-        .retain(|citation| answer.contains(&format!("[{}]", citation.handle)));
+    let cited = |handle: &str| answer.contains(&format!("[{handle}]"));
+    // `passages` keeps everything — the drawer shows what the agent read — and
+    // only records which ones earned a reference.
+    for passage in &mut summary.passages {
+        passage.cited = cited(&passage.handle);
+    }
+    summary.citations.retain(|citation| cited(&citation.handle));
 }
 
 /// Entries after the compaction watermark. Everything before it is represented
@@ -885,9 +892,9 @@ mod tests {
             })
             .expect("assembles");
 
-        assert!(assembled.system_prompt.contains("[C1]"));
+        assert!(assembled.system_prompt.contains("[1]"));
         assert_eq!(assembled.summary.citations.len(), chunks.len());
-        assert_eq!(assembled.summary.citations[0].handle, "C1");
+        assert_eq!(assembled.summary.citations[0].handle, "1");
         assert_eq!(assembled.summary.citations[0].paper_id, paper_id);
         assert_eq!(assembled.summary.context_items, assembled.summary.citations.len());
         // Handles are assigned in emission order, so C1 is the first passage
@@ -895,7 +902,7 @@ mod tests {
         // pressure runs newest-first; these two orders are different and the
         // prompt must use the reading one.
         for (index, citation) in assembled.summary.citations.iter().enumerate() {
-            assert_eq!(citation.handle, format!("C{}", index + 1));
+            assert_eq!(citation.handle, (index + 1).to_string());
         }
         let first = assembled
             .system_prompt
@@ -959,7 +966,7 @@ mod tests {
         assert_eq!(assembled.summary.dropped_items, 1);
         assert_eq!(assembled.summary.context_items, 0);
         // Dropped, not silently absorbed: no marker the model could cite.
-        assert!(!assembled.system_prompt.contains("[C1]"));
+        assert!(!assembled.system_prompt.contains("[1]"));
     }
 
     #[test]
@@ -1045,30 +1052,48 @@ mod tests {
 
     #[test]
     fn only_the_passages_the_answer_cited_are_stored() {
-        let mut summary = summary_with(&["C1", "C2", "C3"]);
-        retain_cited(&mut summary, "The scaling factor matters [C2].");
+        let mut summary = summary_with(&["1", "2", "3"]);
+        retain_cited(&mut summary, "The scaling factor matters [2].");
 
         // What was offered is not evidence. Storing C1 and C3 would show three
         // references for an answer that rested on one.
         assert_eq!(summary.citations.len(), 1);
-        assert_eq!(summary.citations[0].handle, "C2");
+        assert_eq!(summary.citations[0].handle, "2");
+    }
+
+    #[test]
+    fn what_the_agent_read_survives_even_when_it_is_not_cited() {
+        let mut summary = summary_with(&["1", "2", "3"]);
+        summary.passages = summary.citations.iter().map(PassageRef::from_citation).collect();
+        retain_cited(&mut summary, "The scaling factor matters [2].");
+
+        // References stay honest; the drawer still shows the whole audit trail.
+        assert_eq!(summary.citations.len(), 1);
+        assert_eq!(summary.passages.len(), 3);
+        let cited: Vec<&str> = summary
+            .passages
+            .iter()
+            .filter(|passage| passage.cited)
+            .map(|passage| passage.handle.as_str())
+            .collect();
+        assert_eq!(cited, vec!["2"]);
     }
 
     #[test]
     fn an_answer_that_cites_nothing_keeps_no_references() {
-        let mut summary = summary_with(&["C1", "C2"]);
+        let mut summary = summary_with(&["1", "2"]);
         retain_cited(&mut summary, "The paper is about attention.");
         assert!(summary.citations.is_empty());
     }
 
     #[test]
     fn a_handle_that_is_a_prefix_of_another_does_not_match_it() {
-        // "[C1]" must not be found inside "[C10]" — brackets are what make the
-        // match exact, and dropping them would attribute the wrong passage.
-        let mut summary = summary_with(&["C1", "C10"]);
-        retain_cited(&mut summary, "As shown in [C10].");
+        // "[1]" must not be found inside "[10]" — the brackets are what make
+        // the match exact, and dropping them would attribute the wrong passage.
+        let mut summary = summary_with(&["1", "10"]);
+        retain_cited(&mut summary, "As shown in [10].");
         assert_eq!(summary.citations.len(), 1);
-        assert_eq!(summary.citations[0].handle, "C10");
+        assert_eq!(summary.citations[0].handle, "10");
     }
 
     #[test]
