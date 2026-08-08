@@ -50,6 +50,11 @@ pub(super) fn build_context(
          paper below. Ground every claim in the paper text. If the paper does\n\
          not contain the answer, say so explicitly.\n\
          \n\
+         Be brief. Two or three sentences answers most questions; a short list\n\
+         answers the rest. No preamble, no restating the question, no summary\n\
+         of what you just said. The reader has the paper open next to you —\n\
+         they want the answer, not an essay.\n\
+         \n\
          Title: {title}\n\
          Authors: {authors}\n\
          Venue: {venue} {year}\n\

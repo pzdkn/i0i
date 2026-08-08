@@ -77,13 +77,21 @@ export async function askChatThreadStreamed(
 /// Ask at an anchor; the thread is created lazily on success and returned
 /// (RFC 0034). Prose only — marking is a separate fast-model pass
 /// (`annotateStreamed`), so the answer is never slowed by tool-calling.
+/**
+ * Ask at an anchor, creating the thread only once the reply lands.
+ *
+ * `newThread` forces a fresh conversation instead of appending to this paper's
+ * existing whole-paper thread — what "Ask about this paper" wants, since a new
+ * question is usually a new subject.
+ */
 export async function askAtAnchorStreamed(
   scope: ChatScope,
   anchor: ThreadAnchor,
   body: string,
   onDelta: (text: string) => void,
+  newThread = false,
 ): Promise<ChatThreadView> {
-  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body }, onDelta);
+  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body, newThread }, onDelta);
 }
 
 export type LogLevel = "error" | "warn" | "info" | "debug" | "trace";

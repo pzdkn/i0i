@@ -123,6 +123,11 @@ pub async fn ask_at_anchor_streamed(
     scope: ChatScope,
     anchor: ThreadAnchor,
     body: String,
+    // Start a fresh conversation rather than appending to this paper's
+    // existing whole-paper thread. camelCase because Tauri matches the
+    // JavaScript argument name verbatim.
+    #[allow(non_snake_case)]
+    newThread: Option<bool>,
     on_event: Channel<ChatStreamEvent>,
 ) -> Result<(), String> {
     chat_log(format!(
@@ -135,7 +140,7 @@ pub async fn ask_at_anchor_streamed(
 
     let deltas = on_event.clone();
     let result = chat_service
-        .ask_at_anchor_streamed(&scope, anchor, body, move |text| {
+        .ask_at_anchor_streamed(&scope, anchor, body, newThread.unwrap_or(false), move |text| {
             let _ = deltas.send(ChatStreamEvent::Delta { text });
         })
         .await;

@@ -206,6 +206,7 @@ impl ChatService {
         scope: &ChatScope,
         anchor: ThreadAnchor,
         body: String,
+        new_thread: bool,
         on_delta: F,
     ) -> Result<ChatThreadView, String>
     where
@@ -242,6 +243,7 @@ impl ChatService {
             &anchor,
             &ChatEntryDraft::question(prep.user_body.clone()),
             &ChatEntryDraft::answer(answer_text, self.config.model.clone(), summary),
+            new_thread,
         )?;
         self.spawn_title_generation_if_created(
             write.created,

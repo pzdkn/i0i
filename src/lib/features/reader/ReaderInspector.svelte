@@ -219,7 +219,11 @@
   let activeAskId = $state(0);
 
   const scope = $derived<ChatScope>({ kind: "paper", paperId: document.paperId });
-  const documentThread = $derived(threads.find((thread) => thread.anchor.kind === "document"));
+  // Whole-paper conversations. Plural since RFC 0078 follow-up: "Ask about
+  // this paper" starts a new one rather than reopening January's.
+  const paperChats = $derived(
+    threads.filter((thread) => thread.anchor.kind === "document" && thread.entryCount > 0),
+  );
   const isVirtual = $derived(Boolean(openThread) && openThread!.thread.id === "");
   const openPassage = $derived(openThread ? anchorSelectedText(openThread.thread.anchor) : null);
   // The annotated-passage row backing the open thread (RFC 0061). A passage
@@ -291,9 +295,7 @@
   const passageChats = $derived(
     threads.filter((thread) => thread.anchor.kind !== "document" && thread.entryCount > 0),
   );
-  const chatCount = $derived(
-    (documentThread && documentThread.entryCount > 0 ? 1 : 0) + passageChats.length,
-  );
+  const chatCount = $derived(paperChats.length + passageChats.length);
   const activeFilterCount = $derived(
     (filterAuthor !== "all" ? 1 : 0) +
       (filterColor !== null ? 1 : 0) +
@@ -467,14 +469,14 @@
     return thread && thread.entryCount > 0 ? "chat" : "notes";
   }
 
+  /// Start a new whole-paper conversation. Always fresh: a new question about
+  /// the paper is usually a new subject, and appending it to a months-old
+  /// thread both buries it and drags that history into every prompt.
+  /// Past conversations stay in the Chats list below.
   function openWholePaper() {
     activeSection = "chat";
     error = "";
-    if (documentThread) {
-      void openThreadById(documentThread.id);
-    } else {
-      openThread = virtualThread({ kind: "document" }, "Whole paper");
-    }
+    openThread = virtualThread({ kind: "document" }, "New chat");
   }
 
   async function openThreadById(threadId: string) {
@@ -561,7 +563,9 @@
         }
       };
       const view = virtual
-        ? await askAtAnchorStreamed(scope, anchor, body, onDelta)
+        ? // A virtual whole-paper thread is a new chat by construction — the
+          // backend would otherwise fold it into the existing one.
+          await askAtAnchorStreamed(scope, anchor, body, onDelta, anchor.kind === "document")
         : await askChatThreadStreamed(threadId, body, onDelta);
       // The ANSWER is done: show it and unblock the composer immediately (the
       // `finally` below clears `isBusy`).
@@ -898,6 +902,14 @@
                   {#if !isVirtual}
                     <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
                   {/if}
+                  <!-- Start another conversation without going back to the
+                       list. The current one is already saved. -->
+                  <button
+                    class="link-btn"
+                    type="button"
+                    title="Start a new chat about this paper"
+                    onclick={openWholePaper}
+                  >+ new</button>
                   {#if !isVirtual}
                     <!-- RFC 0077: explicit, because it costs a model call and
                          is lossy. The conversation itself is untouched. -->
@@ -1168,11 +1180,16 @@
               <div class="thread-list">
                 <button class="ask-paper-row" type="button" onclick={openWholePaper}>
                   <MessageSquare size={13} strokeWidth={1.75} aria-hidden="true" />
-                  <span class="ask-paper-title">Ask about this paper</span>
-                  {#if documentThread && documentThread.entryCount > 0}
-                    <span class="mono-dim">{documentThread.entryCount}</span>
-                  {/if}
+                  <span class="ask-paper-title">New chat about this paper</span>
                 </button>
+
+                {#each paperChats as chat (chat.id)}
+                  <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>
+                    <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
+                    <span class="thread-row-title">{chat.title.trim() || "Whole paper"}</span>
+                    <span class="mono-dim">{chat.entryCount}</span>
+                  </button>
+                {/each}
 
                 {#each passageChats as chat (chat.id)}
                   <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>

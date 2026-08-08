@@ -1836,7 +1836,9 @@ impl LibraryStore {
         question: &ChatEntryDraft,
         answer: &ChatEntryDraft,
     ) -> StoreResult<ChatThreadView> {
-        self.persist_anchored_turn_with_creation(scope_kind, scope_id, anchor, question, answer)
+        self.persist_anchored_turn_with_creation(
+            scope_kind, scope_id, anchor, question, answer, false,
+        )
             .map(|write| write.view)
     }
 
@@ -1847,10 +1849,12 @@ impl LibraryStore {
         anchor: &ThreadAnchor,
         question: &ChatEntryDraft,
         answer: &ChatEntryDraft,
+        force_new_thread: bool,
     ) -> StoreResult<AnchoredThreadWrite> {
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
-        let thread = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
+        let thread =
+            find_or_create_thread_id_with(&tx, scope_kind, scope_id, anchor, force_new_thread)?;
         // Derive both ids from one base so the question always sorts before the
         // answer even when their `created_at` second is identical.
         let base = timestamped_id("entry")?;
@@ -3749,7 +3753,23 @@ fn find_or_create_thread_id(
     scope_id: &str,
     anchor: &ThreadAnchor,
 ) -> StoreResult<ThreadResolution> {
-    if matches!(anchor, ThreadAnchor::Document) {
+    find_or_create_thread_id_with(conn, scope_kind, scope_id, anchor, false)
+}
+
+/// `force_new` skips the whole-paper de-duplication, so "Ask about this paper"
+/// starts a fresh conversation instead of appending to the one from last week.
+///
+/// RFC 0034 collapsed every `document` anchor onto a single thread per paper.
+/// That is right for a *note* about the paper — there is one of those — and
+/// wrong for a chat, where a new question is usually a new subject.
+fn find_or_create_thread_id_with(
+    conn: &Connection,
+    scope_kind: &str,
+    scope_id: &str,
+    anchor: &ThreadAnchor,
+    force_new: bool,
+) -> StoreResult<ThreadResolution> {
+    if matches!(anchor, ThreadAnchor::Document) && !force_new {
         let existing: Option<String> = conn
             .query_row(
                 "
@@ -7866,6 +7886,54 @@ mod tests {
             origin: crate::domain::context::ORIGIN_USER.to_string(),
             token_estimate: chunk.token_estimate,
         }
+    }
+
+    #[test]
+    fn a_new_whole_paper_chat_does_not_append_to_the_last_one() -> StoreResult<()> {
+        let db = test_db()?;
+        let first = db.store.persist_anchored_turn_with_creation(
+            "paper",
+            "vaswani2017",
+            &ThreadAnchor::Document,
+            &ChatEntryDraft::question("what is attention?".to_string()),
+            &ChatEntryDraft::answer("a weighting".to_string(), "m".to_string(), summary()),
+            false,
+        )?;
+
+        // A note about the paper still folds into the one whole-paper thread —
+        // there is one of those. A *chat* does not: a new question is usually a
+        // new subject, and appending buries it and drags the old history into
+        // every later prompt.
+        let same = db.store.persist_anchored_turn_with_creation(
+            "paper",
+            "vaswani2017",
+            &ThreadAnchor::Document,
+            &ChatEntryDraft::question("and scaling?".to_string()),
+            &ChatEntryDraft::answer("1/sqrt(d)".to_string(), "m".to_string(), summary()),
+            false,
+        )?;
+        assert_eq!(same.view.thread.id, first.view.thread.id);
+        assert!(!same.created);
+
+        let fresh = db.store.persist_anchored_turn_with_creation(
+            "paper",
+            "vaswani2017",
+            &ThreadAnchor::Document,
+            &ChatEntryDraft::question("unrelated question".to_string()),
+            &ChatEntryDraft::answer("unrelated answer".to_string(), "m".to_string(), summary()),
+            true,
+        )?;
+        assert_ne!(fresh.view.thread.id, first.view.thread.id);
+        assert!(fresh.created);
+        assert_eq!(fresh.view.entries.len(), 2, "the new chat starts empty");
+
+        let threads = db.store.list_chat_threads("paper", "vaswani2017")?;
+        let whole_paper = threads
+            .iter()
+            .filter(|thread| matches!(thread.anchor, ThreadAnchor::Document))
+            .count();
+        assert_eq!(whole_paper, 2, "both conversations stay reachable");
+        Ok(())
     }
 
     #[test]
