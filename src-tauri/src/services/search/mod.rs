@@ -600,6 +600,69 @@ mod tests {
         }
     }
 
+    /// End-to-end against the developer's real library, with the real model.
+    ///
+    /// Ignored by default: it needs a populated `library.sqlite` and downloads
+    /// nothing but does load the ONNX model, so it is a manual check rather
+    /// than a CI gate. Run with:
+    ///
+    /// ```text
+    /// cargo test --lib real_library -- --ignored --nocapture
+    /// ```
+    ///
+    /// Exists because every bug that mattered in RFC 0075 and 0076 was found by
+    /// running against real data, not by the unit tests above.
+    #[tokio::test]
+    #[ignore]
+    async fn real_library_hybrid_search_smoke() {
+        let source = dirs_app_data().join("library.sqlite");
+        if !source.exists() {
+            eprintln!("no real library at {}; skipping", source.display());
+            return;
+        }
+
+        // Work on a copy: the app may be running against the original.
+        let dir = std::env::temp_dir().join("i0i-real-search-smoke");
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("library.sqlite");
+        std::fs::copy(&source, &copy).unwrap();
+
+        let store = LibraryStore::for_test(copy);
+        let embedder = crate::services::embedding::load_embedder(dir.join("models"));
+        assert!(embedder.is_some(), "real model must load for this check");
+        let service = SearchService::new(store.clone(), embedder);
+
+        for (mode, label) in [
+            (SearchMode::Lexical, "lexical"),
+            (SearchMode::Semantic, "semantic"),
+            (SearchMode::Hybrid, "hybrid"),
+        ] {
+            let mut req = request("attention mechanism");
+            req.mode = mode;
+            req.limit = Some(5);
+            let response = service.search(req).await.expect("search");
+
+            eprintln!("\n=== {label}: {} hits ===", response.hits.len());
+            eprintln!("semantic: {:?}", response.semantic);
+            for hit in &response.hits {
+                eprintln!(
+                    "  {:.5}  p{}-{}  {:?}  {}",
+                    hit.score,
+                    hit.chunk.page_start,
+                    hit.chunk.page_end,
+                    hit.chunk.heading_path.as_deref().unwrap_or("-"),
+                    hit.chunk.text.chars().take(70).collect::<String>()
+                );
+            }
+            assert!(!response.hits.is_empty(), "{label} returned nothing");
+        }
+    }
+
+    fn dirs_app_data() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap())
+            .join("Library/Application Support/com.i0i.app")
+    }
+
     #[tokio::test]
     async fn limit_is_respected() {
         let fx = fixture();
