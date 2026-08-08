@@ -102,24 +102,22 @@ agent that decided it had enough.
 This is the subtle one, and the reason to write it down before building.
 
 RFC 0077 mints `[C1]`, `[C2]` … at assembly time, in emission order. In a loop
-that is a bug waiting to happen: the agent retrieves passage X in iteration 1,
-sees it referred to one way, retrieves passage Y in iteration 3, and the final
-assembly renumbers both. A marker the model formed an intention about now points
-at a different passage.
+that looks like a bug waiting to happen: the agent retrieves passage X in
+iteration 1, retrieves passage Y in iteration 3, and the final assembly
+renumbers both. A marker the model formed an intention about now points at a
+different passage.
 
-So handles are assigned **once per turn**, as chunks first arrive, and are
-frozen:
+**Resolved by never showing a handle during the loop.** Tool results identify
+passages by `chunk_id`, not by `[Cn]`:
 
 ```text
-iteration 1   retrieves A, B   → C1, C2
-iteration 2   retrieves C      → C3
-final assembly                 → C1, C2, C3, unchanged
+- id=chunk_88:4 p7 · Method · Scaling :: We divide by sqrt(d_k) because…
 ```
 
-The final prompt may emit them in a different *order* (persistent items lead),
-but never under a different *number*. Handles stay per-turn — across turns the
-same chunk can be `C1` then `C3`, which is fine because each answer stores its
-own map.
+Handles are still minted once, at final assembly. The model sees ids while
+*deciding* and markers while *writing*, and the two never overlap — so there is
+nothing to keep stable. Freezing handles per turn would also have worked; this
+is the same guarantee with no machinery.
 
 ## What has to change underneath
 
@@ -293,7 +291,7 @@ answers slightly less well.
 |---|---|
 | A question needing no retrieval | zero tool calls, one round trip |
 | Existing single-turn asks | same answer quality, no slower |
-| Handles | stable from first retrieval through the final prompt |
+| Handles | never shown during the loop, so they cannot go stale |
 | Capped turn | answers, and says it was capped |
 | Malformed tool call | turn completes |
 | An answer citing 1 of 5 passages | 1 reference stored, not 5 |
@@ -317,7 +315,8 @@ Say the word on any of these:
    later RFC — the scope plumbing already supports it.
 6. **`search_context` returns previews, not full text.** Full text arrives once,
    in the final assembly.
-7. **Handles are frozen per turn**, assigned as chunks arrive.
+7. **Handles are never exposed during the loop.** The model works in chunk ids
+   while deciding and markers while writing, so there is nothing to freeze.
 8. **No agent-initiated compaction.** Compaction is lossy and stays yours.
 9. **Only cited passages become references** — and this is applied to RFC 0077's
    shipped behaviour too, not held back for the agentic loop. It is a small

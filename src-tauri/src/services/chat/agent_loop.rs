@@ -277,9 +277,13 @@ where
     if lines.is_empty() {
         return "Those passages are already in front of you.".to_string();
     }
+    // Deliberately no [C…] handles here. Handles are minted once, at final
+    // assembly; showing provisional ones mid-loop would let the model form an
+    // intention about a number that later renumbers, and cite the wrong
+    // passage. The model sees chunk ids while deciding, markers while writing.
     format!(
-        "{} passage(s). Full text is already in your context; \
-         cite them by their [C…] markers.\n{}",
+        "{} passage(s). Their full text will appear in your context with \
+         [C…] markers — cite the marker shown there, not these ids.\n{}",
         lines.len(),
         lines.join("\n")
     )
