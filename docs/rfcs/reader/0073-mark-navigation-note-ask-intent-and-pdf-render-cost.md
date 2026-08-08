@@ -2,6 +2,9 @@
 
 Status: Implemented — R1, R2, R3 Phase 0 + Phase 1 + Phase 1.5 landed
 (`pnpm check` 0 errors, `pnpm build` green, `cargo test --lib` 269 passed).
+**R3 Phase 2 was measured and then dropped** — see "The measurement, taken" at
+the end of this RFC. Scheduling far pages' text layers onto idle time delivers
+the whole win without virtualization's behavioral risk. The original gate read:
 **R3 Phase 2 is not implemented and should not be** until the measurement below
 says it is needed. The behavioral checks in the Verification table — including
 the RFC 0069 quote-resolution regression check — need a live app run.
@@ -377,6 +380,122 @@ Record the numbers in this RFC when they land. Everything above is arithmetic
 from real document measurements, but **no profile has been taken** — the phases
 are ordered so that the cheapest change comes first and the riskiest one is
 gated behind evidence that it is needed.
+
+### The measurement, taken — and what it changed
+
+Taken by mounting the real `ReaderView` in headless Chrome against a stubbed
+Tauri bridge, timing `publish → first painted pixel` over 3-4 warmed runs per
+configuration, on a 320KB/19-page and a 28MB/43-page document.
+
+| configuration | publish → first ink |
+| --- | --- |
+| eager text layers, 19 pages | ~130-190ms |
+| eager text layers, 43 pages | ~270-420ms |
+| scheduled, either document | ~50-110ms |
+
+**The cost scales with page count, so Phase 2's premise was right — but its
+prescription was wrong.** The problem is not that far pages *have* text layers,
+it is that they build them on the critical path to first paint. Scheduling fixes
+that; virtualization is not needed, and none of the three behaviors Phase 2 would
+have broken are touched: every page still gets a text layer, so cross-page
+selection, `updateSelectionAffordance`, and both `resolveQuote` waits keep
+working unchanged.
+
+> **Correction.** The paragraph above was written from *open-latency* data and
+> then over-generalized into a verdict on Phase 2 as a whole. It is right about
+> opening and wrong about scrolling — see "Scroll" below. The text layers still
+> all exist; scheduling only changes *when* they are built, not what the engine
+> must lay out on every subsequent frame.
+
+**Implemented instead of Phase 2:** pages beyond the first
+`EAGER_TEXT_LAYER_PAGES` (2) build their text layer inside
+`requestIdleCallback(…, { timeout: 2000 })`. Two details are load-bearing:
+
+- **Keyed on `pageNumber`, not `isNear`.** Reading `isNear` in that effect would
+  make it re-run on every scroll — reintroducing precisely the teardown thrash
+  the Phase 1 effect split exists to prevent.
+- **The first two pages stay synchronous.** A page that is visible and
+  canvas-painted but has no text layer is one you cannot select text on. Idle
+  scheduling every page would open that window on the page the user is actually
+  looking at, for up to the 2s timeout under load.
+
+The `timeout` is not optional: a starved idle callback would mean a text layer
+that never renders, and therefore a quote that can never be resolved.
+
+Phase 2 as drafted (virtualization + the `getTextContent()` hybrid) is
+**dropped** — but for the reason in "Scroll" below, not because the text layers
+stopped mattering once opening was fast.
+
+### Scroll — a second, separate cost with the same root
+
+Scrolling stayed laggy after the change above, because scheduling does not
+reduce how much text layer exists — only when it is built. Every page's spans
+remain in the scroll container:
+
+| document | pages | live spans | worst page |
+| --- | --- | --- | --- |
+| 15pp paper | 15 | 2,869 | 304 |
+| 19pp paper | 19 | 4,071 | 685 |
+| DeepSeek-V3 | 53 | 9,071 | 647 |
+| 28MB paper | 43 | **21,829** | 965 |
+
+Frame intervals while driving `.pdf-scroll` from `requestAnimationFrame`, canvas
+rendering held constant across arms (2 live canvases in every case):
+
+| arm | spans | worst frame | frames > 32ms |
+| --- | --- | --- | --- |
+| all 43 text layers | 20,343 | 140-190ms | 2-3 / 198 |
+| near pages only | 475 | 21-46ms | 0-1 / 198 |
+| no text layers | 0 | 17-21ms | 0 / 198 |
+
+Jank scales with span count with canvas work fixed, so the spans are causal.
+The same spikes appear in a production build (184-197ms), so this is not a
+dev-mode artifact.
+
+**Fix: `content-visibility: auto` on `.pdf-rendered-page`**, with
+`contain-intrinsic-size` set inline from the measured page box. The engine skips
+layout and paint for off-screen pages while every span stays in the DOM — which
+is why this is preferable to Phase 2's virtualization: nothing is unmounted, so
+cross-page selection, `updateSelectionAffordance`, and both `resolveQuote` waits
+keep working with no `getTextContent()` fallback path to build.
+
+The correctness gate was whether geometry survives skipping, since RFC 0069
+derives rects from `getBoundingClientRect()`. It does — measured on page 30 of
+the 43-page document, a span's rect and its normalized position within the page
+are **identical to four decimal places** with and without the property.
+
+Result: worst frame 140-190ms → **30-45ms**, zero janky frames on slow scroll,
+scroll height unchanged. Remaining fast-scroll hitches (~40ms) are canvas
+renders as pages cross the render margin — inherent to painting PDF pages, and
+an order of magnitude smaller than what they replaced.
+
+### The larger cost this measurement uncovered
+
+Profiling first paint surfaced a bigger cost than anything in R3: `get_reader_pdf_bytes`
+returned `Vec<u8>`, which serde serializes as a **JSON array of integers**. A
+28MB PDF crossed the IPC as a 101MB string.
+
+Fixed by returning `tauri::ipc::Response`, which sends the bytes raw
+(`application/octet-stream`) and arrives in JS as an `ArrayBuffer`. This is
+independent of R3 and is by far the dominant win.
+
+**Measured in the running app**, timing the `invoke` round-trip with both
+commands registered side by side and the page cache warm:
+
+| PDF | `Vec<u8>` (before) | `Response` (after) |
+| --- | --- | --- |
+| 0.5MB | 78ms | 2ms |
+| 3.7MB | 550-569ms | 3-5ms |
+| 8.5MB | 1281-1291ms | 6-8ms |
+| 28.3MB | 4285ms | 19ms |
+
+Component benchmarks badly understated this. Isolated `serde_json::to_string`
+(237ms at 28MB) plus isolated `JSON.parse` (540ms) predicted ~800ms; the real
+round-trip was **4285ms**. The gap is the IPC transport itself moving a 101MB
+string plus the webview materializing 30M boxed numbers, and it grows
+superlinearly with file size. The lesson for future perf work here: **measure
+the round-trip in the app**, not the stages in isolation — a harness that stubs
+the bridge cannot see the cost that dominates.
 
 ### Alternatives considered
 

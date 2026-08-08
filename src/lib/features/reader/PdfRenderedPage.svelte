@@ -25,6 +25,12 @@
   // of pages hot, so ordinary scrolling never waits on a render.
   const RENDER_MARGIN = "150% 0px";
 
+  // RFC 0073 Phase 2: how many leading pages build their text layer on the
+  // critical path. Two, because at the default scale the viewport shows page 1
+  // and the top of page 2 — those are the pages a user can select text on
+  // before an idle callback would have run.
+  const EAGER_TEXT_LAYER_PAGES = 2;
+
   let {
     pdfDocument,
     pageNumber,
@@ -136,6 +142,18 @@
   //
   // The text layer belongs to the document, not to the viewport: it renders once
   // per (document, scale) and stays. Only `textReady` is touched here.
+  //
+  // RFC 0073 Phase 2 (measured): every page building its text layer eagerly is
+  // what made opening scale with page count — `publish → first ink` was ~270-420ms
+  // on a 43-page document versus ~90ms when the far pages got out of the way.
+  // The fix turned out to be *scheduling*, not virtualization: the pages the
+  // reader opens on render their text layer immediately, the rest go to idle
+  // time. Every page still gets one, so `resolveQuote` (RFC 0069) is unaffected
+  // — it just arrives a few frames later on pages nobody is looking at yet.
+  //
+  // Deliberately keyed on `pageNumber`, not `isNear`: reading `isNear` here
+  // would make this effect re-run on every scroll, tearing down and rebuilding
+  // text layers — the exact thrash the Phase 1 effect split exists to prevent.
   $effect(() => {
     const document = pdfDocument;
     const currentScale = scale;
@@ -152,28 +170,51 @@
       return;
     }
 
-    document
-      .getPage(pageNumber)
-      .then(async (page) => {
-        if (cancelled) {
-          return;
-        }
-        const viewport = page.getViewport({ scale: currentScale });
-        textLayerTask = renderTextLayer(page, viewport, textLayer);
-        await textLayerTask.render();
-      })
-      .catch((nextError) => {
-        if (!cancelled && !isCancelledRenderError(nextError)) {
-          console.error("[pdf-render] text-layer-error", { pageNumber, error: nextError });
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          // Text layer is rendered (or this page errored out and never will be);
-          // either way, release quote-resolution awaiters (RFC 0069).
-          markTextReady();
-        }
-      });
+    function renderNow() {
+      return document
+        .getPage(pageNumber)
+        .then(async (page) => {
+          if (cancelled) {
+            return;
+          }
+          const viewport = page.getViewport({ scale: currentScale });
+          textLayerTask = renderTextLayer(page, viewport, textLayer!);
+          await textLayerTask.render();
+        })
+        .catch((nextError) => {
+          if (!cancelled && !isCancelledRenderError(nextError)) {
+            console.error("[pdf-render] text-layer-error", { pageNumber, error: nextError });
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            // Text layer is rendered (or this page errored out and never will
+            // be); either way, release quote-resolution awaiters (RFC 0069).
+            markTextReady();
+          }
+        });
+    }
+
+    // The pages the reader opens on keep their text layer synchronously: a
+    // visible page with a painted canvas but no text layer is one you cannot
+    // select text on, and that window would otherwise last until idle.
+    if (pageNumber <= EAGER_TEXT_LAYER_PAGES) {
+      void renderNow();
+    } else {
+      // `timeout` matters: without it a busy main thread can starve the callback
+      // indefinitely, and a text layer that never renders is a quote that can
+      // never be resolved.
+      const schedule =
+        window.requestIdleCallback ?? ((callback: () => void) => window.setTimeout(callback, 0));
+      schedule(
+        () => {
+          if (!cancelled) {
+            void renderNow();
+          }
+        },
+        { timeout: 2000 },
+      );
+    }
 
     return () => {
       cancelled = true;
@@ -545,7 +586,7 @@
   bind:this={pageElement}
   class="pdf-rendered-page"
   class:placing-note={activeTool === "note"}
-  style={`width: ${pageWidth}px; height: ${pageHeight}px; --scale-factor: ${scale}; --user-unit: 1; --total-scale-factor: ${scale}; --scale-round-x: 1px; --scale-round-y: 1px;`}
+  style={`width: ${pageWidth}px; height: ${pageHeight}px; contain-intrinsic-size: ${pageWidth}px ${pageHeight}px; --scale-factor: ${scale}; --user-unit: 1; --total-scale-factor: ${scale}; --scale-round-x: 1px; --scale-round-y: 1px;`}
   onclick={handlePageClick}
 >
   <canvas bind:this={canvasElement} aria-label={`PDF page ${pageNumber}`}></canvas>
@@ -631,6 +672,16 @@
 
 <style>
   .pdf-rendered-page {
+    /* RFC 0073 Phase 2 (measured): every page keeps a full text layer, and a
+       43-page paper carries ~22k absolutely-positioned spans. Laying those out
+       during a scroll produced ~150-190ms frame spikes. `content-visibility`
+       lets the engine skip layout and paint for off-screen pages while leaving
+       every span in the DOM, so quote resolution (RFC 0069) and cross-page
+       selection are untouched — `getBoundingClientRect()` on a skipped subtree
+       still returns exact geometry (verified: identical to 4dp on page 30 of a
+       43-page document). `contain-intrinsic-size` is set inline from the
+       measured page box so the scroll height stays correct while skipped. */
+    content-visibility: auto;
     position: relative;
     flex-shrink: 0;
     overflow: hidden;

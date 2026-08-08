@@ -91,6 +91,9 @@
           return;
         }
 
+        // `bytes` is an ArrayBuffer straight off the IPC, so this wraps rather
+        // than copies. pdf.js takes ownership and detaches the buffer — nothing
+        // may read `bytes` after this line.
         loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(bytes) });
         const document = await loadingTask.promise;
         if (cancelled) {

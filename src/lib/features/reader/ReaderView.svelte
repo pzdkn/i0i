@@ -75,6 +75,13 @@
   let threads = $state<ChatThreadSummary[]>([]);
   let pins = $state<PinnedHighlight[]>([]);
   let highlights = $state<Highlight[]>([]);
+  // Declared before its first use, which is `loadActiveColor()` in the
+  // `stickyColor` initializer below. A `const` is hoisted but stays in the
+  // temporal dead zone until its own declaration runs, so moving this back down
+  // makes every ReaderView mount throw "Cannot access 'TOOL_COLOR_KEY' before
+  // initialization" — and a reader that throws on init renders nothing at all.
+  const TOOL_COLOR_KEY = "i0i.reader-active-color";
+
   // RFC 0058 Phase 1 (Task 9): the last color picked (swatch or note/ask) is
   // the sticky default for the next one-click highlight. RFC 0074 promotes it
   // to the *active color* shared by the tools, the swatch row, and the popover.
@@ -82,8 +89,6 @@
   // RFC 0074: the active annotation tool. `null` = the reader behaves as it
   // always has (a selection raises the Note/Ask/Highlight popover).
   let activeTool = $state<"highlight" | "note" | null>(null);
-
-  const TOOL_COLOR_KEY = "i0i.reader-active-color";
 
   function loadActiveColor(): HighlightColor {
     if (typeof localStorage === "undefined") {

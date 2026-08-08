@@ -158,8 +158,12 @@ export async function probeDiscoveryCandidatePdf(
   });
 }
 
-export async function getReaderPdfBytes(sourceId: string): Promise<number[]> {
-  return invoke<number[]>("get_reader_pdf_bytes", {
+/// Raw PDF bytes as an `ArrayBuffer`. The command returns `tauri::ipc::Response`
+/// so the bytes cross the IPC as `application/octet-stream` rather than a JSON
+/// array of integers — see the comment on `get_reader_pdf_bytes` in
+/// `commands/reader.rs` for the measurements behind that.
+export async function getReaderPdfBytes(sourceId: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("get_reader_pdf_bytes", {
     sourceId,
   });
 }

@@ -220,6 +220,32 @@ Five deviations from the draft:
 `hasExistingHighlight` needed no change — it delegates to `samePassage`, so the
 point arms added there cover it.
 
+### Post-landing defect: `TOOL_COLOR_KEY` temporal dead zone
+
+The first landing of R2 broke **every reader open**, PDF and HTML alike: clicking
+a paper in the vault created its tab and rendered nothing. `ReaderView` declared
+
+```js
+let stickyColor = $state(loadActiveColor());   // calls it here
+const TOOL_COLOR_KEY = "i0i.reader-active-color";   // …declared after
+```
+
+`loadActiveColor` is a function *declaration*, so it hoists and is callable — but
+its body reads `TOOL_COLOR_KEY`, and a `const` stays in the temporal dead zone
+until its own declaration executes. Every mount threw `Cannot access
+'TOOL_COLOR_KEY' before initialization` during component init, which in Svelte 5
+takes the whole subtree down silently. Fixed by hoisting the constant above its
+first use.
+
+Worth recording because **no static check in this repo could have caught it**:
+`pnpm check`, `pnpm build`, and `cargo test --lib` were all green while the app
+was unusable. TypeScript deliberately permits use-before-declaration across a
+function boundary (the function might only be called later), so this is a lint
+concern (`no-use-before-define`), not a type one. It was found by mounting the
+real `ReaderView` in headless Chrome against a stubbed Tauri bridge and reading
+`pageerror` — the reader has no automated mount coverage, and that gap is what
+let a one-line ordering mistake ship as a total outage.
+
 ## Verification
 
 | # | Change | How it is verified |

@@ -124,18 +124,37 @@ pub fn get_reader_html(
 }
 
 /// Read PDF bytes for either a durable or temporary Reader source id.
+///
+/// Returns `tauri::ipc::Response`, NOT `Vec<u8>`. A `Vec<u8>` return value is
+/// serialized by serde as a JSON array of integers, so a 28MB PDF crosses the
+/// IPC as a 101MB string that the webview must then parse into 30M boxed
+/// numbers. `Response` sends the bytes raw (`application/octet-stream`) and the
+/// frontend receives an `ArrayBuffer` it hands straight to pdf.js.
+///
+/// Measured in the running app (`invoke` round-trip, warm page cache):
+///
+/// | PDF | `Vec<u8>` | `Response` |
+/// | --- | --- | --- |
+/// | 0.5MB | 78ms | 2ms |
+/// | 3.7MB | 550ms | 3ms |
+/// | 8.5MB | 1281ms | 6ms |
+/// | 28.3MB | 4285ms | 19ms |
+///
+/// The cost is superlinear in file size, which is why this mattered far more
+/// than an isolated `JSON.parse` benchmark suggested. Do not "simplify" this
+/// back to `Vec<u8>`.
 #[tauri::command]
 pub fn get_reader_pdf_bytes(
     reader_service: tauri::State<'_, ReaderService>,
     source_id: String,
-) -> Result<Vec<u8>, String> {
+) -> Result<tauri::ipc::Response, String> {
     reader_log(format!("get_reader_pdf_bytes start source_id={source_id}"));
     let bytes = reader_service.get_reader_pdf_bytes(&source_id)?;
     reader_log(format!(
         "get_reader_pdf_bytes ok source_id={source_id} bytes={}",
         bytes.len()
     ));
-    Ok(bytes)
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Queue text extraction for a saved paper's cached PDF.
