@@ -1,6 +1,6 @@
 # RFC 0077: ContextManager — the agent's working memory
 
-Status: Proposed
+Status: Implemented
 Date: 2026-08-08
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -58,7 +58,7 @@ The distinction the user asked for, made concrete:
 
 | | Ephemeral | Persistent |
 |---|---|---|
-| Examples | current selection, current page, the open paper | chunks the agent or user added |
+| Examples | current selection, the open paper, this turn's retrieval | chunks the agent or user added |
 | Lifetime | one `get_context` call | until deleted or compacted |
 | Where it lives | **a function parameter** | a SQLite table |
 | Survives restart | no | yes |
@@ -75,12 +75,14 @@ deleted" has to mean *across restarts*, and a process-lifetime `HashMap` loses
 it on quit.
 
 ```rust
-pub struct EphemeralContext<'a> {
-    pub paper_id: &'a str,
-    pub selection: Option<&'a str>,
-    pub page_index: Option<i32>,
+pub struct EphemeralContext {
+    pub paper_id: String,
+    pub selection: Option<String>,
 }
 ```
+
+No `page_index`: nothing produces the current page at ask time, and a field no
+caller fills is a field that lies. Ambient page context is a later change.
 
 ## Schema
 
@@ -171,7 +173,8 @@ pub struct ContextCitation {
     pub paper_id: String,
     pub page_start: i32,
     pub heading_path: Option<String>,
-    pub rects: Vec<PageRects>, // page_index + normalized rects
+    pub chunk_id: Option<String>,
+    pub rects_json: String,   // a JSON array of PageRects
 }
 ```
 
@@ -248,13 +251,20 @@ existing `CHARS_PER_TOKEN = 4`:
 
 Fill in this order, stopping when the budget is spent:
 
-| # | Item | Why here |
-|---|---|---|
-| 0 | Ephemeral selection | **outside the budget** — see below |
-| 1 | Compaction summary | the only record of what was dropped |
-| 2 | Entries after the watermark | the live conversation |
-| 3 | Persistent chunks, newest first | added deliberately, but replaceable |
-| 4 | Paper head-text fallback | today's behaviour, when 1–3 leave room |
+| # | Item | Why here | In the budget? |
+|---|---|---|---|
+| 0 | Ephemeral selection | the question is about *this* | no — see below |
+| 1 | Compaction summaries | the only record of what was dropped | yes |
+| 2 | Entries after the watermark | the live conversation | no — as today |
+| 3 | Persistent chunks, newest first | added deliberately, but replaceable | yes |
+| 4 | Retrieved chunks (this turn) | ephemeral, re-selected each turn | yes |
+| 5 | Paper head text | today's behaviour, with what is left | takes the remainder |
+
+**The budget governs context items, not the whole prompt.** Entries are not
+charged, because they never have been: the thread's turns have always been sent
+in full. Charging them would shrink the paper text on any thread with history,
+which is a regression dressed as a budget. Compaction still bounds them — via
+the watermark, not the budget.
 
 Row 0 is outside the budget because that is what happens today:
 `build_context` gives the paper its full 32,000 chars *and* adds the anchor
@@ -263,11 +273,12 @@ passage on top — the test
 Charging the selection against the budget would shrink the paper text on every
 anchored ask, which is a silent regression on the most common ask in the app.
 
-Rows 3 and 4 have two different orders. Chunks are *selected* newest-first when
-the budget is tight, and *emitted* in `position` ascending so the prompt reads
-in the order the context was built.
+Row 3 has two different orders. Chunks are *selected* newest-first when the
+budget is tight, and *emitted* in `position` ascending so the prompt reads in
+the order the context was built. `added_chunks_appear_as_numbered_citable_passages`
+pins the emission order.
 
-Row 4 keeps the current experience intact for a thread with no context items —
+Row 5 keeps the current experience intact for a thread with no context items —
 which is every existing thread. Without it, this RFC would be a regression on
 day one.
 
@@ -357,6 +368,18 @@ One RFC, but built and verified in this order so a failure is never ambiguous:
 
 Step 1 is the only database migration. Step 5 is the only UI risk.
 
+### What landed
+
+| Piece | Where |
+|---|---|
+| `chat_context_items` + cascade | `storage/library_store.rs` |
+| `chunk_rects`, `chunks_overlapping` | `storage/library_store.rs` |
+| the five methods | `services/chat/context_manager.rs` |
+| pre-answer retrieval, compaction call | `services/chat/service.rs` |
+| commands | `commands/context.rs` |
+| `[C1]` rendering + jump | `features/reader/CitedAnswer.svelte`, `cited-answer.ts`, `ReaderView.svelte` |
+| transient passage flash | `PdfPage.svelte` → `PdfRenderedPage.svelte` |
+
 ## Risks
 
 **R1 — Tool calls in the answer path.** `annotate_streamed`'s doc comment says
@@ -383,7 +406,7 @@ thread, and `dropped_items` is reported. Not fully solved.
 **R3 — Re-resolution widens a passage.** Covered above: after a rechunk, an item
 may resolve to more text than was added. Bounded by the same token budget.
 
-**R4 — Budget row 4 masks an empty context.** If the paper-text fallback always
+**R4 — Budget row 5 masks an empty context.** If the paper-text fallback always
 fills the remaining space, a user may not notice their context items were
 dropped. `context_items` / `dropped_items` in the summary is what the UI needs
 to show it.
@@ -413,16 +436,22 @@ Chosen on your behalf — say the word on any of them:
 4. **Compaction is manual.** No token-threshold auto-trigger in phase 1.
 5. **Compaction uses `annotation_model`**, not the answer model.
 6. **Tokens are the currency**, converted at 4 chars/token.
-7. **Row 4 exists** — the paper-text fallback stays, so nothing regresses, and
-   the selection stays outside the budget as it is today.
+7. **Row 5 exists** — the paper-text fallback stays, so nothing regresses, and
+   the selection stays outside the budget as it is today. Chat entries are not
+   charged against the budget either, for the same reason.
 8. **Phase 1 is pre-answer retrieval**, not mid-turn tool calls (R1).
 9. **Citations are block-level**, so a click lands on the paragraph, not the
    sentence. Sentence precision would need span offsets the chunk does not
    carry.
 10. **Citation handles are `[C1]`-style and not stored**; the map that resolves
     them is stored on the answer entry.
-11. **`get_context` returns OpenRouter `WireMessage`s.** Convenient, but it
-   couples ContextManager to one provider's wire format — the opposite of what
-   we did for SearchService. The alternative is a neutral
-   `Vec<ContextBlock { role, text }>` that `chat/service.rs` converts. Cheap to
-   change now, annoying later; say if you want the neutral shape.
+11. **`get_context` is provider-neutral** — resolved the other way during
+    implementation. It returns `AssembledContext { system_prompt, entries,
+    summary }`; `chat/service.rs` converts to OpenRouter `WireMessage`s. Same
+    instinct that kept SearchService caller-agnostic.
+12. **`EphemeralContext` carries `paper_id` and `selection`, not `page_index`.**
+    Nothing produces the current page at ask time, and a field no caller fills
+    is a field that lies. Ambient page context is a later change.
+13. **Citations live on `ChatContextSummary`**, which is already serialized into
+    `chat_entries.context_json` — so the map that resolves `[C1]` is stored with
+    the answer that wrote it, with no schema change.

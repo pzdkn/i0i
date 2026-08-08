@@ -84,3 +84,9 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 - [x] RFC 0070 - Vault papers can now be exported as a BibTeX (`.bib`) file for LaTeX.
 - [x] RFC 0071 - The reader now has a Zotero-style tool panel and a collapsible Info/Notes/Chat sidebar.
+- [x] RFC 0072 - Reader titles no longer clip, notes attach reliably, and un-extracted imports are visible to the AI.
+- [x] RFC 0073 - Marks can be opened from the list to jump the document, Note and Ask are explicit intents, and PDF render cost is bounded.
+- [x] RFC 0074 - Sticky notes can be placed anywhere on a page, with Zotero-style annotation tools.
+- [x] RFC 0075 - PDFs now extract into sub-page blocks and spans, chunk structurally, and embed locally.
+- [x] RFC 0076 - Papers can be searched by wording and by meaning at once, from the title bar or any scope.
+- [x] RFC 0077 - Chat has a ContextManager: passages can be added, compacted, and cited back to the page they came from.
