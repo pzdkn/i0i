@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::domain::discovery::PaperCandidate;
 
+pub mod chunk_worker;
 #[cfg(feature = "embeddings")]
 pub mod fastembed_backend;
 
@@ -23,24 +24,49 @@ pub mod fastembed_backend;
 /// tokenization cost.
 const ABSTRACT_EMBED_CHARS: usize = 400;
 
-/// Build the reranker at app startup. With the `embeddings` feature enabled it
-/// loads the local model (caching under `cache_dir`); without the feature, or on
-/// any load failure, it returns a disabled reranker and ranking transparently
-/// uses legacy weights.
-pub fn build(cache_dir: std::path::PathBuf) -> EmbeddingReranker {
+/// Identifies which vector space a stored embedding belongs to. Persisted on
+/// every `document_chunk_embeddings` row so a model swap is a re-embed rather
+/// than a silent mix of incompatible vectors (RFC 0075).
+pub const MODEL_NAME: &str = "bge-small-en-v1.5";
+pub const MODEL_VERSION: &str = "1";
+
+/// Dimensionality of `MODEL_NAME`. Recorded per row rather than assumed, but
+/// useful for sizing buffers.
+pub const MODEL_DIMENSIONS: usize = 384;
+
+/// Load the local model once at startup, for every consumer that needs it.
+///
+/// Returns `None` when the `embeddings` feature is off or the model fails to
+/// load. Callers decide what that means for them: the reranker degrades to
+/// legacy weights, while chunk embedding reports zero coverage (RFC 0075 R5).
+pub fn load_embedder(cache_dir: std::path::PathBuf) -> Option<Arc<dyn TextEmbedder>> {
     // Borrowed so the parameter is "used" even when the feature is off.
     let _ = &cache_dir;
     #[cfg(feature = "embeddings")]
     match fastembed_backend::FastEmbedder::load(cache_dir) {
         Ok(embedder) => {
             eprintln!("[embedding] local model ready");
-            return EmbeddingReranker::with_embedder(Arc::new(embedder));
+            return Some(Arc::new(embedder));
         }
         Err(error) => {
-            eprintln!("[embedding] model load failed; ranking uses legacy weights: {error}");
+            eprintln!("[embedding] model load failed: {error}");
         }
     }
-    EmbeddingReranker::disabled()
+    None
+}
+
+/// Build the reranker around an already-loaded embedder.
+///
+/// Separate from `load_embedder` so the ~130 MB model is loaded once and shared
+/// with the chunk-embedding worker rather than loaded twice.
+pub fn build_reranker(embedder: Option<Arc<dyn TextEmbedder>>) -> EmbeddingReranker {
+    match embedder {
+        Some(embedder) => EmbeddingReranker::with_embedder(embedder),
+        None => {
+            eprintln!("[embedding] no model; ranking uses legacy weights");
+            EmbeddingReranker::disabled()
+        }
+    }
 }
 
 /// A synchronous text embedder. Implementations are CPU-bound and pure, so the
@@ -148,7 +174,10 @@ fn candidate_embed_text(candidate: &PaperCandidate) -> String {
 
 /// Cosine similarity of two equal-length vectors, in `[-1, 1]`. Returns 0 for a
 /// length mismatch or a zero-magnitude vector (both are "no usable signal").
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+///
+/// A length mismatch is how a stale embedding from a different model shows up,
+/// so scoring it as "no signal" is the safe reading rather than an error.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }

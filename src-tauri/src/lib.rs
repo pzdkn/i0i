@@ -92,18 +92,44 @@ pub fn run() {
             // feature is built in; ranking falls back to legacy weights. Built
             // before SearchManager so deep research can rank semantically too
             // (RFC 0057).
-            let embedding_reranker = {
+            //
+            // Loaded once and shared: the reranker and the chunk-embedding
+            // worker (RFC 0075) use the same ~130 MB model, and loading it
+            // twice would cost that twice for nothing.
+            let embedder = {
                 let cache_dir = app
                     .path()
                     .app_data_dir()
                     .map(|dir| dir.join("models"))
                     .unwrap_or_else(|_| std::path::PathBuf::from("models"));
-                services::embedding::build(cache_dir)
+                services::embedding::load_embedder(cache_dir)
             };
+            let embedding_reranker = services::embedding::build_reranker(embedder.clone());
             eprintln!(
                 "[embedding] reranker ready={}",
                 embedding_reranker.is_ready()
             );
+
+            // Chunk embeddings (RFC 0075). The startup sweep re-chunks anything
+            // below the current chunk version, then embeds whatever is missing.
+            // Spawned rather than awaited: a first run over an existing library
+            // is minutes of CPU, and the app is fully usable without it —
+            // lexical search answers on its own.
+            let chunk_embedder = services::embedding::chunk_worker::ChunkEmbeddingWorker::new(
+                store.clone(),
+                embedder,
+            );
+            eprintln!("[embedding] chunk worker ready={}", chunk_embedder.is_ready());
+            {
+                let worker = chunk_embedder.clone();
+                tauri::async_runtime::spawn(async move {
+                    let outcome = worker.recover_and_sweep().await;
+                    eprintln!(
+                        "[embedding] startup sweep embedded={} failed={}",
+                        outcome.embedded, outcome.failed
+                    );
+                });
+            }
             let search_manager = SearchManager::new(
                 app.handle().clone(),
                 store.clone(),
@@ -126,6 +152,7 @@ pub fn run() {
             app.manage(discovery_providers);
             app.manage(search_manager);
             app.manage(embedding_reranker);
+            app.manage(chunk_embedder);
             app.manage(query_expander);
             app.manage(settings_store);
             Ok(())
