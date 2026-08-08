@@ -73,12 +73,6 @@ pub fn run() {
                 store.clone(),
                 source_acquisition.clone(),
             );
-            let chat_service = ChatService::from_app_config(
-                app.handle().clone(),
-                store.clone(),
-                reader_service.clone(),
-            )
-            .map_err(std::io::Error::other)?;
             let discovery_providers = commands::discovery::DiscoveryProviders::from_app_config()
                 .map_err(std::io::Error::other)?;
             let metadata_enrichment = MetadataEnrichmentService::new(
@@ -126,6 +120,24 @@ pub fn run() {
             // discovery, which is SearchManager above.
             let search_service =
                 services::search::SearchService::new(store.clone(), embedder_for_search);
+
+            // The agent's working memory (RFC 0077). Built after SearchService
+            // because ContextManager is the only door to retrieval — ChatService
+            // never calls search directly.
+            let chat_config = services::chat::config::ChatConfig::load()
+                .map_err(std::io::Error::other)?;
+            let context_manager = services::chat::ContextManager::new(
+                store.clone(),
+                std::sync::Arc::new(search_service.clone()),
+                chat_config.max_context_chars,
+            );
+            let chat_service = ChatService::new(
+                app.handle().clone(),
+                chat_config,
+                store.clone(),
+                reader_service.clone(),
+                context_manager.clone(),
+            );
             {
                 let worker = chunk_embedder.clone();
                 tauri::async_runtime::spawn(async move {
@@ -177,6 +189,7 @@ pub fn run() {
             app.manage(embedding_reranker);
             app.manage(chunk_embedder);
             app.manage(search_service);
+            app.manage(context_manager);
             app.manage(query_expander);
             app.manage(settings_store);
             Ok(())
@@ -193,6 +206,10 @@ pub fn run() {
             commands::library::get_library,
             commands::search::search_chunks,
             commands::search::chunk_embedding_coverage,
+            commands::context::add_chat_context,
+            commands::context::delete_chat_context,
+            commands::context::list_chat_context,
+            commands::context::compact_chat_context,
             commands::library::add_paper_to_vaults,
             commands::library::import_local_pdfs,
             commands::library::import_html_url,

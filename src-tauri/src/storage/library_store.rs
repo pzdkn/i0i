@@ -12,6 +12,8 @@ use crate::domain::chat::{
     PinnedHighlight, ThreadAnchor, ENTRY_ANSWER, ENTRY_NOTE, ENTRY_QUESTION,
 };
 use crate::domain::chunking::{chunk_blocks, CHUNK_VERSION};
+use crate::domain::context::{ContextItem, ContextItemDraft, ContextKey, PageRects};
+use crate::pdf_layout::NormRect;
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
     CiteRecord, DocumentAsset, DocumentBlock, DocumentChunk, DocumentExtraction, DocumentPage,
@@ -1635,6 +1637,143 @@ impl LibraryStore {
         read_chat_entry(&conn, &id)
     }
 
+    // ---- Chat context items (RFC 0077) ----
+
+    /// Append a persistent context item, assigning the next `position`.
+    ///
+    /// Position is derived inside the transaction so two concurrent adds cannot
+    /// collide on the unique `(thread_id, position)` index.
+    pub fn insert_context_item(
+        &self,
+        thread_id: &str,
+        draft: &ContextItemDraft,
+    ) -> StoreResult<ContextItem> {
+        let id = timestamped_id("ctx")?;
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        insert_context_item_tx(&tx, &id, thread_id, draft)?;
+        tx.commit().map_err(|error| error.to_string())?;
+
+        let conn = self.open_connection()?;
+        read_context_item(&conn, &id)
+    }
+
+    /// Every persistent item for a thread, in emission order.
+    pub fn context_items(&self, thread_id: &str) -> StoreResult<Vec<ContextItem>> {
+        let conn = self.open_connection()?;
+        read_context_items(&conn, thread_id)
+    }
+
+    /// Delete one item by whichever key the caller holds. Returns whether a row
+    /// was removed — a delete of something already gone is not an error.
+    pub fn delete_context_item(&self, thread_id: &str, key: &ContextKey) -> StoreResult<bool> {
+        let conn = self.open_connection()?;
+        let removed = match key {
+            ContextKey::Item(id) => conn.execute(
+                "delete from chat_context_items where thread_id = ?1 and id = ?2",
+                params![thread_id, id],
+            ),
+            ContextKey::Chunk(chunk_id) => conn.execute(
+                "delete from chat_context_items where thread_id = ?1 and chunk_id = ?2",
+                params![thread_id, chunk_id],
+            ),
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(removed > 0)
+    }
+
+    /// Replace the chunk items listed in `superseded` with one summary item.
+    ///
+    /// One transaction: a compaction either lands whole or leaves the thread
+    /// untouched. `superseded` is captured *before* the summarization call, so
+    /// items added while the model was working survive.
+    pub fn compact_context_items(
+        &self,
+        thread_id: &str,
+        summary: &ContextItemDraft,
+        superseded: &[String],
+    ) -> StoreResult<ContextItem> {
+        let id = timestamped_id("ctx")?;
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        for item_id in superseded {
+            tx.execute(
+                "delete from chat_context_items where thread_id = ?1 and id = ?2",
+                params![thread_id, item_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        insert_context_item_tx(&tx, &id, thread_id, summary)?;
+        tx.commit().map_err(|error| error.to_string())?;
+
+        let conn = self.open_connection()?;
+        read_context_item(&conn, &id)
+    }
+
+    /// Chunks of `paper_id` overlapping `[source_start, source_end)`.
+    ///
+    /// The durable-anchor path: after a rechunk the original `chunk_id` is gone,
+    /// but the character range into the extraction still names the same passage.
+    /// May return more text than was originally added if boundaries moved — the
+    /// passage is preserved, its packaging is not.
+    pub fn chunks_overlapping(
+        &self,
+        paper_id: &str,
+        source_start: i64,
+        source_end: i64,
+    ) -> StoreResult<Vec<DocumentChunk>> {
+        let conn = self.open_connection()?;
+        read_chunks(
+            &conn,
+            "where c.paper_id = ?1 and c.source_start < ?2 and c.source_end > ?3
+             order by c.chunk_index",
+            params![paper_id, source_end, source_start],
+        )
+    }
+
+    /// Rectangles covering a chunk, grouped by page, in reading order.
+    ///
+    /// Block-level: a chunk resolves to whole blocks, so a citation jump lands
+    /// on the paragraph rather than the sentence. Blocks without geometry
+    /// (`bbox_json` null, or written before RFC 0075) contribute nothing rather
+    /// than failing the lookup.
+    pub fn chunk_rects(&self, chunk_id: &str) -> StoreResult<Vec<PageRects>> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select b.page_index, b.bbox_json
+                 from document_chunk_blocks cb
+                 join document_blocks b on b.id = cb.block_id
+                 where cb.chunk_id = ?1
+                 order by cb.ordinal",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = statement
+            .query_map(params![chunk_id], |row| {
+                Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+
+        // Grouped in first-seen page order, which for a chunk is reading order.
+        let mut pages: Vec<PageRects> = Vec::new();
+        for row in rows {
+            let (page_index, bbox_json) = row.map_err(|error| error.to_string())?;
+            let Some(bbox_json) = bbox_json else { continue };
+            let Ok(rect) = serde_json::from_str::<NormRect>(&bbox_json) else {
+                continue;
+            };
+            match pages.iter_mut().find(|page| page.page_index == page_index) {
+                Some(page) => page.rects.push(rect),
+                None => pages.push(PageRects {
+                    page_index,
+                    rects: vec![rect],
+                }),
+            }
+        }
+        Ok(pages)
+    }
+
     /// Add a self-authored note at an anchor, creating its thread lazily, and
     /// return the thread view. The thread and its (pinned) note are written in
     /// one transaction, so a passage never leaves behind an empty thread. A
@@ -2529,6 +2668,35 @@ impl LibraryStore {
 
             create index if not exists idx_chat_entries_pinned
               on chat_entries(thread_id, pinned);
+
+            -- What the model is allowed to see, per thread (RFC 0077).
+            -- Only *persistent* context lives here: the current selection and
+            -- page are parameters to get_context, never rows, so a selection
+            -- change needs no invalidation.
+            create table if not exists chat_context_items (
+              id text primary key,
+              thread_id text not null,
+              position integer not null,
+              kind text not null,
+              -- chunk items: a fast-path id plus a durable anchor. A
+              -- CHUNK_VERSION bump re-mints chunk ids, so chunk_id alone
+              -- would dangle through no fault of the user.
+              chunk_id text,
+              paper_id text,
+              source_start integer,
+              source_end integer,
+              -- summary items
+              body text,
+              covers_through_entry_id text,
+              token_estimate integer not null,
+              created_at text not null,
+              foreign key (thread_id) references chat_threads(id) on delete cascade
+            );
+
+            -- No score column: ChunkHit.score is comparable only within one
+            -- search response, so ordering context by it would be meaningless.
+            create unique index if not exists idx_chat_context_items_position
+              on chat_context_items(thread_id, position);
 
             create table if not exists highlights (
               id text primary key,
@@ -4935,6 +5103,89 @@ fn from_json(value: &str) -> Vec<String> {
 ///
 /// `created_at` is only second-resolution, so transcript ordering leans on the
 /// nanosecond suffix here to break ties within the same second.
+fn insert_context_item_tx(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    thread_id: &str,
+    draft: &ContextItemDraft,
+) -> StoreResult<()> {
+    let next_position: i32 = tx
+        .query_row(
+            "select coalesce(max(position) + 1, 0) from chat_context_items where thread_id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+
+    tx.execute(
+        "
+        insert into chat_context_items (
+          id, thread_id, position, kind, chunk_id, paper_id, source_start,
+          source_end, body, covers_through_entry_id, token_estimate, created_at
+        )
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
+        ",
+        params![
+            id,
+            thread_id,
+            next_position,
+            draft.kind,
+            draft.chunk_id,
+            draft.paper_id,
+            draft.source_start,
+            draft.source_end,
+            draft.body,
+            draft.covers_through_entry_id,
+            draft.token_estimate,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+const CONTEXT_ITEM_COLUMNS: &str = "id, thread_id, position, kind, chunk_id, paper_id, \
+     source_start, source_end, body, covers_through_entry_id, token_estimate, created_at";
+
+fn context_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextItem> {
+    Ok(ContextItem {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        position: row.get(2)?,
+        kind: row.get(3)?,
+        chunk_id: row.get(4)?,
+        paper_id: row.get(5)?,
+        source_start: row.get(6)?,
+        source_end: row.get(7)?,
+        body: row.get(8)?,
+        covers_through_entry_id: row.get(9)?,
+        token_estimate: row.get(10)?,
+        created_at: row.get(11)?,
+    })
+}
+
+fn read_context_item(conn: &Connection, id: &str) -> StoreResult<ContextItem> {
+    conn.query_row(
+        &format!("select {CONTEXT_ITEM_COLUMNS} from chat_context_items where id = ?1"),
+        params![id],
+        context_item_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn read_context_items(conn: &Connection, thread_id: &str) -> StoreResult<Vec<ContextItem>> {
+    let mut statement = conn
+        .prepare(&format!(
+            "select {CONTEXT_ITEM_COLUMNS} from chat_context_items
+             where thread_id = ?1 order by position"
+        ))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![thread_id], context_item_from_row)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())
+}
+
 fn timestamped_id(prefix: &str) -> StoreResult<String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5889,6 +6140,7 @@ mod tests {
             paper_title: "Attention Is All You Need".to_string(),
             included_chars: 1234,
             truncated: true,
+            ..ChatContextSummary::default()
         }
     }
 

@@ -65,6 +65,9 @@ pub(super) fn build_context(
             paper_title: title.to_string(),
             included_chars,
             truncated,
+            // Filled in by ContextManager, which is the only thing that knows
+            // about context items. Zero here is honest: build_context has none.
+            ..ChatContextSummary::default()
         },
     }
 }

@@ -11,7 +11,7 @@
 //! enough structure to give the chunker paragraph boundaries and give a
 //! retrieved chunk a rectangle to highlight.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A positioned run of text as the PDF reports it, in PDF page space:
 /// origin at the bottom-left, y increasing upward.
@@ -28,7 +28,7 @@ pub struct TextFragment {
 /// A rectangle in the reader's coordinate system: normalized 0..1 with the
 /// origin at the *top* left, matching `PdfRect` in `src/lib/domain/reader.ts`
 /// and every rect already stored in `highlights.rects_json`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct NormRect {
     pub x: f64,
     pub y: f64,

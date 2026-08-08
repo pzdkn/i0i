@@ -1,0 +1,595 @@
+//! ContextManager — what the model is allowed to see (RFC 0077).
+//!
+//! The agent's working memory. ChatAgent asks this for a prompt and never calls
+//! [`SearchService`] itself; this is the only door to retrieval.
+//!
+//! Two kinds of context, with different lifetimes:
+//!
+//! - **Persistent** — `chat_context_items` rows, keyed by thread. Survive
+//!   restarts, removed only by [`ContextManager::delete_context`] or compaction.
+//! - **Ephemeral** — the [`EphemeralContext`] parameter. The current selection
+//!   and page are dropped by never being written down, so a selection change
+//!   needs no invalidation.
+//!
+//! Only [`ContextManager::compact_context`] calls a model.
+//! [`ContextManager::get_context`] is pure assembly: if it could trigger
+//! compaction, some asks would silently gain a round-trip before the first
+//! token.
+
+use std::sync::Arc;
+
+use crate::domain::chat::{ChatContextSummary, ChatEntry};
+use crate::domain::chunking::{estimate_tokens, CHARS_PER_TOKEN};
+use crate::domain::context::{
+    ContextCitation, ContextItem, ContextItemDraft, ContextItemView, ContextKey, EphemeralContext,
+    CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY,
+};
+use crate::domain::library::DocumentChunk;
+use crate::services::chat::context::build_context;
+use crate::services::search::{SearchRequest, SearchResponse, SearchService};
+use crate::storage::library_store::LibraryStore;
+
+/// Hits pulled into ephemeral context before an answer (RFC 0077 R1).
+///
+/// Small on purpose: this is pre-answer retrieval, not a research pass, and
+/// every chunk here competes with the paper text for the same budget.
+pub const RETRIEVAL_LIMIT: usize = 5;
+
+/// Facts about the paper the thread is about, supplied by the caller.
+///
+/// Passed in rather than fetched so ContextManager does not depend on
+/// ReaderService — the ask path has already loaded the document by this point.
+pub struct PaperFacts<'a> {
+    pub title: &'a str,
+    pub authors: &'a [String],
+    pub venue: &'a str,
+    pub year: i32,
+    /// Canonical extracted text, used for the row-4 fallback.
+    pub source_text: &'a str,
+}
+
+pub struct ContextRequest<'a> {
+    /// `None` on the anchor ask path, where the thread does not exist yet — that
+    /// call gets ephemeral context only.
+    pub thread_id: Option<&'a str>,
+    pub paper: PaperFacts<'a>,
+    /// The thread's entries, oldest first. Filtered by the compaction watermark.
+    pub entries: &'a [ChatEntry],
+    pub ephemeral: &'a EphemeralContext,
+    /// Chunks retrieved for this turn only (RFC 0077 R1). Never persisted.
+    pub retrieved: &'a [DocumentChunk],
+}
+
+/// The assembled prompt, provider-neutral.
+///
+/// Deliberately not `Vec<WireMessage>`: the wire format is OpenRouter's, and
+/// binding context assembly to one provider is the mistake SearchService was
+/// designed to avoid. `chat/service.rs` converts.
+pub struct AssembledContext {
+    pub system_prompt: String,
+    /// Entries to replay, after the compaction watermark.
+    pub entries: Vec<ChatEntry>,
+    pub summary: ChatContextSummary,
+    /// Resolves `[C1]` markers in the answer back to a place in the PDF.
+    pub citations: Vec<ContextCitation>,
+}
+
+#[derive(Clone)]
+pub struct ContextManager {
+    store: LibraryStore,
+    search: Arc<SearchService>,
+    /// The same cap `build_context` has always used, shared between context
+    /// items and the paper-text fallback rather than added on top of it.
+    max_context_chars: usize,
+}
+
+impl ContextManager {
+    pub fn new(store: LibraryStore, search: Arc<SearchService>, max_context_chars: usize) -> Self {
+        Self {
+            store,
+            search,
+            max_context_chars,
+        }
+    }
+
+    /// Find candidate passages. Commits nothing — `add_context` does that.
+    ///
+    /// A thin pass-through, so SearchService stays caller-agnostic and
+    /// ContextManager gets no privileged ranking.
+    pub async fn search(&self, request: SearchRequest) -> Result<SearchResponse, String> {
+        self.search.search(request).await
+    }
+
+    /// Commit a chunk to persistent context.
+    ///
+    /// Takes only a chunk id: the durable anchor and token estimate are read off
+    /// the chunk, so no caller has to know that layout. Adding a chunk already
+    /// in context is a no-op returning the existing item.
+    pub fn add_context(&self, thread_id: &str, chunk_id: &str) -> Result<ContextItem, String> {
+        let existing = self.store.context_items(thread_id)?;
+        if let Some(item) = existing
+            .iter()
+            .find(|item| item.chunk_id.as_deref() == Some(chunk_id))
+        {
+            return Ok(item.clone());
+        }
+
+        let chunk = self
+            .store
+            .chunks_by_ids(&[chunk_id.to_string()])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("No chunk {chunk_id}"))?;
+
+        self.store.insert_context_item(
+            thread_id,
+            &ContextItemDraft {
+                kind: CONTEXT_KIND_CHUNK.to_string(),
+                chunk_id: Some(chunk.id.clone()),
+                paper_id: Some(chunk.paper_id.clone()),
+                source_start: Some(chunk.source_start),
+                source_end: Some(chunk.source_end),
+                body: None,
+                covers_through_entry_id: None,
+                token_estimate: chunk.token_estimate,
+            },
+        )
+    }
+
+    /// Drop one item, by item id or by chunk id.
+    pub fn delete_context(&self, thread_id: &str, key: &ContextKey) -> Result<bool, String> {
+        self.store.delete_context_item(thread_id, key)
+    }
+
+    /// The thread's persistent context, resolved, for display.
+    pub fn list_context(&self, thread_id: &str) -> Result<Vec<ContextItemView>, String> {
+        let items = self.store.context_items(thread_id)?;
+        items
+            .iter()
+            .map(|item| {
+                let resolved = self.resolve(item)?;
+                Ok(match resolved {
+                    Resolved::Summary(body) => ContextItemView {
+                        id: item.id.clone(),
+                        kind: item.kind.clone(),
+                        chunk_id: None,
+                        paper_id: None,
+                        page_start: None,
+                        heading_path: None,
+                        text: body,
+                        token_estimate: item.token_estimate,
+                        unresolved: false,
+                    },
+                    Resolved::Chunks(chunks) => ContextItemView {
+                        id: item.id.clone(),
+                        kind: item.kind.clone(),
+                        chunk_id: item.chunk_id.clone(),
+                        paper_id: item.paper_id.clone(),
+                        page_start: chunks.first().map(|chunk| chunk.page_start),
+                        heading_path: chunks
+                            .first()
+                            .and_then(|chunk| chunk.heading_path.clone()),
+                        text: join_chunk_text(&chunks),
+                        token_estimate: item.token_estimate,
+                        unresolved: false,
+                    },
+                    Resolved::Unresolved => ContextItemView {
+                        id: item.id.clone(),
+                        kind: item.kind.clone(),
+                        chunk_id: item.chunk_id.clone(),
+                        paper_id: item.paper_id.clone(),
+                        page_start: None,
+                        heading_path: None,
+                        text: String::new(),
+                        token_estimate: item.token_estimate,
+                        unresolved: true,
+                    },
+                })
+            })
+            .collect()
+    }
+
+    /// Assemble the prompt under a token budget. No model call, no network.
+    ///
+    /// Fill order, stopping when the budget is spent:
+    ///
+    /// | # | item | note |
+    /// |---|---|---|
+    /// | 0 | ephemeral selection | **outside** the budget, as today |
+    /// | 1 | compaction summaries | the only record of what was dropped |
+    /// | 2 | entries after the watermark | the live conversation |
+    /// | 3 | persistent chunks | selected newest-first, emitted in position order |
+    /// | 4 | retrieved chunks (this turn only) | |
+    /// | 5 | paper head text | today's behaviour, with what is left |
+    ///
+    /// Row 5 is what keeps a thread with no context items byte-identical to the
+    /// pre-RFC prompt — which is every thread that exists today.
+    pub fn get_context(&self, request: ContextRequest<'_>) -> Result<AssembledContext, String> {
+        let items = match request.thread_id {
+            Some(thread_id) => self.store.context_items(thread_id)?,
+            // The anchor path: no thread exists yet, so there is nothing
+            // persistent to read. Ephemeral only, by construction.
+            None => Vec::new(),
+        };
+
+        let mut assembly = Assembly::new(self.budget_tokens());
+        let mut unresolved = 0usize;
+        let mut watermark: Option<String> = None;
+
+        // Row 1 — compaction summaries, and the watermark they set.
+        for item in items.iter().filter(|item| item.kind == CONTEXT_KIND_SUMMARY) {
+            if let Some(entry_id) = &item.covers_through_entry_id {
+                watermark = Some(entry_id.clone());
+            }
+            if let Resolved::Summary(body) = self.resolve(item)? {
+                assembly.push_summary(body);
+            }
+        }
+
+        // Row 3 — persistent chunks. Selected newest-first under budget
+        // pressure; emitted in position order so the prompt reads in the order
+        // the context was built.
+        let chunk_items: Vec<&ContextItem> = items
+            .iter()
+            .filter(|item| item.kind == CONTEXT_KIND_CHUNK)
+            .collect();
+        for item in chunk_items.iter().rev() {
+            match self.resolve(item)? {
+                Resolved::Chunks(chunks) => {
+                    assembly.push_item(item, &chunks);
+                }
+                Resolved::Unresolved => unresolved += 1,
+                Resolved::Summary(_) => {}
+            }
+        }
+        assembly.restore_emission_order();
+
+        // Row 4 — this turn's retrieval. Ephemeral: never written down, so it
+        // is re-selected for every turn.
+        for chunk in request.retrieved {
+            if items
+                .iter()
+                .any(|item| item.chunk_id.as_deref() == Some(chunk.id.as_str()))
+            {
+                continue; // already present as a persistent item
+            }
+            assembly.push_retrieved(chunk);
+        }
+
+        // Row 2 — entries after the watermark. Not charged against the budget,
+        // matching today: the thread's turns have always been sent in full.
+        let entries = entries_after(request.entries, watermark.as_deref());
+
+        // Row 5 — paper text with what is left. When nothing above spent any
+        // budget this is the full allowance, which is what makes an untouched
+        // thread byte-identical to the pre-RFC prompt.
+        let paper_chars = chars_for_tokens(assembly.remaining());
+        let bundle = build_context(
+            request.paper.title,
+            request.paper.authors,
+            request.paper.venue,
+            request.paper.year,
+            request.paper.source_text,
+            paper_chars,
+            request.ephemeral.selection.as_deref(),
+        );
+
+        let system_prompt = match assembly.passages_block() {
+            // No citable context: today's prompt exactly, down to the byte.
+            None => bundle.system_prompt,
+            Some(passages) => format!("{}\n\n{passages}", bundle.system_prompt),
+        };
+
+        // Rectangles last, and only for what actually made it into the prompt.
+        // Resolving them for dropped passages would be work nobody can click.
+        let mut citations = assembly.citations;
+        for citation in &mut citations {
+            let Some(chunk_id) = &citation.chunk_id else {
+                continue;
+            };
+            let rects = self.store.chunk_rects(chunk_id)?;
+            citation.rects_json =
+                serde_json::to_string(&rects).map_err(|error| error.to_string())?;
+        }
+
+        Ok(AssembledContext {
+            system_prompt,
+            entries,
+            summary: ChatContextSummary {
+                citations: citations.clone(),
+                paper_title: request.paper.title.to_string(),
+                included_chars: bundle.summary.included_chars,
+                truncated: bundle.summary.truncated,
+                context_items: assembly.included,
+                dropped_items: assembly.dropped,
+                unresolved_items: unresolved,
+                compacted: watermark.is_some(),
+            },
+            citations,
+        })
+    }
+
+    /// Replace the thread's chunk items and pre-watermark turns with a summary.
+    ///
+    /// The only method that calls a model. Non-destructive to `chat_entries`:
+    /// it writes a watermark, and `get_context` replays only what came after.
+    /// The thread view still shows every entry.
+    ///
+    /// `summarize` receives the text to compress and returns the summary, so
+    /// the model call stays in `chat/service.rs` where the provider lives.
+    pub async fn compact_context<F, Fut>(
+        &self,
+        thread_id: &str,
+        entries: &[ChatEntry],
+        summarize: F,
+    ) -> Result<ContextItem, String>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = Result<String, String>>,
+    {
+        let items = self.store.context_items(thread_id)?;
+        // Captured before the model call: anything added while it runs survives.
+        let superseded: Vec<String> = items
+            .iter()
+            .filter(|item| item.kind == CONTEXT_KIND_CHUNK)
+            .map(|item| item.id.clone())
+            .collect();
+
+        let mut material = String::new();
+        for item in &items {
+            match self.resolve(item)? {
+                Resolved::Summary(body) => material.push_str(&body),
+                Resolved::Chunks(chunks) => material.push_str(&join_chunk_text(&chunks)),
+                Resolved::Unresolved => continue,
+            }
+            material.push_str("\n\n");
+        }
+        for entry in entries {
+            material.push_str(&entry.body);
+            material.push_str("\n\n");
+        }
+        if material.trim().is_empty() {
+            return Err("Nothing to compact yet.".to_string());
+        }
+
+        // A failed summarization writes nothing — the thread is untouched, the
+        // same invariant `ask_at_anchor_streamed` already holds.
+        let body = summarize(material).await?;
+        let body = body.trim().to_string();
+        if body.is_empty() {
+            return Err("The summary came back empty; context is unchanged.".to_string());
+        }
+
+        let token_estimate = estimate_tokens(&body) as i32;
+        self.store.compact_context_items(
+            thread_id,
+            &ContextItemDraft {
+                kind: CONTEXT_KIND_SUMMARY.to_string(),
+                chunk_id: None,
+                paper_id: None,
+                source_start: None,
+                source_end: None,
+                body: Some(body),
+                covers_through_entry_id: entries.last().map(|entry| entry.id.clone()),
+                token_estimate,
+            },
+            &superseded,
+        )
+    }
+
+    /// Tokens available to context items, from the configured character cap.
+    fn budget_tokens(&self) -> usize {
+        self.max_context_chars / CHARS_PER_TOKEN
+    }
+
+    /// Resolve one item to its text, trying the fast path before the durable one.
+    fn resolve(&self, item: &ContextItem) -> Result<Resolved, String> {
+        if item.kind == CONTEXT_KIND_SUMMARY {
+            return Ok(Resolved::Summary(item.body.clone().unwrap_or_default()));
+        }
+
+        if let Some(chunk_id) = &item.chunk_id {
+            let found = self.store.chunks_by_ids(&[chunk_id.clone()])?;
+            if !found.is_empty() {
+                return Ok(Resolved::Chunks(found));
+            }
+        }
+
+        // The chunk id died in a rechunk. The character range into the
+        // extraction still names the same passage.
+        let (Some(paper_id), Some(start), Some(end)) =
+            (&item.paper_id, item.source_start, item.source_end)
+        else {
+            return Ok(Resolved::Unresolved);
+        };
+        let chunks = self.store.chunks_overlapping(paper_id, start, end)?;
+        if chunks.is_empty() {
+            return Ok(Resolved::Unresolved);
+        }
+        Ok(Resolved::Chunks(chunks))
+    }
+}
+
+enum Resolved {
+    Summary(String),
+    Chunks(Vec<DocumentChunk>),
+    Unresolved,
+}
+
+/// Accumulates the passages block under a token budget.
+///
+/// Handles are assigned in *emission* order, so `[C1]` is the first passage the
+/// model reads. Selection happens newest-first, which is why
+/// `restore_emission_order` exists: the two orders are genuinely different.
+struct Assembly {
+    budget: usize,
+    spent: usize,
+    passages: Vec<Passage>,
+    citations: Vec<ContextCitation>,
+    included: usize,
+    dropped: usize,
+}
+
+struct Passage {
+    /// Sort key: `position` for persistent items, and after them, retrieval
+    /// order for this turn's hits.
+    order: i64,
+    item_id: String,
+    paper_id: String,
+    page_start: i32,
+    heading_path: Option<String>,
+    text: String,
+    /// The chunk to draw rectangles from. `None` when re-resolution produced
+    /// several chunks — the citation then points at the first one.
+    chunk_id: Option<String>,
+}
+
+impl Assembly {
+    fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            spent: 0,
+            passages: Vec::new(),
+            citations: Vec::new(),
+            included: 0,
+            dropped: 0,
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        self.budget.saturating_sub(self.spent)
+    }
+
+    /// A summary is charged but never citable — it has no place in the PDF.
+    fn push_summary(&mut self, body: String) {
+        let cost = estimate_tokens(&body);
+        if cost > self.remaining() {
+            self.dropped += 1;
+            return;
+        }
+        self.spent += cost;
+        self.included += 1;
+        self.passages.push(Passage {
+            order: i64::MIN,
+            item_id: String::new(),
+            paper_id: String::new(),
+            page_start: 0,
+            heading_path: Some("Summary of earlier context".to_string()),
+            text: body,
+            chunk_id: None,
+        });
+    }
+
+    fn push_item(&mut self, item: &ContextItem, chunks: &[DocumentChunk]) {
+        let Some(first) = chunks.first() else {
+            return;
+        };
+        let text = join_chunk_text(chunks);
+        let cost = estimate_tokens(&text);
+        if cost > self.remaining() {
+            self.dropped += 1;
+            return;
+        }
+        self.spent += cost;
+        self.included += 1;
+        self.passages.push(Passage {
+            order: item.position as i64,
+            item_id: item.id.clone(),
+            paper_id: first.paper_id.clone(),
+            page_start: first.page_start,
+            heading_path: first.heading_path.clone(),
+            text,
+            chunk_id: Some(first.id.clone()),
+        });
+    }
+
+    /// This turn's retrieval. `item_id` is empty: there is no persistent row to
+    /// delete, which is exactly what makes it ephemeral.
+    fn push_retrieved(&mut self, chunk: &DocumentChunk) {
+        let cost = estimate_tokens(&chunk.text);
+        if cost > self.remaining() {
+            self.dropped += 1;
+            return;
+        }
+        self.spent += cost;
+        self.included += 1;
+        self.passages.push(Passage {
+            // After every persistent item, in retrieval rank order.
+            order: i64::MAX - (RETRIEVAL_LIMIT as i64) + self.passages.len() as i64,
+            item_id: String::new(),
+            paper_id: chunk.paper_id.clone(),
+            page_start: chunk.page_start,
+            heading_path: chunk.heading_path.clone(),
+            text: chunk.text.clone(),
+            chunk_id: Some(chunk.id.clone()),
+        });
+    }
+
+    fn restore_emission_order(&mut self) {
+        self.passages.sort_by_key(|passage| passage.order);
+    }
+
+    /// Render the passages, assigning `[C1]`… and building the citation map.
+    ///
+    /// `None` when there is nothing citable, which is the case the
+    /// byte-identical-prompt guarantee depends on.
+    fn passages_block(&mut self) -> Option<String> {
+        if self.passages.is_empty() {
+            return None;
+        }
+
+        let mut block = String::from(
+            "Context passages. Cite the ones you use by their marker, like [C1].\n\
+             Do not invent markers.\n",
+        );
+        for (index, passage) in self.passages.iter().enumerate() {
+            let handle = format!("C{}", index + 1);
+            let location = match &passage.heading_path {
+                Some(heading) => format!("p{} · {heading}", passage.page_start + 1),
+                None => format!("p{}", passage.page_start + 1),
+            };
+            block.push_str(&format!("\n[{handle}] ({location})\n{}\n", passage.text));
+
+            if !passage.paper_id.is_empty() {
+                self.citations.push(ContextCitation {
+                    handle,
+                    item_id: passage.item_id.clone(),
+                    paper_id: passage.paper_id.clone(),
+                    page_start: passage.page_start,
+                    heading_path: passage.heading_path.clone(),
+                    chunk_id: passage.chunk_id.clone(),
+                    rects_json: "[]".to_string(),
+                });
+            }
+        }
+        Some(block)
+    }
+}
+
+/// Entries after the compaction watermark. Everything before it is represented
+/// by the summary — but the rows themselves are untouched, so the thread view
+/// still shows the whole conversation.
+fn entries_after(entries: &[ChatEntry], watermark: Option<&str>) -> Vec<ChatEntry> {
+    let Some(watermark) = watermark else {
+        return entries.to_vec();
+    };
+    match entries.iter().position(|entry| entry.id == watermark) {
+        Some(index) => entries[index + 1..].to_vec(),
+        // The watermark entry was deleted. Replaying everything is the safe
+        // reading: the summary is redundant, not wrong.
+        None => entries.to_vec(),
+    }
+}
+
+fn join_chunk_text(chunks: &[DocumentChunk]) -> String {
+    chunks
+        .iter()
+        .map(|chunk| chunk.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Characters a token budget buys, for the row-5 paper-text fallback.
+fn chars_for_tokens(tokens: usize) -> usize {
+    tokens.saturating_mul(CHARS_PER_TOKEN)
+}

@@ -23,7 +23,7 @@ pub const CHUNK_VERSION: i32 = 2;
 /// Tokens are estimated, never counted. A real tokenizer is not worth a
 /// dependency for a bound this soft — every threshold below is a preference,
 /// not a correctness constraint.
-const CHARS_PER_TOKEN: usize = 4;
+pub const CHARS_PER_TOKEN: usize = 4;
 
 /// Close a chunk once it reaches this. Chunks land at or just above it.
 const TARGET_TOKENS: usize = 450;

@@ -13,12 +13,15 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 
 use super::config::ChatConfig;
-use super::context::build_context;
+use super::context_manager::{ContextManager, ContextRequest, PaperFacts, RETRIEVAL_LIMIT};
 use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatScope, ChatThreadSummary, ChatThreadUpdated,
     ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
 };
+use crate::domain::context::EphemeralContext;
+use crate::domain::library::DocumentChunk;
 use crate::services::llm::{self as openrouter, CompletionRequest, WireMessage};
+use crate::services::search::{SearchMode, SearchRequest};
 use crate::services::reader_service::ReaderService;
 use crate::storage::library_store::LibraryStore;
 
@@ -29,6 +32,9 @@ pub struct ChatService {
     config: ChatConfig,
     store: LibraryStore,
     reader: ReaderService,
+    /// Decides what the model sees (RFC 0077). ChatService never calls
+    /// SearchService itself — retrieval goes through here.
+    context: ContextManager,
 }
 
 impl ChatService {
@@ -37,6 +43,7 @@ impl ChatService {
         config: ChatConfig,
         store: LibraryStore,
         reader: ReaderService,
+        context: ContextManager,
     ) -> Self {
         let client = Client::builder()
             .user_agent(concat!(
@@ -53,15 +60,8 @@ impl ChatService {
             config,
             store,
             reader,
+            context,
         }
-    }
-
-    pub fn from_app_config(
-        app: AppHandle,
-        store: LibraryStore,
-        reader: ReaderService,
-    ) -> Result<Self, String> {
-        Ok(Self::new(app, ChatConfig::load()?, store, reader))
     }
 
     /// List a scope's threads with entry/pin counts (newest activity first).
@@ -440,19 +440,27 @@ impl ChatService {
         }
         let api_key = self.config.resolve_api_key()?;
         let document = self.reader.get_reader_document(scope.id(), None).await?;
-        let bundle = build_context(
-            &document.title,
-            &document.authors,
-            &document.venue,
-            document.year,
-            &document.source_text,
-            self.config.max_context_chars,
-            anchor.selected_text(),
-        );
+
+        // No thread exists yet on this path (RFC 0034 creates it only once the
+        // reply lands), so there is nothing persistent to read: ephemeral only.
+        let ephemeral = EphemeralContext {
+            paper_id: scope.id().to_string(),
+            selection: anchor.selected_text().map(ToString::to_string),
+            page_index: None,
+        };
+        let retrieved = self.retrieve_for_turn(scope.id(), &user_body).await;
+        let assembled = self.context.get_context(ContextRequest {
+            thread_id: None,
+            paper: paper_facts(&document),
+            entries: &[],
+            ephemeral: &ephemeral,
+            retrieved: &retrieved,
+        })?;
+
         Ok(PreparedAsk {
             api_key,
-            request_messages: build_wire_messages(bundle.system_prompt, &[], &user_body),
-            summary: bundle.summary,
+            request_messages: build_wire_messages(assembled.system_prompt, &[], &user_body),
+            summary: assembled.summary,
             user_body,
         })
     }
@@ -472,22 +480,99 @@ impl ChatService {
         }
         let document = self.reader.get_reader_document(&scope_id, None).await?;
 
-        let bundle = build_context(
-            &document.title,
-            &document.authors,
-            &document.venue,
-            document.year,
-            &document.source_text,
-            self.config.max_context_chars,
-            view.thread.anchor.selected_text(),
-        );
+        let ephemeral = EphemeralContext {
+            paper_id: scope_id.clone(),
+            selection: view
+                .thread
+                .anchor
+                .selected_text()
+                .map(ToString::to_string),
+            page_index: None,
+        };
+        let retrieved = self.retrieve_for_turn(&scope_id, &user_body).await;
+        let assembled = self.context.get_context(ContextRequest {
+            thread_id: Some(thread_id),
+            paper: paper_facts(&document),
+            // Everything before a compaction watermark is dropped here, not in
+            // the store: the thread view still shows the whole conversation.
+            entries: &view.entries,
+            ephemeral: &ephemeral,
+            retrieved: &retrieved,
+        })?;
 
         Ok(PreparedAsk {
             api_key,
-            request_messages: build_wire_messages(bundle.system_prompt, &view.entries, &user_body),
-            summary: bundle.summary,
+            request_messages: build_wire_messages(
+                assembled.system_prompt,
+                &assembled.entries,
+                &user_body,
+            ),
+            summary: assembled.summary,
             user_body,
         })
+    }
+
+    /// Compact a thread's context into a summary (RFC 0077).
+    ///
+    /// The only chat path that summarizes rather than answers, so it runs the
+    /// cheap `annotation_model`. Non-destructive: `chat_entries` is untouched
+    /// and the thread view keeps showing every turn — only what the next prompt
+    /// carries shrinks.
+    pub async fn compact_context(&self, thread_id: &str) -> Result<ChatThreadView, String> {
+        let api_key = self.config.resolve_api_key()?;
+        let view = self.store.get_chat_thread(thread_id)?;
+        let client = self.client.clone();
+        let url = self.config.url.clone();
+        let model = self.config.annotation_model.clone();
+
+        self.context
+            .compact_context(thread_id, &view.entries, move |material| async move {
+                let request = CompletionRequest {
+                    model,
+                    messages: vec![WireMessage {
+                        role: "user".to_string(),
+                        content: format!("{COMPACTION_PROMPT}\n\n{material}"),
+                    }],
+                    stream: false,
+                    max_tokens: Some(COMPACTION_MAX_TOKENS),
+                    response_format: None,
+                    tools: None,
+                    tool_choice: None,
+                };
+                openrouter::complete(&client, &url, &api_key, &request).await
+            })
+            .await?;
+
+        self.store.get_chat_thread(thread_id)
+    }
+
+    /// Pre-answer retrieval (RFC 0077 R1).
+    ///
+    /// One search before the ask, rather than tool calls during it: the answer
+    /// path is deliberately free of tool-call generation so the reply streams
+    /// clean, and `annotate_streamed` runs marking as a separate cheap pass.
+    ///
+    /// Retrieval failing is not the ask failing. A search error or an empty
+    /// index degrades to the paper-text context that has always been there.
+    async fn retrieve_for_turn(&self, paper_id: &str, question: &str) -> Vec<DocumentChunk> {
+        let response = self
+            .context
+            .search(SearchRequest {
+                query: question.to_string(),
+                paper_ids: vec![paper_id.to_string()],
+                vault_ids: Vec::new(),
+                mode: SearchMode::Hybrid,
+                limit: Some(RETRIEVAL_LIMIT),
+            })
+            .await;
+
+        match response {
+            Ok(response) => response.hits.into_iter().map(|hit| hit.chunk).collect(),
+            Err(error) => {
+                eprintln!("[chat] pre-answer retrieval failed, using paper text: {error}");
+                Vec::new()
+            }
+        }
     }
 
     /// Persist the completed turn (question then answer) and return the thread.
@@ -732,6 +817,29 @@ struct PreparedAsk {
     user_body: String,
     request_messages: Vec<WireMessage>,
     summary: ChatContextSummary,
+}
+
+/// Steers compaction toward what a later turn can still use. A summary that
+/// drops the specifics is worse than no compaction: the turns it replaced are
+/// gone from the prompt, so anything it omits is unrecoverable without the
+/// user scrolling back.
+const COMPACTION_PROMPT: &str = "Summarize the research conversation and source \
+     passages below so the assistant can continue without them. Keep concrete \
+     findings, numbers, definitions, and open questions. Drop pleasantries and \
+     restatements. Write prose, no preamble.";
+
+/// Enough for a dense summary, short enough that compacting is fast.
+const COMPACTION_MAX_TOKENS: u32 = 700;
+
+/// Read the paper facts ContextManager needs off a loaded reader document.
+fn paper_facts(document: &crate::domain::reader::ReaderDocument) -> PaperFacts<'_> {
+    PaperFacts {
+        title: &document.title,
+        authors: &document.authors,
+        venue: &document.venue,
+        year: document.year,
+        source_text: &document.source_text,
+    }
 }
 
 /// Assemble the wire messages: one system message, the thread's entries replayed

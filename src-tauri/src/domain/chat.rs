@@ -218,12 +218,37 @@ pub struct ChatThreadUpdated {
 }
 
 /// What the model actually saw, rendered in the UI so context is inspectable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatContextSummary {
     pub paper_title: String,
     pub included_chars: usize,
     pub truncated: bool,
+    /// Context items that made it into the prompt (RFC 0077).
+    ///
+    /// These four are `serde(default)` because this struct is already
+    /// serialized into `chat_entries.context_json`: every answer written before
+    /// RFC 0077 must keep deserializing. Old rows read as zeros and
+    /// `compacted: false`, which is accurate for them.
+    #[serde(default)]
+    pub context_items: usize,
+    /// Items that did not fit the budget. What the UI needs to say so, rather
+    /// than letting the paper-text fallback quietly hide the loss.
+    #[serde(default)]
+    pub dropped_items: usize,
+    /// Items whose chunk no longer exists and could not be re-resolved.
+    #[serde(default)]
+    pub unresolved_items: usize,
+    /// A compaction summary stood in for earlier turns.
+    #[serde(default)]
+    pub compacted: bool,
+    /// Resolves the `[C1]` markers in this answer back to places in the PDF.
+    ///
+    /// Stored with the answer rather than recomputed: handles are assigned per
+    /// assembly, so the same chunk is `[C3]` in one turn and `[C1]` in the next.
+    /// Reopening a thread must show the markers the model actually wrote.
+    #[serde(default)]
+    pub citations: Vec<crate::domain::context::ContextCitation>,
 }
 
 /// Event pushed to the frontend over a Tauri channel while a streamed reply
@@ -371,6 +396,7 @@ mod tests {
                     paper_title: "t".to_string(),
                     included_chars: 1,
                     truncated: false,
+                    ..ChatContextSummary::default()
                 },
             )
             .pinned

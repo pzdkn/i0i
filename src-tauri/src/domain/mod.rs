@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod chunking;
+pub mod context;
 pub mod discovery;
 pub mod highlight;
 pub mod library;

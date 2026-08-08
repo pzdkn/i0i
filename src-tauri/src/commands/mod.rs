@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod context;
 pub mod discovery;
 pub mod highlight;
 pub mod library;
