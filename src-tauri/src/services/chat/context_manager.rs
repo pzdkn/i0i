@@ -581,6 +581,22 @@ impl Assembly {
     }
 }
 
+/// Drop every citation the answer did not actually cite (RFC 0078).
+///
+/// The prompt offers a handle for every passage, because the model has to be
+/// able to cite anything it reads. What gets *stored* is narrower: an answer
+/// that leaned on one passage should show one reference, not five. Four
+/// unused ones look like evidence and are not.
+///
+/// A passage the model paraphrased without marking is indistinguishable from
+/// one it ignored — nothing here can tell them apart, which is why the prompt
+/// asks for a marker on anything load-bearing.
+pub fn retain_cited(summary: &mut ChatContextSummary, answer: &str) {
+    summary
+        .citations
+        .retain(|citation| answer.contains(&format!("[{}]", citation.handle)));
+}
+
 /// Entries after the compaction watermark. Everything before it is represented
 /// by the summary — but the rows themselves are untouched, so the thread view
 /// still shows the whole conversation.
@@ -976,6 +992,52 @@ mod tests {
             "the chunk id is gone but the character range still names the passage"
         );
         assert!(listed[0].text.contains("durable passage"));
+    }
+
+    fn summary_with(handles: &[&str]) -> ChatContextSummary {
+        ChatContextSummary {
+            citations: handles
+                .iter()
+                .map(|handle| ContextCitation {
+                    handle: (*handle).to_string(),
+                    item_id: String::new(),
+                    paper_id: "vaswani2017".to_string(),
+                    page_start: 0,
+                    heading_path: None,
+                    chunk_id: Some(format!("chunk-{handle}")),
+                    rects_json: "[]".to_string(),
+                })
+                .collect(),
+            ..ChatContextSummary::default()
+        }
+    }
+
+    #[test]
+    fn only_the_passages_the_answer_cited_are_stored() {
+        let mut summary = summary_with(&["C1", "C2", "C3"]);
+        retain_cited(&mut summary, "The scaling factor matters [C2].");
+
+        // What was offered is not evidence. Storing C1 and C3 would show three
+        // references for an answer that rested on one.
+        assert_eq!(summary.citations.len(), 1);
+        assert_eq!(summary.citations[0].handle, "C2");
+    }
+
+    #[test]
+    fn an_answer_that_cites_nothing_keeps_no_references() {
+        let mut summary = summary_with(&["C1", "C2"]);
+        retain_cited(&mut summary, "The paper is about attention.");
+        assert!(summary.citations.is_empty());
+    }
+
+    #[test]
+    fn a_handle_that_is_a_prefix_of_another_does_not_match_it() {
+        // "[C1]" must not be found inside "[C10]" — brackets are what make the
+        // match exact, and dropping them would attribute the wrong passage.
+        let mut summary = summary_with(&["C1", "C10"]);
+        retain_cited(&mut summary, "As shown in [C10].");
+        assert_eq!(summary.citations.len(), 1);
+        assert_eq!(summary.citations[0].handle, "C10");
     }
 
     #[test]

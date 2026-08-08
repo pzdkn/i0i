@@ -13,7 +13,9 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 
 use super::config::ChatConfig;
-use super::context_manager::{ContextManager, ContextRequest, PaperFacts, RETRIEVAL_LIMIT};
+use super::context_manager::{
+    retain_cited, ContextManager, ContextRequest, PaperFacts, RETRIEVAL_LIMIT,
+};
 use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatScope, ChatThreadSummary, ChatThreadUpdated,
     ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
@@ -153,7 +155,9 @@ impl ChatService {
         };
         let answer =
             openrouter::complete(&self.client, &self.config.url, &prep.api_key, &request).await?;
-        self.finalize_ask(thread_id, &prep.user_body, answer, prep.summary)
+        let mut summary = prep.summary;
+        retain_cited(&mut summary, &answer);
+        self.finalize_ask(thread_id, &prep.user_body, answer, summary)
             .await
     }
 
@@ -185,7 +189,9 @@ impl ChatService {
             on_delta,
         )
         .await?;
-        self.finalize_ask(thread_id, &prep.user_body, outcome.text, prep.summary)
+        let mut summary = prep.summary;
+        retain_cited(&mut summary, &outcome.text);
+        self.finalize_ask(thread_id, &prep.user_body, outcome.text, summary)
             .await
     }
 
@@ -228,6 +234,8 @@ impl ChatService {
         .await?;
 
         let answer_text = outcome.text;
+        let mut summary = prep.summary;
+        retain_cited(&mut summary, &answer_text);
 
         let default_title = anchor.default_title();
         let selected_text = anchor.selected_text().map(ToString::to_string);
@@ -236,7 +244,7 @@ impl ChatService {
             scope.id(),
             &anchor,
             &ChatEntryDraft::question(prep.user_body.clone()),
-            &ChatEntryDraft::answer(answer_text, self.config.model.clone(), prep.summary),
+            &ChatEntryDraft::answer(answer_text, self.config.model.clone(), summary),
         )?;
         self.spawn_title_generation_if_created(
             write.created,

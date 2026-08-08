@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
   import CitedAnswer from "$lib/features/reader/CitedAnswer.svelte";
+  import { citationLabel } from "$lib/features/reader/cited-answer";
   import {
     addChatContext,
     compactChatContext,
@@ -680,12 +681,20 @@
   const contextTokens = $derived(
     contextItems.reduce((total, item) => total + item.tokenEstimate, 0),
   );
+  const unresolvedCount = $derived(contextItems.filter((item) => item.unresolved).length);
+  // RFC 0078: closed is the resting state — context is plumbing, and plumbing
+  // you must look at to read an answer is a leak. The one exception: a hole
+  // opens itself, because a hole you never see is the failure mode RFC 0076 and
+  // RFC 0077 were both written against.
+  let contextOpen = $state(false);
+  const contextExpanded = $derived(contextOpen || unresolvedCount > 0);
 
   // Keyed on the thread id, so switching threads never leaves the previous
   // thread's context on screen. Cheap: one indexed read per open.
   $effect(() => {
     const threadId = openThread?.thread.id ?? "";
     contextNote = "";
+    contextOpen = false;
     if (!threadId) {
       contextItems = [];
       return;
@@ -902,28 +911,43 @@
               {:else}
                 {#if contextItems.length || contextNote}
                   <div class="context-panel">
-                    <div class="row context-head">
-                      <span class="label">Context</span>
+                    <button
+                      class="row context-head"
+                      type="button"
+                      aria-expanded={contextExpanded}
+                      onclick={() => (contextOpen = !contextOpen)}
+                    >
+                      {#if contextExpanded}
+                        <ChevronDown size={11} strokeWidth={1.75} aria-hidden="true" />
+                      {:else}
+                        <ChevronRight size={11} strokeWidth={1.75} aria-hidden="true" />
+                      {/if}
+                      <span class="label">Context ({contextItems.length})</span>
+                      {#if unresolvedCount}
+                        <span class="context-warn">· {unresolvedCount} unresolved</span>
+                      {/if}
                       <div class="flex1"></div>
                       {#if contextItems.length}
-                        <span class="mono-dim">{contextItems.length} · ~{contextTokens} tok</span>
+                        <span class="mono-dim">~{contextTokens} tok</span>
                       {/if}
-                    </div>
+                    </button>
                     {#if contextNote}
                       <div class="context-note mono-dim">{contextNote}</div>
                     {/if}
-                    {#each contextItems as item (item.id)}
-                      <div class="row context-item" class:unresolved={item.unresolved}>
-                        <span class="context-label">{contextItemLabel(item)}</span>
-                        <div class="flex1"></div>
-                        <button
-                          class="note-icon remove"
-                          type="button"
-                          aria-label="remove from context"
-                          onclick={() => void dropContextItem(item)}
-                        >×</button>
-                      </div>
-                    {/each}
+                    {#if contextExpanded}
+                      {#each contextItems as item (item.id)}
+                        <div class="row context-item" class:unresolved={item.unresolved}>
+                          <span class="context-label">{contextItemLabel(item)}</span>
+                          <div class="flex1"></div>
+                          <button
+                            class="note-icon remove"
+                            type="button"
+                            aria-label="remove from context"
+                            onclick={() => void dropContextItem(item)}
+                          >×</button>
+                        </div>
+                      {/each}
+                    {/if}
                   </div>
                 {/if}
 
@@ -952,21 +976,34 @@
                       {:else}
                         <p>{entry.body}</p>
                       {/if}
-                      {#if entry.kind === "answer" && entry.contextSummary?.citations?.length && !isVirtual}
-                        <!-- RFC 0077: retrieved passages are ephemeral — they
-                             are re-selected every turn. Keeping one promotes it
-                             to persistent context. -->
-                        <div class="row keep-row">
-                          <span class="mono-dim">keep:</span>
+                      {#if entry.kind === "answer" && entry.contextSummary?.citations?.length}
+                        <!-- RFC 0078: only passages the answer actually cited.
+                             What the model was offered is not evidence. -->
+                        <div class="references">
+                          <div class="mono-dim ref-title">References</div>
                           {#each entry.contextSummary.citations as citation (citation.handle)}
-                            {#if citation.chunkId}
+                            <div class="row ref-row">
                               <button
-                                class="keep-chip"
+                                class="ref-open"
                                 type="button"
-                                title={`Keep ${citation.handle} in this thread's context`}
-                                onclick={() => void keepCitation(citation)}
-                              >{citation.handle}</button>
-                            {/if}
+                                title="Jump to this passage"
+                                onclick={() => onOpenCitation(citation)}
+                              >
+                                <span class="ref-handle">{citation.handle}</span>
+                                <span class="ref-where">{citationLabel(citation)}</span>
+                              </button>
+                              <div class="flex1"></div>
+                              {#if citation.chunkId && !isVirtual}
+                                <!-- Retrieved passages are ephemeral, re-selected
+                                     each turn. Keeping one makes it persistent. -->
+                                <button
+                                  class="keep-chip"
+                                  type="button"
+                                  title="Keep this passage in the thread's context"
+                                  onclick={() => void keepCitation(citation)}
+                                >keep</button>
+                              {/if}
+                            </div>
                           {/each}
                         </div>
                       {/if}
@@ -1592,9 +1629,20 @@
   }
 
   .context-head {
-    gap: 6px;
-    margin-bottom: 4px;
+    width: 100%;
+    gap: 4px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--fg-2);
+    font: inherit;
     font-size: 10px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .context-warn {
+    color: var(--red);
   }
 
   .context-note {
@@ -1620,10 +1668,49 @@
     white-space: nowrap;
   }
 
-  .keep-row {
-    gap: 4px;
+  .references {
     margin-top: 6px;
+    padding-top: 5px;
+    border-top: 1px solid var(--border);
+  }
+
+  .ref-title {
+    margin-bottom: 3px;
     font-size: 9px;
+  }
+
+  .ref-row {
+    gap: 6px;
+    font-size: 10px;
+  }
+
+  .ref-open {
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+    padding: 1px 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-size: 10px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .ref-handle {
+    flex-shrink: 0;
+    color: var(--amber);
+  }
+
+  .ref-where {
+    overflow: hidden;
+    color: var(--fg-2);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ref-open:hover .ref-where {
+    color: var(--fg-1);
   }
 
   .keep-chip {
