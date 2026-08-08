@@ -114,6 +114,12 @@ impl LibraryStore {
         // pre-existing vault. Must run after the `note` column exists — the
         // rebuild copies it by name.
         relax_highlight_color_not_null(&conn)?;
+        // RFC 0078 on a database created by RFC 0077, where the table exists
+        // without `origin`. Existing rows are the user's by definition.
+        let _ = conn.execute(
+            "alter table chat_context_items add column origin text not null default 'user'",
+            [],
+        );
 
         self.migrate_threads_to_highlights()?;
         self.migrate_notes_into_highlight_field()?;
@@ -2688,6 +2694,10 @@ impl LibraryStore {
               -- summary items
               body text,
               covers_through_entry_id text,
+              -- RFC 0078: who put this here. The agent may drop only its own
+              -- additions — a curated passage vanishing on its own is the kind
+              -- of surprise that makes a feature untrustworthy.
+              origin text not null default 'user',
               token_estimate integer not null,
               created_at text not null,
               foreign key (thread_id) references chat_threads(id) on delete cascade
@@ -5121,9 +5131,9 @@ fn insert_context_item_tx(
         "
         insert into chat_context_items (
           id, thread_id, position, kind, chunk_id, paper_id, source_start,
-          source_end, body, covers_through_entry_id, token_estimate, created_at
+          source_end, body, covers_through_entry_id, origin, token_estimate, created_at
         )
-        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'))
         ",
         params![
             id,
@@ -5136,6 +5146,7 @@ fn insert_context_item_tx(
             draft.source_end,
             draft.body,
             draft.covers_through_entry_id,
+            draft.origin,
             draft.token_estimate,
         ],
     )
@@ -5144,7 +5155,8 @@ fn insert_context_item_tx(
 }
 
 const CONTEXT_ITEM_COLUMNS: &str = "id, thread_id, position, kind, chunk_id, paper_id, \
-     source_start, source_end, body, covers_through_entry_id, token_estimate, created_at";
+     source_start, source_end, body, covers_through_entry_id, origin, token_estimate, \
+     created_at";
 
 fn context_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextItem> {
     Ok(ContextItem {
@@ -5158,8 +5170,9 @@ fn context_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextIte
         source_end: row.get(7)?,
         body: row.get(8)?,
         covers_through_entry_id: row.get(9)?,
-        token_estimate: row.get(10)?,
-        created_at: row.get(11)?,
+        origin: row.get(10)?,
+        token_estimate: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -7850,6 +7863,7 @@ mod tests {
             source_end: Some(chunk.source_end),
             body: None,
             covers_through_entry_id: None,
+            origin: crate::domain::context::ORIGIN_USER.to_string(),
             token_estimate: chunk.token_estimate,
         }
     }
@@ -7972,6 +7986,7 @@ mod tests {
                 source_end: None,
                 body: Some("They discussed passages.".to_string()),
                 covers_through_entry_id: Some("entry-9".to_string()),
+                origin: crate::domain::context::ORIGIN_USER.to_string(),
                 token_estimate: 6,
             },
             &superseded,

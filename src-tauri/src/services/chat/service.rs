@@ -13,17 +13,14 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 
 use super::config::ChatConfig;
-use super::context_manager::{
-    retain_cited, ContextManager, ContextRequest, PaperFacts, RETRIEVAL_LIMIT,
-};
+use super::agent_loop::{self, RetrievalOutcome};
+use super::context_manager::{retain_cited, ContextManager, ContextRequest, PaperFacts};
 use crate::domain::chat::{
-    ChatContextSummary, ChatEntry, ChatEntryDraft, ChatScope, ChatThreadSummary, ChatThreadUpdated,
-    ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
+    ChatContextSummary, ChatEntry, ChatEntryDraft, ChatProgress, ChatScope, ChatThreadSummary,
+    ChatThreadUpdated, ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
 };
 use crate::domain::context::EphemeralContext;
-use crate::domain::library::DocumentChunk;
 use crate::services::llm::{self as openrouter, CompletionRequest, WireMessage};
-use crate::services::search::{SearchMode, SearchRequest};
 use crate::services::reader_service::ReaderService;
 use crate::storage::library_store::LibraryStore;
 
@@ -449,14 +446,24 @@ impl ChatService {
             paper_id: scope.id().to_string(),
             selection: anchor.selected_text().map(ToString::to_string),
         };
-        let retrieved = self.retrieve_for_turn(scope.id(), &user_body).await;
-        let assembled = self.context.get_context(ContextRequest {
+        let retrieval = self
+            .retrieve_for_turn(
+                scope.id(),
+                None,
+                &document.title,
+                anchor.selected_text(),
+                &user_body,
+                &api_key,
+            )
+            .await;
+        let mut assembled = self.context.get_context(ContextRequest {
             thread_id: None,
             paper: paper_facts(&document),
             entries: &[],
             ephemeral: &ephemeral,
-            retrieved: &retrieved,
+            retrieved: &retrieval.chunks,
         })?;
+        assembled.summary.retrieval_capped = retrieval.capped;
 
         Ok(PreparedAsk {
             api_key,
@@ -489,16 +496,26 @@ impl ChatService {
                 .selected_text()
                 .map(ToString::to_string),
         };
-        let retrieved = self.retrieve_for_turn(&scope_id, &user_body).await;
-        let assembled = self.context.get_context(ContextRequest {
+        let retrieval = self
+            .retrieve_for_turn(
+                &scope_id,
+                Some(thread_id),
+                &document.title,
+                view.thread.anchor.selected_text(),
+                &user_body,
+                &api_key,
+            )
+            .await;
+        let mut assembled = self.context.get_context(ContextRequest {
             thread_id: Some(thread_id),
             paper: paper_facts(&document),
             // Everything before a compaction watermark is dropped here, not in
             // the store: the thread view still shows the whole conversation.
             entries: &view.entries,
             ephemeral: &ephemeral,
-            retrieved: &retrieved,
+            retrieved: &retrieval.chunks,
         })?;
+        assembled.summary.retrieval_capped = retrieval.capped;
 
         Ok(PreparedAsk {
             api_key,
@@ -543,33 +560,52 @@ impl ChatService {
         self.store.get_chat_thread(thread_id)
     }
 
-    /// Pre-answer retrieval (RFC 0077 R1).
+    /// Phase 1 of a turn: let the agent decide what it needs (RFC 0078).
     ///
-    /// One search before the ask, rather than tool calls during it: the answer
-    /// path is deliberately free of tool-call generation so the reply streams
-    /// clean, and `annotate_streamed` runs marking as a separate cheap pass.
+    /// Replaces RFC 0077's unconditional pre-answer search. A question that
+    /// needs no lookup now costs no lookup, and one that needs three gets three
+    /// — all before phase 2, so the answer still streams free of tool calls.
     ///
-    /// Retrieval failing is not the ask failing. A search error or an empty
-    /// index degrades to the paper-text context that has always been there.
-    async fn retrieve_for_turn(&self, paper_id: &str, question: &str) -> Vec<DocumentChunk> {
-        let response = self
-            .context
-            .search(SearchRequest {
-                query: question.to_string(),
-                paper_ids: vec![paper_id.to_string()],
-                vault_ids: Vec::new(),
-                mode: SearchMode::Hybrid,
-                limit: Some(RETRIEVAL_LIMIT),
-            })
-            .await;
-
-        match response {
-            Ok(response) => response.hits.into_iter().map(|hit| hit.chunk).collect(),
-            Err(error) => {
-                eprintln!("[chat] pre-answer retrieval failed, using paper text: {error}");
-                Vec::new()
-            }
-        }
+    /// Retrieval failing is not the ask failing: the loop swallows its own
+    /// errors and returns whatever it managed to find.
+    async fn retrieve_for_turn(
+        &self,
+        paper_id: &str,
+        thread_id: Option<&str>,
+        paper_title: &str,
+        selection: Option<&str>,
+        question: &str,
+        api_key: &str,
+    ) -> RetrievalOutcome {
+        let app = self.app.clone();
+        agent_loop::run(
+            &self.client,
+            &self.context,
+            agent_loop::LoopRequest {
+                paper_id,
+                thread_id,
+                paper_title,
+                question,
+                selection,
+                model: &self.config.model,
+                url: &self.config.url,
+                api_key,
+            },
+            move |event| {
+                // The panel would otherwise sit dead through up to three round
+                // trips, which reads as hung rather than thinking.
+                let payload = match event {
+                    agent_loop::LoopEvent::Searching { query } => {
+                        ChatProgress::Searching { query }
+                    }
+                    agent_loop::LoopEvent::Retrieved { count } => {
+                        ChatProgress::Retrieved { count }
+                    }
+                };
+                let _ = app.emit(CHAT_PROGRESS_EVENT, payload);
+            },
+        )
+        .await
     }
 
     /// Persist the completed turn (question then answer) and return the thread.
@@ -815,6 +851,11 @@ struct PreparedAsk {
     request_messages: Vec<WireMessage>,
     summary: ChatContextSummary,
 }
+
+/// Tauri event carrying phase-1 progress (RFC 0078). A global event rather than
+/// a per-ask channel: the reader has one conversation open at a time, and the
+/// existing ask channel is already committed to answer deltas.
+pub const CHAT_PROGRESS_EVENT: &str = "chat://progress";
 
 /// Steers compaction toward what a later turn can still use. A summary that
 /// drops the specifics is worse than no compaction: the turns it replaced are

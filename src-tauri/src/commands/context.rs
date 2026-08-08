@@ -4,7 +4,7 @@
 //! page are ephemeral — passed into assembly at ask time and never stored — so
 //! there is nothing to add or remove for them.
 
-use crate::domain::context::{ContextItem, ContextItemView, ContextKey};
+use crate::domain::context::{ContextItem, ContextItemView, ContextKey, ORIGIN_USER};
 use crate::domain::chat::ChatThreadView;
 use crate::services::chat::{ChatService, ContextManager};
 
@@ -17,7 +17,7 @@ pub fn add_chat_context(
     thread_id: String,
     chunk_id: String,
 ) -> Result<ContextItem, String> {
-    context.add_context(&thread_id, &chunk_id)
+    context.add_context(&thread_id, &chunk_id, ORIGIN_USER)
 }
 
 /// Drop one item, by item id or by chunk id — whichever the caller holds.

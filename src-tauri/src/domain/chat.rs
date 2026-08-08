@@ -209,6 +209,17 @@ pub struct PinnedHighlight {
     pub anchor: ThreadAnchor,
 }
 
+/// Progress while the agent decides what evidence it needs (RFC 0078).
+///
+/// Phase 1 can take up to three round trips before the first word of prose. A
+/// silent panel through that reads as hung rather than thinking.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "camelCase")]
+pub enum ChatProgress {
+    Searching { query: String },
+    Retrieved { count: usize },
+}
+
 /// Event emitted when background title generation updates a thread title.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -242,6 +253,10 @@ pub struct ChatContextSummary {
     /// A compaction summary stood in for earlier turns.
     #[serde(default)]
     pub compacted: bool,
+    /// The retrieval loop hit a bound and stopped short (RFC 0078). Reported
+    /// so a capped turn does not read as an agent that decided it had enough.
+    #[serde(default)]
+    pub retrieval_capped: bool,
     /// Resolves the `[C1]` markers in this answer back to places in the PDF.
     ///
     /// Stored with the answer rather than recomputed: handles are assigned per

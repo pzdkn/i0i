@@ -22,18 +22,12 @@ use crate::domain::chat::{ChatContextSummary, ChatEntry};
 use crate::domain::chunking::{estimate_tokens, CHARS_PER_TOKEN};
 use crate::domain::context::{
     ContextCitation, ContextItem, ContextItemDraft, ContextItemView, ContextKey, EphemeralContext,
-    CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY,
+    CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY, ORIGIN_AGENT, ORIGIN_USER,
 };
 use crate::domain::library::DocumentChunk;
 use crate::services::chat::context::build_context;
 use crate::services::search::{SearchRequest, SearchResponse, SearchService};
 use crate::storage::library_store::LibraryStore;
-
-/// Hits pulled into ephemeral context before an answer (RFC 0077 R1).
-///
-/// Small on purpose: this is pre-answer retrieval, not a research pass, and
-/// every chunk here competes with the paper text for the same budget.
-pub const RETRIEVAL_LIMIT: usize = 5;
 
 /// Facts about the paper the thread is about, supplied by the caller.
 ///
@@ -104,8 +98,15 @@ impl ContextManager {
     ///
     /// Takes only a chunk id: the durable anchor and token estimate are read off
     /// the chunk, so no caller has to know that layout. Adding a chunk already
-    /// in context is a no-op returning the existing item.
-    pub fn add_context(&self, thread_id: &str, chunk_id: &str) -> Result<ContextItem, String> {
+    /// in context is a no-op returning the existing item — including its
+    /// original `origin`, so the agent re-adding a passage you kept does not
+    /// relabel it as the agent's.
+    pub fn add_context(
+        &self,
+        thread_id: &str,
+        chunk_id: &str,
+        origin: &str,
+    ) -> Result<ContextItem, String> {
         let existing = self.store.context_items(thread_id)?;
         if let Some(item) = existing
             .iter()
@@ -131,6 +132,7 @@ impl ContextManager {
                 source_end: Some(chunk.source_end),
                 body: None,
                 covers_through_entry_id: None,
+                origin: origin.to_string(),
                 token_estimate: chunk.token_estimate,
             },
         )
@@ -139,6 +141,28 @@ impl ContextManager {
     /// Drop one item, by item id or by chunk id.
     pub fn delete_context(&self, thread_id: &str, key: &ContextKey) -> Result<bool, String> {
         self.store.delete_context_item(thread_id, key)
+    }
+
+    /// The agent dropping one of *its own* additions (RFC 0078).
+    ///
+    /// Refuses anything the user kept. You curated that passage on purpose, and
+    /// an agent removing it silently is the kind of surprise that makes the
+    /// whole feature untrustworthy — the agent can say a passage looks
+    /// unhelpful, it cannot act on that alone.
+    pub fn agent_delete_context(&self, thread_id: &str, item_id: &str) -> Result<String, String> {
+        let items = self.store.context_items(thread_id)?;
+        let Some(item) = items.iter().find(|item| item.id == item_id) else {
+            return Ok(format!("No context item {item_id}."));
+        };
+        if item.origin != ORIGIN_AGENT {
+            return Ok(format!(
+                "Refused: {item_id} was added by the reader, not by you. \
+                 Say why it looks unhelpful instead."
+            ));
+        }
+        self.store
+            .delete_context_item(thread_id, &ContextKey::Item(item_id.to_string()))?;
+        Ok(format!("Dropped {item_id}."))
     }
 
     /// The thread's persistent context, resolved, for display.
@@ -158,6 +182,7 @@ impl ContextManager {
                         heading_path: None,
                         text: body,
                         token_estimate: item.token_estimate,
+                        origin: item.origin.clone(),
                         unresolved: false,
                     },
                     Resolved::Chunks(chunks) => ContextItemView {
@@ -171,6 +196,7 @@ impl ContextManager {
                             .and_then(|chunk| chunk.heading_path.clone()),
                         text: join_chunk_text(&chunks),
                         token_estimate: item.token_estimate,
+                        origin: item.origin.clone(),
                         unresolved: false,
                     },
                     Resolved::Unresolved => ContextItemView {
@@ -182,6 +208,7 @@ impl ContextManager {
                         heading_path: None,
                         text: String::new(),
                         token_estimate: item.token_estimate,
+                        origin: item.origin.clone(),
                         unresolved: true,
                     },
                 })
@@ -304,6 +331,9 @@ impl ContextManager {
                 dropped_items: assembly.dropped,
                 unresolved_items: unresolved,
                 compacted: watermark.is_some(),
+                // Set by the caller, which is the only thing that knows whether
+                // phase 1 stopped short (RFC 0078).
+                retrieval_capped: false,
             },
         })
     }
@@ -371,6 +401,7 @@ impl ContextManager {
                 source_end: None,
                 body: Some(body),
                 covers_through_entry_id: entries.last().map(|entry| entry.id.clone()),
+                origin: ORIGIN_USER.to_string(),
                 token_estimate,
             },
             &superseded,
@@ -835,7 +866,7 @@ mod tests {
         for chunk in &chunks {
             fixture
                 .manager
-                .add_context(&thread_id, &chunk.id)
+                .add_context(&thread_id, &chunk.id, ORIGIN_USER)
                 .expect("adds");
         }
 
@@ -885,11 +916,11 @@ mod tests {
 
         let first = fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds");
         let second = fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds again");
 
         assert_eq!(first.id, second.id);
@@ -907,7 +938,7 @@ mod tests {
         let thread_id = thread_for(&fixture, &paper_id);
         fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds");
 
         let authors = vec!["A. Vaswani".to_string()];
@@ -938,7 +969,7 @@ mod tests {
         let thread_id = thread_for(&fixture, &paper_id);
         fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds");
 
         // Break both paths: the chunk id and the durable anchor.
@@ -976,7 +1007,7 @@ mod tests {
         let thread_id = thread_for(&fixture, &paper_id);
         fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds");
 
         let extraction_id = chunks[0].extraction_id.clone();
@@ -1083,7 +1114,7 @@ mod tests {
         for chunk in &chunks {
             fixture
                 .manager
-                .add_context(&thread_id, &chunk.id)
+                .add_context(&thread_id, &chunk.id, ORIGIN_USER)
                 .expect("adds");
         }
         let entries = vec![entry("e1", "what did they find"), entry("e2", "they found x")];
@@ -1112,7 +1143,7 @@ mod tests {
         for chunk in &chunks {
             fixture
                 .manager
-                .add_context(&thread_id, &chunk.id)
+                .add_context(&thread_id, &chunk.id, ORIGIN_USER)
                 .expect("adds");
         }
 
@@ -1141,7 +1172,7 @@ mod tests {
         let thread_id = thread_for(&fixture, &paper_id);
         fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds");
 
         // More than the six that used to overflow the old sort key.
@@ -1191,7 +1222,7 @@ mod tests {
         let thread_id = thread_for(&fixture, &paper_id);
         fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds");
 
         let error = fixture
@@ -1215,7 +1246,7 @@ mod tests {
         let thread_id = thread_for(&fixture, &paper_id);
         fixture
             .manager
-            .add_context(&thread_id, &chunks[0].id)
+            .add_context(&thread_id, &chunks[0].id, ORIGIN_USER)
             .expect("adds");
 
         let error = fixture

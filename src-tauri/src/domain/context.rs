@@ -45,9 +45,15 @@ pub struct ContextItem {
     pub body: Option<String>,
     /// Newest entry the summary covers; `get_context` replays entries after it.
     pub covers_through_entry_id: Option<String>,
+    /// `ORIGIN_USER` or `ORIGIN_AGENT` (RFC 0078).
+    pub origin: String,
     pub token_estimate: i32,
     pub created_at: String,
 }
+
+/// Who added a context item. The agent may drop only its own additions.
+pub const ORIGIN_USER: &str = "user";
+pub const ORIGIN_AGENT: &str = "agent";
 
 /// A context item to insert. `position` and `id` are assigned by the store.
 #[derive(Debug, Clone)]
@@ -59,6 +65,7 @@ pub struct ContextItemDraft {
     pub source_end: Option<i64>,
     pub body: Option<String>,
     pub covers_through_entry_id: Option<String>,
+    pub origin: String,
     pub token_estimate: i32,
 }
 
@@ -132,6 +139,8 @@ pub struct ContextItemView {
     /// Chunk text, or the summary body.
     pub text: String,
     pub token_estimate: i32,
+    /// `"user"` or `"agent"` — the panel tags the agent's additions.
+    pub origin: String,
     /// The chunk no longer resolves — reported, never silently dropped.
     pub unresolved: bool,
 }
