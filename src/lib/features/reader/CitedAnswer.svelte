@@ -76,7 +76,15 @@
         </ul>
       {/if}
     {:else if block.kind === "code"}
-      <pre>{block.text}</pre>
+      <!-- Pseudocode is a first-class answer shape: five lines of it beat a
+           paragraph the reader has to re-derive. Horizontal scroll rather than
+           wrapping — a wrapped algorithm reads as a different algorithm. -->
+      <div class="code-block">
+        {#if block.lang}
+          <div class="code-lang mono-dim">{block.lang}</div>
+        {/if}
+        <pre>{block.text}</pre>
+      </div>
     {:else if block.kind === "quote"}
       <blockquote>{@render inline(block.spans)}</blockquote>
     {:else}
@@ -121,12 +129,24 @@
     color: var(--amber-mid);
   }
 
+  .code-block {
+    margin: 0 0 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+
+  .code-lang {
+    padding: 2px 6px 0;
+    font-size: 9px;
+  }
+
   pre {
     overflow-x: auto;
-    margin: 0 0 6px;
+    margin: 0;
     padding: 5px 6px;
-    background: var(--bg-2);
+    /* Indentation carries meaning in pseudocode, so it must not collapse. */
     white-space: pre;
+    tab-size: 2;
   }
 
   blockquote {

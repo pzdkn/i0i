@@ -28,7 +28,8 @@ export type Block =
   | { kind: "p"; spans: Inline[] }
   | { kind: "h"; level: number; spans: Inline[] }
   | { kind: "list"; ordered: boolean; items: Inline[][] }
-  | { kind: "code"; text: string }
+  /** `lang` is the fence tag, when the model gave one. */
+  | { kind: "code"; text: string; lang: string }
   | { kind: "quote"; spans: Inline[] }
   | { kind: "hr" };
 
@@ -37,7 +38,7 @@ const BULLET = /^\s*[-*+]\s+(.*)$/;
 const NUMBERED = /^\s*\d+[.)]\s+(.*)$/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const RULE = /^\s*([-*_])\1{2,}\s*$/;
-const FENCE = /^\s*```/;
+const FENCE = /^\s*```(.*)$/;
 
 export function parseMarkdown(body: string): Block[] {
   const lines = body.split("\n");
@@ -54,8 +55,10 @@ export function parseMarkdown(body: string): Block[] {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
 
-    if (FENCE.test(line)) {
+    const fence = line.match(FENCE);
+    if (fence) {
       flushParagraph();
+      const lang = fence[1].trim();
       const code: string[] = [];
       index += 1;
       // An unterminated fence runs to the end — models truncate mid-block, and
@@ -64,7 +67,11 @@ export function parseMarkdown(body: string): Block[] {
         code.push(lines[index]);
         index += 1;
       }
-      blocks.push({ kind: "code", text: code.join("\n") });
+      // Trailing blank lines are the model's formatting, not content.
+      while (code.length && !code[code.length - 1].trim()) {
+        code.pop();
+      }
+      blocks.push({ kind: "code", text: code.join("\n"), lang });
       continue;
     }
 

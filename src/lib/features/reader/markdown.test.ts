@@ -48,10 +48,31 @@ test("a list ends at the paragraph after it", () => {
   assert.deepEqual(kinds(blocks), ["list", "p"]);
 });
 
-test("fenced code keeps its lines verbatim", () => {
+test("fenced code keeps its lines verbatim and records the language", () => {
   const blocks = parseMarkdown("before\n\n```python\nx = 1\ny = 2\n```\n\nafter");
   assert.deepEqual(kinds(blocks), ["p", "code", "p"]);
-  assert.equal((blocks[1] as { text: string }).text, "x = 1\ny = 2");
+  const code = blocks[1] as { text: string; lang: string };
+  assert.equal(code.text, "x = 1\ny = 2");
+  assert.equal(code.lang, "python");
+});
+
+test("an untagged fence has no language", () => {
+  const blocks = parseMarkdown("```\nfor h in heads:\n    out = attend(h)\n```");
+  assert.equal((blocks[0] as { lang: string }).lang, "");
+});
+
+test("pseudocode indentation survives", () => {
+  // Indentation carries meaning; collapsing it changes the algorithm.
+  const blocks = parseMarkdown("```\nfor each head h:\n    scores = Q @ K.T\n    out = softmax(scores)\n```");
+  assert.equal(
+    (blocks[0] as { text: string }).text,
+    "for each head h:\n    scores = Q @ K.T\n    out = softmax(scores)",
+  );
+});
+
+test("trailing blank lines in a fence are dropped", () => {
+  const blocks = parseMarkdown("```\nx = 1\n\n\n```");
+  assert.equal((blocks[0] as { text: string }).text, "x = 1");
 });
 
 test("an unterminated fence runs to the end rather than leaking backticks", () => {

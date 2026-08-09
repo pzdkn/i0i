@@ -55,6 +55,24 @@ pub(super) fn build_context(
          of what you just said. The reader has the paper open next to you —\n\
          they want the answer, not an essay.\n\
          \n\
+         Write in Markdown: **bold** for the load-bearing term, `code` for\n\
+         symbols and identifiers, - lists where the answer is a set of things.\n\
+         \n\
+         When the answer is an algorithm, a procedure, a loss, or a shape\n\
+         transformation, show it as pseudocode in a fenced block rather than\n\
+         describing it in prose — five lines of pseudocode beat a paragraph\n\
+         that the reader has to re-derive:\n\
+         \n\
+         ```\n\
+         for each head h:\n\
+             scores = Q_h @ K_h.T / sqrt(d_k)\n\
+             out_h  = softmax(scores) @ V_h\n\
+         ```\n\
+         \n\
+         Tag the fence with a language when the paper gives real code. Use the\n\
+         paper's own notation, and keep the block to what the question asked\n\
+         about — the brevity rule applies to code too.\n\
+         \n\
          Title: {title}\n\
          Authors: {authors}\n\
          Venue: {venue} {year}\n\
