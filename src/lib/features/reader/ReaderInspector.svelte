@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Pencil, Trash2, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
+  import { Pencil, Trash2, Minus, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import CitedAnswer from "$lib/features/reader/CitedAnswer.svelte";
@@ -74,6 +74,7 @@
     onPickColor,
     onEnsureHighlight,
     onOpenHighlight,
+    onRemoveHighlight,
     onHighlightIntent,
     onAskTurnStart,
     onAskTurnComplete,
@@ -108,6 +109,8 @@
     onPickColor: (color: HighlightColor) => void | Promise<void>;
     onEnsureHighlight: () => Promise<string | null>;
     onOpenHighlight: (highlightId: string) => void;
+    /// RFC 0079 R1.2: delete the passage, its note, and its conversation.
+    onRemoveHighlight?: (highlightId: string) => void | Promise<void>;
     onHighlightIntent?: (intent: HighlightIntent) => Promise<boolean>;
     // RFC 0059 Phase 2 (Task 9): lifecycle hooks around a single ask turn so
     // ReaderView can collect the highlight ids the agent creates during that
@@ -187,6 +190,10 @@
   // is currently in the draft so a background reload never clobbers typing.
   let noteDraft = $state("");
   let isSavingNote = $state(false);
+  // RFC 0079 R3.1: after a save the editor closes and the note reads back as
+  // text. Saving used to leave the textarea open and unchanged, so nothing on
+  // screen moved and the note never felt filed anywhere.
+  let noteEditorOpen = $state(false);
   let noteLoadedFor = "";
   let pendingQuestion = $state<string | null>(null);
   let streamingAnswer = $state<string | null>(null);
@@ -449,6 +456,9 @@
     if (key !== noteLoadedFor) {
       noteLoadedFor = key;
       noteDraft = currentHighlight?.note ?? "";
+      // A passage that already has a note opens closed — you came to read it,
+      // not to retype it. One with none opens ready to type.
+      noteEditorOpen = !(currentHighlight?.note ?? "").trim();
     }
   });
 
@@ -596,6 +606,15 @@
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void saveNote();
+      return;
+    }
+    // RFC 0079 R3.3: Escape abandons the edit and restores what was stored.
+    // Without it the only way out of the editor was to save something.
+    if (event.key === "Escape") {
+      event.preventDefault();
+      const stored = currentHighlight?.note ?? "";
+      noteDraft = stored;
+      noteEditorOpen = !stored.trim();
     }
   }
 
@@ -631,6 +650,9 @@
       }
       await setHighlightNote(id, body.length ? body : null);
       await onReloadChat();
+      // Collapse to the saved note (R3.1). An emptied note has nothing to show,
+      // so its editor stays open rather than collapsing into a blank.
+      noteEditorOpen = !body.length;
       if (isVirtual) {
         onClearSelection();
       }
@@ -985,28 +1007,46 @@
                   </div>
                 {/if}
 
+                <!-- RFC 0079 R3.1: two states, not one. Editing shows the
+                     textarea; saving closes it and the note reads back as
+                     text, which is what makes a save feel like filing
+                     something rather than typing into a box that never
+                     changes. -->
                 <div class="note-field">
                   <div class="row note-field-head">
                     <span class="label">Note</span>
-                    {#if noteDraft.trim() !== (currentHighlight?.note ?? "").trim()}
-                      <button
-                        class="link-btn"
-                        type="button"
-                        disabled={isSavingNote}
-                        onclick={() => void saveNote()}
-                      >
-                        {isSavingNote ? "Saving…" : "Save"}
-                      </button>
+                    {#if noteEditorOpen}
+                      {#if noteDraft.trim() !== (currentHighlight?.note ?? "").trim()}
+                        <button
+                          class="link-btn"
+                          type="button"
+                          disabled={isSavingNote}
+                          onclick={() => void saveNote()}
+                        >
+                          {isSavingNote ? "Saving…" : "Save"}
+                        </button>
+                      {/if}
+                    {:else}
+                      <button class="link-btn" type="button" onclick={() => (noteEditorOpen = true)}>Edit</button>
                     {/if}
                   </div>
-                  <textarea
-                    bind:value={noteDraft}
-                    aria-label="Note on this passage"
-                    placeholder="Jot a note on this passage… (Enter saves, Shift+Enter newline)"
-                    rows="2"
-                    disabled={isSavingNote}
-                    onkeydown={handleNoteKeydown}
-                  ></textarea>
+                  {#if noteEditorOpen}
+                    <textarea
+                      bind:value={noteDraft}
+                      aria-label="Note on this passage"
+                      placeholder="Jot a note on this passage… (Enter saves, Shift+Enter newline)"
+                      rows="2"
+                      disabled={isSavingNote}
+                      onkeydown={handleNoteKeydown}
+                    ></textarea>
+                  {:else}
+                    <button
+                      class="note-saved"
+                      type="button"
+                      title="Edit this note"
+                      onclick={() => (noteEditorOpen = true)}
+                    >{currentHighlight?.note ?? ""}</button>
+                  {/if}
                 </div>
               {:else}
                 {#if contextItems.length || contextNote}
@@ -1352,20 +1392,52 @@
                 <p class="empty-note">Loading annotations…</p>
               {:else if filteredAnnotations.length}
                 {#each filteredAnnotations as row (row.highlight.id)}
-                  <button class="thread-row" type="button" onclick={() => onOpenHighlight(row.highlight.id)}>
-                    <!-- RFC 0074: the list mirrors the page — a sticky note reads
-                         as its glyph, a passage mark as its color chip. -->
-                    {#if isStickyNote(row.highlight.locator)}
-                      <StickyGlyph color={row.highlight.color} size={13} />
-                    {:else}
-                      <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
+                  <!-- RFC 0079 R1.2: the row opens the passage, the trailing −
+                       deletes it. Two buttons rather than one, because a list of
+                       things you cannot remove from the list is where this
+                       started. Delete/Backspace on the focused row does the
+                       same, and so does right-click. -->
+                  <div class="thread-row-wrap">
+                    <button
+                      class="thread-row"
+                      type="button"
+                      onclick={() => onOpenHighlight(row.highlight.id)}
+                      oncontextmenu={(event) => {
+                        event.preventDefault();
+                        void onRemoveHighlight?.(row.highlight.id);
+                      }}
+                      onkeydown={(event) => {
+                        if (event.key === "Delete" || event.key === "Backspace") {
+                          event.preventDefault();
+                          void onRemoveHighlight?.(row.highlight.id);
+                        }
+                      }}
+                    >
+                      <!-- RFC 0074: the list mirrors the page — a sticky note reads
+                           as its glyph, a passage mark as its color chip. -->
+                      {#if isStickyNote(row.highlight.locator)}
+                        <StickyGlyph color={row.highlight.color} size={13} />
+                      {:else}
+                        <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
+                      {/if}
+                      <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
+                      {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                      {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                      {#if row.hasConversation}<span class="badge" title="has a conversation"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                      {#if row.starred}<span class="badge" title="starred"><Star size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
+                    </button>
+                    {#if onRemoveHighlight}
+                      <button
+                        class="row-remove"
+                        type="button"
+                        aria-label="delete annotation"
+                        title="Delete this annotation"
+                        onclick={() => void onRemoveHighlight?.(row.highlight.id)}
+                      >
+                        <Minus size={13} strokeWidth={2} aria-hidden="true" />
+                      </button>
                     {/if}
-                    <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
-                    {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                    {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                    {#if row.hasConversation}<span class="badge" title="has a conversation"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                    {#if row.starred}<span class="badge" title="starred"><Star size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                  </button>
+                  </div>
                 {/each}
               {:else if anyFilterActive}
                 <p class="empty-note">No marks match these filters. <button class="link-btn" type="button" onclick={clearFilters}>Clear</button></p>
@@ -1581,6 +1653,28 @@
     min-height: 48px;
   }
 
+  /* The saved note, at rest. Reads as text rather than as a field — a border
+     around it would say "still editing" (RFC 0079 R3.1). */
+  .note-saved {
+    display: block;
+    width: 100%;
+    padding: 6px 7px 6px 9px;
+    border: none;
+    border-left: 2px solid var(--amber-dim);
+    background: rgba(242, 169, 59, 0.04);
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1.5;
+    text-align: left;
+    white-space: pre-wrap;
+    cursor: text;
+  }
+
+  .note-saved:hover {
+    background: rgba(242, 169, 59, 0.08);
+  }
+
   textarea {
     width: 100%;
     min-height: 72px;
@@ -1710,6 +1804,38 @@
   .thread-row:hover {
     border-color: var(--amber-dim);
     background: rgba(242, 169, 59, 0.05);
+  }
+
+  /* RFC 0079 R1.2: the row and its remove button read as one row. The button
+     stays visible rather than appearing on hover — a list you can delete from
+     should look like one before you point at it. */
+  .thread-row-wrap {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .thread-row-wrap .thread-row {
+    border-right: none;
+  }
+
+  .row-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 24px;
+    padding: 0;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.015);
+    color: var(--fg-3);
+    cursor: pointer;
+  }
+
+  .row-remove:hover {
+    border-color: #b4483c;
+    background: rgba(180, 72, 60, 0.12);
+    color: #e07a6e;
   }
 
   .thread-row-title {

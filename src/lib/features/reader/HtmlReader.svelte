@@ -171,6 +171,41 @@
     }
   }
 
+  type CaretPoint = { node: Node; offset: number };
+
+  /// The text position under a viewport point, across both spellings of the
+  /// API. Returns null when neither exists or the point is not over text.
+  function resolveCaret(clientX: number, clientY: number): CaretPoint | null {
+    const doc = document as Document & {
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    };
+    const position = doc.caretPositionFromPoint?.(clientX, clientY);
+    if (position) {
+      return { node: position.offsetNode, offset: position.offset };
+    }
+    const range = doc.caretRangeFromPoint?.(clientX, clientY);
+    return range ? { node: range.startContainer, offset: range.startOffset } : null;
+  }
+
+  /// RFC 0079 R1.1: right-click a mark to reach its actions — Remove included.
+  /// The HTML reader has no per-mark element to hang a hover affordance on
+  /// (marks are ranges painted over the article), so the pointer position is
+  /// resolved to an offset the same way a plain click is.
+  function handleContextMenu(event: MouseEvent) {
+    if (!root || !onHighlightClick) return;
+    const target = event.target as Node | null;
+    if (!target || !root.contains(target)) return;
+    // `caretPositionFromPoint` is the standard; WebKit still ships only the
+    // older `caretRangeFromPoint`, and this reader runs in a WKWebView.
+    const point = resolveCaret(event.clientX, event.clientY);
+    if (!point) return;
+    const offset = offsetIn(root, point.node, point.offset);
+    const hit = findHighlightForOffset(highlights, sourceId, offset);
+    if (!hit) return;
+    event.preventDefault();
+    onHighlightClick(hit.id, event.clientX, event.clientY);
+  }
+
   function handleMouseUp(event: MouseEvent) {
     if (!root) return;
     const selection = window.getSelection();
@@ -264,7 +299,7 @@
   {:else}
     <!-- Safe: the backend sanitized this (ammonia allowlist, no scripts/externals). -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <article class="html-content" bind:this={root} onmouseup={handleMouseUp}>
+    <article class="html-content" bind:this={root} onmouseup={handleMouseUp} oncontextmenu={handleContextMenu}>
       {@html html}
     </article>
   {/if}

@@ -1,6 +1,20 @@
 export type HighlightColor = "yellow" | "green" | "blue" | "red" | "purple" | "orange";
 export const HIGHLIGHT_COLORS: HighlightColor[] = ["yellow", "green", "blue", "red", "purple", "orange"];
 
+/**
+ * Where an annotation lives. This type carries the whole distinction between
+ * the kinds of annotation the app has (RFC 0079 R2.3):
+ *
+ * - A **range** (`textOffset` / `pdfRect`) is a mark on a passage. It quotes
+ *   text, so it has an excerpt.
+ * - A **point** (`textPoint` / `pdfPoint`) is a sticky note — dropped at a
+ *   spot rather than attached to words, so its excerpt is empty.
+ *
+ * There is no `kind` column and no second table: a sticky note and a
+ * commented highlight are the same row with different anchors, which is why
+ * they share every verb (color, note, delete) and every list. `isStickyNote`
+ * below is the only place that asks which one it is.
+ */
 export type Locator =
   | { kind: "textOffset"; sourceId: string; startOffset: number; endOffset: number }
   | { kind: "pdfRect"; sourceId: string; pageIndex: number; rectsJson: string }

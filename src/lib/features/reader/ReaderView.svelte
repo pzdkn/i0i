@@ -22,6 +22,7 @@
     createHighlight,
     listHighlights,
     recolorHighlight,
+    removeAnnotation,
     removeHighlight,
     setHighlightNote,
   } from "$lib/bridge/highlight";
@@ -176,6 +177,8 @@
         highlights = [...highlights, created];
       }
       openHighlightPopover(created.id, clientX, clientY);
+      // Eligible for cleanup until it is typed into (R2.2).
+      pendingStickyId = created.id;
       await reloadChat();
     } catch (error) {
       readerLog("place-note-error", { error: errorDetail(error) }, "error");
@@ -888,9 +891,30 @@
     };
   }
 
+  // RFC 0079 R2.2: a sticky placed and then dismissed without a word is a
+  // misfire, not a record — clean it up rather than leaving an empty glyph on
+  // the page and an empty row in the list. Only the sticky *this* placement
+  // created is eligible: an existing one you opened and closed stays put.
+  let pendingStickyId: string | null = null;
+
   function closeHighlightPopover() {
+    const abandoned = pendingStickyId;
+    const target = abandoned ? highlights.find((hl) => hl.id === abandoned) : null;
+    pendingStickyId = null;
     popoverHighlightId = null;
     popoverPos = null;
+    if (target && !target.note?.trim()) {
+      void discardEmptySticky(target.id);
+    }
+  }
+
+  async function discardEmptySticky(id: string) {
+    try {
+      await removeHighlight(id);
+      await reloadChat();
+    } catch (error) {
+      readerLog("discard-empty-sticky-error", { error: errorDetail(error) }, "error");
+    }
   }
 
   async function recolorPopoverHighlight(color: HighlightColor) {
@@ -909,12 +933,38 @@
     if (!popoverHighlight) {
       return;
     }
+    closeHighlightPopover();
+    await deleteAnnotation(popoverHighlight.id);
+  }
+
+  // RFC 0079 R1.3/R1.4: deleting a passage takes its note and its conversation
+  // with it — the old `removeHighlight` left the thread alive with no row
+  // rendering it, which is unreachable rather than deleted.
+  //
+  // The confirm is asymmetric on purpose: a colored mark is one gesture to
+  // redo, so it goes silently; a note or a conversation is work, so it asks
+  // once. Confirming everything teaches you to confirm without reading.
+  async function deleteAnnotation(id: string) {
+    const target = highlights.find((hl) => hl.id === id);
+    if (!target) {
+      return;
+    }
+    const hasNote = Boolean(target.note?.trim());
+    const hasThread = Boolean(findThreadForHighlight(threads, target));
+    if (hasNote || hasThread) {
+      const what = hasThread && hasNote ? "note and conversation" : hasThread ? "conversation" : "note";
+      const excerpt = target.excerpt.trim().slice(0, 60);
+      const subject = excerpt ? `“${excerpt}${target.excerpt.trim().length > 60 ? "…" : ""}”` : "this passage";
+      if (!window.confirm(`Delete ${subject} and its ${what}? This cannot be undone.`)) {
+        return;
+      }
+    }
     try {
-      await removeHighlight(popoverHighlight.id);
-      closeHighlightPopover();
+      await removeAnnotation(id);
       await reloadChat();
     } catch (error) {
-      readerLog("remove-highlight-error", { error: errorDetail(error) }, "error");
+      readerLog("remove-annotation-error", { error: errorDetail(error) }, "error");
+      chatError = String(error);
     }
   }
 
@@ -928,6 +978,10 @@
     const trimmed = note?.trim() ?? "";
     try {
       await setHighlightNote(popoverHighlight.id, trimmed.length ? trimmed : null);
+      // Typed into, so no longer a misfire (R2.2).
+      if (trimmed.length && pendingStickyId === popoverHighlight.id) {
+        pendingStickyId = null;
+      }
       await reloadChat();
     } catch (error) {
       readerLog("set-highlight-note-error", { error: errorDetail(error) }, "error");
@@ -1417,6 +1471,7 @@
           onPickColor={pickColor}
           onEnsureHighlight={ensureHighlightForSelection}
           onOpenHighlight={openHighlightById}
+          onRemoveHighlight={deleteAnnotation}
           onOpenCitation={openCitation}
           onHighlightIntent={handleHighlightIntent}
           onAskTurnStart={handleAskTurnStart}

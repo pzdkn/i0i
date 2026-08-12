@@ -32,6 +32,14 @@ export function removeHighlight(id: string): Promise<void> {
   return invoke("remove_highlight", { id });
 }
 
+/// Delete a passage outright — the mark, its note, and its conversation
+/// (RFC 0079 R1.3). Resolves to the number of threads that went with it, so
+/// the caller can say what it cost. `removeHighlight` above deletes only the
+/// mark and leaves an unreachable thread behind; prefer this one.
+export function removeAnnotation(id: string): Promise<number> {
+  return invoke<number>("remove_annotation", { id });
+}
+
 export function listHighlights(paperId: string): Promise<Highlight[]> {
   return invoke<Highlight[]>("list_highlights", { paperId });
 }

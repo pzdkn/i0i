@@ -610,6 +610,13 @@
             event.stopPropagation();
             onHighlightClick(mark.id, event.clientX, event.clientY);
           }}
+          oncontextmenu={(event) => {
+            // RFC 0079 R1.1: right-click reaches the same actions as left —
+            // including Delete, which had no gesture on the page at all.
+            event.preventDefault();
+            event.stopPropagation();
+            onHighlightClick(mark.id, event.clientX, event.clientY);
+          }}
         ></button>
         <!-- RFC 0074 R3: a commented highlight has to look different from a bare
              one, or the two are indistinguishable on the page. The glyph rides
@@ -637,6 +644,11 @@
           aria-label={sticky.note?.trim() ? `Note: ${sticky.note.trim()}` : "Empty note"}
           style={`left: ${point.x * 100}%; top: ${point.y * 100}%;`}
           onclick={(event) => {
+            event.stopPropagation();
+            onHighlightClick(sticky.id, event.clientX, event.clientY);
+          }}
+          oncontextmenu={(event) => {
+            event.preventDefault();
             event.stopPropagation();
             onHighlightClick(sticky.id, event.clientX, event.clientY);
           }}
