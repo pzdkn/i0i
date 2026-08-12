@@ -878,14 +878,33 @@
     if (parts.length) {
       return `Context: ${parts.join(" · ")}`;
     }
-    // `includedChars` counts the paper body text; the foregrounded passage (for
-    // an anchored thread) is sent separately, so reflect that rather than
-    // claiming there was no context.
+    // RFC 0079 R5.4: zero passages has two causes and they are not the reader's
+    // to guess between. An unindexed paper is something they can fix; a search
+    // that matched nothing is not. Both used to render as a character count.
+    if (!summary.paperIndexed) {
+      return "Context: paper not indexed · answered from the first pages only";
+    }
+    // RFC 0079 R5.5: no passage means the answer cites nothing and rests on
+    // whatever fell inside the character budget — which is the head of the
+    // paper, not the part the question was about. Say so.
+    const chars = summary.includedChars.toLocaleString();
     if (summary.includedChars > 0) {
-      const chars = summary.includedChars.toLocaleString();
-      return `Context: ${chars} chars${summary.truncated ? " · truncated" : ""}`;
+      return summary.truncated
+        ? `Context: no passages retrieved · first ${chars} chars only`
+        : `Context: no passages retrieved · whole paper (${chars} chars)`;
     }
     return openPassage ? "Context: selected passage only" : "Context: title + metadata only";
+  }
+
+  /// RFC 0079 R5.5: what retrieval actually looked for. Shown as the context
+  /// line's tooltip rather than another line — it matters when an answer looks
+  /// wrong, and never otherwise.
+  function chatContextTitle(entry: ChatEntry) {
+    const queries = entry.contextSummary?.retrievalQueries ?? [];
+    if (!queries.length) {
+      return "Nothing was searched for this turn.";
+    }
+    return `Searched: ${queries.map((query) => `"${query}"`).join(", ")}`;
   }
 
 </script>
@@ -1128,7 +1147,7 @@
                         {/if}
                       {/if}
                       {#if entry.kind === "answer" && chatContextLabel(entry)}
-                        <div class="entry-context mono-dim">{chatContextLabel(entry)}</div>
+                        <div class="entry-context mono-dim" title={chatContextTitle(entry)}>{chatContextLabel(entry)}</div>
                       {/if}
                     </div>
                   {/each}

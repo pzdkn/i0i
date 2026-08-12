@@ -470,6 +470,8 @@ impl ChatService {
             retrieved: &retrieval.chunks,
         })?;
         assembled.summary.retrieval_capped = retrieval.capped;
+        assembled.summary.retrieval_queries = retrieval.queries.clone();
+        assembled.summary.paper_indexed = retrieval.paper_indexed;
 
         Ok(PreparedAsk {
             api_key,
@@ -525,6 +527,8 @@ impl ChatService {
             retrieved: &retrieval.chunks,
         })?;
         assembled.summary.retrieval_capped = retrieval.capped;
+        assembled.summary.retrieval_queries = retrieval.queries.clone();
+        assembled.summary.paper_indexed = retrieval.paper_indexed;
 
         Ok(PreparedAsk {
             api_key,

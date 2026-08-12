@@ -46,7 +46,18 @@ const DECIDE_MAX_TOKENS: u32 = 512;
 /// Deliberately tight. Every passage competes with the paper text for the same
 /// assembly budget, and a long reference list is worse than a short one: it
 /// spreads the reader's attention over material the answer did not need.
+///
+/// RFC 0079 R5.1a: this is now the budget for the *whole* turn — the baseline
+/// search and the agent's refinements draw from it in that order — rather than
+/// a bound the loop alone enforced.
 const MAX_CHUNKS_PER_TURN: usize = 6;
+
+/// Chunks the unconditional baseline search may claim (RFC 0079 R5.1).
+///
+/// Less than the whole budget on purpose: the agent must be left room to
+/// refine. Four good passages from the reader's own words, two more if the
+/// agent finds better wording.
+const BASELINE_CHUNKS: usize = 4;
 
 /// Hits one `search_context` call returns. Three good ones beat five, and the
 /// agent can always search again with better wording.
@@ -61,7 +72,7 @@ const PREVIEW_CHARS: usize = 300;
 pub const RECENT_TURNS: usize = 4;
 
 /// What phase 1 produced.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RetrievalOutcome {
     /// Passages found this turn. Ephemeral: they go into the assembly and are
     /// not persisted unless something called `add_context`.
@@ -72,6 +83,24 @@ pub struct RetrievalOutcome {
     /// Queries the agent ran, oldest first. Drives the progress line, and makes
     /// over-searching visible.
     pub queries: Vec<String>,
+    /// Whether the paper has any chunks to retrieve at all (RFC 0079 R5.4).
+    ///
+    /// Zero passages means two very different things — "nothing matched" and
+    /// "this paper was never indexed" — and only one of them is the reader's
+    /// to fix. Defaults to `true` so a failure to check never accuses the
+    /// library of being unindexed.
+    pub paper_indexed: bool,
+}
+
+impl Default for RetrievalOutcome {
+    fn default() -> Self {
+        Self {
+            chunks: Vec::new(),
+            capped: false,
+            queries: Vec::new(),
+            paper_indexed: true,
+        }
+    }
 }
 
 /// Progress emitted while the loop runs, so the panel is not dead through up to
@@ -119,10 +148,21 @@ pub async fn run<F>(
 where
     F: FnMut(LoopEvent),
 {
+    let mut outcome = RetrievalOutcome::default();
+
+    // RFC 0079 R5.1: retrieval is the floor, not the agent's call. Search runs
+    // before the model gets a vote — it is local (BM25 in SQLite, and a query
+    // embedding against an in-process model), so it costs milliseconds, while
+    // the round trip that used to decide whether to run it costs hundreds. An
+    // ask can no longer reach the answer model with nothing to cite.
+    baseline_search(context, &request, &mut outcome, &mut on_event).await;
+
     on_event(LoopEvent::Deciding);
 
-    let mut outcome = RetrievalOutcome::default();
-    let mut messages = vec![WireMessage::text("system", system_prompt(&request, context))];
+    let mut messages = vec![WireMessage::text(
+        "system",
+        system_prompt(&request, context, &outcome.chunks),
+    )];
     for entry in request.recent {
         let role = if entry.kind == ENTRY_ANSWER {
             "assistant"
@@ -208,6 +248,83 @@ where
         outcome.capped
     );
     outcome
+}
+
+/// What the baseline searches for: the reader's words, and the passage they
+/// are looking at when there is one.
+///
+/// The selection leads because an anchored ask is *about* that passage — "why
+/// scale?" on its own is not a query, and the two together are.
+fn baseline_query(request: &LoopRequest<'_>) -> String {
+    match request.selection.map(str::trim) {
+        Some(selection) if !selection.is_empty() => {
+            format!("{selection} {}", request.question)
+        }
+        _ => request.question.to_string(),
+    }
+}
+
+/// The unconditional first search (RFC 0079 R5.1).
+///
+/// Queries with the reader's own words, plus the passage they have selected
+/// when there is one — the two things we know the question is about before any
+/// model has looked at it. Silent about its own failures for the same reason
+/// the loop is: retrieval failing is not the ask failing.
+///
+/// Feeds the same `outcome` the loop then adds to, so `search`'s existing
+/// dedup covers the overlap: a chunk the agent re-finds is already held and is
+/// neither pushed twice nor counted against the budget twice.
+async fn baseline_search<F>(
+    context: &ContextManager,
+    request: &LoopRequest<'_>,
+    outcome: &mut RetrievalOutcome,
+    on_event: &mut F,
+) where
+    F: FnMut(LoopEvent),
+{
+    match context.paper_has_chunks(request.paper_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            // Not a failure to report as one: an unindexed paper is a state the
+            // reader can act on, and R5.4 surfaces it as such.
+            outcome.paper_indexed = false;
+            eprintln!("[chat] baseline skipped — paper has no chunks (not indexed)");
+            return;
+        }
+        Err(error) => {
+            eprintln!("[chat] baseline index check failed: {error}");
+            return;
+        }
+    }
+
+    let query = baseline_query(request);
+
+    outcome.queries.push(query.clone());
+    on_event(LoopEvent::Searching {
+        query: query.clone(),
+    });
+
+    let response = context
+        .search(SearchRequest {
+            query,
+            paper_ids: vec![request.paper_id.to_string()],
+            vault_ids: Vec::new(),
+            mode: SearchMode::Hybrid,
+            limit: Some(BASELINE_CHUNKS),
+        })
+        .await;
+
+    match response {
+        Ok(response) => {
+            for hit in response.hits.into_iter().take(BASELINE_CHUNKS) {
+                outcome.chunks.push(hit.chunk);
+            }
+            on_event(LoopEvent::Retrieved {
+                count: outcome.chunks.len(),
+            });
+        }
+        Err(error) => eprintln!("[chat] baseline search failed: {error}"),
+    }
 }
 
 /// Execute one call. Every failure comes back as a tool *result*, not an error:
@@ -360,29 +477,59 @@ fn preview(text: &str) -> String {
 /// Deliberately excludes the paper body. Including it would multiply the
 /// largest part of the prompt by the iteration count for no gain — the model is
 /// choosing what to look at here, not writing.
-fn system_prompt(request: &LoopRequest<'_>, context: &ContextManager) -> String {
+fn system_prompt(
+    request: &LoopRequest<'_>,
+    context: &ContextManager,
+    held: &[DocumentChunk],
+) -> String {
     let mut prompt = format!(
         "You are preparing to answer a question about the paper \"{}\".\n\
          \n\
          Your only job right now is to fetch evidence. Do not answer — reply \
          with tool calls, or with nothing at all.\n\
          \n\
-         Call search_context whenever the answer will rest on something \
-         specific in the paper: a claim, number, method, definition, result, or \
-         comparison. That covers most real questions, and a cited answer is \
-         worth far more than a fast one. Skip the search only when the question \
-         is about the conversation itself, or is small talk.\n\
+         A search on the reader's own words has already run, and what it \
+         found is listed below. Your job is to improve on it, not to repeat \
+         it: search again only when those passages plainly miss what the \
+         question turns on — a section they do not reach, a term the reader \
+         did not use, the second half of a two-part question. If they already \
+         cover it, reply with nothing at all. That is the common case and it \
+         is the right answer.\n\
          \n\
          Read as little as possible. One precise query beats three broad ones, \
-         and you should stop as soon as you have what the question needs — \
-         every passage competes for room with the paper text, so one you do not \
-         end up citing cost the answer something.\n\
+         and every passage competes for room with the paper text, so one you \
+         do not end up citing cost the answer something.\n\
          \n\
-         You get one round of searching, so make it count: issue one query, or \
-         two if the question genuinely has two parts. Keep a passage with \
-         add_context only if later turns will need it.\n",
+         You get one round, so make it count: issue one query, or two if the \
+         question genuinely has two parts. Keep a passage with add_context \
+         only if later turns will need it.\n",
         request.paper_title,
     );
+
+    // RFC 0079 R5.1: what the baseline already put in front of the answer
+    // model. Without this the agent searches blind and re-fetches what it
+    // already has.
+    if held.is_empty() {
+        prompt.push_str(
+            "\nThe first search found nothing usable. If the question needs \
+             evidence, try different wording.\n",
+        );
+    } else {
+        prompt.push_str("\nAlready retrieved for this turn:\n");
+        for chunk in held {
+            prompt.push_str(&format!(
+                "- id={} p{}{} :: {}\n",
+                chunk.id,
+                chunk.page_start + 1,
+                chunk
+                    .heading_path
+                    .as_deref()
+                    .map(|heading| format!(" · {heading}"))
+                    .unwrap_or_default(),
+                preview(&chunk.text),
+            ));
+        }
+    }
 
     if let Some(selection) = request.selection {
         prompt.push_str(&format!(
@@ -575,6 +722,45 @@ mod tests {
             &mut |_| {},
         )
         .await
+    }
+
+    /// RFC 0079 R5.4: an unindexed paper is a state the reader can fix, so it
+    /// must be distinguishable from "the search found nothing". Without chunks
+    /// the baseline reports it and spends no search.
+    #[tokio::test]
+    async fn the_baseline_reports_an_unindexed_paper_instead_of_searching_it() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+
+        baseline_search(&fixture.manager, &request(None), &mut outcome, &mut |_| {}).await;
+
+        assert!(!outcome.paper_indexed);
+        assert!(outcome.chunks.is_empty());
+        assert!(
+            outcome.queries.is_empty(),
+            "no query is worth running against an empty index"
+        );
+    }
+
+    /// R5.1: the anchored ask searches for the passage *and* the question. "why
+    /// scale?" alone retrieves nothing useful; with the selection it is a real
+    /// query.
+    #[tokio::test]
+    async fn an_anchored_ask_searches_the_selection_with_the_question() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+        let mut request = request(None);
+        request.selection = Some("  dot-product attention  ");
+
+        baseline_search(&fixture.manager, &request, &mut outcome, &mut |_| {}).await;
+
+        // The paper is unindexed in this fixture, so the query never runs — but
+        // when it does, this is the shape it takes.
+        assert_eq!(
+            baseline_query(&request),
+            "dot-product attention why scale?",
+            "selection first, trimmed, then the question"
+        );
     }
 
     #[tokio::test]

@@ -230,7 +230,7 @@ pub struct ChatThreadUpdated {
 }
 
 /// What the model actually saw, rendered in the UI so context is inspectable.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatContextSummary {
     pub paper_title: String,
@@ -270,6 +270,46 @@ pub struct ChatContextSummary {
     /// Reopening a thread must show the markers the model actually wrote.
     #[serde(default)]
     pub citations: Vec<crate::domain::context::ContextCitation>,
+    /// The queries retrieval ran this turn, oldest first (RFC 0079 R5.5).
+    ///
+    /// Stored, not just emitted as progress: a past answer with no references
+    /// is unreadable without knowing whether anything was looked up.
+    #[serde(default)]
+    pub retrieval_queries: Vec<String>,
+    /// False when the paper has no chunks to retrieve from (RFC 0079 R5.4).
+    ///
+    /// The difference between "nothing matched" and "this paper was never
+    /// indexed" — the second is the reader's to fix, and used to be invisible.
+    /// Defaults to `true` so pre-0079 answers do not read as unindexed.
+    #[serde(default = "yes")]
+    pub paper_indexed: bool,
+}
+
+/// `serde(default)` for a bool that must default to *true*.
+fn yes() -> bool {
+    true
+}
+
+/// Hand-written rather than derived for one field: `paper_indexed` must default
+/// to true. A derived `false` would make every summary built from `..default()`
+/// claim the paper is unindexed.
+impl Default for ChatContextSummary {
+    fn default() -> Self {
+        Self {
+            paper_title: String::new(),
+            included_chars: 0,
+            truncated: false,
+            context_items: 0,
+            dropped_items: 0,
+            unresolved_items: 0,
+            compacted: false,
+            retrieval_capped: false,
+            passages: Vec::new(),
+            citations: Vec::new(),
+            retrieval_queries: Vec::new(),
+            paper_indexed: true,
+        }
+    }
 }
 
 /// Event pushed to the frontend over a Tauri channel while a streamed reply

@@ -1743,6 +1743,22 @@ impl LibraryStore {
         )
     }
 
+    /// Whether a paper has any retrievable chunks (RFC 0079 R5.4).
+    ///
+    /// The discriminator between "nothing matched the question" and "this paper
+    /// was never indexed" — two very different things to tell a reader whose
+    /// answer came back without a citation.
+    pub fn paper_has_chunks(&self, paper_id: &str) -> StoreResult<bool> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "select exists(select 1 from document_chunks where paper_id = ?1)",
+            params![paper_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists == 1)
+        .map_err(|error| error.to_string())
+    }
+
     /// Rectangles covering a chunk, grouped by page, in reading order.
     ///
     /// Block-level: a chunk resolves to whole blocks, so a citation jump lands

@@ -94,6 +94,15 @@ impl ContextManager {
         self.search.search(request).await
     }
 
+    /// Whether the paper has anything to retrieve (RFC 0079 R5.4).
+    ///
+    /// Retrieval's own door to the index, so the baseline search can tell an
+    /// unindexed paper from a question nothing matched without reaching past
+    /// ContextManager for a store handle.
+    pub fn paper_has_chunks(&self, paper_id: &str) -> Result<bool, String> {
+        self.store.paper_has_chunks(paper_id)
+    }
+
     /// Commit a chunk to persistent context.
     ///
     /// Takes only a chunk id: the durable anchor and token estimate are read off
@@ -339,8 +348,11 @@ impl ContextManager {
                 unresolved_items: unresolved,
                 compacted: watermark.is_some(),
                 // Set by the caller, which is the only thing that knows whether
-                // phase 1 stopped short (RFC 0078).
+                // phase 1 stopped short (RFC 0078), what it searched for, and
+                // whether the paper had an index to search (RFC 0079).
                 retrieval_capped: false,
+                retrieval_queries: Vec::new(),
+                paper_indexed: true,
             },
         })
     }

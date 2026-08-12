@@ -115,9 +115,20 @@
   }
 
   // Escape leaves the mode. A tool you cannot see is a tool you cannot leave.
+  //
+  // RFC 0079 R4.4: and then it leaves focus mode, which had exactly one exit —
+  // a button in a toolbar that focus mode is meant to get out of the way. The
+  // tool wins when both are active: Escape backs out one layer at a time.
   function handleToolKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape" && activeTool) {
+    if (event.key !== "Escape") {
+      return;
+    }
+    if (activeTool) {
       activeTool = null;
+      return;
+    }
+    if (isFocusMode) {
+      onToggleFocus();
     }
   }
 
@@ -194,7 +205,10 @@
   // RFC 0051: background PDF acquisition status for discovery opens.
   let acquisitionMessage = $state("");
   let forceNextLoad = false;
-  let focusThreadsMode = $state<"open" | "collapsed">("open");
+  // RFC 0079 R4.1: focus mode starts with the paper and nothing else. It used
+  // to hide the app chrome and then open the rail on top of the page, which
+  // traded one panel for another rather than clearing the desk.
+  let focusThreadsMode = $state<"open" | "collapsed">("collapsed");
   let pdfScale = $state(1.15);
   // RFC 0059 Phase 2 (Task 8): refs to the active reader so intents can be
   // resolved wherever the content actually lives — the HTML reader resolves
@@ -284,6 +298,17 @@
   const canReadAsHtml = $derived(isWebUrl(fallbackSourceUrl) && !isHtml);
   const isFocusMode = $derived(layoutMode === "focus");
   const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
+
+  // RFC 0079 R4.1/R4.3: every *entry* into focus mode starts collapsed. Opening
+  // the rail while in focus keeps it open for as long as you stay — leaving and
+  // coming back is a fresh request for the paper alone.
+  let wasFocusMode = false;
+  $effect(() => {
+    if (isFocusMode && !wasFocusMode) {
+      focusThreadsMode = "collapsed";
+    }
+    wasFocusMode = isFocusMode;
+  });
   // RFC 0067 (R2): highlight ids that have a conversation, so an ask-only
   // passage (no color, no note) still draws the neutral marker on the page.
   const conversationIds = $derived(

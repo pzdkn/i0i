@@ -30,6 +30,17 @@ export type ChatContextSummary = {
   passages: PassageRef[];
   /** Only the passages the answer actually cited. */
   citations: ContextCitation[];
+  /**
+   * RFC 0079: what retrieval searched for this turn, oldest first. Stored with
+   * the answer, so a past turn with no references can still be read back.
+   */
+  retrievalQueries: string[];
+  /**
+   * RFC 0079: false when the paper has no chunks to retrieve from. The
+   * difference between "nothing matched" and "never indexed" — only the second
+   * is the reader's to fix. Defaults true for answers written before 0079.
+   */
+  paperIndexed: boolean;
 };
 
 export type ChatEntryKind = "note" | "question" | "answer";
