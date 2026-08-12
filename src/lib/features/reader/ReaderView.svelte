@@ -302,6 +302,13 @@
   const isFocusMode = $derived(layoutMode === "focus");
   const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
 
+  // RFC 0079 R4.2: the focus-mode toolbar is revealed by pointing at the top of
+  // the reader, and hides again when the pointer leaves. Never while a tool is
+  // armed — a mode you cannot see is a mode you cannot leave, and the toolbar is
+  // where you see it.
+  let toolbarHovered = $state(false);
+  const toolbarRevealed = $derived(toolbarHovered || activeTool !== null);
+
   // RFC 0079 R4.1/R4.3: every *entry* into focus mode starts collapsed. Opening
   // the rail while in focus keeps it open for as long as you stay — leaving and
   // coming back is a fresh request for the paper alone.
@@ -1355,8 +1362,20 @@
                 </div>
               {:else}
                 <div class="reader-content col">
+                  <!-- RFC 0079 R4.2: in focus mode the toolbar gets out of the
+                       way and comes back when you reach for it. It occupies no
+                       layout height while hidden, so the page really does get
+                       the room; the hover strip above it is the reveal. -->
                   {#if isFocusMode}
-                    {@render toolbarStrip()}
+                    <div
+                      class="focus-toolbar-zone"
+                      class:revealed={toolbarRevealed}
+                      role="presentation"
+                      onpointerenter={() => (toolbarHovered = true)}
+                      onpointerleave={() => (toolbarHovered = false)}
+                    >
+                      {@render toolbarStrip()}
+                    </div>
                   {/if}
                   <div class="reading-surface row">
                     {#if isHtml}
@@ -1588,6 +1607,20 @@
     gap: 10px;
     padding: 0 14px;
     background: var(--bg-1);
+  }
+
+  /* RFC 0079 R4.2: a thin always-live hover strip, with the toolbar itself
+     collapsed above the fold until the pointer arrives. Height rather than
+     visibility, so the paper actually gains the space. */
+  .focus-toolbar-zone {
+    flex-shrink: 0;
+    max-height: 6px;
+    overflow: hidden;
+    transition: max-height 120ms ease-out;
+  }
+
+  .focus-toolbar-zone.revealed {
+    max-height: 200px;
   }
 
   .focus-collapsed-layout {

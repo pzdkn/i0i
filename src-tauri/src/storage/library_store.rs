@@ -123,6 +123,7 @@ impl LibraryStore {
 
         self.migrate_threads_to_highlights()?;
         self.migrate_notes_into_highlight_field()?;
+        realign_chunk_fts_rowids(&conn)?;
 
         Ok(())
     }
@@ -2755,10 +2756,17 @@ impl LibraryStore {
             -- cascade never runs the code at the call site. An orphaned FTS row
             -- has no error to report — it just keeps answering searches with a
             -- chunk id that no longer resolves.
-            create trigger if not exists trg_document_chunks_fts_delete
+            --
+            -- RFC 0079 R6.3: keyed on `rowid`, which the insert mirrors from
+            -- `document_chunks`. It used to match on `chunk_id`, an fts5
+            -- `unindexed` column — a full scan of the index, once per deleted
+            -- chunk. Deleting a paper from a 120-paper library spent ~890 ms in
+            -- this trigger alone; keyed on rowid the same delete costs ~2 ms.
+            drop trigger if exists trg_document_chunks_fts_delete;
+            create trigger trg_document_chunks_fts_delete
             after delete on document_chunks
             begin
-              delete from document_chunks_fts where chunk_id = old.id;
+              delete from document_chunks_fts where rowid = old.rowid;
             end;
 
             create table if not exists document_chunk_embeddings (
@@ -5017,6 +5025,43 @@ fn clear_extraction_chunks(conn: &Connection, extraction_id: &str) -> StoreResul
     Ok(())
 }
 
+/// Point every FTS row at its chunk's rowid (RFC 0079 R6.3).
+///
+/// The delete trigger now keys on `rowid`, but rows written before this change
+/// got whatever rowid fts5 handed out. A mismatched row would survive its
+/// chunk's deletion and keep answering searches with an id that resolves to
+/// nothing — so the index is rebuilt once, from the table that owns the truth.
+///
+/// Idempotent and cheap after the first run: the count comparison is two
+/// indexed aggregates, and a rebuild only happens when they disagree.
+fn realign_chunk_fts_rowids(conn: &Connection) -> StoreResult<()> {
+    let misaligned: i64 = conn
+        .query_row(
+            "select count(*) from document_chunks c
+             where not exists (
+               select 1 from document_chunks_fts f
+               where f.rowid = c.rowid and f.chunk_id = c.id
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if misaligned == 0 {
+        return Ok(());
+    }
+
+    eprintln!("[store] realigning {misaligned} chunk FTS row(s) onto chunk rowids");
+    conn.execute("delete from document_chunks_fts", [])
+        .map_err(|error| error.to_string())?;
+    conn.execute(
+        "insert into document_chunks_fts (rowid, chunk_id, text)
+         select rowid, id, text from document_chunks",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 /// Write chunks, their block provenance, and their FTS rows.
 ///
 /// All three in one place because they are one fact recorded three ways —
@@ -5050,6 +5095,9 @@ fn insert_chunks(conn: &Connection, chunks: &[DocumentChunk]) -> StoreResult<()>
             ],
         )
         .map_err(|error| error.to_string())?;
+        // Captured here, not after the loop below: the block inserts would
+        // otherwise be the "last" insert by the time the FTS row is written.
+        let chunk_rowid = conn.last_insert_rowid();
 
         for (ordinal, block_id) in chunk.block_ids.iter().enumerate() {
             conn.execute(
@@ -5062,9 +5110,13 @@ fn insert_chunks(conn: &Connection, chunks: &[DocumentChunk]) -> StoreResult<()>
             .map_err(|error| error.to_string())?;
         }
 
+        // RFC 0079 R6.3: the FTS row carries the chunk's own rowid, so the
+        // delete trigger can key on it. `chunk_id` is an `unindexed` fts5
+        // column — deleting by it scans the whole index, and the trigger runs
+        // once per chunk, which is what made deleting a paper take a second.
         conn.execute(
-            "insert into document_chunks_fts (chunk_id, text) values (?1, ?2)",
-            params![chunk.id, chunk.text],
+            "insert into document_chunks_fts (rowid, chunk_id, text) values (?1, ?2, ?3)",
+            params![chunk_rowid, chunk.id, chunk.text],
         )
         .map_err(|error| error.to_string())?;
     }
@@ -6750,6 +6802,59 @@ mod tests {
     }
 
     use crate::domain::highlight::{HighlightAuthor, HighlightColor, Locator};
+
+    /// RFC 0079 R6.3: the FTS delete trigger now keys on `rowid` rather than
+    /// the `unindexed` `chunk_id` column — ~890 ms of full-index scans per
+    /// paper deletion became ~2 ms. The risk that buys is a stale FTS row
+    /// surviving its chunk and answering searches with a dead id, so the
+    /// cascade is checked end to end rather than the trigger in isolation.
+    #[test]
+    fn deleting_a_paper_leaves_no_orphan_fts_rows() -> StoreResult<()> {
+        let db = test_db()?;
+        let paper_id = "fts-cascade-paper";
+        let extraction = extracted_paper(
+            &db,
+            paper_id,
+            &[
+                ("paragraph", "Scaled dot-product attention divides by sqrt(d_k)."),
+                ("paragraph", "Multi-head attention runs several in parallel."),
+            ],
+        )?;
+        let chunk_ids: Vec<String> = db
+            .store
+            .chunks_for_extraction(&extraction.id)?
+            .into_iter()
+            .map(|chunk| chunk.id)
+            .collect();
+        assert!(!chunk_ids.is_empty(), "the fixture produced chunks");
+
+        let fts_rows = |ids: &[String]| -> StoreResult<i64> {
+            let conn = Connection::open(&db.store.db_path).map_err(|e| e.to_string())?;
+            let mut total = 0;
+            for id in ids {
+                total += conn
+                    .query_row(
+                        "select count(*) from document_chunks_fts where chunk_id = ?1",
+                        params![id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(total)
+        };
+
+        assert_eq!(
+            fts_rows(&chunk_ids)?,
+            chunk_ids.len() as i64,
+            "every chunk is indexed before the delete"
+        );
+
+        db.store.delete_paper_globally(paper_id)?;
+
+        assert_eq!(fts_rows(&chunk_ids)?, 0, "and none of them outlive it");
+
+        Ok(())
+    }
 
     /// RFC 0079 R6.2: `highlights` declares no FK to `papers`, so nothing
     /// cleaned these up — a deleted paper left its marks behind forever.
