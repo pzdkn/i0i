@@ -9,10 +9,15 @@
     onChanged: () => Promise<void> | void;
   } = $props();
 
-  // Curated suggestions; any OpenRouter slug can be typed.
+  // Curated suggestions; any OpenRouter slug can be typed. DeepSeek leads the
+  // list since RFC 0079 R7 — same tool-calling and structured-output support at
+  // a fraction of the price.
   const MODELS = [
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v3.2",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash-0731",
     "anthropic/claude-sonnet-4.5",
-    "anthropic/claude-opus-4.1",
     "anthropic/claude-haiku-4.5",
     "openai/gpt-4o-mini",
     "google/gemini-2.5-flash",
@@ -33,6 +38,28 @@
     hint="Paper-scoped chat and Ask."
     value={prefs["model.chat"] ?? ""}
     placeholder="app default"
+    options={MODELS}
+    restartNote
+    onSaved={onChanged}
+  />
+  <!-- RFC 0079 R7.4: these two read preferences in the backend but had no field
+       here, so the model on the retrieval critical path was unreachable. -->
+  <TextPref
+    settingKey="model.annotation"
+    label="Annotation & retrieval"
+    hint="Decides what to look up before an answer, and picks passages to highlight. Keep it fast."
+    value={prefs["model.annotation"] ?? ""}
+    placeholder="app default (cheap)"
+    options={MODELS}
+    restartNote
+    onSaved={onChanged}
+  />
+  <TextPref
+    settingKey="model.title"
+    label="Thread titles"
+    hint="Names a new conversation in 24 tokens. The cheapest model will do."
+    value={prefs["model.title"] ?? ""}
+    placeholder="app default (cheap)"
     options={MODELS}
     restartNote
     onSaved={onChanged}

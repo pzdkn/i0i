@@ -63,6 +63,13 @@ impl HighlightService {
         self.store.remove_highlight(id).map_err(|e| e.to_string())
     }
 
+    /// Remove an annotation and everything anchored to it (RFC 0079 R1.3):
+    /// the mark, its note, and its conversation. Returns the thread count so
+    /// the caller can say what went with it.
+    pub async fn remove_annotation(&self, id: &str) -> Result<usize, String> {
+        self.store.delete_annotation(id).map_err(|e| e.to_string())
+    }
+
     pub async fn list(&self, paper_id: &str) -> Result<Vec<Highlight>, String> {
         self.store.list_highlights(paper_id).map_err(|e| e.to_string())
     }

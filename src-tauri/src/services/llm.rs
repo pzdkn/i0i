@@ -249,10 +249,20 @@ fn parse_completion(body: &str) -> Result<String, String> {
 /// snippet for the generic case.
 fn describe_error_status(status: StatusCode, body: &str) -> String {
     match status {
-        StatusCode::UNAUTHORIZED => {
-            "OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY.".to_string()
-        }
-        StatusCode::PAYMENT_REQUIRED => "OpenRouter account is out of credits (402).".to_string(),
+        // RFC 0079 R7.5: keep the provider's own words. A 402 is not always an
+        // empty wallet — OpenRouter also returns it when a request's *maximum*
+        // cost exceeds the remaining balance, and when a per-key credit cap is
+        // hit. Both look like "but I have credits" if we overwrite the reason.
+        StatusCode::UNAUTHORIZED => with_reason(
+            "OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY.",
+            body,
+        ),
+        StatusCode::PAYMENT_REQUIRED => with_reason(
+            "OpenRouter refused the request for payment reasons (402). \
+             This can mean an empty balance, a request whose maximum cost \
+             exceeds the balance, or a per-key credit limit.",
+            body,
+        ),
         StatusCode::TOO_MANY_REQUESTS => {
             "OpenRouter rate limit reached (429). Wait a moment and try again.".to_string()
         }
@@ -264,6 +274,17 @@ fn describe_error_status(status: StatusCode, body: &str) -> String {
                 format!("OpenRouter request failed with {status}: {snippet}")
             }
         }
+    }
+}
+
+/// Append the provider's own explanation to our summary of a status, when it
+/// sent one. The key never appears here — only the body it returned.
+fn with_reason(summary: &str, body: &str) -> String {
+    let snippet = body_snippet(body);
+    if snippet.is_empty() {
+        summary.to_string()
+    } else {
+        format!("{summary} OpenRouter said: {snippet}")
     }
 }
 
@@ -596,6 +617,23 @@ mod tests {
             .to_lowercase()
             .contains("credit"));
         assert!(describe_error_status(StatusCode::TOO_MANY_REQUESTS, "").contains("429"));
+    }
+
+    /// RFC 0079 R7.5: a 402 that says "out of credits" when the real reason was
+    /// a per-key cap sends the reader to the wrong dashboard.
+    #[test]
+    fn payment_required_keeps_the_providers_own_reason() {
+        let body = r#"{"error":{"message":"Key limit exceeded","code":402}}"#;
+        let message = describe_error_status(StatusCode::PAYMENT_REQUIRED, body);
+        assert!(message.contains("402"));
+        assert!(message.contains("Key limit exceeded"));
+    }
+
+    #[test]
+    fn unauthorized_keeps_the_providers_own_reason() {
+        let message = describe_error_status(StatusCode::UNAUTHORIZED, "No auth credentials found");
+        assert!(message.contains("401"));
+        assert!(message.contains("No auth credentials found"));
     }
 
     #[test]

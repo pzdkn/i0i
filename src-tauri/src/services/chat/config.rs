@@ -65,10 +65,10 @@ impl ChatConfig {
                 .provider
                 .max_context_chars
                 .min(CONTEXT_CHARS_CAP),
-            title_model: app_config
-                .chat
-                .provider
-                .title_model
+            // RFC 0079 R7.2: settable like the others. A 24-token title was the
+            // one model slot with no preference key at all.
+            title_model: crate::services::settings::preference("model.title")
+                .or(app_config.chat.provider.title_model)
                 .map(|model| model.trim().to_string())
                 .filter(|model| !model.is_empty()),
             title_max_tokens: app_config

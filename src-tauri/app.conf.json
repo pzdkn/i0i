@@ -28,9 +28,9 @@
         "provider": {
             "url": "https://openrouter.ai/api/v1/chat/completions",
             "api_key": "OPENROUTER_API_KEY",
-            "model": "anthropic/claude-sonnet-4.5",
+            "model": "deepseek/deepseek-v4-pro",
             "max_context_chars": 60000,
-            "title_model": "anthropic/claude-sonnet-4.5",
+            "title_model": "deepseek/deepseek-v4-flash-0731",
             "title_max_tokens": 24,
             "title_timeout_ms": 5000
         }

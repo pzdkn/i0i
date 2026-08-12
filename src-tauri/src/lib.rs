@@ -261,6 +261,7 @@ pub fn run() {
             commands::highlight::set_highlight_label,
             commands::highlight::set_highlight_note,
             commands::highlight::remove_highlight,
+            commands::highlight::remove_annotation,
             commands::highlight::list_highlights,
             commands::highlight::create_agent_highlight,
             commands::highlight::list_agent_highlights,

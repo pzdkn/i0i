@@ -1567,6 +1567,12 @@ impl LibraryStore {
         )
         .map_err(|error| error.to_string())?;
 
+        // RFC 0079 R6.2: `highlights` declares no FK to papers at all, so its
+        // rows survived every paper deletion. Explicit here rather than a table
+        // rebuild — the FK is the better fix, this is the safe one.
+        tx.execute("delete from highlights where paper_id = ?1", params![paper_id])
+            .map_err(|error| error.to_string())?;
+
         tx.commit().map_err(|error| error.to_string())?;
         self.get_library()
     }
@@ -2124,6 +2130,28 @@ impl LibraryStore {
     }
 
     /// List a paper's highlights, oldest first.
+    /// Read one highlight by id. `None` when it is already gone — a double
+    /// delete is a race, not an error.
+    pub fn get_highlight(
+        &self,
+        id: &str,
+    ) -> StoreResult<Option<crate::domain::highlight::Highlight>> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "
+            select id, paper_id, source_id, locator_kind, start_offset, end_offset,
+                   page_index, rects_json, excerpt, color, label, author_kind,
+                   author_model, created_at, updated_at, note
+            from highlights
+            where id = ?1
+            ",
+            params![id],
+            highlight_from_row,
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+    }
+
     pub fn list_highlights(
         &self,
         paper_id: &str,
@@ -2218,6 +2246,77 @@ impl LibraryStore {
         conn.execute("delete from highlights where id = ?1", params![id])
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Delete an annotation and everything anchored to it (RFC 0079 R1.3).
+    ///
+    /// `remove_highlight` deletes the mark and leaves the passage's thread
+    /// alive — and since the annotations panel derives every row from
+    /// `highlights`, that thread renders nowhere. It was not deleted, just made
+    /// unreachable. This removes both, in one transaction.
+    ///
+    /// Two ways a thread is found. `chat_threads.highlight_id` is the explicit
+    /// link, set by RFC 0058's backfill; threads created since are matched on
+    /// their anchor columns instead, which is the same comparison
+    /// `find_highlight_by_locator` makes in the other direction. Point-anchored
+    /// stickies never have a thread, so they only ever delete a highlight.
+    ///
+    /// Returns how many threads went with it, so the caller can tell the reader
+    /// what it cost them.
+    pub fn delete_annotation(&self, id: &str) -> StoreResult<usize> {
+        use crate::domain::highlight::Locator;
+
+        let Some(highlight) = self.get_highlight(id)? else {
+            return Err(format!("Highlight not found: {id}"));
+        };
+
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+
+        let mut threads = tx
+            .execute(
+                "delete from chat_threads where highlight_id = ?1",
+                params![id],
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Legacy and current threads with a null `highlight_id`: match the
+        // anchor the thread was created with. Ranges only — a sticky note's
+        // point locator has no thread shape to match.
+        threads += match &highlight.locator {
+            Locator::TextOffset {
+                source_id,
+                start_offset,
+                end_offset,
+            } => tx
+                .execute(
+                    "delete from chat_threads
+                     where highlight_id is null and scope_kind = 'paper' and scope_id = ?1
+                       and anchor_kind = 'text_offset' and source_id = ?2
+                       and start_offset = ?3 and end_offset = ?4",
+                    params![highlight.paper_id, source_id, start_offset, end_offset],
+                )
+                .map_err(|error| error.to_string())?,
+            Locator::PdfRect {
+                source_id,
+                page_index,
+                rects_json,
+            } => tx
+                .execute(
+                    "delete from chat_threads
+                     where highlight_id is null and scope_kind = 'paper' and scope_id = ?1
+                       and anchor_kind = 'pdf_rect' and source_id = ?2
+                       and page_index = ?3 and rects_json = ?4",
+                    params![highlight.paper_id, source_id, page_index, rects_json],
+                )
+                .map_err(|error| error.to_string())?,
+            Locator::TextPoint { .. } | Locator::PdfPoint { .. } => 0,
+        };
+
+        tx.execute("delete from highlights where id = ?1", params![id])
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(threads)
     }
 
     /// One-time backfill (RFC 0058): every paper-scoped anchored thread
@@ -2498,6 +2597,14 @@ impl LibraryStore {
             create index if not exists idx_document_pages_extraction_id
               on document_pages(extraction_id);
 
+            -- RFC 0079 R6.1: SQLite enforces `on delete cascade` by finding the
+            -- child rows, which without an index on the FK column is a full scan
+            -- of the child table per parent row deleted. Deleting one paper was
+            -- therefore scanning every page/block/span/asset in the library, so
+            -- the cost grew with the library rather than with the paper.
+            create index if not exists idx_document_pages_paper_id
+              on document_pages(paper_id);
+
             create table if not exists document_blocks (
               id text primary key,
               paper_id text not null,
@@ -2520,6 +2627,9 @@ impl LibraryStore {
             create index if not exists idx_document_blocks_extraction_id
               on document_blocks(extraction_id);
 
+            create index if not exists idx_document_blocks_paper_id
+              on document_blocks(paper_id);
+
             create table if not exists document_spans (
               id text primary key,
               paper_id text not null,
@@ -2540,6 +2650,11 @@ impl LibraryStore {
             create index if not exists idx_document_spans_extraction_id
               on document_spans(extraction_id);
 
+            -- The big one: spans run to thousands of rows per paper, so this is
+            -- the scan that dominated paper deletion.
+            create index if not exists idx_document_spans_paper_id
+              on document_spans(paper_id);
+
             create table if not exists document_assets (
               id text primary key,
               paper_id text not null,
@@ -2559,6 +2674,9 @@ impl LibraryStore {
 
             create index if not exists idx_document_assets_extraction_id
               on document_assets(extraction_id);
+
+            create index if not exists idx_document_assets_paper_id
+              on document_assets(paper_id);
 
             create table if not exists document_chunks (
               id text primary key,
@@ -6611,6 +6729,106 @@ mod tests {
         db.store.delete_paper_globally("caron2021")?;
 
         assert!(db.store.list_chat_threads("paper", "caron2021")?.is_empty());
+
+        Ok(())
+    }
+
+    use crate::domain::highlight::{HighlightAuthor, HighlightColor, Locator};
+
+    /// RFC 0079 R6.2: `highlights` declares no FK to `papers`, so nothing
+    /// cleaned these up — a deleted paper left its marks behind forever.
+    #[test]
+    fn delete_paper_globally_removes_its_highlights() -> StoreResult<()> {
+        let db = test_db()?;
+        let locator = Locator::TextOffset {
+            source_id: "src".into(),
+            start_offset: 0,
+            end_offset: 9,
+        };
+        db.store.insert_highlight(
+            "caron2021",
+            &locator,
+            "excerpt",
+            Some(HighlightColor::Yellow),
+            None,
+            &HighlightAuthor::User,
+        )?;
+
+        db.store.delete_paper_globally("caron2021")?;
+
+        assert!(db.store.list_highlights("caron2021")?.is_empty());
+
+        Ok(())
+    }
+
+    /// RFC 0079 R1.3: deleting the mark used to leave the thread alive with no
+    /// row rendering it — the conversation became unreachable, not deleted.
+    #[test]
+    fn delete_annotation_takes_its_thread_with_it() -> StoreResult<()> {
+        let db = test_db()?;
+        let anchor = ThreadAnchor::TextOffset {
+            source_id: "src".into(),
+            start_offset: 10,
+            end_offset: 24,
+            selected_text: "a passage".into(),
+        };
+        db.store
+            .add_note_at_anchor("paper", "vaswani2017", &anchor, "my note")?;
+        let highlight = db.store.insert_highlight(
+            "vaswani2017",
+            &Locator::TextOffset {
+                source_id: "src".into(),
+                start_offset: 10,
+                end_offset: 24,
+            },
+            "a passage",
+            Some(HighlightColor::Yellow),
+            None,
+            &HighlightAuthor::User,
+        )?;
+
+        let threads = db.store.delete_annotation(&highlight.id)?;
+
+        assert_eq!(threads, 1, "the anchored thread goes with the mark");
+        assert!(db.store.get_highlight(&highlight.id)?.is_none());
+        assert!(db
+            .store
+            .list_chat_threads("paper", "vaswani2017")?
+            .is_empty());
+
+        Ok(())
+    }
+
+    /// A sticky note has a *point* locator and never has a thread, so deleting
+    /// one must not reach for anchor columns that cannot match.
+    #[test]
+    fn delete_annotation_on_a_sticky_removes_only_the_sticky() -> StoreResult<()> {
+        let db = test_db()?;
+        db.store
+            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "unrelated")?;
+        let sticky = db.store.insert_highlight(
+            "vaswani2017",
+            &Locator::PdfPoint {
+                source_id: "src".into(),
+                page_index: 2,
+                x: 0.5,
+                y: 0.25,
+            },
+            "",
+            None,
+            None,
+            &HighlightAuthor::User,
+        )?;
+
+        let threads = db.store.delete_annotation(&sticky.id)?;
+
+        assert_eq!(threads, 0);
+        assert!(db.store.get_highlight(&sticky.id)?.is_none());
+        assert_eq!(
+            db.store.list_chat_threads("paper", "vaswani2017")?.len(),
+            1,
+            "the whole-paper thread is untouched"
+        );
 
         Ok(())
     }

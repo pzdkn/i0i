@@ -53,6 +53,17 @@ pub async fn remove_highlight(
     service.remove(&id).await
 }
 
+/// Delete a passage outright: the mark, its note, and its conversation
+/// (RFC 0079 R1.3). Returns how many threads went with it, which is what the
+/// UI confirms against before calling.
+#[tauri::command]
+pub async fn remove_annotation(
+    service: tauri::State<'_, HighlightService>,
+    id: String,
+) -> Result<usize, String> {
+    service.remove_annotation(&id).await
+}
+
 #[tauri::command]
 pub async fn list_highlights(
     service: tauri::State<'_, HighlightService>,
