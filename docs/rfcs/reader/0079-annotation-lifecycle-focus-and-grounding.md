@@ -1,6 +1,6 @@
 # RFC 0079: Annotation lifecycle, real focus mode, and honest grounding
 
-Status: Proposed
+Status: Implemented
 Date: 2026-08-12
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -579,4 +579,54 @@ Risks is mitigating a problem that R7.1 was about to delete.
 
 ## What landed
 
-_(filled in on implementation)_
+All nine tasks, in four commits. Two things turned out differently than the
+diagnosis expected.
+
+**The paper-deletion diagnosis was right and incomplete.** The cascade indexes
+(R6.1) are real — on a synthetic library, deleting one paper went from 63 ms to
+9 ms, and the *before* number grew with library size (23 ms at 50 papers, 63 ms
+at 120) exactly as an unindexed cascade should. But 63 ms is not "takes a long
+time," so the remaining cost was measured rather than assumed.
+
+It was `trg_document_chunks_fts_delete`. The trigger matched on `chunk_id`,
+which is an fts5 **`unindexed`** column, so every delete scanned the whole FTS
+index — and the trigger fires once per deleted chunk:
+
+| Library | FTS delete keyed on `chunk_id` | keyed on `rowid` |
+|---|---|---|
+| 120 papers, 18,000 chunks | 886 ms | 2.4 ms |
+
+The FTS row now carries its chunk's rowid and the trigger keys on that. Rows
+written earlier got arbitrary rowids, so `realign_chunk_fts_rowids` rebuilds the
+index once at init — a stale FTS row outliving its chunk would answer searches
+with an id that resolves to nothing, which `deleting_a_paper_leaves_no_orphan_fts_rows`
+checks across the whole cascade. (Verified non-vacuous: offsetting the stored
+rowid makes it fail.)
+
+**Open Decision C was already half-built.** `chat_threads.highlight_id` exists,
+added by RFC 0058's backfill, and `find_highlight_by_locator` gives the backend
+the anchor matching the RFC claimed only TypeScript had. So R1.3 needed no
+ported comparison and no migration: `delete_annotation` matches on
+`highlight_id` where the backfill set it, and on anchor columns where it did
+not. Task 6 was an M after all, not the L this document predicted.
+
+### Deviations from the plan
+
+- **R1.1's hover affordance on the page** became right-click opening the
+  existing popover, which already carries Remove. A hover affordance on a PDF
+  mark means new overlay chrome on every rect; the popover is one gesture away
+  and was already the place these actions live.
+- **R5.3** (measure whether the decide round trip still earns its place) is
+  deliberately not done — it needs a week of real asks, not a benchmark. The
+  loop now runs as refinement on top of the baseline, which is the change that
+  makes the measurement meaningful.
+- **R4.3's per-session memory** collapsed to "every entry into focus mode starts
+  collapsed; opening the rail keeps it open until you leave." Simpler, and it
+  matches what "focus mode" claims.
+
+### Verification
+
+`cargo test --lib`: 398 passed (390 at branch point; +8). `pnpm check`: 0 errors,
+0 warnings. Not yet exercised against a real library in the running app — the
+deletion numbers above are from a synthetic database of the same shape, and the
+retrieval change wants a real ask against the paper from the original report.
