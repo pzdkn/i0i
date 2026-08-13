@@ -195,7 +195,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::vault::get_vault_status,
             commands::discovery::search_papers,
             commands::discovery::expand_search,
             commands::settings::get_settings,

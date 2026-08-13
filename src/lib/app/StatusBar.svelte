@@ -24,9 +24,9 @@
 
   <div class="flex1"></div>
 
-  <span>[j k] navigate</span>
-  <span>[o] open</span>
-  <span>[cmd+k] palette</span>
+  <!-- RFC 0086 R2: [j k] and [o] are gone rather than left advertising keys
+       nothing handles, and cmd+k opens a search, not a palette. -->
+  <span>[cmd+k] search</span>
   <span>i0i v0.1.0</span>
 </footer>
 

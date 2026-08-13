@@ -30,6 +30,7 @@
     onHighlightContextMenu,
     onToolHighlight,
     onPlaceNote,
+    onPageChange,
   }: {
     pdfUrl: string;
     sourceId: string;
@@ -37,6 +38,8 @@
     highlights: Highlight[];
     conversationIds?: Set<string>;
     selection: ReaderTextSelection | null;
+    /** RFC 0086 R4.1: the footer needs the page the reader is actually on. */
+    onPageChange?: (current: number, total: number) => void;
     chatEnabled: boolean;
     scale?: number;
     // RFC 0073: forwarded verbatim to every page — the intent must survive this
@@ -125,6 +128,9 @@
         pdfDocument = document;
         pageSizes = numbers.map(() => provisional);
         pageNumbers = numbers;
+        // The footer needs a count before the first scroll (RFC 0086 R4.1).
+        reportedPage = 0;
+        onPageChange?.(1, numbers.length);
 
         // Correct any page that isn't shaped like page 1 (mixed-orientation
         // documents). Page dictionaries only — no content streams.
@@ -186,6 +192,53 @@
   // `scrollIntoView`, which would scroll every scrollable ancestor — including
   // the inspector panel the Marks list lives in. Same one-scroller geometry as
   // `HtmlReader.focusMatch`.
+  /**
+   * The page nearest the middle of the scrollport, reported to the footer
+   * (RFC 0086 R4.1). Read on scroll, coalesced to one measurement per frame —
+   * a scroll event fires far more often than a page boundary is crossed.
+   */
+  let pageChangeQueued = false;
+  let reportedPage = 0;
+
+  function reportVisiblePage() {
+    if (pageChangeQueued) {
+      return;
+    }
+    pageChangeQueued = true;
+    requestAnimationFrame(() => {
+      pageChangeQueued = false;
+      const scroller = scrollElement;
+      if (!scroller || !onPageChange || pageNumbers.length === 0) {
+        return;
+      }
+      const middle = scroller.getBoundingClientRect().top + scroller.clientHeight / 2;
+      let nearest = 0;
+      let best = Number.POSITIVE_INFINITY;
+      for (let index = 0; index < pageRefs.length; index += 1) {
+        const element = pageRefs[index]?.getElement();
+        if (!element) continue;
+        const rect = element.getBoundingClientRect();
+        const distance = Math.abs(rect.top + rect.height / 2 - middle);
+        if (distance < best) {
+          best = distance;
+          nearest = index;
+        }
+      }
+      if (nearest !== reportedPage) {
+        reportedPage = nearest;
+      }
+      onPageChange(nearest + 1, pageNumbers.length);
+    });
+  }
+
+  /** RFC 0086 R1: page-at-a-time navigation, for the arrow keys and the footer. */
+  export function stepPage(delta: number) {
+    const next = Math.min(Math.max(reportedPage + delta, 0), pageNumbers.length - 1);
+    if (next !== reportedPage) {
+      scrollToPage(next);
+    }
+  }
+
   export function scrollToPage(pageIndex: number) {
     const target = pageRefs[pageIndex]?.getElement();
     const scroller = scrollElement;
@@ -261,7 +314,7 @@
 </script>
 
 <section class="pdf-reader col">
-  <div class="pdf-scroll" bind:this={scrollElement}>
+  <div class="pdf-scroll" bind:this={scrollElement} onscroll={reportVisiblePage}>
     {#if isLoading}
       <div class="pdf-state col">
         <div class="label">Loading PDF...</div>

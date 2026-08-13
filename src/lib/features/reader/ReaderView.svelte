@@ -123,15 +123,79 @@
   // a button in a toolbar that focus mode is meant to get out of the way. The
   // tool wins when both are active: Escape backs out one layer at a time.
   function handleToolKeydown(event: KeyboardEvent) {
-    if (event.key !== "Escape") {
+    if (event.key === "Escape") {
+      if (activeTool) {
+        activeTool = null;
+        return;
+      }
+      if (isFocusMode) {
+        onToggleFocus();
+      }
       return;
     }
-    if (activeTool) {
-      activeTool = null;
+    handleReaderKeydown(event);
+  }
+
+  /**
+   * RFC 0086 §1: the keys the footer has always advertised, finally bound.
+   *
+   * Suppressed while typing — the same guard `+page.svelte` uses for the mode
+   * shortcuts — except for `cmd+enter`, which only means anything *in* a
+   * composer and is handled by the composer itself.
+   */
+  function handleReaderKeydown(event: KeyboardEvent) {
+    const target = event.target as HTMLElement | null;
+    const isEditing =
+      target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
+
+    // Zoom is a chord, so it survives the typing guard — but it must preempt the
+    // webview's own zoom, which would scale the whole app instead of the page.
+    if ((event.metaKey || event.ctrlKey) && hasCachedPdf) {
+      if (event.key === "=" || event.key === "+") {
+        event.preventDefault();
+        zoomIn();
+        return;
+      }
+      if (event.key === "-") {
+        event.preventDefault();
+        zoomOut();
+        return;
+      }
+      if (event.key === "0") {
+        event.preventDefault();
+        pdfScale = 1.15;
+        return;
+      }
+    }
+
+    if (isEditing || event.metaKey || event.ctrlKey || event.altKey) {
       return;
     }
-    if (isFocusMode) {
-      onToggleFocus();
+
+    if (hasCachedPdf && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      pdfPageRef?.stepPage(event.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
+
+    if (!chatEnabled) {
+      return;
+    }
+
+    switch (event.key.toLowerCase()) {
+      case "h":
+        // No selection is a no-op, not an error: `pickColor` guards on it.
+        event.preventDefault();
+        highlightSelection();
+        break;
+      case "n":
+        event.preventDefault();
+        revealSection("notes");
+        break;
+      case "q":
+        event.preventDefault();
+        revealSection("chat");
+        break;
     }
   }
 
@@ -215,6 +279,9 @@
   // traded one panel for another rather than clearing the desk.
   let focusThreadsMode = $state<"open" | "collapsed">("collapsed");
   let pdfScale = $state(1.15);
+  // RFC 0086 R4.1: the footer's page counter, reported by PdfPage as you scroll.
+  let pdfCurrentPage = $state(0);
+  let pdfPageCount = $state(0);
   // RFC 0059 Phase 2 (Task 8): refs to the active reader so intents can be
   // resolved wherever the content actually lives — the HTML reader resolves
   // synchronously against its rendered text; the PDF reader resolves
@@ -1446,6 +1513,10 @@
                     onSelectPassage={selectPassage}
                     onHighlightClick={openHighlightPopover}
                     onHighlightContextMenu={openHighlightContextMenu}
+                    onPageChange={(current, total) => {
+                      pdfCurrentPage = current;
+                      pdfPageCount = total;
+                    }}
                     onToolHighlight={(passage) => void highlightFromTool(passage)}
                     onPlaceNote={(pageIndex, x, y, clientX, clientY) =>
                       void placeNote(pageIndex, x, y, clientX, clientY)}
@@ -1491,7 +1562,12 @@
                 {/if}
               </div>
 
-              <ReaderFooter />
+              <ReaderFooter
+                contentKind={document.contentKind}
+                currentPage={pdfCurrentPage}
+                pageCount={hasCachedPdf ? pdfPageCount : 0}
+                onStepPage={(delta) => pdfPageRef?.stepPage(delta)}
+              />
             </div>
           {/snippet}
 

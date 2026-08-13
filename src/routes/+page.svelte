@@ -36,7 +36,6 @@
     PaperMetadataUpdate,
     Vault,
   } from "$lib/domain/library";
-  import { getVaultStatus } from "$lib/bridge/tauri";
   import type { Paper } from "$lib/domain/paper";
   import type { DiscoveryReaderCandidate } from "$lib/domain/reader";
   import type { ChunkHit } from "$lib/domain/search";
@@ -47,6 +46,7 @@
   import VaultExplorer from "$lib/features/vault/VaultExplorer.svelte";
   import VaultHome from "$lib/features/vault/VaultHome.svelte";
   import {
+    getAllPapers,
     getCandidateVaultTargets,
     getDiscoverCandidate,
     getDiscoverWorkspace,
@@ -77,7 +77,24 @@
   } from "$lib/state/library-cache.svelte";
   import { depthStrategy, isTerminalStatus, type SearchCandidatesPreview, type SearchUpdated } from "$lib/domain/research";
 
-  let vaultStatus = $state<VaultStatus | null>(null);
+  // RFC 0087 R3: the status bar used to read a Rust command that returned the
+  // literals 234 papers / 12 unread, fetched once on mount. It is derived from
+  // the library cache instead — a count that cannot disagree with the list it
+  // counts, and cannot go stale because there is nothing to refresh.
+  const vaultStatus = $derived.by<VaultStatus | null>(() => {
+    const workspace = getVaultWorkspace(activeVaultId);
+    const papers = workspace ? workspace.papers : getAllPapers();
+    if (!workspace && papers.length === 0 && !libraryLoaded) {
+      return null;
+    }
+    return {
+      paperCount: papers.length,
+      unreadCount: papers.filter((paper) => paper.status !== "READ").length,
+      // R3.3: there is no sync. Say so, rather than implying an idle one.
+      syncState: "local-only",
+    };
+  });
+  let libraryLoaded = $state(false);
   let bridgeError = $state("");
   let settingsOpen = $state(false);
   let settingsAttention = $state(false);
@@ -148,9 +165,8 @@
 
   onMount(async () => {
     try {
-      const [nextVaultStatus, librarySnapshot] = await Promise.all([getVaultStatus(), getLibrary()]);
-      vaultStatus = nextVaultStatus;
-      hydrateLibrary(librarySnapshot);
+      hydrateLibrary(await getLibrary());
+      libraryLoaded = true;
     } catch (error) {
       bridgeError = String(error);
     }
@@ -333,6 +349,19 @@
     if (event.key === "Escape" && isReaderFocusMode && !isEditing) {
       event.preventDefault();
       exitReaderFocus();
+      return;
+    }
+
+    // RFC 0086 R3.3: each mode answers to its own first letter — the letters the
+    // rail has printed under its labels since RFC 0001 without binding any of
+    // them. Never while typing, and never as a modified chord (cmd+v is paste).
+    if (isEditing || event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+    const mode = event.key.toUpperCase();
+    if (mode === "V" || mode === "F" || mode === "R") {
+      event.preventDefault();
+      handleModeSelect(mode);
     }
   }
 
@@ -850,7 +879,12 @@
 
     if (mode === "F") {
       openDiscover();
+      return;
     }
+
+    // RFC 0086 R3.2 / RFC 0093: STUDY has an RFC, not yet a destination. The
+    // rail renders it disabled with the reason, so neither the click nor the
+    // `S` key needs to pretend.
   }
 </script>
 

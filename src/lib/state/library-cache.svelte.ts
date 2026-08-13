@@ -548,6 +548,20 @@ function mergeDiscoverCandidates(candidates: DiscoverCandidate[]) {
   return [...byKey.values()].sort((left, right) => right.score - left.score);
 }
 
+/**
+ * Every paper in the library, deduplicated across vaults (RFC 0087 R3.1).
+ * A paper in two vaults is one paper for counting purposes.
+ */
+export function getAllPapers(): Paper[] {
+  const byId = new Map<string, Paper>();
+  for (const workspace of library.vaults) {
+    for (const paper of workspace.papers) {
+      byId.set(paper.id, paper);
+    }
+  }
+  return [...byId.values()];
+}
+
 export function getPaperById(paperId: string): Paper | undefined {
   for (const workspace of library.vaults) {
     const paper = workspace.papers.find((item) => item.id === paperId);

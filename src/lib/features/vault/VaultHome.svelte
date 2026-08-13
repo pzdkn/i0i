@@ -47,9 +47,31 @@
   let urlDraft = $state("");
   let isAddingUrl = $state(false);
   let urlError = $state("");
+  // RFC 0087 R2: the filter box was bound to `localFilter` and the value was
+  // never read. Substring over the three columns the list already shows —
+  // a filter that reordered results would be a search.
+  const visiblePapers = $derived.by(() => {
+    const query = localFilter.trim().toLowerCase();
+    if (!query) {
+      return workspace.papers;
+    }
+    return workspace.papers.filter((paper) =>
+      [paper.title, paper.authors.join(" "), String(paper.year)]
+        .join(" ")
+        .toLowerCase()
+        .includes(query),
+    );
+  });
+
   const selectedPaper = $derived(
     workspace.papers.find((paper) => paper.id === selectedPaperId) ?? workspace.papers[0],
   );
+
+  // R2.3: the filter is view state, and a vault switch is a new view.
+  $effect(() => {
+    void workspace.id;
+    localFilter = "";
+  });
 
   $effect(() => {
     if (!workspace.papers.some((paper) => paper.id === selectedPaperId)) {
@@ -196,7 +218,10 @@
                 <div class="flex1"></div>
                 <label class="inline-filter row">
                   <span>filter</span>
-                  <input bind:value={localFilter} aria-label="Paper filter" placeholder="type..." />
+                  <input bind:value={localFilter} aria-label="Paper filter" placeholder="title, author, year" />
+                  {#if localFilter.trim()}
+                    <span class="mono-dim">{visiblePapers.length}/{workspace.papers.length}</span>
+                  {/if}
                 </label>
                 <span class="mono-dim">sort recent</span>
               </div>
@@ -214,7 +239,7 @@
             </nav>
 
             <PaperList
-              papers={workspace.papers}
+              papers={visiblePapers}
               {selectedPaperId}
               {autofillingMetadataPaperIds}
               {metadataAutofillProgressByPaperId}
@@ -227,6 +252,14 @@
               onRemoveFromVault={(paperId) => onRemovePaperFromVault(workspace.id, paperId)}
               onRemoveFromLibrary={onRemovePaperFromLibrary}
             />
+
+            {#if localFilter.trim() && visiblePapers.length === 0}
+              <!-- RFC 0087 R2.2 -->
+              <p class="filter-empty">
+                No papers match “{localFilter.trim()}”.
+                <button class="link-btn" type="button" onclick={() => (localFilter = "")}>Clear</button>
+              </p>
+            {/if}
           </main>
         {:else}
           <VaultInspector
@@ -329,6 +362,22 @@
     color: var(--fg-3);
     font-size: 10px;
     white-space: nowrap;
+  }
+
+  .filter-empty {
+    margin: 10px 12px;
+    color: var(--fg-3);
+    font-size: 11px;
+  }
+
+  .link-btn {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--amber);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
   }
 
   .inline-filter {

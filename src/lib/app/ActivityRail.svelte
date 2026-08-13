@@ -13,13 +13,17 @@
     settingsAttention?: boolean;
   } = $props();
 
+  // RFC 0086 R3.1: GRAPH and ASK are gone. A graph is a view of the collection
+  // and belongs in VAULT; asking already happens from the reader and, per
+  // RFC 0087, from the vault inspector. Neither had a destination, and a mode
+  // is a place you go. STUDY stays because RFC 0093 gives it one.
+  // R3.3: the letter under each label is now the shortcut it always looked like.
   const modes = [
-    { key: "V", label: "VAULT" },
-    { key: "F", label: "FIND" },
-    { key: "R", label: "READ" },
-    { key: "G", label: "GRAPH" },
-    { key: "A", label: "ASK" },
-    { key: "S", label: "STUDY" },
+    { key: "V", label: "VAULT", reason: "" },
+    { key: "F", label: "FIND", reason: "" },
+    { key: "R", label: "READ", reason: "" },
+    // R3.4: disabled with its reason, not inert. It comes alive with RFC 0093.
+    { key: "S", label: "STUDY", reason: "Study is not built yet (RFC 0093)" },
   ];
 </script>
 
@@ -30,7 +34,8 @@
     <button
       class:active={mode.key === active}
       type="button"
-      title={mode.label}
+      title={mode.reason || mode.label}
+      disabled={Boolean(mode.reason)}
       aria-pressed={mode.key === active}
       onclick={() => onSelectMode(mode.key)}
     >
@@ -84,6 +89,11 @@
     background: transparent;
     color: var(--fg-3);
     cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+    opacity: 0.42;
   }
 
   button.active {
