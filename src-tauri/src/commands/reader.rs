@@ -101,9 +101,12 @@ pub async fn probe_discovery_candidate_pdf(
 pub async fn open_html_document(
     reader_service: tauri::State<'_, ReaderService>,
     url: String,
+    // RFC 0083 R4.1: re-fetch and re-ingest even when the page is cached.
+    force: Option<bool>,
 ) -> Result<crate::domain::reader::ReaderDocument, String> {
-    reader_log(format!("open_html_document start url={url}"));
-    let result = reader_service.open_html_document(&url).await;
+    let force = force.unwrap_or(false);
+    reader_log(format!("open_html_document start url={url} force={force}"));
+    let result = reader_service.open_html_document(&url, force).await;
     match &result {
         Ok(document) => reader_log(format!(
             "open_html_document ok source_id={} title={}",

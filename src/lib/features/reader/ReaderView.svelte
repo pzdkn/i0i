@@ -1129,6 +1129,24 @@
     }
   }
 
+  // RFC 0083 R4.1: re-fetch and re-ingest the page behind this HTML document.
+  // Reference resolution runs at ingest, so a page cached before RFC 0083 keeps
+  // its `??` placeholders until this runs. It re-renders the article, which can
+  // shift the text offsets existing highlights are anchored to — hence a button
+  // the reader presses, not something that happens to them on open.
+  async function reExtractHtml() {
+    const url = readerDocument?.sourceUrl;
+    if (!isWebUrl(url)) {
+      return;
+    }
+    try {
+      readerDocument = await openHtmlDocument(url!, true);
+      refreshTick += 1;
+    } catch (error) {
+      readerLog("re-extract-html-error", { url, error: errorDetail(error) }, "error");
+    }
+  }
+
   function openThreadFromMark(threadId: string) {
     requestedThreadId = threadId;
     openThreadsPanel();
@@ -1369,6 +1387,7 @@
                     {chatEnabled}
                     onSelectPassage={selectPassage}
                     onHighlightClick={openHighlightPopover}
+                    onReExtract={isWebUrl(readerDocument?.sourceUrl) ? reExtractHtml : undefined}
                   />
                 {:else if hasCachedPdf}
                   <PdfPage

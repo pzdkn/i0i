@@ -12,9 +12,12 @@
 //! deterministic and fixture-testable. On extraction failure it falls back to
 //! sanitizing the whole document, which stays readable and annotatable.
 
+use std::collections::HashMap;
+
 use ammonia::Builder;
 use dom_smoothie::Readability;
-use scraper::Html;
+use regex::Regex;
+use scraper::{Html, Selector};
 
 /// The clean, self-contained article plus its plain-text form.
 #[derive(Debug, Clone)]
@@ -100,6 +103,9 @@ const MATHML_ATTRS: &[&str] = &[
     "voffset",
 ];
 
+/// Heading tags, for labelling a reference whose target is a section heading.
+const HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+
 /// Extra non-default HTML tags worth keeping for articles.
 const EXTRA_HTML_TAGS: &[&str] = &["figure", "figcaption", "article", "section", "header"];
 
@@ -116,7 +122,10 @@ fn extract(raw_html: &str, base_url: Option<&str>) -> Option<IngestedHtml> {
         .ok()?;
     let article = readability.parse().ok()?;
 
-    let content = article.content.to_string();
+    // RFC 0083 R1.1: resolve `??` placeholders against the *raw* document —
+    // Readability may have dropped the figure a reference points at, and the
+    // caption numbering we need lives on it.
+    let content = resolve_references(&article.content.to_string(), &reference_labels(raw_html));
     let clean_html = sanitize(&content);
     if clean_html.trim().is_empty() {
         return None;
@@ -137,7 +146,7 @@ fn extract(raw_html: &str, base_url: Option<&str>) -> Option<IngestedHtml> {
 }
 
 fn fallback(raw_html: &str) -> IngestedHtml {
-    let clean_html = sanitize(raw_html);
+    let clean_html = sanitize(&resolve_references(raw_html, &reference_labels(raw_html)));
     let source_text = text_of(&clean_html);
     IngestedHtml {
         title: None,
@@ -149,14 +158,102 @@ fn fallback(raw_html: &str) -> IngestedHtml {
 /// Sanitize with a MathML-aware allowlist. Scripts, event handlers, and
 /// external-loading attributes are dropped; `data:` image URIs are allowed so
 /// the acquisition slice can inline images for offline rendering.
+///
+/// RFC 0083 R1.3: `id` is allowed through. Without it ammonia strips every
+/// anchor target in the document, and a cross-reference that survives with its
+/// `href="#figure-2"` intact has nothing left to point at. An id runs no script
+/// and fetches nothing; the reader resolves jumps scoped to the article root,
+/// so an id that collides with one of the app's own cannot misdirect one.
 fn sanitize(html: &str) -> String {
     let mut builder = Builder::default();
     builder
         .add_tags(MATHML_TAGS.iter().copied())
         .add_tags(EXTRA_HTML_TAGS.iter().copied())
         .add_generic_attributes(MATHML_ATTRS.iter().copied())
+        .add_generic_attributes(["id"])
+        // Only so the reader can style the marker R1.2 leaves behind.
+        .add_tag_attributes("span", ["class"])
         .add_url_schemes(["data"]);
     builder.clean(html).to_string()
+}
+
+/// Label for each `id` in the document, for resolving cross-references
+/// (RFC 0083 R1.1).
+///
+/// Scholarly HTML numbers its figures in the markup (`<figcaption><span
+/// class="fig-num">Figure 2: </span>…`) even when it leaves the *references* to
+/// those figures as `??` placeholders for a script to fill in. So the label is
+/// read from the target: a figure's caption prefix, else a heading's text.
+fn reference_labels(raw_html: &str) -> HashMap<String, String> {
+    let document = Html::parse_document(raw_html);
+    let Ok(with_id) = Selector::parse("[id]") else {
+        return HashMap::new();
+    };
+    let caption = Selector::parse("figcaption").expect("static selector");
+    let heading = Selector::parse("h1, h2, h3, h4, h5, h6").expect("static selector");
+
+    let mut labels = HashMap::new();
+    for element in document.select(&with_id) {
+        let Some(id) = element.value().attr("id") else {
+            continue;
+        };
+        let label = element
+            .select(&caption)
+            .next()
+            .and_then(|node| caption_label(&normalize_ws(&node.text().collect::<String>())))
+            .or_else(|| {
+                // The target may *be* the heading (`<h2 id="methods">`) or
+                // contain one (`<section id="methods"><h2>`).
+                let text = if HEADING_TAGS.contains(&element.value().name()) {
+                    normalize_ws(&element.text().collect::<String>())
+                } else {
+                    normalize_ws(&element.select(&heading).next()?.text().collect::<String>())
+                };
+                (!text.is_empty() && text.chars().count() <= 60).then_some(text)
+            });
+        if let Some(label) = label {
+            labels.insert(id.to_string(), label);
+        }
+    }
+    labels
+}
+
+/// The numbered prefix of a caption — `"Figure 2: Stylized…"` → `"Figure 2"`.
+/// Captions without one (a bare description) give no usable reference label.
+fn caption_label(caption_text: &str) -> Option<String> {
+    let pattern =
+        Regex::new(r"^(Figure|Fig\.?|Table|Listing|Algorithm|Equation|Appendix)\s+([A-Za-z]?[\d.]+)")
+            .ok()?;
+    let captures = pattern.captures(caption_text)?;
+    Some(format!(
+        "{} {}",
+        &captures[1],
+        captures[2].trim_end_matches('.')
+    ))
+}
+
+/// Rewrite placeholder cross-references (RFC 0083 R1.2).
+///
+/// An `<a href="#id">??</a>` (or an empty one) becomes the target's label when
+/// the target is known, and a plain inert marker when it is not — 44 of the 128
+/// distinct references in the paper that prompted this RFC point at sections of
+/// *other* documents, and a link that scrolls nowhere is worse than a word that
+/// admits it is a reference we cannot follow. Anchors with real text are left
+/// exactly as they are.
+fn resolve_references(html: &str, labels: &HashMap<String, String>) -> String {
+    let Ok(pattern) = Regex::new(r##"(?s)<a\b[^>]*\bhref="#([^"]+)"[^>]*>\s*(?:\?\?)?\s*</a>"##)
+    else {
+        return html.to_string();
+    };
+    pattern
+        .replace_all(html, |captures: &regex::Captures| {
+            let target = &captures[1];
+            match labels.get(target) {
+                Some(label) => format!(r##"<a href="#{target}">{label}</a>"##),
+                None => r#"<span class="i0i-ref-unresolved">ref</span>"#.to_string(),
+            }
+        })
+        .into_owned()
 }
 
 /// Plain text of an HTML fragment (fallback `source_text` derivation).
@@ -213,6 +310,57 @@ mod tests {
         assert!(
             clean.contains("data:image/png"),
             "data URI dropped: {clean}"
+        );
+    }
+
+    /// RFC 0083 R1.3: without `id` every anchor target in the document is
+    /// stripped, and the references R1.2 just repaired point at nothing.
+    #[test]
+    fn sanitize_keeps_anchor_targets() {
+        let clean = sanitize(r#"<figure id="fig-2"><figcaption>Figure 2: x</figcaption></figure>"#);
+        assert!(clean.contains(r#"id="fig-2""#), "id dropped: {clean}");
+    }
+
+    /// The shape the RFC was written against: the site ships `??` and fills it
+    /// in with a script we do not run, while numbering its captions statically.
+    #[test]
+    fn placeholder_reference_takes_its_targets_caption_number() {
+        let html = r##"<figure data-fignum="2" id="fig-structure">
+            <figcaption><span class="fig-num">Figure 2: </span>Stylized illustration.</figcaption>
+            </figure>
+            <p>as established in <a class="fig-ref" data-ref="structure" href="#fig-structure">??</a>.</p>"##;
+        let resolved = resolve_references(html, &reference_labels(html));
+        assert!(
+            resolved.contains(r##"<a href="#fig-structure">Figure 2</a>"##),
+            "reference not resolved: {resolved}"
+        );
+    }
+
+    #[test]
+    fn placeholder_reference_to_a_missing_target_stops_being_a_link() {
+        let html = r##"<p>see <a href="#ws-modulation">??</a>.</p>"##;
+        let resolved = resolve_references(html, &reference_labels(html));
+        assert!(!resolved.contains("<a "), "dead link kept: {resolved}");
+        assert!(
+            resolved.contains("i0i-ref-unresolved"),
+            "no marker left behind: {resolved}"
+        );
+    }
+
+    #[test]
+    fn a_reference_that_already_reads_as_one_is_untouched() {
+        let html = r##"<p>see <a href="#fig-2">Figure 2</a>.</p>"##;
+        assert_eq!(resolve_references(html, &reference_labels(html)), html);
+    }
+
+    /// A heading target has no caption to number; its own text is the label.
+    #[test]
+    fn heading_targets_label_from_their_text() {
+        let html = r##"<h2 id="methods">Methods</h2><p>see <a href="#methods">??</a>.</p>"##;
+        let resolved = resolve_references(html, &reference_labels(html));
+        assert!(
+            resolved.contains(r##"<a href="#methods">Methods</a>"##),
+            "heading label not used: {resolved}"
         );
     }
 

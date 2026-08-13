@@ -168,9 +168,10 @@ export async function getReaderPdfBytes(sourceId: string): Promise<ArrayBuffer> 
   });
 }
 
-/// Open an arbitrary URL as an HTML reader document (RFC 0056).
-export async function openHtmlDocument(url: string): Promise<ReaderDocument> {
-  return invoke<ReaderDocument>("open_html_document", { url });
+/// Open an arbitrary URL as an HTML reader document (RFC 0056). `force`
+/// re-fetches and re-ingests a page already in the cache (RFC 0083 R4.1).
+export async function openHtmlDocument(url: string, force = false): Promise<ReaderDocument> {
+  return invoke<ReaderDocument>("open_html_document", { url, force });
 }
 
 /// Serve the sanitized HTML for a cached HTML source (RFC 0056).

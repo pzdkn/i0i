@@ -1,6 +1,6 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { ExternalLink } from "@lucide/svelte";
+  import { ExternalLink, RefreshCw } from "@lucide/svelte";
   import { getReaderHtml } from "$lib/bridge/library";
   import type { ReaderTextSelection } from "$lib/domain/reader";
   import type { Highlight, Locator } from "$lib/domain/highlight";
@@ -17,6 +17,7 @@
     chatEnabled = true,
     onSelectPassage,
     onHighlightClick,
+    onReExtract,
   }: {
     sourceId: string;
     sourceUrl?: string;
@@ -27,6 +28,8 @@
     chatEnabled?: boolean;
     onSelectPassage: (selection: ReaderTextSelection) => void;
     onHighlightClick?: (highlightId: string, x: number, y: number) => void;
+    /** RFC 0083 R4.1: re-fetch and re-ingest this page. */
+    onReExtract?: () => void | Promise<void>;
   } = $props();
 
   let root: HTMLElement | undefined = $state();
@@ -271,6 +274,81 @@
     return () => names.forEach((n) => api.delete(n));
   });
 
+  // RFC 0083 R2.1: every click on a link inside the article comes here, and the
+  // default is to prevent it. An unhandled `<a href="https://…">` navigates the
+  // webview away from the app — the SPA unloads, and the window's close button
+  // then closes i0i rather than the page. Preventing by default makes that class
+  // of bug impossible instead of fixing it one href at a time.
+  function handleArticleClick(event: MouseEvent) {
+    const anchor = (event.target as HTMLElement | null)?.closest?.("a");
+    if (!anchor || !root?.contains(anchor)) {
+      return;
+    }
+    event.preventDefault();
+
+    const href = anchor.getAttribute("href") ?? "";
+    if (href.startsWith("#")) {
+      jumpToTarget(href.slice(1));
+    } else if (/^https?:\/\//i.test(href)) {
+      // The system browser, never this window.
+      void openUrl(href).catch(() => {});
+    }
+  }
+
+  /**
+   * Scroll an in-document reference target into view and flash it, remembering
+   * where the jump started so R3.1's Return chip can undo it. Scoped to the
+   * article root: ids come from someone else's document and may collide with
+   * the app's own.
+   */
+  function jumpToTarget(id: string) {
+    const target = root?.querySelector(`[id="${CSS.escape(id)}"]`);
+    const scroller = root?.closest(".html-reader") as HTMLElement | null;
+    if (!target || !scroller) {
+      return;
+    }
+    returnScrollTop = scroller.scrollTop;
+    jumpSettlesAt = performance.now() + 900;
+    // Same one-scroller geometry as `focusMatch` and for the same reason
+    // (RFC 0073 R2.2): `scrollIntoView` would also scroll the inspector panel.
+    const rect = target.getBoundingClientRect();
+    const scRect = scroller.getBoundingClientRect();
+    scroller.scrollBy({
+      top: rect.top - scRect.top - scroller.clientHeight / 2 + rect.height / 2,
+      behavior: "smooth",
+    });
+    target.classList.add("i0i-ref-flash");
+    setTimeout(() => target.classList.remove("i0i-ref-flash"), 1600);
+  }
+
+  // RFC 0083 R3.1: the scroll position a reference jump left behind. A second
+  // jump replaces it rather than stacking — one step back is the affordance,
+  // not a history.
+  let returnScrollTop = $state<number | null>(null);
+  // The jump itself scrolls, and it scrolls smoothly — without this the chip
+  // would dismiss itself on the first frame of the animation, while the page is
+  // still sitting at the origin R3.2 checks against.
+  let jumpSettlesAt = 0;
+
+  /** R3.2: scrolling back near where you were retires the chip on its own. */
+  function handleScroll(event: Event) {
+    if (returnScrollTop === null || performance.now() < jumpSettlesAt) {
+      return;
+    }
+    const scroller = event.currentTarget as HTMLElement;
+    if (Math.abs(scroller.scrollTop - returnScrollTop) < scroller.clientHeight) {
+      returnScrollTop = null;
+    }
+  }
+
+  function returnFromJump() {
+    const scroller = root?.closest(".html-reader");
+    if (scroller && returnScrollTop !== null) {
+      scroller.scrollTo({ top: returnScrollTop, behavior: "smooth" });
+    }
+    returnScrollTop = null;
+  }
+
   async function viewOriginal() {
     if (sourceUrl) {
       try {
@@ -282,13 +360,22 @@
   }
 </script>
 
-<div class="html-reader col">
+<div class="html-reader col" onscroll={handleScroll}>
   <div class="toolbar row">
     <span class="kind">HTML</span>
     {#if sourceUrl}
-      <button class="view-original" type="button" onclick={viewOriginal}>
-        View original <ExternalLink size={12} strokeWidth={1.75} aria-hidden="true" />
-      </button>
+      <div class="row toolbar-actions">
+        {#if onReExtract}
+          <!-- RFC 0083 R4.1: a page cached before reference resolution existed
+               keeps its `??`s until it is fetched again. -->
+          <button class="view-original" type="button" title="Fetch and extract this page again" onclick={() => void onReExtract?.()}>
+            Re-extract <RefreshCw size={12} strokeWidth={1.75} aria-hidden="true" />
+          </button>
+        {/if}
+        <button class="view-original" type="button" onclick={viewOriginal}>
+          View original <ExternalLink size={12} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+      </div>
     {/if}
   </div>
 
@@ -298,10 +385,25 @@
     <div class="notice">Loading article…</div>
   {:else}
     <!-- Safe: the backend sanitized this (ammonia allowlist, no scripts/externals). -->
+    <!-- The click handler intercepts links inside the article, which are
+         keyboard-activatable in their own right (RFC 0083 R2.1). -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <article class="html-content" bind:this={root} onmouseup={handleMouseUp} oncontextmenu={handleContextMenu}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <article
+      class="html-content"
+      bind:this={root}
+      onmouseup={handleMouseUp}
+      oncontextmenu={handleContextMenu}
+      onclick={handleArticleClick}
+    >
       {@html html}
     </article>
+  {/if}
+
+  {#if returnScrollTop !== null}
+    <button class="return-chip" type="button" onclick={returnFromJump}>
+      ← Back to where you were
+    </button>
   {/if}
 </div>
 
@@ -324,6 +426,10 @@
     padding: 6px 14px;
     background: var(--bg-1, #111);
     border-bottom: 1px solid var(--hair, #2a2a2a);
+  }
+
+  .toolbar-actions {
+    gap: 10px;
   }
 
   .kind {
@@ -379,6 +485,53 @@
   }
 
   .html-content :global(a) {
+    color: var(--amber, #f2a93b);
+  }
+
+  /* RFC 0083 R1.2: a reference we could not resolve — visible as a reference,
+     but not dressed as something you can follow. */
+  .html-content :global(.i0i-ref-unresolved) {
+    color: var(--fg-3, #7a7a7a);
+    font-size: 0.85em;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  /* R2.1: the landing flash, so a jump to a figure lands somewhere visible. */
+  .html-content :global(.i0i-ref-flash) {
+    animation: ref-flash 1.6s ease-out;
+  }
+
+  @keyframes ref-flash {
+    from {
+      background: rgba(242, 169, 59, 0.28);
+    }
+    to {
+      background: transparent;
+    }
+  }
+
+  /* R3.1: one step back from a reference jump. Sticky, so it rides the bottom
+     of the reading surface without covering the inspector. */
+  .return-chip {
+    position: sticky;
+    bottom: 14px;
+    z-index: 2;
+    align-self: center;
+    margin-top: -30px;
+    padding: 5px 11px;
+    border: 1px solid var(--border-2, #3a3a3a);
+    border-radius: 3px;
+    background: var(--panel, #1a1a1a);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+    color: var(--fg-1, #ddd);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .return-chip:hover {
+    border-color: var(--amber, #f2a93b);
     color: var(--amber, #f2a93b);
   }
 

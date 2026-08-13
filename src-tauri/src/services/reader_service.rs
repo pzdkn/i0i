@@ -229,9 +229,17 @@ impl ReaderService {
     /// extract to clean article HTML, cache it, and return a document the reader
     /// renders in its reading column. Annotation/chat reuse the flow-text
     /// (`TextOffset`) anchor path.
-    pub async fn open_html_document(&self, url: &str) -> Result<ReaderDocument, String> {
+    ///
+    /// RFC 0083 R4.1: `force` re-fetches and re-ingests a page already in the
+    /// cache. Reference resolution happens at ingest, so a page cached before
+    /// that landed keeps its `??` placeholders until it is re-extracted.
+    pub async fn open_html_document(
+        &self,
+        url: &str,
+        force: bool,
+    ) -> Result<ReaderDocument, String> {
         let source_id = discovery_html_source_id(url);
-        let acquired = self.cache_discovery_html(&source_id, url).await?;
+        let acquired = self.cache_discovery_html(&source_id, url, force).await?;
         Ok(html_reader_document(source_id, url, acquired))
     }
 
@@ -256,12 +264,13 @@ impl ReaderService {
         &self,
         source_id: &str,
         url: &str,
+        force: bool,
     ) -> Result<AcquiredHtml, String> {
         let local_path = self.discovery_html_path(source_id)?;
         let meta_path = html_meta_path(&local_path);
 
         // Cache hit: reuse the cached article + its metadata.
-        if local_path.is_file() {
+        if local_path.is_file() && !force {
             if let Ok(meta_json) = fs::read_to_string(&meta_path) {
                 if let Ok(meta) = serde_json::from_str::<HtmlSourceMeta>(&meta_json) {
                     let clean_html = fs::read_to_string(&local_path).unwrap_or_default();
