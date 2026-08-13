@@ -309,6 +309,12 @@
   let toolbarHovered = $state(false);
   const toolbarRevealed = $derived(toolbarHovered || activeTool !== null);
 
+  // RFC 0081 R3.1: the collapsed threads rail hides the same way. Keyboard focus
+  // reveals it too — a rail you can tab to but cannot see is not reachable.
+  let railHovered = $state(false);
+  let railFocused = $state(false);
+  const railRevealed = $derived(railHovered || railFocused);
+
   // RFC 0079 R4.1/R4.3: every *entry* into focus mode starts collapsed. Opening
   // the rail while in focus keeps it open for as long as you stay — leaving and
   // coming back is a fresh request for the paper alone.
@@ -1335,125 +1341,140 @@
             {/if}
           </div>
         {:else if document}
-          <ResizableSplit
-            orientation="vertical"
-            storageKey="i0i.reader-header-split"
-            panes={[
-              // RFC 0072: min/default must fit the meta row, TWO clamped title
-              // lines, and (in focus mode) the action row — the old 64/116 left
-              // ~39px for a 26px line box, so a wrapped title was cut mid-glyph.
-              // Raising `min` also lifts already-persisted panes back above the
-              // floor, via ResizableSplit's clampSizes.
-              { id: "header", min: 132, max: 320, default: 132 },
-              { id: "content", min: 240, default: 620 },
-            ]}
-          >
-            {#snippet pane(id: string)}
-              {#if id === "header"}
-                <div class="header-pane">
-                  <ReaderHeader
-                    {document}
-                    {layoutMode}
-                    {threadsCollapsed}
-                    threadCount={threads.length}
-                    pinCount={pins.length}
-                    onToggleThreads={toggleThreadsPanel}
+          {#snippet readerHeader()}
+            <ReaderHeader
+              {document}
+              {layoutMode}
+              {threadsCollapsed}
+              threadCount={threads.length}
+              pinCount={pins.length}
+              onToggleThreads={toggleThreadsPanel}
+            />
+          {/snippet}
+
+          {#snippet readerContent()}
+            <div class="reader-content col">
+              <div class="reading-surface row">
+                {#if isHtml}
+                  <HtmlReader
+                    bind:this={htmlReaderRef}
+                    sourceId={document.sourceId}
+                    sourceUrl={readerDocument?.sourceUrl}
+                    {highlights}
+                    {conversationIds}
+                    {chatEnabled}
+                    onSelectPassage={selectPassage}
+                    onHighlightClick={openHighlightPopover}
                   />
-                </div>
-              {:else}
-                <div class="reader-content col">
-                  <!-- RFC 0079 R4.2: in focus mode the toolbar gets out of the
-                       way and comes back when you reach for it. It occupies no
-                       layout height while hidden, so the page really does get
-                       the room; the hover strip above it is the reveal. -->
-                  {#if isFocusMode}
-                    <div
-                      class="focus-toolbar-zone"
-                      class:revealed={toolbarRevealed}
-                      role="presentation"
-                      onpointerenter={() => (toolbarHovered = true)}
-                      onpointerleave={() => (toolbarHovered = false)}
-                    >
-                      {@render toolbarStrip()}
+                {:else if hasCachedPdf}
+                  <PdfPage
+                    bind:this={pdfPageRef}
+                    pdfUrl={readerDocument!.pdfLocalPath!}
+                    sourceId={document.sourceId}
+                    {threads}
+                    {highlights}
+                    {conversationIds}
+                    {selection}
+                    {chatEnabled}
+                    scale={pdfScale}
+                    {activeTool}
+                    {citationFlash}
+                    onSelectPassage={selectPassage}
+                    onHighlightClick={openHighlightPopover}
+                    onToolHighlight={(passage) => void highlightFromTool(passage)}
+                    onPlaceNote={(pageIndex, x, y, clientX, clientY) =>
+                      void placeNote(pageIndex, x, y, clientX, clientY)}
+                  />
+                {:else if isAcquiringPdf}
+                  <div class="missing-pdf col">
+                    <div class="label hot">Fetching PDF</div>
+                    <div class="progress-shell" aria-hidden="true">
+                      <div class="progress-bar"></div>
                     </div>
-                  {/if}
-                  <div class="reading-surface row">
-                    {#if isHtml}
-                      <HtmlReader
-                        bind:this={htmlReaderRef}
-                        sourceId={document.sourceId}
-                        sourceUrl={readerDocument?.sourceUrl}
-                        {highlights}
-                        {conversationIds}
-                        {chatEnabled}
-                        onSelectPassage={selectPassage}
-                        onHighlightClick={openHighlightPopover}
-                      />
-                    {:else if hasCachedPdf}
-                      <PdfPage
-                        bind:this={pdfPageRef}
-                        pdfUrl={readerDocument!.pdfLocalPath!}
-                        sourceId={document.sourceId}
-                        {threads}
-                        {highlights}
-                        {conversationIds}
-                        {selection}
-                        {chatEnabled}
-                        scale={pdfScale}
-                        {activeTool}
-                        {citationFlash}
-                        onSelectPassage={selectPassage}
-                        onHighlightClick={openHighlightPopover}
-                        onToolHighlight={(passage) => void highlightFromTool(passage)}
-                        onPlaceNote={(pageIndex, x, y, clientX, clientY) =>
-                          void placeNote(pageIndex, x, y, clientX, clientY)}
-                      />
-                    {:else if isAcquiringPdf}
-                      <div class="missing-pdf col">
-                        <div class="label hot">Fetching PDF</div>
-                        <div class="progress-shell" aria-hidden="true">
-                          <div class="progress-bar"></div>
-                        </div>
-                        <p>{acquisitionMessage || "Fetching PDF…"}</p>
-                        <div class="fallback-actions row">
-                          {#if fallbackSourceUrl}
-                            <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open in Browser</button>
-                          {/if}
-                          <button class="btn" type="button" onclick={cancelPdfAcquisition}>Cancel</button>
-                        </div>
-                        {#if fallbackSourceUrl}
-                          <div class="source-line mono-dim">{fallbackSourceUrl}</div>
-                        {/if}
-                      </div>
-                    {:else}
-                      <div class="missing-pdf col">
-                        <div class="label hot">PDF could not be opened automatically</div>
-                        <p>The publisher may require login, browser verification, or manual access.</p>
-                        <div class="fallback-actions row">
-                          {#if fallbackSourceUrl}
-                            <button class="btn primary" type="button" onclick={() => void readAsHtml()}>Read as HTML</button>
-                            <button class="btn" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
-                          {/if}
-                          <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
-                        </div>
-                        {#if fallbackSourceUrl}
-                          <div class="source-line mono-dim">{fallbackSourceUrl}</div>
-                        {/if}
-                        {#if readerDocument?.pdfError}
-                          <details class="error-details">
-                            <summary>Details</summary>
-                            <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
-                          </details>
-                        {/if}
-                      </div>
+                    <p>{acquisitionMessage || "Fetching PDF…"}</p>
+                    <div class="fallback-actions row">
+                      {#if fallbackSourceUrl}
+                        <button class="btn primary" type="button" onclick={() => void openSourceUrl()}>Open in Browser</button>
+                      {/if}
+                      <button class="btn" type="button" onclick={cancelPdfAcquisition}>Cancel</button>
+                    </div>
+                    {#if fallbackSourceUrl}
+                      <div class="source-line mono-dim">{fallbackSourceUrl}</div>
                     {/if}
                   </div>
+                {:else}
+                  <div class="missing-pdf col">
+                    <div class="label hot">PDF could not be opened automatically</div>
+                    <p>The publisher may require login, browser verification, or manual access.</p>
+                    <div class="fallback-actions row">
+                      {#if fallbackSourceUrl}
+                        <button class="btn primary" type="button" onclick={() => void readAsHtml()}>Read as HTML</button>
+                        <button class="btn" type="button" onclick={() => void openSourceUrl()}>Open Source</button>
+                      {/if}
+                      <button class="btn" type="button" onclick={retryDocumentLoad}>Retry</button>
+                    </div>
+                    {#if fallbackSourceUrl}
+                      <div class="source-line mono-dim">{fallbackSourceUrl}</div>
+                    {/if}
+                    {#if readerDocument?.pdfError}
+                      <details class="error-details">
+                        <summary>Details</summary>
+                        <pre class="debug-block mono-dim">{readerDocument.pdfError}</pre>
+                      </details>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
 
-                  <ReaderFooter />
-                </div>
-              {/if}
-            {/snippet}
-          </ResizableSplit>
+              <ReaderFooter />
+            </div>
+          {/snippet}
+
+          {#if isFocusMode}
+            <!-- RFC 0081 R1.1/R1.2: focus mode does not use the header split at
+                 all. The split enforces a 132px minimum against persisted state
+                 (RFC 0072), so a collapsed-to-zero header would be clamped back
+                 open and the collapse would follow you into normal mode. The
+                 title rides the same hover zone as the toolbar instead — the
+                 tool you reach for, then the title that confirms which paper. -->
+            <div
+              class="focus-toolbar-zone"
+              class:revealed={toolbarRevealed}
+              role="presentation"
+              onpointerenter={() => (toolbarHovered = true)}
+              onpointerleave={() => (toolbarHovered = false)}
+            >
+              {@render toolbarStrip()}
+              <div class="focus-header-block">
+                {@render readerHeader()}
+              </div>
+            </div>
+            {@render readerContent()}
+          {:else}
+            <ResizableSplit
+              orientation="vertical"
+              storageKey="i0i.reader-header-split"
+              panes={[
+                // RFC 0072: min/default must fit the meta row and TWO clamped
+                // title lines — the old 64/116 left ~39px for a 26px line box,
+                // so a wrapped title was cut mid-glyph. Raising `min` also
+                // lifts already-persisted panes back above the floor, via
+                // ResizableSplit's clampSizes.
+                { id: "header", min: 132, max: 320, default: 132 },
+                { id: "content", min: 240, default: 620 },
+              ]}
+            >
+              {#snippet pane(id: string)}
+                {#if id === "header"}
+                  <div class="header-pane">
+                    {@render readerHeader()}
+                  </div>
+                {:else}
+                  {@render readerContent()}
+                {/if}
+              {/snippet}
+            </ResizableSplit>
+          {/if}
         {:else}
           <div class="missing-pdf col">
             <div class="label hot">Document not found</div>
@@ -1522,22 +1543,33 @@
           {/snippet}
         </ResizableSplit>
       {:else}
-        <div class="focus-collapsed-layout">
+        <div class="focus-collapsed-layout" class:rail-revealed={railRevealed}>
           {@render readerPane()}
           {#if document}
-            <button
-              class="threads-rail hair-l"
-              type="button"
-              aria-label="Open threads panel"
-              title="Open threads"
-              onclick={openThreadsPanel}
+            <!-- RFC 0081 R3.1: the rail is chrome too. It collapses to a strip
+                 on the right edge and comes back the way the toolbar does. -->
+            <div
+              class="focus-rail-zone"
+              role="presentation"
+              onpointerenter={() => (railHovered = true)}
+              onpointerleave={() => (railHovered = false)}
             >
-              <span>Threads</span>
-              <strong>{threads.length}</strong>
-              {#if pins.length}
-                <em>{pins.length}</em>
-              {/if}
-            </button>
+              <button
+                class="threads-rail hair-l"
+                type="button"
+                aria-label="Open threads panel"
+                title="Open threads"
+                onclick={openThreadsPanel}
+                onfocus={() => (railFocused = true)}
+                onblur={() => (railFocused = false)}
+              >
+                <span>Threads</span>
+                <strong>{threads.length}</strong>
+                {#if pins.length}
+                  <em>{pins.length}</em>
+                {/if}
+              </button>
+            </div>
           {/if}
         </div>
       {/if}
@@ -1619,17 +1651,37 @@
     transition: max-height 120ms ease-out;
   }
 
+  /* RFC 0081 R1.2: the zone now carries the header as well as the toolbar, so
+     it has to clear both plus the AI bar. */
   .focus-toolbar-zone.revealed {
-    max-height: 200px;
+    max-height: 360px;
   }
 
+  .focus-header-block {
+    display: flex;
+    min-width: 0;
+  }
+
+  /* RFC 0081 R3.1: 6px of live hover strip at rest, the full rail once pointed
+     at — the same trade the toolbar zone makes, so the page keeps the column. */
   .focus-collapsed-layout {
     flex: 1;
     min-width: 0;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 42px;
+    grid-template-columns: minmax(0, 1fr) 6px;
     overflow: hidden;
+    transition: grid-template-columns 120ms ease-out;
+  }
+
+  .focus-collapsed-layout.rail-revealed {
+    grid-template-columns: minmax(0, 1fr) 42px;
+  }
+
+  .focus-rail-zone {
+    min-width: 0;
+    overflow: hidden;
+    display: flex;
   }
 
   .threads-rail {

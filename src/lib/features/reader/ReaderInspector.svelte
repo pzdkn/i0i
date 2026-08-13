@@ -323,6 +323,38 @@
     }),
   );
 
+  // RFC 0080 R1.1/R1.2: right-click on an annotation row opens a menu at the
+  // pointer, the way it already does in the vault (PaperList, VaultExplorer).
+  // Deliberately not a shared component — two call sites of thirty lines is
+  // cheaper to read here than one indirection away.
+  let rowMenu = $state<{ x: number; y: number; highlightId: string } | null>(null);
+
+  function showRowMenu(event: MouseEvent, highlightId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    rowMenu = { x: event.clientX, y: event.clientY, highlightId };
+  }
+
+  function closeRowMenu() {
+    rowMenu = null;
+  }
+
+  function handleRowMenuKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      closeRowMenu();
+    }
+  }
+
+  function openFromRowMenu(highlightId: string) {
+    closeRowMenu();
+    onOpenHighlight(highlightId);
+  }
+
+  function removeFromRowMenu(highlightId: string) {
+    closeRowMenu();
+    void onRemoveHighlight?.(highlightId);
+  }
+
   function clearFilters() {
     filterAuthor = "all";
     filterColor = null;
@@ -1269,6 +1301,8 @@
               </div>
 {/snippet}
 
+<svelte:window onclick={closeRowMenu} onkeydown={handleRowMenuKeydown} />
+
 <aside class="reader-inspector hair-l">
   <div class="inspector-body">
     <header class="hair-b">
@@ -1392,20 +1426,18 @@
                 <p class="empty-note">Loading annotations…</p>
               {:else if filteredAnnotations.length}
                 {#each filteredAnnotations as row (row.highlight.id)}
-                  <!-- RFC 0079 R1.2: the row opens the passage, the trailing −
-                       deletes it. Two buttons rather than one, because a list of
-                       things you cannot remove from the list is where this
-                       started. Delete/Backspace on the focused row does the
-                       same, and so does right-click. -->
+                  <!-- RFC 0080 R1.1: the row opens the passage, the corner −
+                       deletes it, right-click offers both as a labelled menu.
+                       Right-click used to delete on contact (RFC 0079 R1.2) —
+                       an unlabelled destructive gesture everywhere else in the
+                       app opens a menu. Delete/Backspace on a focused row is
+                       deliberate enough to keep acting directly. -->
                   <div class="thread-row-wrap">
                     <button
                       class="thread-row"
                       type="button"
                       onclick={() => onOpenHighlight(row.highlight.id)}
-                      oncontextmenu={(event) => {
-                        event.preventDefault();
-                        void onRemoveHighlight?.(row.highlight.id);
-                      }}
+                      oncontextmenu={(event) => showRowMenu(event, row.highlight.id)}
                       onkeydown={(event) => {
                         if (event.key === "Delete" || event.key === "Backspace") {
                           event.preventDefault();
@@ -1434,7 +1466,7 @@
                         title="Delete this annotation"
                         onclick={() => void onRemoveHighlight?.(row.highlight.id)}
                       >
-                        <Minus size={13} strokeWidth={2} aria-hidden="true" />
+                        <Minus size={11} strokeWidth={2} aria-hidden="true" />
                       </button>
                     {/if}
                   </div>
@@ -1443,6 +1475,27 @@
                 <p class="empty-note">No marks match these filters. <button class="link-btn" type="button" onclick={clearFilters}>Clear</button></p>
               {:else}
                 <p class="empty-note">Highlight or note a passage in the Reader to see it here.</p>
+              {/if}
+
+              {#if rowMenu}
+                {@const menuHighlightId = rowMenu.highlightId}
+                <div
+                  class="context-menu col"
+                  role="menu"
+                  tabindex="-1"
+                  style={`left: ${rowMenu.x}px; top: ${rowMenu.y}px;`}
+                  onclick={(event) => event.stopPropagation()}
+                  onkeydown={(event) => event.stopPropagation()}
+                >
+                  <button role="menuitem" type="button" onclick={() => openFromRowMenu(menuHighlightId)}>
+                    Open passage
+                  </button>
+                  {#if onRemoveHighlight}
+                    <button role="menuitem" class="danger" type="button" onclick={() => removeFromRowMenu(menuHighlightId)}>
+                      Delete annotation
+                    </button>
+                  {/if}
+                </div>
               {/if}
             </div>
 
@@ -1810,32 +1863,82 @@
      stays visible rather than appearing on hover — a list you can delete from
      should look like one before you point at it. */
   .thread-row-wrap {
-    display: flex;
-    align-items: stretch;
-    gap: 0;
+    position: relative;
   }
 
+  /* RFC 0080 R2.1: room for the corner button, so a long title cannot slide
+     under it. */
   .thread-row-wrap .thread-row {
-    border-right: none;
+    padding-right: 22px;
   }
 
+  /* RFC 0080 R2.1/R2.2: the delete control used to be a full-height 24px bar on
+     every row — the heaviest element in a list of 11px annotations. It is now a
+     small corner icon that appears where the pointer already is. */
   .row-remove {
+    position: absolute;
+    top: 3px;
+    right: 3px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    flex-shrink: 0;
-    width: 24px;
+    width: 16px;
+    height: 16px;
     padding: 0;
-    border: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.015);
+    border: 0;
+    border-radius: 2px;
+    background: transparent;
     color: var(--fg-3);
     cursor: pointer;
+    opacity: 0;
+  }
+
+  .thread-row-wrap:hover .row-remove,
+  .row-remove:focus-visible {
+    opacity: 1;
   }
 
   .row-remove:hover {
-    border-color: #b4483c;
-    background: rgba(180, 72, 60, 0.12);
+    background: rgba(180, 72, 60, 0.16);
     color: #e07a6e;
+  }
+
+  /* RFC 0080 R1.2: same mechanics and look as the vault's row menu. */
+  .context-menu {
+    position: fixed;
+    z-index: 20;
+    min-width: 160px;
+    padding: 5px;
+    border: 1px solid var(--border-2);
+    border-radius: 3px;
+    background: var(--bg-1);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
+  }
+
+  .context-menu button {
+    height: 26px;
+    width: 100%;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .context-menu button:hover {
+    background: rgba(242, 169, 59, 0.08);
+    color: var(--amber);
+  }
+
+  .context-menu .danger {
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 2px 2px;
+    color: var(--red);
   }
 
   .thread-row-title {

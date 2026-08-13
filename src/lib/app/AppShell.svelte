@@ -34,23 +34,62 @@
     onOpenSearchResult?: (paperId: string, hit: ChunkHit) => void;
     children: Snippet;
   } = $props();
+
+  // RFC 0081 R2.1: in focus mode the app's own bars collapse to hover strips at
+  // the window edges — the same reveal the reader toolbar uses (RFC 0079 R4.2),
+  // so the space is given back to the page rather than merely dimmed.
+  let titleBarHovered = $state(false);
+  let statusBarHovered = $state(false);
+  // R2.2: a bridge error is the app explaining why nothing works. It is never
+  // something you should have to go looking for.
+  const statusBarRevealed = $derived(statusBarHovered || Boolean(bridgeError));
 </script>
 
 <div class="crt app-shell">
-  <TitleBar
-    {vaultStatus}
-    {currentPath}
-    vaultId={searchVaultId}
-    {resolvePaperTitle}
-    onOpenResult={onOpenSearchResult}
-  />
+  {#snippet titleBar()}
+    <TitleBar
+      {vaultStatus}
+      {currentPath}
+      vaultId={searchVaultId}
+      {resolvePaperTitle}
+      onOpenResult={onOpenSearchResult}
+    />
+  {/snippet}
+
+  {#if readerFocusMode}
+    <div
+      class="edge-zone"
+      class:revealed={titleBarHovered}
+      role="presentation"
+      onpointerenter={() => (titleBarHovered = true)}
+      onpointerleave={() => (titleBarHovered = false)}
+    >
+      {@render titleBar()}
+    </div>
+  {:else}
+    {@render titleBar()}
+  {/if}
+
   <div class="app-body row">
     {#if !readerFocusMode}
       <ActivityRail active={activeMode} {onSelectMode} {onOpenSettings} {settingsAttention} />
     {/if}
     {@render children()}
   </div>
-  <StatusBar {vaultStatus} {bridgeError} />
+
+  {#if readerFocusMode}
+    <div
+      class="edge-zone"
+      class:revealed={statusBarRevealed}
+      role="presentation"
+      onpointerenter={() => (statusBarHovered = true)}
+      onpointerleave={() => (statusBarHovered = false)}
+    >
+      <StatusBar {vaultStatus} {bridgeError} />
+    </div>
+  {:else}
+    <StatusBar {vaultStatus} {bridgeError} />
+  {/if}
 </div>
 
 <style>
@@ -66,5 +105,19 @@
     flex: 1;
     min-height: 0;
     align-items: stretch;
+  }
+
+  /* RFC 0081 R2.1: 6px of always-live hover strip; the bar itself is collapsed
+     above (or below) the fold until the pointer arrives. Height rather than
+     visibility, so the reading surface actually gains the space. */
+  .edge-zone {
+    flex-shrink: 0;
+    max-height: 6px;
+    overflow: hidden;
+    transition: max-height 120ms ease-out;
+  }
+
+  .edge-zone.revealed {
+    max-height: 120px;
   }
 </style>
