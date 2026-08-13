@@ -70,6 +70,13 @@ point of the change, not a side effect of it.
 R1.3 The row's conversation badge goes: no row in Notes can have one. So does
 the **Has: Chat** filter chip, which after R1.1 can only ever return nothing.
 
+R1.4 The Chat list gets the delete affordances RFC 0080 gave the Marks list —
+the corner `−` and the right-click menu — because R1.1 moves chatted passages
+out of the only list that had them. Without this, asking about a mark would make
+it undeletable from any list, which un-amends RFC 0079's first success
+criterion. Deleting acts on the passage's highlight, which takes the thread with
+it (RFC 0079 R1.3). A whole-paper chat has no highlight and gets no delete.
+
 ---
 
 ## 2. The page cannot delete a mark
@@ -110,7 +117,7 @@ R2.3 Left-click behaviour is unchanged: it opens the popover, as it always has.
 
 | # | Task | Ships alone | Size |
 |---|---|---|---|
-| 1 | R1.1–R1.3 strict Notes/Chat partition | yes | XS |
+| 1 | R1.1–R1.4 strict Notes/Chat partition, delete follows the rows | yes | S |
 | 2 | R2.1–R2.3 page context menu in both viewers | yes | S |
 
 ## Risks
@@ -133,7 +140,10 @@ Manual (no Svelte component harness):
    mark from the page and the list.
 4. Right-click a PDF sticky note → same menu, same result.
 5. Right-click a highlighted range in an HTML article → same menu.
-6. Left-click any of the three → the popover, exactly as before.
+6. Left-click any of the three → the popover, exactly as before, and nothing
+   else opens on top of it.
+7. Hover a Chat row: the same corner `−`; right-click it: the same menu. Deleting
+   removes the passage and its conversation.
 
 ## Success criteria
 

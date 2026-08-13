@@ -213,7 +213,10 @@
   }
 
   function handleMouseUp(event: MouseEvent) {
-    if (!root) return;
+    // RFC 0085 R2.1: mouseup fires for the right button too, and a collapsed
+    // selection under the pointer would open the popover just as `contextmenu`
+    // opens the menu — two overlays stacked on the same point.
+    if (!root || event.button !== 0) return;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);

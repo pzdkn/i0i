@@ -44,6 +44,16 @@ floor width (140px) so ten open papers are ten legible tabs rather than ten
 slivers. `WorkspaceTabs.svelte` has no overflow rule today because it never had
 to hold more than three tabs.
 
+R1.5 **The open gesture stays double-click**, and this is a decision, not an
+omission. The report said "clicking on a paper should open a new tab"; in
+`VaultHome.svelte:221` a single click is what selects the row, and the selection
+drives the `VaultInspector` metadata pane beside the list. Making single-click
+open would activate the reader tab on every click, which leaves that pane
+reachable only by returning to the vault tab — where the next click leaves
+again. The complaint this RFC answers is the eviction (R1.1), which is
+gesture-independent. If double-click still feels wrong once tabs accumulate, the
+change is one line in `PaperList.svelte:120`.
+
 **Out of scope:** tab reordering, tab persistence across restarts, splits (the
 `split` / `layout` words in the tab bar are still decoration), a limit on how
 many papers can be open.

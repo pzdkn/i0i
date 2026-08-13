@@ -113,7 +113,15 @@
     }
 
     if (activeTab.paperId) {
-      return getPaperById(activeTab.paperId) ?? selectedReaderPaper;
+      // RFC 0084: `selectedReaderPaper` holds the last opened paper, including
+      // the synthetic one a discovery candidate resolves to — which is not in
+      // the library, so `getPaperById` misses it. With one reader tab that
+      // fallback was always the right paper. With several it has to prove it is
+      // this tab's, or two candidate tabs render the same document.
+      return (
+        getPaperById(activeTab.paperId) ??
+        (selectedReaderPaper?.id === activeTab.paperId ? selectedReaderPaper : null)
+      );
     }
 
     return selectedReaderPaper;

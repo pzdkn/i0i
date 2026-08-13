@@ -323,6 +323,16 @@
     }
   });
 
+  /**
+   * The highlight a passage conversation is anchored to (RFC 0085 R1.4).
+   * Deleting the highlight takes the thread with it (RFC 0079 R1.3), so this is
+   * what the Chat list's delete acts on. A whole-paper chat has no highlight and
+   * gets no delete.
+   */
+  function highlightIdForThread(thread: ChatThreadSummary): string | undefined {
+    return highlights.find((hl) => samePassage(thread.anchor, hl.locator))?.id;
+  }
+
   function showRowMenu(event: MouseEvent, highlightId: string) {
     event.preventDefault();
     event.stopPropagation();
@@ -1284,12 +1294,37 @@
                   </button>
                 {/each}
 
+                <!-- RFC 0085 R1.4: a chatted passage now lives only here, so the
+                     delete affordances RFC 0080 gave the Marks list have to come
+                     with it — otherwise asking about a mark makes it
+                     undeletable from any list. -->
                 {#each passageChats as chat (chat.id)}
-                  <button class="thread-row" type="button" onclick={() => void openThreadById(chat.id)}>
-                    <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
-                    <span class="thread-row-title">{chat.title.trim() || anchorSelectedText(chat.anchor) || "Conversation"}</span>
-                    <span class="mono-dim">{chat.entryCount}</span>
-                  </button>
+                  {@const passageHighlightId = highlightIdForThread(chat)}
+                  <div class="thread-row-wrap">
+                    <button
+                      class="thread-row"
+                      type="button"
+                      onclick={() => void openThreadById(chat.id)}
+                      oncontextmenu={(event) => {
+                        if (passageHighlightId) showRowMenu(event, passageHighlightId);
+                      }}
+                    >
+                      <MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" />
+                      <span class="thread-row-title">{chat.title.trim() || anchorSelectedText(chat.anchor) || "Conversation"}</span>
+                      <span class="mono-dim">{chat.entryCount}</span>
+                    </button>
+                    {#if onRemoveHighlight && passageHighlightId}
+                      <button
+                        class="row-remove"
+                        type="button"
+                        aria-label="delete conversation"
+                        title="Delete this passage and its conversation"
+                        onclick={() => void onRemoveHighlight?.(passageHighlightId)}
+                      >
+                        <Minus size={11} strokeWidth={2} aria-hidden="true" />
+                      </button>
+                    {/if}
+                  </div>
                 {/each}
               </div>
 {/snippet}
@@ -1466,32 +1501,6 @@
                 <p class="empty-note">Highlight or note a passage in the Reader to see it here.</p>
               {/if}
 
-              {#if rowMenu}
-                {@const menuHighlightId = rowMenu.highlightId}
-                <div
-                  bind:this={rowMenuEl}
-                  class="context-menu col"
-                  role="menu"
-                  tabindex="-1"
-                  style={`left: ${rowMenu.x}px; top: ${rowMenu.y}px;`}
-                  onclick={(event) => event.stopPropagation()}
-                  onkeydown={(event) => {
-                    event.stopPropagation();
-                    if (event.key === "Escape") {
-                      closeRowMenu();
-                    }
-                  }}
-                >
-                  <button role="menuitem" type="button" onclick={() => openFromRowMenu(menuHighlightId)}>
-                    Open passage
-                  </button>
-                  {#if onRemoveHighlight}
-                    <button role="menuitem" class="danger" type="button" onclick={() => removeFromRowMenu(menuHighlightId)}>
-                      Delete annotation
-                    </button>
-                  {/if}
-                </div>
-              {/if}
             </div>
 
             {#if visibleError}
@@ -1553,6 +1562,35 @@
     </button>
   </nav>
 </aside>
+
+<!-- RFC 0080/0085: one row menu for both lists, at the component root so it
+     is not scoped to whichever section rendered the row. -->
+{#if rowMenu}
+  {@const menuHighlightId = rowMenu.highlightId}
+  <div
+    bind:this={rowMenuEl}
+    class="context-menu col"
+    role="menu"
+    tabindex="-1"
+    style={`left: ${rowMenu.x}px; top: ${rowMenu.y}px;`}
+    onclick={(event) => event.stopPropagation()}
+    onkeydown={(event) => {
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        closeRowMenu();
+      }
+    }}
+  >
+    <button role="menuitem" type="button" onclick={() => openFromRowMenu(menuHighlightId)}>
+      Open passage
+    </button>
+    {#if onRemoveHighlight}
+      <button role="menuitem" class="danger" type="button" onclick={() => removeFromRowMenu(menuHighlightId)}>
+        Delete annotation
+      </button>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .reader-inspector {
