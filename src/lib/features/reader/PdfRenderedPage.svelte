@@ -46,6 +46,7 @@
     citationFlash = null,
     onSelectPassage,
     onHighlightClick,
+    onHighlightContextMenu,
     onToolHighlight,
     onPlaceNote,
   }: {
@@ -75,6 +76,8 @@
     // opened the note editor.
     onSelectPassage: (selection: ReaderTextSelection, intent?: "notes" | "chat") => void;
     onHighlightClick: (highlightId: string, x: number, y: number) => void;
+    /** RFC 0085 R2.2: right-click reports upward; ReaderView draws the menu. */
+    onHighlightContextMenu?: (highlightId: string, x: number, y: number) => void;
     // RFC 0074: the Highlight tool marks a selection outright; the Note tool
     // places a sticky at a normalized point on this page.
     onToolHighlight?: (selection: ReaderTextSelection) => void;
@@ -611,11 +614,11 @@
             onHighlightClick(mark.id, event.clientX, event.clientY);
           }}
           oncontextmenu={(event) => {
-            // RFC 0079 R1.1: right-click reaches the same actions as left —
-            // including Delete, which had no gesture on the page at all.
+            // RFC 0085 R2.1: right-click names its actions instead of opening
+            // the same popover a left-click does.
             event.preventDefault();
             event.stopPropagation();
-            onHighlightClick(mark.id, event.clientX, event.clientY);
+            onHighlightContextMenu?.(mark.id, event.clientX, event.clientY);
           }}
         ></button>
         <!-- RFC 0074 R3: a commented highlight has to look different from a bare
@@ -650,7 +653,7 @@
           oncontextmenu={(event) => {
             event.preventDefault();
             event.stopPropagation();
-            onHighlightClick(sticky.id, event.clientX, event.clientY);
+            onHighlightContextMenu?.(sticky.id, event.clientX, event.clientY);
           }}
         >
           <StickyGlyph color={sticky.color} size={16} />

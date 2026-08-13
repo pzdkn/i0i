@@ -17,6 +17,7 @@
     chatEnabled = true,
     onSelectPassage,
     onHighlightClick,
+    onHighlightContextMenu,
     onReExtract,
   }: {
     sourceId: string;
@@ -28,6 +29,8 @@
     chatEnabled?: boolean;
     onSelectPassage: (selection: ReaderTextSelection) => void;
     onHighlightClick?: (highlightId: string, x: number, y: number) => void;
+    /** RFC 0085 R2.2: right-click reports upward; ReaderView draws the menu. */
+    onHighlightContextMenu?: (highlightId: string, x: number, y: number) => void;
     /** RFC 0083 R4.1: re-fetch and re-ingest this page. */
     onReExtract?: () => void | Promise<void>;
   } = $props();
@@ -190,12 +193,12 @@
     return range ? { node: range.startContainer, offset: range.startOffset } : null;
   }
 
-  /// RFC 0079 R1.1: right-click a mark to reach its actions — Remove included.
-  /// The HTML reader has no per-mark element to hang a hover affordance on
-  /// (marks are ranges painted over the article), so the pointer position is
-  /// resolved to an offset the same way a plain click is.
+  /// RFC 0085 R2.1: right-click a mark for a menu that names its actions,
+  /// Delete included. The HTML reader has no per-mark element to hang an
+  /// affordance on (marks are ranges painted over the article), so the pointer
+  /// position is resolved to an offset the same way a plain click is.
   function handleContextMenu(event: MouseEvent) {
-    if (!root || !onHighlightClick) return;
+    if (!root || !onHighlightContextMenu) return;
     const target = event.target as Node | null;
     if (!target || !root.contains(target)) return;
     // `caretPositionFromPoint` is the standard; WebKit still ships only the
@@ -206,7 +209,7 @@
     const hit = findHighlightForOffset(highlights, sourceId, offset);
     if (!hit) return;
     event.preventDefault();
-    onHighlightClick(hit.id, event.clientX, event.clientY);
+    onHighlightContextMenu(hit.id, event.clientX, event.clientY);
   }
 
   function handleMouseUp(event: MouseEvent) {

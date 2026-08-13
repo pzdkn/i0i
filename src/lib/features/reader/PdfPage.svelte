@@ -27,6 +27,7 @@
     citationFlash = null,
     onSelectPassage,
     onHighlightClick,
+    onHighlightContextMenu,
     onToolHighlight,
     onPlaceNote,
   }: {
@@ -49,6 +50,7 @@
     citationFlash?: { pageIndex: number; rects: PdfRect[] } | null;
     onSelectPassage: (selection: ReaderTextSelection, intent?: "notes" | "chat") => void;
     onHighlightClick: (highlightId: string, x: number, y: number) => void;
+    onHighlightContextMenu?: (highlightId: string, x: number, y: number) => void;
     onToolHighlight?: (selection: ReaderTextSelection) => void;
     onPlaceNote?: (pageIndex: number, x: number, y: number, clientX: number, clientY: number) => void;
   } = $props();
@@ -288,6 +290,7 @@
             {citationFlash}
             {onSelectPassage}
             {onHighlightClick}
+            {onHighlightContextMenu}
             {onToolHighlight}
             {onPlaceNote}
           />

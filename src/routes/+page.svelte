@@ -260,6 +260,23 @@
     activeTabId = vaultTab.id;
   }
 
+  /**
+   * RFC 0084 R1.1/R1.2: place a reader tab without evicting the others. Opening
+   * a paper used to close whichever paper was open — the tab id has always been
+   * `reader:<paperId>`, so one tab per paper only ever needed this.
+   *
+   * A paper already open keeps its position and takes the new tab's contents,
+   * so reopening it as a discovery candidate refreshes the candidate rather
+   * than adding a second tab for the same paper.
+   */
+  function withReaderTab(readerTab: WorkspaceTab): WorkspaceTab[] {
+    const existing = tabs.findIndex((tab) => tab.id === readerTab.id);
+    if (existing === -1) {
+      return [...tabs, readerTab];
+    }
+    return tabs.map((tab, index) => (index === existing ? readerTab : tab));
+  }
+
   function openPaper(paperId: string) {
     const paper = getPaperById(paperId);
     if (!paper) {
@@ -275,7 +292,7 @@
       paperId: paper.id,
     };
 
-    tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
+    tabs = withReaderTab(readerTab);
     activeTabId = readerTab.id;
   }
 
@@ -612,7 +629,7 @@
       readerCandidate: readerCandidateFrom(candidate),
     };
 
-    tabs = [...tabs.filter((tab) => tab.kind !== "reader"), readerTab];
+    tabs = withReaderTab(readerTab);
     activeTabId = readerTab.id;
   }
 

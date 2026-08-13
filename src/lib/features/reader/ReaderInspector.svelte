@@ -177,7 +177,6 @@
   let filterAuthor = $state<AuthorFilter>("all");
   let filterColor = $state<HighlightColor | null>(null);
   let filterHasNote = $state(false);
-  let filterHasConversation = $state(false);
   let filterStarred = $state(false);
   // A thread with an empty id is *virtual*: it shows a passage's composer before
   // the first Note/Ask creates the row (RFC 0034 lazy threads).
@@ -277,25 +276,13 @@
       })
       .reverse(),
   );
-  // RFC 0067 (R1): the Marks list is "everything I highlighted/noted" — rows
-  // with a color or a note. A *pure* conversation passage (asked, no color/note)
-  // lives under Chats, not here (though it's still marked on the page). The
-  // `!hasConversation` clause keeps orphan rows reachable: a highlight with no
-  // color, no note, and no conversation (e.g. a failed ask, a whitespace-only
-  // note) would otherwise fall out of both lists and render nowhere. Net
-  // invariant: every highlight appears in Marks ∪ Chats exactly once.
-  const markRows = $derived(
-    annotationRows.filter(
-      (row) =>
-        // RFC 0074: a sticky note is always a mark, even before it has been
-        // typed into — right after placement it has no note and no color rule
-        // should be able to hide it.
-        isStickyNote(row.highlight.locator) ||
-        row.highlight.color !== null ||
-        row.hasNote ||
-        !row.hasConversation,
-    ),
-  );
+  // RFC 0085 R1.1: one list, one kind of thing. RFC 0067 stated the invariant —
+  // every highlight appears in Marks ∪ Chats exactly once — and then let a
+  // coloured passage you had also asked about into both lists at once, badge and
+  // all. The rail asks you to pick Notes or Chat; the partition is now the same
+  // question. A mark you ask about moves to Chat (R1.2) and keeps its colour on
+  // the page.
+  const markRows = $derived(annotationRows.filter((row) => !row.hasConversation));
   // RFC 0067 (R1): the Chats section lists every passage conversation; the
   // whole-paper "Ask about this paper" row heads it separately. The count folds
   // in the whole-paper conversation when it has entries.
@@ -307,7 +294,6 @@
     (filterAuthor !== "all" ? 1 : 0) +
       (filterColor !== null ? 1 : 0) +
       (filterHasNote ? 1 : 0) +
-      (filterHasConversation ? 1 : 0) +
       (filterStarred ? 1 : 0),
   );
   const anyFilterActive = $derived(activeFilterCount > 0);
@@ -317,7 +303,6 @@
       if (filterAuthor === "ai" && !row.isAgent) return false;
       if (filterColor !== null && row.highlight.color !== filterColor) return false;
       if (filterHasNote && !row.hasNote) return false;
-      if (filterHasConversation && !row.hasConversation) return false;
       if (filterStarred && !row.starred) return false;
       return true;
     }),
@@ -368,7 +353,6 @@
     filterAuthor = "all";
     filterColor = null;
     filterHasNote = false;
-    filterHasConversation = false;
     filterStarred = false;
   }
 
@@ -1418,9 +1402,6 @@
                       <button class="chip-btn" class:on={filterHasNote} type="button" onclick={() => (filterHasNote = !filterHasNote)}>
                         <StickyNote size={11} strokeWidth={1.75} aria-hidden="true" /> Note
                       </button>
-                      <button class="chip-btn" class:on={filterHasConversation} type="button" onclick={() => (filterHasConversation = !filterHasConversation)}>
-                        <MessageSquare size={11} strokeWidth={1.75} aria-hidden="true" /> Chat
-                      </button>
                       <button class="chip-btn" class:on={filterStarred} type="button" onclick={() => (filterStarred = !filterStarred)}>
                         <Star size={11} strokeWidth={1.75} aria-hidden="true" /> Starred
                       </button>
@@ -1464,7 +1445,6 @@
                       <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
                       {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                       {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-                      {#if row.hasConversation}<span class="badge" title="has a conversation"><MessageSquare size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                       {#if row.starred}<span class="badge" title="starred"><Star size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                     </button>
                     {#if onRemoveHighlight}

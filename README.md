@@ -96,3 +96,5 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [ ] RFC 0081 - Focus mode hides every bar and panel, and each one comes back by pointing at the edge it hides behind. (implemented; awaiting manual verification)
 - [ ] RFC 0082 - Each hidden bar has a visible handle you can aim at, overshoot, and pin open. (implemented; awaiting manual verification)
 - [ ] RFC 0083 - HTML cross-references read as their figure number, and no link in an article can navigate the app away. (implemented; awaiting manual verification)
+- [ ] RFC 0084 - Opening a paper adds a tab instead of closing the one you were reading. (implemented; awaiting manual verification)
+- [ ] RFC 0085 - Notes and Chat each list only their own kind, and a mark can be deleted from the page it lives on. (implemented; awaiting manual verification)

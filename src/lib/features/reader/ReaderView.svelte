@@ -902,6 +902,40 @@
   }
 
   // Click-a-highlight popover (RFC 0058 Task 10).
+  // RFC 0085 R2.1/R2.2: right-clicking a mark on the page opens a menu that
+  // names its actions. Both viewers report the mark and the pointer here rather
+  // than drawing a menu each — the PDF page and the HTML article resolve a
+  // pointer to a highlight differently, but what happens next is the same.
+  let pageMenu = $state<{ x: number; y: number; highlightId: string } | null>(null);
+  let pageMenuEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    if (pageMenu) {
+      pageMenuEl?.focus();
+    }
+  });
+
+  function openHighlightContextMenu(highlightId: string, x: number, y: number) {
+    pageMenu = {
+      x: Math.max(8, Math.min(x, window.innerWidth - 176)),
+      y: Math.min(y, window.innerHeight - 80),
+      highlightId,
+    };
+  }
+
+  function closePageMenu() {
+    pageMenu = null;
+  }
+
+  function openFromPageMenu(highlightId: string, x: number, y: number) {
+    closePageMenu();
+    openHighlightPopover(highlightId, x, y);
+  }
+
+  function removeFromPageMenu(highlightId: string) {
+    closePageMenu();
+    void deleteAnnotation(highlightId);
+  }
+
   function openHighlightPopover(highlightId: string, x: number, y: number) {
     popoverHighlightId = highlightId;
     popoverPos = {
@@ -1260,7 +1294,7 @@
   }
 </script>
 
-<svelte:window onkeydown={handleToolKeydown} />
+<svelte:window onkeydown={handleToolKeydown} onclick={closePageMenu} />
 
 <section class="reader-workspace col">
   <!-- RFC 0071: one tool panel. In normal mode it spans the full width above the
@@ -1393,6 +1427,7 @@
                     {chatEnabled}
                     onSelectPassage={selectPassage}
                     onHighlightClick={openHighlightPopover}
+                    onHighlightContextMenu={openHighlightContextMenu}
                     onReExtract={isWebUrl(readerDocument?.sourceUrl) ? reExtractHtml : undefined}
                   />
                 {:else if hasCachedPdf}
@@ -1410,6 +1445,7 @@
                     {citationFlash}
                     onSelectPassage={selectPassage}
                     onHighlightClick={openHighlightPopover}
+                    onHighlightContextMenu={openHighlightContextMenu}
                     onToolHighlight={(passage) => void highlightFromTool(passage)}
                     onPlaceNote={(pageIndex, x, y, clientX, clientY) =>
                       void placeNote(pageIndex, x, y, clientX, clientY)}
@@ -1635,6 +1671,32 @@
     {/if}
   </div>
 
+  <!-- RFC 0085 R2.1: the page's own delete menu, for both viewers. -->
+  {#if pageMenu}
+    {@const menu = pageMenu}
+    <div
+      bind:this={pageMenuEl}
+      class="context-menu col"
+      role="menu"
+      tabindex="-1"
+      style={`left: ${menu.x}px; top: ${menu.y}px;`}
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => {
+        event.stopPropagation();
+        if (event.key === "Escape") {
+          closePageMenu();
+        }
+      }}
+    >
+      <button role="menuitem" type="button" onclick={() => openFromPageMenu(menu.highlightId, menu.x, menu.y)}>
+        Open
+      </button>
+      <button role="menuitem" class="danger" type="button" onclick={() => removeFromPageMenu(menu.highlightId)}>
+        Delete
+      </button>
+    </div>
+  {/if}
+
   {#if popoverHighlight && popoverPos}
     <HighlightPopover
       highlight={popoverHighlight}
@@ -1651,6 +1713,45 @@
 </section>
 
 <style>
+  /* RFC 0085 R2.1: same mechanics and look as the vault's row menu and the
+     annotations list's (RFC 0080). */
+  .context-menu {
+    position: fixed;
+    z-index: 40;
+    min-width: 160px;
+    padding: 5px;
+    border: 1px solid var(--border-2);
+    border-radius: 3px;
+    background: var(--bg-1);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
+  }
+
+  .context-menu button {
+    height: 26px;
+    width: 100%;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--fg-1);
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .context-menu button:hover {
+    background: rgba(242, 169, 59, 0.08);
+    color: var(--amber);
+  }
+
+  .context-menu .danger {
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 2px 2px;
+    color: var(--red);
+  }
+
   .reader-workspace {
     flex: 1;
     min-width: 0;

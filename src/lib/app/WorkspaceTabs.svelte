@@ -70,12 +70,18 @@
     height: 26px;
     flex-shrink: 0;
     background: var(--bg-1);
+    /* RFC 0084 R1.4: papers no longer evict each other, so the strip has to
+       hold more than three tabs. Scroll rather than squeeze. */
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 
   .tab {
     height: 100%;
     max-width: 320px;
-    min-width: 0;
+    /* A floor, so eight open papers are eight legible tabs, not eight slivers. */
+    min-width: 140px;
+    flex-shrink: 0;
     gap: 8px;
     padding: 0 10px 0 12px;
     border: 0;
@@ -116,6 +122,7 @@
   }
 
   .tab-actions {
+    flex-shrink: 0;
     gap: 12px;
     padding: 0 10px;
     color: var(--fg-3);
