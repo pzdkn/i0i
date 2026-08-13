@@ -55,9 +55,10 @@ activeTool !== null` (RFC 0079 R4.2).
 
 ## 3. Pinning
 
-R3.1 Clicking a zone's handle **pins** the zone open. A pinned zone ignores
-pointer events entirely — it behaves like ordinary chrome until unpinned.
-Clicking the handle again unpins it, and it collapses.
+R3.1 Clicking a zone's handle **pins** the zone open: it stays regardless of
+where the pointer is, until unpinned. Clicking the handle again unpins it, and
+it collapses once the pointer leaves — not under the cursor that is still on the
+handle, which would leave nothing to re-enter.
 
 R3.2 A pinned zone marks its handle in `var(--amber)` so the state is visible
 without hovering.

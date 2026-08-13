@@ -490,11 +490,12 @@
 
   /* RFC 0083 R1.2: a reference we could not resolve — visible as a reference,
      but not dressed as something you can follow. */
+  /* Lowercase and dim on purpose: there are 164 of these in the paper that
+     prompted the RFC, one every couple of paragraphs. A marker that shouts is
+     worse than the `??` it replaced. */
   .html-content :global(.i0i-ref-unresolved) {
     color: var(--fg-3, #7a7a7a);
     font-size: 0.85em;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
   }
 
   /* R2.1: the landing flash, so a jump to a figure lands somewhere visible. */

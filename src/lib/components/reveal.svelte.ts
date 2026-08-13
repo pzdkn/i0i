@@ -47,12 +47,14 @@ export class RevealZone {
     }, CLOSE_DELAY_MS);
   };
 
-  /** Clicking the handle pins the zone open, or lets a pinned one go. */
+  /**
+   * Clicking the handle pins the zone open, or lets a pinned one go. Unpinning
+   * does not force it shut: the pointer is on the handle, which is inside the
+   * zone, and slamming it closed under the cursor leaves nothing to re-enter.
+   * `leave` collapses it when the pointer actually goes.
+   */
   togglePin = () => {
     this.#pinned = !this.#pinned;
-    if (!this.#pinned) {
-      this.#hovered = false;
-    }
   };
 
   /**
