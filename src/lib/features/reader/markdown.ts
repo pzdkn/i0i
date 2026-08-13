@@ -22,7 +22,16 @@ export type Inline =
   | { kind: "strong"; text: string }
   | { kind: "em"; text: string }
   /** A `[1]`-style citation marker; the caller resolves the handle. */
-  | { kind: "cite"; handle: string };
+  | { kind: "cite"; handle: string }
+  /**
+   * A `[@vault/citation-key]` reference to a paper in the library (RFC 0090).
+   *
+   * Parsed, not resolved: `vault` is undefined for the unqualified
+   * `[@citation-key]` form, and whether either half names anything real is the
+   * caller's question. An unresolvable reference renders as the literal text it
+   * was written as — same rule as a `[n]` the assembly never minted.
+   */
+  | { kind: "paperRef"; vault?: string; key: string; raw: string };
 
 export type Block =
   | { kind: "p"; spans: Inline[] }
@@ -183,6 +192,26 @@ export function parseInline(text: string): Inline[] {
       pushPlain();
       spans.push({ kind: "em", text: em[1] });
       index += em[0].length;
+      continue;
+    }
+
+    // RFC 0090: before the citation rule, since `[@…]` can never be `[1]` but
+    // sharing the opening bracket makes the ordering worth being explicit about.
+    const paperRef = rest.match(/^\[@([A-Za-z0-9._-]+)?(?:\/([A-Za-z0-9._-]*))?\]/);
+    if (paperRef) {
+      pushPlain();
+      const [raw, first, second] = paperRef;
+      // `[@vault/key]` gives both; `[@key]` gives only the first; `[@vault/]`
+      // gives a vault and an empty key, which is a reference to the vault.
+      const vault = second === undefined ? undefined : first;
+      const key = second === undefined ? (first ?? "") : second;
+      if (!vault && !key) {
+        plain += text[index];
+        index += 1;
+        continue;
+      }
+      spans.push({ kind: "paperRef", vault, key, raw });
+      index += raw.length;
       continue;
     }
 

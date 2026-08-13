@@ -41,6 +41,10 @@
   import StickyGlyph from "$lib/features/reader/StickyGlyph.svelte";
   import { samePassage } from "$lib/features/reader/highlight-thread-match";
   import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
+  import NoteText from "$lib/features/reader/NoteText.svelte";
+  import { parseInline } from "$lib/features/reader/markdown";
+  import { resolveRef } from "$lib/features/reader/paper-refs";
+  import { getReferenceIndex } from "$lib/state/library-cache.svelte";
 
   // RFC 0071: the reader inspector is a Zotero-style sidebar whose right-edge
   // icon rail switches between three sections.
@@ -75,6 +79,9 @@
     onEnsureHighlight,
     onOpenHighlight,
     onRemoveHighlight,
+    onOpenPaperReference,
+    onOpenVaultReference,
+    activeVaultId = "",
     onHighlightIntent,
     onAskTurnStart,
     onAskTurnComplete,
@@ -111,6 +118,11 @@
     onOpenHighlight: (highlightId: string) => void;
     /// RFC 0079 R1.2: delete the passage, its note, and its conversation.
     onRemoveHighlight?: (highlightId: string) => void | Promise<void>;
+    /** RFC 0090 R3.1: following a reference opens its paper in its own tab. */
+    onOpenPaperReference?: (paperId: string) => void;
+    onOpenVaultReference?: (vaultId: string) => void;
+    /** Scope for unqualified `[@key]` references. */
+    activeVaultId?: string;
     onHighlightIntent?: (intent: HighlightIntent) => Promise<boolean>;
     // RFC 0059 Phase 2 (Task 9): lifecycle hooks around a single ask turn so
     // ReaderView can collect the highlight ids the agent creates during that
@@ -230,6 +242,30 @@
   const paperChats = $derived(
     threads.filter((thread) => thread.anchor.kind === "document" && thread.entryCount > 0),
   );
+  // RFC 0090 R2.2: rebuilt from the library cache, which is reactive, so a
+  // paper imported while a note is open becomes referenceable immediately.
+  const referenceIndex = $derived(getReferenceIndex());
+
+  /**
+   * A row's one line. RFC 0090 R3: a note carrying `[@vault/key]` reads as the
+   * paper's short title here, not as the raw notation — the row is too narrow to
+   * spend on a slug, and it is not interactive at this size.
+   */
+  function rowTitle(row: AnnotationRow): string {
+    const note = row.highlight.note?.trim();
+    if (!note) {
+      return row.highlight.excerpt;
+    }
+    return parseInline(note)
+      .map((span) => {
+        if (span.kind !== "paperRef") {
+          return span.kind === "cite" ? `[${span.handle}]` : span.text;
+        }
+        return resolveRef(referenceIndex, span, activeVaultId)?.label ?? span.raw;
+      })
+      .join("");
+  }
+
   const isVirtual = $derived(Boolean(openThread) && openThread!.thread.id === "");
   const openPassage = $derived(openThread ? anchorSelectedText(openThread.thread.anchor) : null);
   // The annotated-passage row backing the open thread (RFC 0061). A passage
@@ -1102,12 +1138,25 @@
                       onkeydown={handleNoteKeydown}
                     ></textarea>
                   {:else}
-                    <button
+                    <!-- RFC 0090 §3: the saved note renders its references. It
+                         stops being one big button — a link inside a button is
+                         not a thing — and the header's Edit is the way back into
+                         the textarea. Double-click still opens it, since that is
+                         the gesture the button taught. -->
+                    <div
                       class="note-saved"
-                      type="button"
-                      title="Edit this note"
-                      onclick={() => (noteEditorOpen = true)}
-                    >{currentHighlight?.note ?? ""}</button>
+                      role="presentation"
+                      title="Double-click to edit"
+                      ondblclick={() => (noteEditorOpen = true)}
+                    >
+                      <NoteText
+                        text={currentHighlight?.note ?? ""}
+                        index={referenceIndex}
+                        currentVaultId={activeVaultId}
+                        onOpenPaper={onOpenPaperReference}
+                        onOpenVault={onOpenVaultReference}
+                      />
+                    </div>
                   {/if}
                 </div>
               {:else}
@@ -1504,7 +1553,7 @@
                       {:else}
                         <span class="color-chip" style={`background:${markFill(row.highlight.color)}`} aria-hidden="true"></span>
                       {/if}
-                      <span class="thread-row-title">{row.highlight.note?.trim() || row.highlight.excerpt}</span>
+                      <span class="thread-row-title">{rowTitle(row)}</span>
                       {#if row.isAgent}<span class="badge" title="AI-authored"><Sparkles size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                       {#if row.hasNote}<span class="badge" title="has a note"><StickyNote size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
                       {#if row.starred}<span class="badge" title="starred"><Star size={12} strokeWidth={1.75} aria-hidden="true" /></span>{/if}

@@ -903,6 +903,9 @@
         onApplyMetadataCandidate={applyMetadataCandidateForPaper}
         onUpdatePaperMetadata={updatePaperMetadataForPaper}
         onToggleFocus={exitReaderFocus}
+        onOpenPaperReference={openPaper}
+        onOpenVaultReference={openVault}
+        {activeVaultId}
       />
     </section>
   {:else}
@@ -938,6 +941,9 @@
                 onApplyMetadataCandidate={applyMetadataCandidateForPaper}
                 onUpdatePaperMetadata={updatePaperMetadataForPaper}
                 onToggleFocus={enterReaderFocus}
+                onOpenPaperReference={openPaper}
+                onOpenVaultReference={openVault}
+                {activeVaultId}
               />
             {:else if activeTab?.kind === "discover"}
               <DiscoverView

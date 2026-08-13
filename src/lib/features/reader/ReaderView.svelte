@@ -54,6 +54,9 @@
     paper,
     candidate,
     layoutMode = "normal",
+    onOpenPaperReference,
+    onOpenVaultReference,
+    activeVaultId = "",
     metadataAutofillProgress,
     isAutofillingMetadata = false,
     onAutofillMetadata,
@@ -64,6 +67,10 @@
     paper: Paper;
     candidate?: DiscoveryReaderCandidate;
     layoutMode?: "normal" | "focus";
+    /** RFC 0090 R3.1/R3.2: following a `[@vault/key]` reference from a note. */
+    onOpenPaperReference?: (paperId: string) => void;
+    onOpenVaultReference?: (vaultId: string) => void;
+    activeVaultId?: string;
     metadataAutofillProgress?: MetadataAutofillProgress;
     isAutofillingMetadata?: boolean;
     onAutofillMetadata?: (paperId: string) => void | Promise<void>;
@@ -1659,6 +1666,9 @@
           onEnsureHighlight={ensureHighlightForSelection}
           onOpenHighlight={openHighlightById}
           onRemoveHighlight={deleteAnnotation}
+          {onOpenPaperReference}
+          {onOpenVaultReference}
+          {activeVaultId}
           onOpenCitation={openCitation}
           onHighlightIntent={handleHighlightIntent}
           onAskTurnStart={handleAskTurnStart}

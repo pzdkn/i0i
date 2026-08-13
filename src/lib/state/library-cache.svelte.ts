@@ -2,6 +2,7 @@ import type { Paper } from "$lib/domain/paper";
 import { providerDisplayName, sanitizeProviders, type DiscoverCandidate, type DiscoverRunProgress, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
 import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
 import type { ResearchPaper, SearchCandidate, SearchUpdated } from "$lib/domain/research";
+import { citeKey, refSlug, type RefIndex, type RefPaper } from "$lib/features/reader/paper-refs";
 
 type LibraryState = {
   vaults: VaultWorkspace[];
@@ -546,6 +547,34 @@ function mergeDiscoverCandidates(candidates: DiscoverCandidate[]) {
     });
   }
   return [...byKey.values()].sort((left, right) => right.score - left.score);
+}
+
+/**
+ * The index `[@vault/key]` references resolve against (RFC 0090 R2.2), built
+ * from the library the frontend already holds — resolution is a map lookup, not
+ * a round trip. The vault slug is the last segment of its path, which is what a
+ * reader would call it.
+ */
+export function getReferenceIndex(): RefIndex {
+  const papers: RefPaper[] = [];
+  const vaults = new Map<string, string>();
+  for (const workspace of library.vaults) {
+    const vaultSlug = refSlug(workspace.path.split("/").filter(Boolean).pop() ?? workspace.title);
+    if (vaultSlug) {
+      vaults.set(vaultSlug, workspace.id);
+    }
+    for (const paper of workspace.papers) {
+      papers.push({
+        paperId: paper.id,
+        vaultId: workspace.id,
+        vaultSlug,
+        citationKey: citeKey(paper),
+        title: paper.title,
+        year: paper.year,
+      });
+    }
+  }
+  return { papers, vaults };
 }
 
 /**

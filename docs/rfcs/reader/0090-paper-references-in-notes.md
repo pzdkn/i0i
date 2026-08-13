@@ -29,11 +29,18 @@ R1.1 The reference syntax is `[@vault/paper]`, matching the report:
 | `[@attention-is-all-you-need]` | that paper in **the current vault**, unqualified |
 | `[@transformers/]` | the vault itself |
 
-R1.2 The slug after the slash is the paper's **citation key** — `citationKey`
-already exists on the reader document (`ReaderInspector.svelte:1327` renders it)
-and is exactly the stable, typeable, human-meaningful handle this needs. Not the
-paper id (`paper_1786…` is not something anyone types) and not the title (it
-changes when metadata autofill runs).
+R1.2 The slug after the slash is the paper's **cite key**, in the
+`<family><year><first significant title word>` form the BibTeX export already
+mints — `vaswani2017attention`.
+
+**Correction, found in implementation.** This RFC originally said to reuse
+`ReaderDocument.citationKey`, on the grounds that it already exists and is the
+stable typeable handle. It is neither: `reader_service.rs:592` sets
+`citation_key = paper.id.clone()`, so it is `paper_1786…` — the very thing the
+RFC said not to use. The real cite key lives in `services/bibtex.rs:82`
+(`cite_key_base`, RFC 0070) and is mirrored in TypeScript by `citeKey()` in
+`features/reader/paper-refs.ts`, so a key you write in a note and a key you get
+in a bibliography are computed the same way and agree.
 
 R1.3 An unresolvable reference stays literal text. This is the same rule
 `markdown.ts` already applies to citation markers — *"a `[n]` the assembly never
@@ -112,13 +119,19 @@ later they can build an index from the same parser.
 | 2 | R3 render and open, in the saved-note and marks-list surfaces | no — wants 1 | M |
 | 3 | R4 `[@` autocomplete | no — wants 1 | M |
 
+**Status of the tasks:** 1 and 2 are implemented (parser node, resolution,
+rendering in the saved note and the marks list, opening in a new tab). Task 3,
+the `[@` autocomplete, is not — the notation is plain text and typing it by hand
+works, which R4.3 requires anyway.
+
 ## Risks
 
-- **Citation keys are not guaranteed unique.** Two imports of the same paper, or
-  two papers by the same author in a year, can collide. R2.3's rule (current
-  vault wins, otherwise literal) keeps a collision from silently linking the
-  wrong paper, but the real fix is uniqueness at import, which is out of scope
-  here and worth its own look.
+- **Cite keys are not guaranteed unique.** Two papers by the same author, year
+  and first title word collide. The BibTeX export disambiguates with an `a`/`b`
+  suffix at export time (`collision_suffix`, `bibtex.rs:139`); the reference
+  index does not, so a collision resolves by R2.3 — current vault wins,
+  otherwise the reference stays literal rather than linking to the wrong paper.
+  Aligning the two disambiguations is worth its own look.
 - **Rendering notes means notes stop being plain text.** A note containing
   `[@foo]` that the user did *not* mean as a reference will render as one if it
   happens to resolve. Accepted: the notation is explicit enough that this is

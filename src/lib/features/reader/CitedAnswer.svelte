@@ -47,6 +47,10 @@
       {:else}
         [{span.handle}]
       {/if}
+    {:else if span.kind === "paperRef"}
+      <!-- RFC 0090: a reference inside a model answer is not resolved — the
+           notation is for the reader's own notes. It reads as what was typed. -->
+      {span.raw}
     {:else}
       {span.text}
     {/if}

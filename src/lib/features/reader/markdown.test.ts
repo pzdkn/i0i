@@ -4,7 +4,11 @@ import { parseInline, parseMarkdown, type Block, type Inline } from './markdown.
 
 function text(spans: Inline[]): string {
   return spans
-    .map((span) => (span.kind === "cite" ? `[${span.handle}]` : span.text))
+    .map((span) => {
+      if (span.kind === "cite") return `[${span.handle}]`;
+      if (span.kind === "paperRef") return span.raw;
+      return span.text;
+    })
     .join("");
 }
 
@@ -136,4 +140,40 @@ test("a partially streamed bold does not swallow the rest", () => {
   // Mid-stream the closing ** has not arrived yet.
   const spans = parseInline("this is **half writ");
   assert.equal(text(spans), "this is **half writ");
+});
+
+// RFC 0090: `[@vault/key]` is an inline node, resolved by the caller.
+test("parses a qualified paper reference", () => {
+  const spans = parseInline("see [@transformers/vaswani-2017] for the original");
+  const ref = spans.find((span) => span.kind === "paperRef");
+  assert.deepEqual(ref, {
+    kind: "paperRef",
+    vault: "transformers",
+    key: "vaswani-2017",
+    raw: "[@transformers/vaswani-2017]",
+  });
+});
+
+test("parses an unqualified paper reference with no vault", () => {
+  const spans = parseInline("as in [@vaswani-2017]");
+  const ref = spans.find((span) => span.kind === "paperRef");
+  assert.equal(ref?.kind === "paperRef" && ref.vault, undefined);
+  assert.equal(ref?.kind === "paperRef" && ref.key, "vaswani-2017");
+});
+
+test("parses a vault reference", () => {
+  const spans = parseInline("everything in [@transformers/]");
+  const ref = spans.find((span) => span.kind === "paperRef");
+  assert.equal(ref?.kind === "paperRef" && ref.vault, "transformers");
+  assert.equal(ref?.kind === "paperRef" && ref.key, "");
+});
+
+test("leaves a bare [@] as literal text", () => {
+  assert.equal(text(parseInline("a bare [@] stays put")), "a bare [@] stays put");
+});
+
+test("a numeric citation is still a citation", () => {
+  const spans = parseInline("grounded [1]");
+  assert.equal(spans.some((span) => span.kind === "cite"), true);
+  assert.equal(spans.some((span) => span.kind === "paperRef"), false);
 });
