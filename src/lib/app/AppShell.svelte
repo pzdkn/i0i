@@ -43,6 +43,14 @@
   // R2.2: a bridge error is the app explaining why nothing works. It is never
   // something you should have to go looking for.
   const statusBarRevealed = $derived(statusBarHovered || Boolean(bridgeError));
+  // The zones unmount when focus mode ends — possibly with the pointer inside
+  // one, so no pointerleave arrives. Reset on the mode change, or the next entry
+  // into focus mode starts with a bar already showing.
+  $effect(() => {
+    void readerFocusMode;
+    titleBarHovered = false;
+    statusBarHovered = false;
+  });
 </script>
 
 <div class="crt app-shell">

@@ -1197,6 +1197,10 @@
 
   function openThreadsPanel() {
     if (isFocusMode) {
+      // The rail unmounts under the pointer here, so no pointerleave arrives —
+      // without this the next collapse would remount it already revealed.
+      railHovered = false;
+      railFocused = false;
       focusThreadsMode = "open";
     } else if (inspectorCollapsed) {
       // Annotating or asking reveals the panel for this session, but must not

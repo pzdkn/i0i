@@ -92,5 +92,5 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [x] RFC 0077 - Chat has a ContextManager: passages can be added, compacted, and cited back to the page they came from.
 - [x] RFC 0078 - The AI now decides for itself when to search the paper, keeps what it needs, and lists only the passages it actually used.
 - [x] RFC 0079 - Annotations can be deleted from the list with their conversations, focus mode clears the desk, notes stack, and every answer about an indexed paper cites passages.
-- [x] RFC 0080 - Right-clicking an annotation opens a menu instead of deleting it, and the delete control is a corner icon rather than a bar.
-- [x] RFC 0081 - Focus mode hides every bar and panel, and each one comes back by pointing at the edge it hides behind.
+- [ ] RFC 0080 - Right-clicking an annotation opens a menu instead of deleting it, and the delete control is a corner icon rather than a bar. (implemented; awaiting manual verification)
+- [ ] RFC 0081 - Focus mode hides every bar and panel, and each one comes back by pointing at the edge it hides behind. (implemented; awaiting manual verification)

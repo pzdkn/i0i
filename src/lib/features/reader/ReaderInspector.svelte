@@ -1905,12 +1905,17 @@
     background: transparent;
     color: var(--fg-3);
     cursor: pointer;
+    /* Not merely transparent: an invisible delete button that still takes a
+       click is the gesture RFC 0080 set out to remove. It stays in the tab
+       order, though — keyboard focus is one of the two things that reveals it. */
     opacity: 0;
+    pointer-events: none;
   }
 
   .thread-row-wrap:hover .row-remove,
   .row-remove:focus-visible {
     opacity: 1;
+    pointer-events: auto;
   }
 
   .row-remove:hover {
