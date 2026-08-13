@@ -10,7 +10,8 @@ RFC 0079 §4 / RFC 0081 / RFC 0082 (focus mode and `Esc`).
 
 ## Summary
 
-The app prints a keyboard legend in two places and honours almost none of it.
+The app prints a keyboard legend in three places — two footers and the activity
+rail — and honours almost none of it.
 
 `ReaderFooter.svelte` is a static bar with no script block at all. It says
 `< p.2 / 15 >`, `mode: PDF`, `scroll / up down / j k`, and then advertises
@@ -18,6 +19,10 @@ The app prints a keyboard legend in two places and honours almost none of it.
 wired — and the page count is a literal `2 / 15` for every document in the
 library. `StatusBar.svelte:27-29` advertises a different set: `[j k] navigate`,
 `[o] open`, `[cmd+k] palette`.
+
+The activity rail prints a letter under each of its six modes as though it were
+a shortcut; none of the six is bound, and two of the modes (**GRAPH**, **ASK**)
+do nothing when clicked either (`+page.svelte:837` handles only `V`, `R`, `F`).
 
 Of the eleven keys the two bars promise, **exactly one works**: `cmd+k` focuses
 the title-bar search (`TitleBar.svelte:117`). The reader's only real key handler
@@ -73,18 +78,47 @@ R2.2 Remove `scroll / up down / j k` from `ReaderFooter.svelte`.
 R2.3 Record `j`/`k`/`o` in this RFC's Open Decisions rather than in the UI, so
 the intent survives without the app claiming the keys are live.
 
-## 3. The footer is lying about the document, too
+## 3. The activity rail has two modes that do nothing
+
+### Diagnosis
+
+`ActivityRail.svelte:16` lists six modes — `V` vault, `F` find, `R` read,
+`G` graph, `A` ask, `S` study. `handleModeSelect` (`+page.svelte:837`) handles
+three: `V`, `R`, `F`. Clicking **GRAPH**, **ASK** or **STUDY** does nothing at
+all, silently, and each already prints its key letter under the label as though
+that letter were a shortcut. None of the six letters is bound to a key.
+
+### Change
+
+R3.1 **Remove GRAPH and ASK.** Graph is a feature nobody has specified; Ask is
+already what the reader's Chat section and RFC 0087's "Ask this vault" do, from
+the surfaces where the asking makes sense. A mode is a place you go, and neither
+has a place to go to.
+
+R3.2 **Keep STUDY**, which RFC 0093 gives a destination. Until that lands it is
+the one mode allowed to be disabled-with-a-reason rather than removed, because
+its RFC exists.
+
+R3.3 The rail becomes **V / F / R / S**, and each is bound to its own first
+letter as a global shortcut — the letters the rail has been printing all along.
+Subject to the same `isEditing` guard as §1.
+
+R3.4 A mode with no destination is `disabled`, not inert. The pattern is already
+in the toolbar: RFC 0086 §1's keys and the toolbar's AI button both disable with
+a title explaining why.
+
+## 4. The footer is lying about the document, too
 
 `ReaderFooter.svelte` has no props. `p.2 / 15` and `mode: PDF` are hardcoded for
 every paper, including HTML articles.
 
-R3.1 The footer takes `contentKind` and, for PDFs, the current and total page.
+R4.1 The footer takes `contentKind` and, for PDFs, the current and total page.
 `PdfPage` knows both; `ReaderView` already threads `contentKind` to the toolbar.
 
-R3.2 For an HTML article there are no pages: the footer shows `mode: HTML` and
+R4.2 For an HTML article there are no pages: the footer shows `mode: HTML` and
 omits the page counter rather than inventing one.
 
-R3.3 The `<` `>` page arrows become real buttons bound to the same action as
+R4.3 The `<` `>` page arrows become real buttons bound to the same action as
 `←` / `→`.
 
 ---
@@ -95,7 +129,8 @@ R3.3 The `<` `>` page arrows become real buttons bound to the same action as
 |---|---|---|---|
 | 1 | R1 reader keymap (`h`, `n`, `q`, `cmd+enter`, zoom, arrows) | yes | M |
 | 2 | R2 remove dead legends | yes | XS |
-| 3 | R3 footer reflects the real document | yes | S |
+| 3 | R3 rail modes: drop GRAPH/ASK, bind V/F/R/S | yes | S |
+| 4 | R4 footer reflects the real document | yes | S |
 
 ## Risks
 
@@ -118,7 +153,7 @@ R3.3 The `<` `>` page arrows become real buttons bound to the same action as
 
 ## Success criteria
 
-1. Every key printed in the reader footer and the status bar performs the action
-   it names.
-2. No key is printed that does nothing.
+1. Every key printed in the reader footer, the status bar and the activity rail
+   performs the action it names.
+2. No key is printed that does nothing, and no mode button is inert.
 3. The footer's page count and mode describe the document actually open.

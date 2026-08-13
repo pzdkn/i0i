@@ -7,6 +7,8 @@ Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
 Milestone: Release 0.0.1
 Builds on: RFC 0062 (annotations), RFC 0067 (marks vs chats), RFC 0075
 (chunking), RFC 0089 (quiz sessions), RFC 0079 R7 (cheap model slots).
+Related: RFC 0093 owns Study mode and what else lives in it; this RFC owns the
+digest surface inside it.
 
 ## Summary
 
@@ -39,10 +41,11 @@ Its subject is **you, over a week**, which is a scope nothing in the shell
 currently addresses. That is what justifies a new attachment rather than reusing
 one.
 
-R1.3 Entry point: a **Study** entry in the `ActivityRail` (`+page.svelte:837`
-handles V/R/F; this adds one), opening `digest:<isoWeek>`. It is also where
-RFC 0089's quiz history belongs, which is why both RFCs live under
-`docs/rfcs/study/` — this is one product area, arriving in two pieces.
+R1.3 Entry point: **Study mode**, which already has a dead button in the
+activity rail. What that mode *is* — its membership test, what else belongs in
+it, and what happens when it is empty — is RFC 0093's subject, not this one's.
+This RFC owns the digest; RFC 0093 owns the room it stands in. Pressing `S`
+(RFC 0086 R3.3) opens `digest:<isoWeek>`.
 
 R1.4 Weeks are navigable: `‹ this week ›`. A diary you cannot page back through
 is a dashboard.
@@ -70,7 +73,12 @@ on, what changed, what you left open. This is the only generated prose in the
 digest and it comes last, under the evidence, never above it.
 
 R1.9 **What you retained.** Quiz sessions from the week with their scores
-(RFC 0089 R3.2). Absent until quizzes exist; the section is omitted, not empty.
+(RFC 0089 R4.3). Because RFC 0089 R4.2 stores *where each question came from* —
+a passage you marked, one you asked about, or unmarked territory — this section
+can say more than a score: "you missed two of three questions on passages you
+had asked about" is a statement about your reading, which is the only kind of
+statement this digest exists to make. Absent until quizzes exist; the section is
+omitted, not empty.
 
 R1.10 An empty week says so plainly and does not generate prose about nothing.
 
@@ -131,9 +139,7 @@ what you did is already useful, and it is the half that cannot be wrong.
   pulled?** Recommendation: pulled for 0.0.1. A weekly notification is a product
   commitment about attention, and it should not be made by default in a first
   release.
-- **B. Does "Study" mode hold anything else?** It is the natural home for the
-  quiz history, spaced repetition if it ever lands, and reading stats. This RFC
-  claims the mode and fills one tab in it; RFC 0089 fills the other.
+- **B. Moved to RFC 0093.** What else Study mode holds is that RFC's question.
 
 ## Success criteria
 

@@ -76,32 +76,88 @@ does not say it is stale is worse than an empty one.
 
 ## 2. What makes a good suggestion
 
-R2.1 The vault's **centroid** — the mean of its papers' chunk embeddings
-(RFC 0075) — is the query. This is the one thing this feature has that a normal
-search does not: it knows what the vault is *about* without anyone describing
-it.
+The report asks for this to be done *cleverly*, and points at two levers: the
+methods Discover already has, and k-hop traversal of the citation graph. Both
+are right, and the literature says why — plus what neither of them does alone.
 
-R2.2 Candidates come from two directions, merged and deduped by the existing
-`dedup` primitive:
+### What the field does
 
-- **Citation neighbourhood.** Papers cited by, or citing, papers in the vault.
-  This is the feature the release notes elsewhere call "find similar papers
-  through the network of references," and it is the highest-precision source we
-  have.
-- **Semantic search.** Machine-written queries from the vault's dominant topics,
-  through the existing multi-provider path.
+- **Citation-informed embeddings.** [SPECTER](https://arxiv.org/abs/2004.07180)
+  and its successors (SPECTER2, SciNCL) train document embeddings so that
+  *cited-together* papers land near each other, then recommend by plain cosine
+  similarity with no reranking stage. The lesson is not "use SPECTER" — we embed
+  chunks locally (RFC 0075) — but that **citation structure and text similarity
+  are different signals**, and the strong systems fuse them rather than picking
+  one.
+- **Co-citation and bibliographic coupling.** Two papers cited *by* the same
+  work (co-citation), or citing the same works (bibliographic coupling), are
+  related even with no direct edge and no textual overlap. Accumulating this
+  evidence across a whole library is what
+  [citation-community work](https://arxiv.org/pdf/2605.07158) finds captures
+  agenda-level relatedness that text embeddings miss.
+- **Agentic retrieval over the graph.** Recent citation-graph-aware retrievers
+  run a query-generating agent over multiple facets of a topic and re-rank by
+  internal citation count within the retrieved set — which is close to what
+  RFC 0088 is building for deep research.
 
-R2.3 Ranked by the RFC 0057 semantic reranker against the centroid, then filtered
-hard: **anything already in the vault, already dismissed, or already in the
-library is removed** before ranking, not after. A suggestion you already own is
-the fastest way to make the feature look broken.
+### The design
 
-R2.4 Each suggestion carries a one-line reason grounded in the vault — *"cited
-by 3 papers here"*, *"closest to your work on sparse attention"* — not a generic
-abstract summary. The reason is the difference between a recommendation and a
-list.
+R2.1 **Three candidate generators, fused.** None of them alone is good enough,
+and the fusion is the cleverness:
 
-R2.5 Cap at **five**. A suggestion list you scroll is a search result.
+| Generator | Signal | Why |
+|---|---|---|
+| **k-hop citation neighbourhood** | structural | Papers your vault's papers cite (hop 1 out), papers citing them (hop 1 in), and hop 2 of both |
+| **Co-citation / coupling frequency** | structural, accumulated | A hop-2 paper reached from *five* of your papers is a different proposition from one reached from one |
+| **Semantic search** | textual | Machine-written queries from the vault centroid, through the existing multi-provider path |
+
+R2.2 **The traversal primitive already exists and is unused.**
+`openalex_lineage_filter` (`commands/discovery/providers/openalex/search.rs:186`)
+builds `cited_by:<id>` for references and `cites:<id>` for citations. It is
+marked `#[allow(dead_code)]` with the comment *"Wired into RealCandidateSource in
+the RFC 0037 seams layer"* — written for deep research and never connected. This
+RFC is its first caller.
+
+R2.3 **k = 2, and the fan-out is bounded per hop.** Hop 1 from a 40-paper vault
+is already thousands of works; hop 2 is unbounded in practice. So: seed with the
+vault's *most central* papers (most-cited within the vault's own hop-1 graph, not
+globally), cap hop-1 expansion per seed, and take hop 2 only from hop-1 papers
+that were reached more than once. **Frequency of arrival is the ranking signal
+that makes hop 2 affordable** — it is also exactly the co-citation evidence R2.1
+wants, so the bound and the quality measure are the same number.
+
+R2.4 **Fusion, not concatenation.** A candidate's score combines: how many vault
+papers reach it (structural), its cosine similarity to the vault centroid
+(textual, RFC 0075 chunk embeddings), and its own citation count as a weak prior.
+Reciprocal-rank fusion is the obvious combiner and the codebase already has one —
+`services/search/fusion.rs`, built for hybrid retrieval in RFC 0076. Reuse it
+rather than inventing a scoring formula.
+
+R2.5 **The vault centroid** — the mean of its papers' chunk embeddings — is what
+the semantic generator queries with, and what the textual half of R2.4 measures
+against. This is the thing this feature has that a normal search does not: it
+knows what the vault is *about* without anyone describing it.
+
+R2.6 **Filter before ranking, hard**: anything already in the vault, already in
+the library, or previously dismissed is removed before scoring. A suggestion you
+already own is the fastest way to make the feature look broken.
+
+R2.7 **Every suggestion states its evidence**, and the evidence differs by
+generator: *"cited by 4 papers in this vault"*, *"cites 3 of the same works as
+Vaswani 2017"*, *"closest to your work on sparse attention"*. The reason is not
+decoration — it is how you decide without opening the paper, and a fused score
+with no explanation is a number nobody can act on.
+
+R2.8 Cap at **five**. A suggestion list you scroll is a search result.
+
+### Provider reality
+
+R2.9 OpenAlex is the only provider we use with a traversable citation graph, so
+the structural generators are OpenAlex-only for now and the RFC says so rather
+than implying coverage we lack. arXiv and Europe PMC contribute through the
+semantic generator. A vault of papers with no OpenAlex ids degrades to R2.1's
+third row alone — which is exactly the situation the fusion has to survive
+gracefully.
 
 ## 3. Storage
 
@@ -119,10 +175,11 @@ R3.2 Dismissals are permanent and are consulted by the *next* run's filter
 
 | # | Task | Ships alone | Size |
 |---|---|---|---|
-| 1 | R3 schema + R2.1–R2.3 centroid + semantic candidates + filtering | yes | M |
+| 1 | R3 schema + R2.5/R2.6 centroid, semantic generator, filtering | yes | M |
 | 2 | R1.1–R1.5 inspector section, Add / Dismiss, manual run | no — wants 1 | M |
-| 3 | R2.2 citation-neighbourhood source | yes | M |
-| 4 | R1.6–R1.7 weekly schedule | no — wants 2 | S |
+| 3 | **R2.2–R2.3 k-hop traversal** — wire the dead `openalex_lineage_filter` | yes | M |
+| 4 | R2.4 RRF fusion over the three generators + R2.7 evidence lines | no — wants 1, 3 | M |
+| 5 | R1.6–R1.7 weekly schedule | no — wants 2 | S |
 
 ## Risks
 
@@ -133,8 +190,11 @@ R3.2 Dismissals are permanent and are consulted by the *next* run's filter
 - **A vault with three papers has no centroid worth the name.** R1.6's minimum
   is a floor, not a fix; below ~10 papers the suggestions will be broad. Say so
   in the empty state rather than shipping vague rows.
-- **Citation-graph coverage is uneven** across the providers we use. This source
-  may be strong for arXiv/OpenAlex and thin elsewhere.
+- **Citation-graph coverage is uneven.** R2.9 states it: OpenAlex only. A vault
+  whose papers lack OpenAlex ids gets semantic suggestions and nothing else.
+- **Hop 2 is a fan-out hazard.** R2.3's arrival-frequency gate is what keeps it
+  finite; if the numbers in practice say otherwise, the answer is a smaller k,
+  not a bigger budget.
 
 ## Open Decisions
 
@@ -150,5 +210,20 @@ R3.2 Dismissals are permanent and are consulted by the *next* run's filter
 
 1. From an open vault, suggestions are one click away and never include a paper
    the library already has.
-2. Every suggestion says why *this vault*.
-3. A dismissed paper never appears again.
+2. Every suggestion says why *this vault*, in the terms of the generator that
+   found it.
+3. A suggestion reached from several of your papers outranks one reached from
+   one, all else equal.
+4. A dismissed paper never appears again.
+
+## Sources
+
+- [SPECTER: Document-level Representation Learning using Citation-informed
+  Transformers](https://arxiv.org/abs/2004.07180) — citation-informed embeddings,
+  cosine similarity without reranking.
+- [Topic Is Not Agenda: A Citation-Community Audit of Text
+  Embeddings](https://arxiv.org/pdf/2605.07158) — co-citation and bibliographic
+  coupling capture relatedness text embeddings miss.
+- [Citation Recommendation for Research Papers via Knowledge
+  Graphs](https://arxiv.org/pdf/2106.05633) — graph traversal for citation
+  recommendation.
