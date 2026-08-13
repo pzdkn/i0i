@@ -1,6 +1,6 @@
 # RFC 0082: Reveal handles you can see, aim at, and pin
 
-Status: Proposed
+Status: Implemented (pending manual verification)
 Date: 2026-08-13
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

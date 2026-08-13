@@ -5,6 +5,8 @@
   import TitleBar from "$lib/app/TitleBar.svelte";
   import type { VaultStatus } from "$lib/domain/vault";
   import type { ChunkHit } from "$lib/domain/search";
+  import RevealHandle from "$lib/components/RevealHandle.svelte";
+  import { RevealZone } from "$lib/components/reveal.svelte";
 
   let {
     activeMode = "V",
@@ -35,21 +37,25 @@
     children: Snippet;
   } = $props();
 
-  // RFC 0081 R2.1: in focus mode the app's own bars collapse to hover strips at
-  // the window edges — the same reveal the reader toolbar uses (RFC 0079 R4.2),
-  // so the space is given back to the page rather than merely dimmed.
-  let titleBarHovered = $state(false);
-  let statusBarHovered = $state(false);
-  // R2.2: a bridge error is the app explaining why nothing works. It is never
-  // something you should have to go looking for.
-  const statusBarRevealed = $derived(statusBarHovered || Boolean(bridgeError));
+  // RFC 0081 R2.1: in focus mode the app's own bars collapse to strips at the
+  // window edges, so the space is given back to the page rather than dimmed.
+  // RFC 0082: each strip is marked, forgiving of an overshoot, and pinnable.
+  const titleZone = new RevealZone();
+  const statusZone = new RevealZone();
+  // RFC 0082 R4.1: and the activity rail, so switching mode no longer costs you
+  // focus mode.
+  const railZone = new RevealZone();
+  // RFC 0081 R2.2: a bridge error is the app explaining why nothing works. It is
+  // never something you should have to go looking for.
+  const statusRevealed = $derived(statusZone.revealed || Boolean(bridgeError));
   // The zones unmount when focus mode ends — possibly with the pointer inside
-  // one, so no pointerleave arrives. Reset on the mode change, or the next entry
-  // into focus mode starts with a bar already showing.
+  // one, so no pointerleave arrives, and a pin must not outlive the mode
+  // (RFC 0082 R3.3).
   $effect(() => {
     void readerFocusMode;
-    titleBarHovered = false;
-    statusBarHovered = false;
+    titleZone.reset();
+    statusZone.reset();
+    railZone.reset();
   });
 </script>
 
@@ -67,11 +73,12 @@
   {#if readerFocusMode}
     <div
       class="edge-zone top"
-      class:revealed={titleBarHovered}
+      class:revealed={titleZone.revealed}
       role="presentation"
-      onpointerenter={() => (titleBarHovered = true)}
-      onpointerleave={() => (titleBarHovered = false)}
+      onpointerenter={titleZone.enter}
+      onpointerleave={titleZone.leave}
     >
+      <RevealHandle edge="top" pinned={titleZone.pinned} label="the title bar" onToggle={titleZone.togglePin} />
       <div class="edge-panel">
         {@render titleBar()}
       </div>
@@ -81,7 +88,20 @@
   {/if}
 
   <div class="app-body row">
-    {#if !readerFocusMode}
+    {#if readerFocusMode}
+      <div
+        class="edge-zone left"
+        class:revealed={railZone.revealed}
+        role="presentation"
+        onpointerenter={railZone.enter}
+        onpointerleave={railZone.leave}
+      >
+        <RevealHandle edge="left" pinned={railZone.pinned} label="the activity rail" onToggle={railZone.togglePin} />
+        <div class="edge-panel">
+          <ActivityRail active={activeMode} {onSelectMode} {onOpenSettings} {settingsAttention} />
+        </div>
+      </div>
+    {:else}
       <ActivityRail active={activeMode} {onSelectMode} {onOpenSettings} {settingsAttention} />
     {/if}
     {@render children()}
@@ -90,11 +110,12 @@
   {#if readerFocusMode}
     <div
       class="edge-zone bottom"
-      class:revealed={statusBarRevealed}
+      class:revealed={statusRevealed}
       role="presentation"
-      onpointerenter={() => (statusBarHovered = true)}
-      onpointerleave={() => (statusBarHovered = false)}
+      onpointerenter={statusZone.enter}
+      onpointerleave={statusZone.leave}
     >
+      <RevealHandle edge="bottom" pinned={statusZone.pinned} label="the status bar" onToggle={statusZone.togglePin} />
       <div class="edge-panel">
         <StatusBar {vaultStatus} {bridgeError} />
       </div>
@@ -131,15 +152,36 @@
   .edge-zone {
     position: relative;
     flex-shrink: 0;
-    height: 6px;
     z-index: 30;
+  }
+
+  /* RFC 0082 R1.1: 12px, up from RFC 0081's 6px. A strip you have to aim at is
+     a strip you miss. */
+  .edge-zone.top,
+  .edge-zone.bottom {
+    height: 12px;
+  }
+
+  .edge-zone.left {
+    width: 12px;
   }
 
   .edge-panel {
     position: absolute;
+    transition: transform 120ms ease-out;
+  }
+
+  .edge-zone.top .edge-panel,
+  .edge-zone.bottom .edge-panel {
     left: 0;
     right: 0;
-    transition: transform 120ms ease-out;
+  }
+
+  .edge-zone.left .edge-panel {
+    top: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
   }
 
   .edge-zone.top .edge-panel {
@@ -152,7 +194,16 @@
     transform: translateY(100%);
   }
 
-  .edge-zone.revealed .edge-panel {
+  .edge-zone.left .edge-panel {
+    transform: translateX(-100%);
+  }
+
+  .edge-zone.top.revealed .edge-panel,
+  .edge-zone.bottom.revealed .edge-panel {
     transform: translateY(0);
+  }
+
+  .edge-zone.left.revealed .edge-panel {
+    transform: translateX(0);
   }
 </style>

@@ -47,6 +47,8 @@
   import HighlightPopover from "$lib/features/reader/HighlightPopover.svelte";
   import { findThreadForHighlight, hasExistingHighlight, samePassage } from "$lib/features/reader/highlight-thread-match";
   import { isPaperInLibrary } from "$lib/state/library-cache.svelte";
+  import RevealHandle from "$lib/components/RevealHandle.svelte";
+  import { RevealZone } from "$lib/components/reveal.svelte";
 
   let {
     paper,
@@ -302,18 +304,19 @@
   const isFocusMode = $derived(layoutMode === "focus");
   const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
 
-  // RFC 0079 R4.2: the focus-mode toolbar is revealed by pointing at the top of
-  // the reader, and hides again when the pointer leaves. Never while a tool is
-  // armed — a mode you cannot see is a mode you cannot leave, and the toolbar is
-  // where you see it.
-  let toolbarHovered = $state(false);
-  const toolbarRevealed = $derived(toolbarHovered || activeTool !== null);
+  // RFC 0079 R4.2 / RFC 0082: the focus-mode toolbar (and, since RFC 0081, the
+  // paper's title with it) is revealed by pointing at the top of the reader,
+  // stays through a small overshoot, and can be pinned. Never hidden while a
+  // tool is armed — a mode you cannot see is a mode you cannot leave, and the
+  // toolbar is where you see it.
+  const toolbarZone = new RevealZone();
+  const toolbarRevealed = $derived(toolbarZone.revealed || activeTool !== null);
 
   // RFC 0081 R3.1: the collapsed threads rail hides the same way. Keyboard focus
   // reveals it too — a rail you can tab to but cannot see is not reachable.
-  let railHovered = $state(false);
   let railFocused = $state(false);
-  const railRevealed = $derived(railHovered || railFocused);
+  const railZone = new RevealZone();
+  const railRevealed = $derived(railZone.revealed || railFocused);
 
   // RFC 0079 R4.1/R4.3: every *entry* into focus mode starts collapsed. Opening
   // the rail while in focus keeps it open for as long as you stay — leaving and
@@ -322,6 +325,9 @@
   $effect(() => {
     if (isFocusMode && !wasFocusMode) {
       focusThreadsMode = "collapsed";
+      // RFC 0082 R3.3: pins do not survive leaving and re-entering the mode.
+      toolbarZone.reset();
+      railZone.reset();
     }
     wasFocusMode = isFocusMode;
   });
@@ -1217,7 +1223,7 @@
     if (isFocusMode) {
       // The rail unmounts under the pointer here, so no pointerleave arrives —
       // without this the next collapse would remount it already revealed.
-      railHovered = false;
+      railZone.reset();
       railFocused = false;
       focusThreadsMode = "open";
     } else if (inspectorCollapsed) {
@@ -1464,9 +1470,15 @@
               class="focus-toolbar-zone"
               class:revealed={toolbarRevealed}
               role="presentation"
-              onpointerenter={() => (toolbarHovered = true)}
-              onpointerleave={() => (toolbarHovered = false)}
+              onpointerenter={toolbarZone.enter}
+              onpointerleave={toolbarZone.leave}
             >
+              <RevealHandle
+                edge="top"
+                pinned={toolbarZone.pinned}
+                label="the toolbar"
+                onToggle={toolbarZone.togglePin}
+              />
               {@render toolbarStrip()}
               <div class="focus-header-block">
                 {@render readerHeader()}
@@ -1574,9 +1586,15 @@
             <div
               class="focus-rail-zone"
               role="presentation"
-              onpointerenter={() => (railHovered = true)}
-              onpointerleave={() => (railHovered = false)}
+              onpointerenter={railZone.enter}
+              onpointerleave={railZone.leave}
             >
+              <RevealHandle
+                edge="right"
+                pinned={railZone.pinned}
+                label="the threads rail"
+                onToggle={railZone.togglePin}
+              />
               <button
                 class="threads-rail hair-l"
                 type="button"
@@ -1668,8 +1686,10 @@
      collapsed above the fold until the pointer arrives. Height rather than
      visibility, so the paper actually gains the space. */
   .focus-toolbar-zone {
+    position: relative;
     flex-shrink: 0;
-    max-height: 6px;
+    /* RFC 0082 R1.1: 12px, up from 6 — with a handle painted on it (R1.2). */
+    max-height: 12px;
     overflow: hidden;
     transition: max-height 120ms ease-out;
   }
@@ -1692,7 +1712,7 @@
     min-width: 0;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 6px;
+    grid-template-columns: minmax(0, 1fr) 12px;
     overflow: hidden;
     transition: grid-template-columns 120ms ease-out;
   }
@@ -1702,6 +1722,7 @@
   }
 
   .focus-rail-zone {
+    position: relative;
     min-width: 0;
     overflow: hidden;
     display: flex;
