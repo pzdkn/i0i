@@ -328,6 +328,15 @@
   // Deliberately not a shared component — two call sites of thirty lines is
   // cheaper to read here than one indirection away.
   let rowMenu = $state<{ x: number; y: number; highlightId: string } | null>(null);
+  // The menu takes focus when it opens, so its own Escape handler can close it
+  // without the keystroke bubbling on to ReaderView's window handler — which
+  // would disarm the tool or leave focus mode in the same press.
+  let rowMenuEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    if (rowMenu) {
+      rowMenuEl?.focus();
+    }
+  });
 
   function showRowMenu(event: MouseEvent, highlightId: string) {
     event.preventDefault();
@@ -1480,12 +1489,18 @@
               {#if rowMenu}
                 {@const menuHighlightId = rowMenu.highlightId}
                 <div
+                  bind:this={rowMenuEl}
                   class="context-menu col"
                   role="menu"
                   tabindex="-1"
                   style={`left: ${rowMenu.x}px; top: ${rowMenu.y}px;`}
                   onclick={(event) => event.stopPropagation()}
-                  onkeydown={(event) => event.stopPropagation()}
+                  onkeydown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === "Escape") {
+                      closeRowMenu();
+                    }
+                  }}
                 >
                   <button role="menuitem" type="button" onclick={() => openFromRowMenu(menuHighlightId)}>
                     Open passage

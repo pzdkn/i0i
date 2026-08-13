@@ -90,9 +90,17 @@ works.
 ### Change
 
 R2.1 In focus mode, `AppShell` wraps `TitleBar` in a collapsed hover zone at the
-top of the window and `StatusBar` in one at the bottom — the same
-`max-height` collapse-and-reveal as `.focus-toolbar-zone`, so the space is
-genuinely returned to the page rather than merely made transparent.
+top of the window and `StatusBar` in one at the bottom, each leaving a 6px
+always-live strip.
+
+The bars **slide off the window edge** rather than collapsing inside a clipped
+`max-height` box the way `.focus-toolbar-zone` does. `TitleBar`'s search results
+are an absolutely positioned dropdown (`.results`, `max-height: 60vh`) that is
+far taller than the 28px bar, and `overflow: hidden` on the zone would cut them
+off — hiding a function instead of hiding chrome, which §4 forbids. So the zone
+is a 6px `position: relative` strip holding a `position: absolute` panel at
+`translateY(±100%)`, brought to `translateY(0)` on reveal. The page below never
+reflows, and the revealed bar overlays it.
 
 R2.2 The status bar reveals itself unconditionally whenever `bridgeError` is
 non-empty. An error you have to hunt for is not a report.
@@ -186,6 +194,8 @@ tests all cover pure-logic modules), so verification is manual:
    elsewhere. `Esc` disarms the tool; a second `Esc` exits focus mode.
 6. Disconnect the bridge (or force `bridgeError`): the status bar is visible
    without hovering.
+6a. Reveal the title bar and type a library search: the results dropdown is
+   fully visible, not clipped to the bar's height.
 7. Leave focus mode: the header split still has the height it had before, and
    normal mode is pixel-identical to today.
 

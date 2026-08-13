@@ -58,13 +58,15 @@
 
   {#if readerFocusMode}
     <div
-      class="edge-zone"
+      class="edge-zone top"
       class:revealed={titleBarHovered}
       role="presentation"
       onpointerenter={() => (titleBarHovered = true)}
       onpointerleave={() => (titleBarHovered = false)}
     >
-      {@render titleBar()}
+      <div class="edge-panel">
+        {@render titleBar()}
+      </div>
     </div>
   {:else}
     {@render titleBar()}
@@ -79,13 +81,15 @@
 
   {#if readerFocusMode}
     <div
-      class="edge-zone"
+      class="edge-zone bottom"
       class:revealed={statusBarRevealed}
       role="presentation"
       onpointerenter={() => (statusBarHovered = true)}
       onpointerleave={() => (statusBarHovered = false)}
     >
-      <StatusBar {vaultStatus} {bridgeError} />
+      <div class="edge-panel">
+        <StatusBar {vaultStatus} {bridgeError} />
+      </div>
     </div>
   {:else}
     <StatusBar {vaultStatus} {bridgeError} />
@@ -107,17 +111,40 @@
     align-items: stretch;
   }
 
-  /* RFC 0081 R2.1: 6px of always-live hover strip; the bar itself is collapsed
-     above (or below) the fold until the pointer arrives. Height rather than
-     visibility, so the reading surface actually gains the space. */
+  /* RFC 0081 R2.1: 6px of always-live hover strip; the bar itself slides off the
+     window edge until the pointer arrives, and slides back over the page rather
+     than pushing it. The zone keeps its 6px whether revealed or not, so the
+     reading surface below never reflows.
+
+     The bar rides in an absolutely positioned child rather than a clipped
+     max-height box because the title bar's search results are an absolutely
+     positioned dropdown taller than the bar — `overflow: hidden` here would cut
+     them off, which is the one thing this mode may not do (RFC 0081 §4). */
   .edge-zone {
+    position: relative;
     flex-shrink: 0;
-    max-height: 6px;
-    overflow: hidden;
-    transition: max-height 120ms ease-out;
+    height: 6px;
+    z-index: 30;
   }
 
-  .edge-zone.revealed {
-    max-height: 120px;
+  .edge-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    transition: transform 120ms ease-out;
+  }
+
+  .edge-zone.top .edge-panel {
+    top: 0;
+    transform: translateY(-100%);
+  }
+
+  .edge-zone.bottom .edge-panel {
+    bottom: 0;
+    transform: translateY(100%);
+  }
+
+  .edge-zone.revealed .edge-panel {
+    transform: translateY(0);
   }
 </style>

@@ -75,6 +75,12 @@ the opening click does not immediately close it. Do not extract a shared
 component: two call sites with ~30 lines each is not an abstraction worth the
 indirection (AGENTS.md, *Introduce Abstractions Sparingly*).
 
+R1.2a The menu takes focus when it opens and handles `Escape` itself, stopping
+the keystroke there. `ReaderView` also listens for `Escape` on the window (it
+disarms the active tool, then leaves focus mode — RFC 0079 R4.4), and two
+window-level listeners cannot be ordered reliably; without the focus, dismissing
+this menu would also back you out of focus mode in the same press.
+
 R1.3 `Delete`/`Backspace` on a keyboard-focused row keeps deleting directly.
 That gesture is explicit, keyboard-only, and requires the row to already be
 focused — it is not the accident right-click is.
