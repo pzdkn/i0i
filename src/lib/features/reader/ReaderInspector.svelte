@@ -539,6 +539,19 @@
     }
   }
 
+  /**
+   * Delete the open passage from its own detail view (RFC 0085 R3.1), then fall
+   * back to the list — the detail is a view of something that no longer exists.
+   */
+  async function removeOpenPassage() {
+    const id = currentHighlight?.id;
+    if (!id) {
+      return;
+    }
+    await onRemoveHighlight?.(id);
+    backToThreadList();
+  }
+
   function backToThreadList() {
     openThread = null;
     renaming = false;
@@ -972,9 +985,23 @@
                    section decides the lens: Notes edits its note, Chat holds its
                    conversation. `openThread` persists across a section switch. -->
               <div class="row section-title">
-                <button class="link-btn" type="button" onclick={backToThreadList}>‹ {activeSection === "chat" ? "Chat" : "Marks"}</button>
+                <button class="link-btn" type="button" onclick={backToThreadList}>‹ {activeSection === "chat" ? "Chat" : "Notes"}</button>
                 <div class="flex1"></div>
-                {#if activeSection === "chat"}
+                {#if activeSection === "notes"}
+                  <!-- RFC 0085 R3.1: the open passage shows its note and its Ask
+                       and, until now, no way to remove the thing it is showing.
+                       Chat's header has had a delete since RFC 0073; Notes only
+                       ever had one in the list behind it. -->
+                  {#if currentHighlight && onRemoveHighlight}
+                    <button
+                      class="note-icon remove"
+                      type="button"
+                      aria-label="delete annotation"
+                      title="Delete this annotation"
+                      onclick={() => void removeOpenPassage()}
+                    ><Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /></button>
+                  {/if}
+                {:else if activeSection === "chat"}
                   {#if !isVirtual}
                     <button class="note-icon" type="button" aria-label="rename thread" onclick={startRename}><Pencil size={13} strokeWidth={1.75} aria-hidden="true" /></button>
                   {/if}

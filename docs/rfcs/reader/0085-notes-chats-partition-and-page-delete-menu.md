@@ -113,12 +113,41 @@ R2.3 Left-click behaviour is unchanged: it opens the popover, as it always has.
 
 ---
 
+## 3. Opening a mark shows its note and its Ask, and no way to delete it
+
+### Diagnosis
+
+Two surfaces, one omission each.
+
+- **The open-passage detail.** `passageDetail` (`ReaderInspector.svelte:968`)
+  renders the header's actions per lens. The Chat lens has rename, new, compact
+  and a trash. The **Notes** lens has a back link and nothing else — so the view
+  that shows you a passage's note and its Ask cannot remove the passage. Delete
+  lived only in the list behind it.
+- **The click-a-mark popover.** `HighlightPopover.svelte:129` *does* carry
+  Remove. It is a borderless text button in `var(--fg-3)`, the dimmest colour in
+  the panel, sitting beside an `Ask` in `var(--fg-2)`. It is present and it
+  reads as absent, which is the same bug with a different cause.
+
+### Change
+
+R3.1 The Notes lens of the open-passage header gets the same trash the Chat lens
+has, deleting the annotation (and its conversation, RFC 0079 R1.3) and returning
+to the list — a detail view of a deleted thing should not stay open.
+
+R3.2 The popover's action becomes **Delete**, with a trash icon and `var(--red)`,
+in the colour every other destructive control in the app uses. Same position,
+same behaviour.
+
+---
+
 ## Task list
 
 | # | Task | Ships alone | Size |
 |---|---|---|---|
 | 1 | R1.1–R1.4 strict Notes/Chat partition, delete follows the rows | yes | S |
 | 2 | R2.1–R2.3 page context menu in both viewers | yes | S |
+| 3 | R3.1–R3.2 delete in the passage detail and a legible one in the popover | yes | XS |
 
 ## Risks
 
@@ -144,8 +173,14 @@ Manual (no Svelte component harness):
    else opens on top of it.
 7. Hover a Chat row: the same corner `−`; right-click it: the same menu. Deleting
    removes the passage and its conversation.
+8. Open a mark from the Notes list: the header has a trash; using it deletes the
+   mark and returns to the list.
+9. Click a mark on the page: the popover's Delete is red and carries a trash
+   icon, not a grey word beside Ask.
 
 ## Success criteria
 
 1. The Notes list and the Chat list never contain the same passage.
 2. Every mark can be deleted from the page it lives on, from a menu that says so.
+3. Every surface that shows one annotation — list row, page mark, popover, open
+   passage — offers to delete it, and the offer looks destructive.

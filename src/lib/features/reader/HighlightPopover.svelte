@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Trash2 } from "@lucide/svelte";
   import type { Highlight, HighlightColor } from "$lib/domain/highlight";
   import { HIGHLIGHT_COLORS, isStickyNote } from "$lib/domain/highlight";
   import { highlightFill } from "$lib/features/reader/highlight-colors";
@@ -126,8 +127,12 @@
     {#if !isSticky}
       <button class="hp-btn" type="button" onclick={onAsk}>{hasThread ? "Open thread" : "Ask"}</button>
     {/if}
-    <button class="hp-btn hp-remove" type="button" aria-label="Remove highlight" title="Remove" onclick={() => void onRemove()}>
-      Remove
+    <!-- RFC 0085 R3.2: it was here all along, in the dimmest colour the panel
+         has, unlabelled by anything but a word — next to Ask, it read as
+         absent. A destructive action should look like one. -->
+    <button class="hp-btn hp-remove" type="button" aria-label="Delete annotation" title="Delete" onclick={() => void onRemove()}>
+      <Trash2 size={12} strokeWidth={1.75} aria-hidden="true" />
+      Delete
     </button>
   </div>
 </div>
@@ -273,8 +278,15 @@
   }
 
   .hp-remove {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     margin-left: auto;
-    color: var(--fg-3);
+    color: var(--red);
+  }
+
+  .hp-remove:hover {
+    background: rgba(180, 72, 60, 0.14);
   }
 
   .hp-remove:hover {
