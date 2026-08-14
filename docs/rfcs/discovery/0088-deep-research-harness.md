@@ -13,8 +13,15 @@ RFC 0054 (search relevance), RFC 0057 (semantic ranking), RFC 0041/0052
 
 The report asks to *"find in github what other deep research agents use as
 scaffolding, what are their key techniques and features, either use them or
-copy."* This RFC does the survey and answers **copy, do not adopt** — then names
-the four techniques worth copying and the one architectural claim we should not.
+copy."* This RFC surveys **five** of them — 80k, 29k, 19.5k, 5.2k stars and LangChain's
+reference implementation — and answers **copy the techniques, do not adopt the
+architecture**. §0 is the reflection: what we steal whole, what we copy and
+reshape, what we can do *better* than a web harness because we hold a paper
+library, and what we refuse because it only makes sense for a report generator.
+
+The filter throughout is that **our goal is improved paper search — Perplexity
+over your library, not a literature review**. Four of the five end in a written
+report. We end in a ranked set of papers.
 
 ### What we have
 
@@ -31,36 +38,128 @@ is legible and testable (`agent.rs` has a full fake-planner test suite at :250+)
 
 ### What the field does
 
-Read from source, not from marketing:
+Five harnesses, read from source or from their own docs rather than from
+coverage of them. Stars are a proxy for how much scrutiny each design has had,
+not for quality.
 
-- **[langchain-ai/open_deep_research](https://github.com/langchain-ai/open_deep_research)** —
-  the reference open implementation. Its `deep_researcher.py` runs four nodes:
-  `clarify_with_user` → `write_research_brief` → `research_supervisor` →
-  `final_report_generation`. The supervisor holds exactly three tools:
-  `think_tool` (reflection with no external call), `ConductResearch` (delegate a
-  sub-topic to a researcher subgraph), and `ResearchComplete`. Researchers
-  terminate on `max_react_tool_calls`, an explicit `ResearchComplete`, or a turn
-  with no tool calls, then run a **compression** node that synthesises findings
-  and, on token overflow, drops older messages via `remove_up_to_last_ai_message`.
-  Concurrency is capped by `max_concurrent_research_units`.
-- **Reflection as a first-class tool.** `think_tool` exists so the model can
-  reason about *whether it has enough*, separately from acting. This is the
-  single most-copied idea across current harnesses.
-- **Clarify before planning.** The first node's whole job is deciding whether
-  the request is answerable as stated.
-- **Evaluation.** open_deep_research reports against Deep Research Bench (100
-  PhD-level tasks, LLM-as-judge). The field treats "did the harness get better"
-  as a measured question.
+| Harness | Scale | Shape | Terminates on | Produces |
+|---|---|---|---|---|
+| [bytedance/deer-flow](https://github.com/bytedance/deer-flow) | 80k★, Python | Lead agent spawning **dynamic** sub-agents with scoped contexts and their own termination conditions | Per-agent conditions; goal tracking | Report / artifacts |
+| [assafelovic/gpt-researcher](https://github.com/assafelovic/gpt-researcher) | 29k★, Python | **Planner / executor** split; planner writes sub-questions, crawler agents gather, each source summarised then aggregated | Fixed tree depth × breadth | Report over 20+ sources |
+| [dzhng/deep-research](https://github.com/dzhng/deep-research) | 19.5k★, TS | **Recursive tree**: generate SERP queries, extract `learnings` + `followUpQuestions`, recurse | `depth` hits 0 | Report from accumulated learnings |
+| [langchain-ai/open_deep_research](https://github.com/langchain-ai/open_deep_research) | LangChain's reference | `clarify_with_user` → `write_research_brief` → **supervisor** → report; supervisor holds `think_tool`, `ConductResearch`, `ResearchComplete` | Tool-call caps, explicit `ResearchComplete`, or a turn with no tool calls | Report |
+| [jina-ai/node-DeepResearch](https://github.com/jina-ai/node-DeepResearch) | 5.2k★, TS | Flat loop over four actions — **search / read / reason / reflect** — with knowledge accumulation | **Token budget**, then "Beast Mode" forces an answer from what it has | A cited *answer*, explicitly not a report |
 
-## The architectural claim we should *not* copy
+Four patterns recur across all five, and each has a name here:
 
-These harnesses are LangGraph message-graph agents: state is a message list, and
-control flow is what the model emits. RFC 0037 deliberately chose the opposite,
-and the reasons still hold — Rust has no LangGraph, our primitives are typed and
-unit-tested, and a message-list agent is exactly the thing whose cost RFC 0079
-§5 caught (*"the round trip spent deciding whether to run it costs hundreds"*).
+- **Query fan-out before retrieval.** Every one of them turns the goal into
+  several distinct queries rather than one. gpt-researcher calls it planning,
+  dzhng calls it `generateSerpQueries`, open_deep_research calls it a research
+  brief. We do this (`plan_queries`).
+- **Gap-driven iteration.** The second round is aimed at what the first round
+  missed: `followUpQuestions` (dzhng), `think_tool` (open_deep_research),
+  `reflect` (jina). We do a weak version — gaps are computed and passed to
+  `refine_queries` as strings.
+- **A hard budget, and a graceful end at it.** jina's is the sharpest: a token
+  budget, and when it is spent, "Beast Mode" stops searching and answers from
+  accumulated knowledge rather than failing. We have budgets and stop, but with
+  a `StopReason` that cannot distinguish success from exhaustion.
+- **Read the page, not just the index.** All five fetch and extract page
+  content. We do not — we only query metadata APIs.
 
-So: **keep the typed loop, borrow the techniques.**
+And two structural choices they disagree about, which is itself informative:
+
+- **Recursion schedule.** dzhng *halves breadth at each depth*
+  (`Math.ceil(breadth / 2)`) — a deliberate narrowing as the tree deepens.
+  gpt-researcher uses a fixed depth × breadth. Ours is flat: `max_iterations`
+  with the same query count each round.
+- **Delegation.** open_deep_research and deer-flow both delegate to sub-agents,
+  but deer-flow's own guidance is the cautious one: *"sub-agents are an
+  optimization, not the default response to a complex request"*, and the lead
+  *"uses the fewest useful sub-agents"*. The 80k-star project argues against
+  reaching for delegation first.
+
+### The filter: we are building search, not a report
+
+**Our goal is improved paper search — closer to Perplexity than to a report
+generator.** Four of these five end in a written report; jina's ends in a cited
+answer. We end in **a ranked set of papers the user chooses from**. That
+difference decides what is worth copying:
+
+- Their **synthesis** stages — summarise each source, compress findings, write
+  sections — are the majority of their token spend and are *irrelevant to us*.
+  We do not write prose about the papers; we rank them and hand them over.
+- Their **retrieval** stages — fan-out, gap-driven iteration, reading pages,
+  budget discipline — are exactly our problem, and are where they are ahead of
+  us.
+- We have two things none of them have: a **citation graph** with real paper
+  identity (DOI/OpenAlex id, so dedup is exact rather than URL-based) and a
+  **local embedding reranker** (RFC 0057). A web harness cannot rank by
+  semantic proximity to your library; we can.
+
+## 0. What we steal, copy, improve, and refuse
+
+Four verbs, used precisely. **Steal** = take the idea whole, it is right and we
+have nothing like it. **Copy** = take the mechanism but reshape it to a typed
+Rust primitive. **Improve** = they do it, we can do it better because of what a
+paper library gives us. **Refuse** = it is load-bearing for a report generator
+and dead weight for a search engine.
+
+### Steal
+
+| From | Idea | Why it is right for us |
+|---|---|---|
+| jina | **Budget-forcing with a graceful end.** When the budget is spent, stop searching and return the best you have, deliberately, rather than treating exhaustion as failure. | We already accumulate a ranked pool, so our version is nearly free: exhaustion returns the pool and *says* it was exhausted. Today `StopReason::MaxIterations` cannot distinguish that from convergence. → §1 R1.3 |
+| jina | **Disable an action that stops paying.** jina disables actions that yield nothing new. | We already compute `new_count(pool, existing)` (`agent.rs:199`) and throw it away. A provider that returns zero new candidates two rounds running should stop being queried this run. → **new R1.4** |
+| dzhng | **Narrow as you deepen** — `Math.ceil(breadth / 2)` per level. | Our loop issues the same number of queries every round, so round 4 costs what round 1 did while returning far less. A decaying query budget is three lines and directly reduces spend. → **new R1.5** |
+
+### Copy
+
+| From | Mechanism | Our shape |
+|---|---|---|
+| open_deep_research | `think_tool` — reflection as a first-class step, separate from acting | A `reflect` **primitive** returning typed `Reflection { gaps, should_continue, next_queries }`, not a tool the model may skip. Rust decides; the model only fills the struct. → §1 |
+| all five | Fetch and read pages, not just query indexes | A `browse` primitive over the existing `html_ingestion` pipeline, tightly budgeted. → §4 |
+| open_deep_research | `clarify_with_user` before spending | One pre-round call, default **off**. → §2, Open Decision A |
+| deer-flow / open_deep_research | Sub-agent delegation | Bounded fan-out over sub-topics with the budget split up front — and demoted, on deer-flow's own advice. → §3 |
+
+### Improve
+
+Three places where a paper library beats a web harness, and we should not
+imitate their workarounds:
+
+1. **Identity.** They dedup by URL and by fuzzy title. We have DOIs and
+   OpenAlex ids; `dedup` is exact. Their duplicate-suppression heuristics are a
+   symptom of a problem we do not have.
+2. **Ranking.** They rank by what the model says. We rank by embedding
+   proximity (RFC 0057) against a local reranker — and, per RFC 0091, could rank
+   against the *vault centroid*, which is a signal no general harness can
+   compute. Perplexity-style search over your own library is exactly this.
+3. **Coverage as the stop condition.** Their loops ask *"can I answer yet?"*
+   Ours should ask *"is the candidate set complete?"* — a different question with
+   a measurable answer (§5's recall fixtures), and the honest goal for search.
+
+### Refuse
+
+- **Report and section generation** (gpt-researcher, dzhng, deer-flow,
+  open_deep_research). We return papers. A generated literature review would be
+  the most expensive and least trustworthy thing in the product.
+- **Per-source summarisation** (gpt-researcher summarises every scraped source).
+  Our unit is the paper, and the user reads it in the reader we already built.
+- **Context compression** (open_deep_research's `compress_research`,
+  `remove_up_to_last_ai_message`). That exists because a message-list agent
+  overflows its window. Our loop holds a typed `Vec<PaperCandidate>`, which does
+  not grow like a transcript.
+- **Dynamic agent spawning** (deer-flow). The most-starred design here, and the
+  furthest from RFC 0037's premise. Even deer-flow says sub-agents are an
+  optimisation, not a default.
+
+### What this changes about the plan
+
+The survey moved two things. **Budget shaping (R1.4, R1.5) is new and is the
+cheapest win in the RFC** — it comes from the two harnesses closest to our
+actual problem, needs no new model call, and reduces cost rather than adding it.
+And **delegation (§3) drops further down**: three of the five either avoid it or
+warn against reaching for it first.
 
 ---
 
@@ -80,7 +179,22 @@ effect.
 
 R1.3 `StopReason` gains `Converged` — the run stopped because reflection said
 the pool answers the goal — distinct from today's `MaxIterations`, which cannot
-tell "done" from "out of budget."
+tell "done" from "out of budget." Exhaustion is never a failure: like jina's
+Beast Mode, a spent budget returns the ranked pool and labels it *exhausted*, so
+the UI can say "here is what I found, and I stopped early" rather than implying
+completeness.
+
+R1.4 **Retire a provider that has stopped paying.** `new_count(pool, existing)`
+(`agent.rs:199`) already measures how many candidates a round actually added and
+the result is discarded. A provider returning zero new candidates for two
+consecutive rounds is skipped for the rest of the run. Stolen from jina's
+action-disabling; costs one counter per provider.
+
+R1.5 **Narrow as the run deepens.** Query count per round decays —
+`ceil(previous / 2)`, floored at one — instead of issuing the same fan-out every
+round. dzhng halves breadth at each level of recursion for the same reason: the
+later rounds are refinements, and paying round-one prices for them is how a
+bounded loop still gets expensive.
 
 ## 2. Clarify before spending the budget
 
@@ -139,10 +253,15 @@ established this habit for performance; this extends it to quality.
 | # | Task | Ships alone | Size |
 |---|---|---|---|
 | 1 | R5 evaluation fixtures — **first**, so the rest can be judged | yes | M |
-| 2 | R1 reflection primitive + `Converged` stop reason | yes | M |
-| 3 | R4 Obscura `browse` primitive | yes | M |
-| 4 | R2 clarify step | yes | S |
-| 5 | R3 bounded sub-topic delegation | no — wants R1 | L |
+| 2 | **R1.4 + R1.5 budget shaping** — decaying fan-out, retire dead providers | yes | S |
+| 3 | R1.1–R1.3 reflection primitive + `Converged` / exhausted stop reasons | yes | M |
+| 4 | R4 Obscura `browse` primitive | yes | M |
+| 5 | R2 clarify step (default off) | yes | S |
+| 6 | R3 bounded sub-topic delegation | no — wants R1 | L |
+
+Task 2 moved ahead of reflection after the survey: it is the smallest change,
+it needs no model call, and it *reduces* spend, so it makes every later
+measurement cheaper to run.
 
 ## Risks
 
@@ -153,7 +272,12 @@ established this habit for performance; this extends it to quality.
   arbitrary latency. R4.3's budget and the existing `READER_MAX_PDF_BYTES`-style
   caps are the containment.
 - **Delegation is the biggest change and the least certain payoff.** It is last
-  in the task list for that reason, and it may not ship for 0.0.1.
+  in the task list for that reason, and it may not ship for 0.0.1. deer-flow —
+  the largest project surveyed and one that *does* delegate — says sub-agents
+  are an optimisation rather than a default, which is the outside view agreeing.
+- **A decaying fan-out (R1.5) can under-search a broad goal.** It is a schedule,
+  not a law: the decay floor and the starting breadth are both settings, and R5
+  is what says whether the schedule costs recall.
 
 ## Open Decisions
 
@@ -169,9 +293,29 @@ established this habit for performance; this extends it to quality.
 2. Deep research can read a web page it was not handed, and papers found that
    way are indistinguishable downstream from API-found ones.
 3. Every claim that the harness improved is backed by a number from R5.
+4. A run that spends its budget returns its ranked pool and says it stopped
+   early — exhaustion is reported, never silently dressed as completeness.
+5. Cost per run falls, not rises: the decaying fan-out and provider retirement
+   land before anything that adds a model call.
 
 ## Sources
 
+Harnesses, read from source or from their own documentation:
+
+- [bytedance/deer-flow](https://github.com/bytedance/deer-flow) (80k★) — lead
+  agent with dynamic sub-agent spawning, scoped contexts, and the warning that
+  sub-agents are an optimisation rather than a default.
+- [assafelovic/gpt-researcher](https://github.com/assafelovic/gpt-researcher)
+  (29k★) — planner/executor split, 20+ sources per run, tree-like depth ×
+  breadth exploration; reports ~5 minutes and ~$0.40 per deep research run,
+  which is a useful yardstick for our own budget defaults.
+- [dzhng/deep-research](https://github.com/dzhng/deep-research) (19.5k★) —
+  `deepResearch()` recursion over `breadth`/`depth`, `generateSerpQueries`,
+  `processSerpResult` returning learnings + follow-up questions, breadth halved
+  per level, `pLimit` concurrency.
+- [jina-ai/node-DeepResearch](https://github.com/jina-ai/node-DeepResearch)
+  (5.2k★) — search / read / reason / reflect loop, token-budget termination with
+  Beast Mode, action disabling, definitive-answer test, citations preferred.
 - [langchain-ai/open_deep_research](https://github.com/langchain-ai/open_deep_research) —
   supervisor/researcher structure, `think_tool` / `ConductResearch` /
   `ResearchComplete`, compression, iteration and concurrency caps.
