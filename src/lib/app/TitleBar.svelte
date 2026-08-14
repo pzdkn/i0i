@@ -223,13 +223,19 @@
     {/if}
   </div>
 
+  <!-- `.readout` had no rule of its own, so `.row` packed these spans edge to
+       edge and the bar read "online7 papers7 unread". Separated, pluralised, and
+       no longer claiming to be "online" — nothing here checks a network, and the
+       status bar reports the bridge when it actually breaks. -->
   <div class="readout row">
-    <span class="sync">online</span>
     {#if vaultStatus}
-      <span>{vaultStatus.paperCount} papers</span>
-      <span>{vaultStatus.unreadCount} unread</span>
+      <span>{vaultStatus.paperCount} {vaultStatus.paperCount === 1 ? "paper" : "papers"}</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span class:none={vaultStatus.unreadCount === 0}>{vaultStatus.unreadCount} unread</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span class="sync">{vaultStatus.syncState}</span>
     {:else}
-      <span>loading vault</span>
+      <span class="sync">loading vault…</span>
     {/if}
   </div>
 </header>
@@ -304,6 +310,25 @@
   .key {
     color: var(--fg-4);
     font-size: 10px;
+  }
+
+  .readout {
+    flex-shrink: 0;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  .readout .sep {
+    color: var(--fg-4);
+  }
+
+  /* Nothing unread is the quiet case, not the notable one. */
+  .readout .none {
+    color: var(--fg-3);
+  }
+
+  .readout .sync {
+    color: var(--fg-3);
   }
 
   /* Sits behind the panel so an outside click dismisses it. */

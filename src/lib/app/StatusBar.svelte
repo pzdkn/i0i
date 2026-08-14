@@ -11,15 +11,18 @@
 </script>
 
 <footer class="statusbar row hair-t">
-  <span class="ok">connected</span>
-  {#if vaultStatus}
-    <span>vault / {vaultStatus.paperCount} papers / {vaultStatus.unreadCount} unread</span>
-    <span>sync: {vaultStatus.syncState}</span>
-  {:else if bridgeError}
+  <!-- "connected" used to be printed unconditionally, so a broken bridge
+       reported itself as connected and unavailable in the same line. -->
+  {#if bridgeError}
     <span class="warn">rust bridge unavailable</span>
-    <span>{bridgeError}</span>
+    <span class="truncate">{bridgeError}</span>
+  {:else if vaultStatus}
+    <span class="ok">connected</span>
+    <span>{vaultStatus.paperCount} {vaultStatus.paperCount === 1 ? "paper" : "papers"}</span>
+    <span>{vaultStatus.unreadCount} unread</span>
+    <span class="mono-dim">sync: {vaultStatus.syncState}</span>
   {:else}
-    <span>vault status loading</span>
+    <span class="mono-dim">loading vault…</span>
   {/if}
 
   <div class="flex1"></div>
