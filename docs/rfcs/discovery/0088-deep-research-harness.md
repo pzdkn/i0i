@@ -23,6 +23,10 @@ The filter throughout is that **our goal is improved paper search — Perplexity
 over your library, not a literature review**. Four of the five end in a written
 report. We end in a ranked set of papers.
 
+§6 is what §0–§5 add up to: the seams, the types, the pure functions, and the
+one design question the survey did not settle — how much of each candidate
+`reflect` should see.
+
 ### What we have
 
 `services/research/agent.rs:60` runs a bounded loop over typed primitives:
@@ -246,22 +250,194 @@ claim, not a vibe.
 R5.2 Every change in §1–§4 reports its before/after on that set. RFC 0079 §6
 established this habit for performance; this extends it to quality.
 
+## 6. Target design
+
+What §0–§5 add up to, as a diff against `services/research/` today. The loop
+keeps RFC 0037's shape — Rust orchestrates, the LLM fills typed structs — and
+gains two seams, loses two planner methods, and grows three pure functions.
+
+```
+clarify? → for each round:
+    plan | reflect → search (+ expand, + browse) → filter → dedup → rank → stop?
+  → RunOutcome { ranked, stop_reason, complete }
+```
+
+### 6.1 Seams
+
+Four traits, up from three. `browse` gets its **own** trait rather than a third
+method on `CandidateSource`: querying a metadata API and fetching an arbitrary
+web page have different failure modes, different budgets, and different fakes.
+
+```rust
+#[async_trait]
+pub trait Planner: Send + Sync {
+    async fn plan_queries(&self, goal: &str, c: &SearchConstraints) -> Result<Vec<Query>>;
+
+    /// Replaces `assess` + `refine_queries` (R6.1).
+    async fn reflect(&self, goal: &str, pool: &PoolSummary, left: &BudgetUsage)
+        -> Result<Reflection>;
+
+    async fn rank(&self, goal: &str, c: &[PaperCandidate]) -> Result<Vec<RankedCandidate>>;
+
+    /// §2, default off. Never spends a provider query.
+    async fn clarify(&self, goal: &str) -> Result<Clarification>;
+}
+
+#[async_trait]
+pub trait CandidateSource: Send + Sync {
+    async fn search(&self, q: &Query, c: &SearchConstraints) -> Result<Vec<PaperCandidate>>;
+
+    /// R6.4: the citation graph.
+    async fn expand(&self, seed: &CandidateRef, lineage: Lineage, c: &SearchConstraints)
+        -> Result<Vec<PaperCandidate>>;
+}
+
+/// New seam (§4). Obscura + `html_ingestion` behind one testable interface.
+#[async_trait]
+pub trait PageReader: Send + Sync {
+    async fn read(&self, url: &str) -> Result<PageText>;
+}
+
+pub trait Clock: Send + Sync;  // unchanged
+```
+
+R6.1 **`assess` and `refine_queries` are deleted.** Today they are two LLM calls
+doing overlapping work — one decides whether to stop, the other writes the next
+queries from gaps computed separately (`agent.rs:94`). `reflect` returns both,
+so the decision to continue becomes an explicit logged output rather than a
+budget side effect, and the round costs one call instead of two. The seam gets
+*smaller* even as the design gets larger.
+
+### 6.2 Types
+
+```rust
+pub struct Reflection {
+    pub gaps: Vec<String>,
+    pub should_continue: bool,
+    pub next_queries: Vec<Query>,
+    pub urls_worth_reading: Vec<String>,            // → PageReader
+    pub seeds_worth_expanding: Vec<CandidateRef>,   // → CandidateSource::expand
+}
+
+pub struct ProviderStats {
+    pub queries: u32,
+    pub candidates: u32,
+    pub new_candidates: u32,
+    pub dry_rounds: u32,   // consecutive rounds that added nothing
+}
+
+pub enum StopReason { /* … */ Converged }   // new variant
+
+impl StopReason {
+    /// The Beast Mode distinction: finished, or ran out?
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::TargetReached | Self::Converged)
+    }
+}
+```
+
+R6.2 `RunOutcome` gains `complete: bool` from `is_complete()`, so the UI can say
+*"here is what I found, and I stopped early"* instead of presenting an exhausted
+run as a finished one.
+
+### 6.3 What `reflect` sees — titles, not abstracts
+
+The question is not whether abstracts are available. **They already are**:
+OpenAlex reconstructs them from its inverted index during the search
+(`providers/openalex/normalize.rs:36`) and they sit on `PaperCandidate` unused
+by the loop. The question is what belongs in the prompt.
+
+**They are already being read — by the reranker, not the model.**
+`candidate_embed_text` (`services/embedding/mod.rs:159`) embeds **title +
+abstract** for every candidate, so the semantic score on each candidate is an
+abstract-aware relevance signal computed locally at zero token cost. Sending
+abstracts to `reflect` pays a model to re-derive what the reranker has already
+derived, and derived better.
+
+The arithmetic: a 60-candidate pool at ~270 tokens of abstract each is ~16k
+tokens *per reflect call*, ~65k input tokens over four rounds. Titles are ~900
+tokens a round. Not ruinous — gpt-researcher reports ~$0.40 per run — but it is
+10–20× spend on the one call whose job is *not* to judge individual papers.
+
+And the shape of the job argues the same way: `reflect` names gaps and writes
+queries. A gap is a claim about what is **absent**, and no amount of detail
+about what is present tells you what is missing.
+
+R6.3 `PoolSummary` is therefore three tiers:
+
+```rust
+pub struct PoolSummary {
+    /// Whole pool, cheap: title · year · venue · semantic score. ~20 tokens each.
+    pub entries: Vec<PoolEntry>,
+    /// Abstracts only where the decision is genuinely uncertain. Capped (8).
+    pub detailed: Vec<CandidateDetail>,
+    /// Computed, not narrated: score distribution, count below SEMANTIC_FLOOR,
+    /// year spread, provider mix.
+    pub coverage: CoverageStats,
+}
+```
+
+The `detailed` set is chosen, not arbitrary: candidates straddling
+`SEMANTIC_FLOOR` (0.30, `orchestrator.rs:53`) where keep-or-drop is a real
+question, and seeds under consideration for expansion, where "is this central
+enough to expand from" needs the contribution rather than the topic. Eight
+abstracts is ~2k tokens — an order of magnitude below sending the pool.
+
+**The counter-argument, stated because it is real:** a gap named from titles
+alone can be a phantom — "nothing on evaluation methodology" while three papers
+cover it under titles that do not say so. Titles are dense in this domain but
+they omit setting, datasets and negative results. `CoverageStats` is the
+mitigation: a computed score distribution is a harder signal than a model's
+impression of a title list.
+
+R6.4 **This is a question for §5, not for this RFC.** Recall@target with
+titles-only versus titles-plus-eight-abstracts is exactly what the fixtures
+exist to settle. Ship the `detailed` cap as a parameter defaulted to 8 and let
+the measurement move it. What the RFC does rule out is sending abstracts for the
+whole pool *while keeping the reranker* — that pays twice for one judgement, and
+the model's half is the weaker one.
+
+### 6.4 Pure functions
+
+No model, no network, exhaustively testable — and where the cheap wins are:
+
+```rust
+// budget.rs
+pub fn evaluate_stop(usage, strategy, target) -> Option<StopReason>;          // exists
+pub fn query_budget_for_round(round: u32, s: &SearchStrategy) -> u32;         // new, R1.5
+pub fn provider_is_paying(stats: &ProviderStats) -> bool;                     // new, R1.4
+pub fn split_budget(total: &SearchStrategy, ways: usize) -> Vec<SearchStrategy>; // new, §3
+
+// dedup.rs, filter.rs — unchanged: dedup(), diff(), apply_constraints()
+
+// trace.rs — new: the record §5's fixtures assert against
+pub struct RoundTrace { round, queries, provider_calls, new_candidates, reflection }
+```
+
+R6.5 `expand` wires `openalex_lineage_filter`
+(`providers/openalex/search.rs:186`), which has been written and marked
+`#[allow(dead_code)]` since RFC 0037 waiting for a caller. Citation-graph
+expansion is the cheapest large recall win available, and RFC 0091 wants the
+same primitive for vault suggestions — one implementation, two callers.
+
 ---
 
 ## Task list
 
 | # | Task | Ships alone | Size |
 |---|---|---|---|
-| 1 | R5 evaluation fixtures — **first**, so the rest can be judged | yes | M |
-| 2 | **R1.4 + R1.5 budget shaping** — decaying fan-out, retire dead providers | yes | S |
-| 3 | R1.1–R1.3 reflection primitive + `Converged` / exhausted stop reasons | yes | M |
-| 4 | R4 Obscura `browse` primitive | yes | M |
-| 5 | R2 clarify step (default off) | yes | S |
-| 6 | R3 bounded sub-topic delegation | no — wants R1 | L |
+| 1 | **R1.4 + R1.5 budget shaping** — `query_budget_for_round`, `provider_is_paying` | yes | S |
+| 2 | R5 + `RoundTrace` — evaluation fixtures, so 3–7 are measured not asserted | yes | M |
+| 3 | R1.1–R1.3 + R6.1–R6.3 `reflect` replacing `assess`/`refine_queries` | yes | M |
+| 4 | R6.5 `expand` — wire the dead lineage filter | yes | M |
+| 5 | R4 + `PageReader` — Obscura browsing | yes | M |
+| 6 | R2 clarify step (default off) | yes | S |
+| 7 | R3 + `split_budget` — bounded sub-topic delegation | no — wants R1 | L |
 
-Task 2 moved ahead of reflection after the survey: it is the smallest change,
-it needs no model call, and it *reduces* spend, so it makes every later
-measurement cheaper to run.
+Budget shaping is first, ahead even of the fixtures: it is pure, needs no model
+call, and *reduces* spend, so every measurement after it is cheaper to run.
+Tasks 1 and 2 are the unglamorous ones and they are the two that make everything
+after them honest — if only two land, those are the two.
 
 ## Risks
 
@@ -275,12 +451,22 @@ measurement cheaper to run.
   in the task list for that reason, and it may not ship for 0.0.1. deer-flow —
   the largest project surveyed and one that *does* delegate — says sub-agents
   are an optimisation rather than a default, which is the outside view agreeing.
+- **Deleting `assess` and `refine_queries` for one `reflect` is a behaviour
+  change, not a refactor.** Two calls become one and the early-break decision
+  moves. Task 2's fixtures exist so this is measured rather than hoped; if
+  recall drops, the answer is a better `PoolSummary`, not a return to two calls.
 - **A decaying fan-out (R1.5) can under-search a broad goal.** It is a schedule,
   not a law: the decay floor and the starting breadth are both settings, and R5
   is what says whether the schedule costs recall.
 
 ## Open Decisions
 
+- **B. Does `reflect` need abstracts?** §6.3 says no — titles plus a computed
+  coverage summary plus at most eight abstracts for genuinely uncertain
+  candidates. The reasoning is sound and the evidence is not yet in.
+  Recommendation: ship the cap as a parameter and let §5's recall numbers move
+  it; do not send the whole pool's abstracts while the reranker is also reading
+  them.
 - **A. Does clarification belong in a research run at all?** For a
   paper-discovery tool the goal is usually a topic, not an ambiguous request.
   Recommendation: implement it as R2 describes but default it **off** behind a
