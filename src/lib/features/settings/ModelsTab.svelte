@@ -54,6 +54,19 @@
     restartNote
     onSaved={onChanged}
   />
+  <!-- The 402 this came from: with no cap, OpenRouter reserves the model's full
+       completion ceiling (32,000 tokens for deepseek-v4-pro) and refuses the
+       request if the balance or the key's credit limit cannot cover that
+       maximum — even when the answer itself would cost a fraction of a cent. -->
+  <TextPref
+    settingKey="model.max_tokens"
+    label="Max answer tokens"
+    hint="How much an answer may generate. Also what OpenRouter reserves against your balance — leave it low unless answers are being cut off."
+    value={prefs["model.max_tokens"] ?? ""}
+    placeholder="app default (2048)"
+    restartNote
+    onSaved={onChanged}
+  />
   <TextPref
     settingKey="model.title"
     label="Thread titles"

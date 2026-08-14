@@ -18,6 +18,21 @@ const CONTEXT_CHARS_CAP: usize = 32_000;
 /// (RFC 0059 follow-up). Overridable via the `model.annotation` setting.
 const DEFAULT_ANNOTATION_MODEL: &str = "meta-llama/llama-3.3-70b-instruct";
 
+/// Upper bound on the tokens a single answer may generate.
+///
+/// This is not a quality knob, it is a *cost reservation* knob. With
+/// `max_tokens` unset, OpenRouter reserves the model's full completion ceiling —
+/// 32,000 tokens for `deepseek-v4-pro` — and refuses the request with a 402 if
+/// the remaining balance or the key's credit limit cannot cover that maximum,
+/// even when the answer would have cost a fraction of a cent. A grounded answer
+/// about a passage runs to a few hundred tokens; 2,048 leaves room for a long
+/// one and shrinks the reservation about sixteen-fold.
+///
+/// Override with the `model.max_tokens` preference or `max_tokens` in
+/// `app.conf.json`. Raise it if answers are being cut off mid-sentence — that is
+/// the symptom of this being too low.
+const DEFAULT_MAX_ANSWER_TOKENS: u32 = 2_048;
+
 #[derive(Debug, Clone)]
 pub struct ChatConfig {
     pub url: String,
@@ -25,6 +40,8 @@ pub struct ChatConfig {
     pub model: String,
     pub annotation_model: String,
     pub max_context_chars: usize,
+    /// Cap on generated tokens per answer. See `DEFAULT_MAX_ANSWER_TOKENS`.
+    pub max_answer_tokens: u32,
     pub title_model: Option<String>,
     pub title_max_tokens: u32,
     pub title_timeout_ms: u64,
@@ -65,6 +82,11 @@ impl ChatConfig {
                 .provider
                 .max_context_chars
                 .min(CONTEXT_CHARS_CAP),
+            max_answer_tokens: crate::services::settings::preference("model.max_tokens")
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .or(app_config.chat.provider.max_tokens)
+                .unwrap_or(DEFAULT_MAX_ANSWER_TOKENS)
+                .max(256),
             // RFC 0079 R7.2: settable like the others. A 24-token title was the
             // one model slot with no preference key at all.
             title_model: crate::services::settings::preference("model.title")
@@ -123,6 +145,8 @@ struct ChatProviderConfig {
     api_key: String,
     model: String,
     max_context_chars: usize,
+    #[serde(default)]
+    max_tokens: Option<u32>,
     #[serde(default)]
     title_model: Option<String>,
     #[serde(default)]
@@ -192,6 +216,7 @@ mod tests {
             model: "m".to_string(),
             annotation_model: "a".to_string(),
             max_context_chars: 10,
+            max_answer_tokens: 2_048,
             title_model: None,
             title_max_tokens: 24,
             title_timeout_ms: 5_000,
@@ -210,6 +235,7 @@ mod tests {
             model: "m".to_string(),
             annotation_model: "a".to_string(),
             max_context_chars: 10,
+            max_answer_tokens: 2_048,
             title_model: None,
             title_max_tokens: 24,
             title_timeout_ms: 5_000,

@@ -34,6 +34,9 @@ pub struct Assessment {
     pub gaps: Vec<String>,
 }
 
+/// Room for a JSON object holding a handful of queries, and no more.
+const PLANNER_MAX_TOKENS: u32 = 1_024;
+
 #[async_trait]
 pub trait Planner: Send + Sync {
     async fn plan_queries(
@@ -169,7 +172,10 @@ impl OpenRouterPlanner {
                 WireMessage::text("user", user.to_string()),
             ],
             stream: false,
-            max_tokens: None,
+            // A planner reply is a small JSON object of queries. Unset,
+            // OpenRouter reserves the model's full completion ceiling and can
+            // 402 a request that would have cost a fraction of a cent.
+            max_tokens: Some(PLANNER_MAX_TOKENS),
             response_format: None,
             tools: None,
             tool_choice: None,

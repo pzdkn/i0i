@@ -289,13 +289,30 @@ fn with_reason(summary: &str, body: &str) -> String {
 }
 
 /// Trim a response body to a short, single-line snippet for error messages.
+/// The provider's own words, for appending to our summary of a status.
+///
+/// Two changes over the original 200-character truncation, both from a real
+/// 402: OpenRouter's message carries the *numbers that explain the refusal*
+/// ("You requested up to 32000 tokens, but can only afford 31430") followed by
+/// the URL of the setting to change, and 200 characters cut it mid-URL — so the
+/// one actionable part of the message was the part that got dropped.
+///
+/// - The `error.message` field is extracted when the body is the JSON envelope
+///   every OpenAI-compatible provider returns, so the reader sees the sentence
+///   rather than the wrapper.
+/// - The cap is 1200 characters, which is longer than any provider message we
+///   have seen and still short of pasting a stack trace into the UI.
 fn body_snippet(body: &str) -> String {
-    body.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(200)
-        .collect()
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| body.to_string());
+
+    let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= 1200 {
+        return collapsed;
+    }
+    collapsed.chars().take(1200).collect::<String>() + "…"
 }
 
 // --- Streaming (M2) ---
@@ -617,6 +634,23 @@ mod tests {
             .to_lowercase()
             .contains("credit"));
         assert!(describe_error_status(StatusCode::TOO_MANY_REQUESTS, "").contains("429"));
+    }
+
+    /// The 402 that prompted the fix: OpenRouter's message carries the numbers
+    /// that explain the refusal and then the URL of the setting to change, and
+    /// the old 200-character cap cut it off mid-URL.
+    #[test]
+    fn payment_required_keeps_the_whole_actionable_message() {
+        let body = r#"{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 31430. To increase, visit https://openrouter.ai/workspaces/default/keys and upgrade your key limit.","code":402}}"#;
+        let message = describe_error_status(StatusCode::PAYMENT_REQUIRED, body);
+        assert!(message.contains("32000"), "{message}");
+        assert!(message.contains("31430"), "{message}");
+        assert!(
+            message.contains("https://openrouter.ai/workspaces/default/keys"),
+            "the URL is the actionable half and must survive: {message}"
+        );
+        // The JSON envelope is unwrapped — the reader sees the sentence.
+        assert!(!message.contains("{\"error\""), "{message}");
     }
 
     /// RFC 0079 R7.5: a 402 that says "out of credits" when the real reason was
