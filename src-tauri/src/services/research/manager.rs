@@ -64,6 +64,8 @@ pub struct SearchCandidatesPreview {
 struct RunSummary {
     new: usize,
     total: usize,
+    complete: bool,
+    stop_reason: String,
 }
 
 impl SearchManager {
@@ -238,9 +240,14 @@ impl SearchManager {
             .store
             .append_new_candidates(search_id, run_id, &outcome.ranked)?;
         let total = self.store.list_search_candidates(search_id)?.len();
-        let summary =
-            serde_json::to_string(&RunSummary { new: added, total }).map_err(|e| e.to_string())?;
         let stop = outcome.stop_reason.as_str();
+        let summary = serde_json::to_string(&RunSummary {
+            new: added,
+            total,
+            complete: outcome.complete,
+            stop_reason: stop.to_string(),
+        })
+        .map_err(|e| e.to_string())?;
         let final_status =
             if outcome.stop_reason == crate::services::research::budget::StopReason::Cancelled {
                 SearchRunStatus::Cancelled
@@ -265,7 +272,7 @@ impl SearchManager {
                 search_id: search_id.to_string(),
                 run_id: run_id.to_string(),
                 status: final_status.as_str().to_string(),
-                message: format!("{} · {added} new · {total} total", stop),
+                message: final_message(outcome.complete, stop, added, total),
                 iteration: outcome.iterations,
                 found: 0,
                 unique: total as u32,
@@ -318,6 +325,15 @@ impl SearchManager {
     }
 }
 
+/// Describe whether a run converged or returned the best pool its budget bought.
+fn final_message(complete: bool, stop_reason: &str, added: usize, total: usize) -> String {
+    if complete {
+        format!("{stop_reason} · {added} new · {total} total")
+    } else {
+        format!("stopped early ({stop_reason}) · {added} new · {total} total")
+    }
+}
+
 /// Map a progress signal to (status, human message, (found, unique, new)).
 fn describe(progress: &Progress) -> (SearchRunStatus, String, (u32, u32, u32)) {
     match progress {
@@ -361,5 +377,22 @@ fn describe(progress: &Progress) -> (SearchRunStatus, String, (u32, u32, u32)) {
             format!("ranking {count} candidates"),
             (0, 0, *count as u32),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_message_distinguishes_convergence_from_exhaustion() {
+        assert_eq!(
+            final_message(true, "converged", 4, 12),
+            "converged · 4 new · 12 total"
+        );
+        assert_eq!(
+            final_message(false, "max_iterations", 4, 12),
+            "stopped early (max_iterations) · 4 new · 12 total"
+        );
     }
 }

@@ -1,6 +1,7 @@
 # RFC 0088: Borrow the parts of an established deep-research harness that we lack
 
-Status: Proposed
+Status: Partially implemented — tasks 1 and 3 landed; task 2 has trace collection
+but not the evaluation fixtures; tasks 4–7 are not started
 Date: 2026-08-13
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -424,20 +425,46 @@ same primitive for vault suggestions — one implementation, two callers.
 
 ## Task list
 
-| # | Task | Ships alone | Size |
-|---|---|---|---|
-| 1 | **R1.4 + R1.5 budget shaping** — `query_budget_for_round`, `provider_is_paying` | yes | S |
-| 2 | R5 + `RoundTrace` — evaluation fixtures, so 3–7 are measured not asserted | yes | M |
-| 3 | R1.1–R1.3 + R6.1–R6.3 `reflect` replacing `assess`/`refine_queries` | yes | M |
-| 4 | R6.5 `expand` — wire the dead lineage filter | yes | M |
-| 5 | R4 + `PageReader` — Obscura browsing | yes | M |
-| 6 | R2 clarify step (default off) | yes | S |
-| 7 | R3 + `split_budget` — bounded sub-topic delegation | no — wants R1 | L |
+| # | Task | Status | Ships alone | Size |
+|---|---|---|---|---|
+| 1 | **R1.4 + R1.5 budget shaping** — `query_budget_for_round`, `provider_is_paying` | Implemented | yes | S |
+| 2 | R5 + `RoundTrace` — evaluation fixtures, so 3–7 are measured not asserted | Trace implemented; fixtures pending | yes | M |
+| 3 | R1.1–R1.3 + R6.1–R6.3 `reflect` replacing `assess`/`refine_queries` | Implemented | yes | M |
+| 4 | R6.5 `expand` — wire the dead lineage filter | Not started | yes | M |
+| 5 | R4 + `PageReader` — Obscura browsing | Not started | yes | M |
+| 6 | R2 clarify step (default off) | Not started | yes | S |
+| 7 | R3 + `split_budget` — bounded sub-topic delegation | Not started | no — wants R1 | L |
 
 Budget shaping is first, ahead even of the fixtures: it is pure, needs no model
 call, and *reduces* spend, so every measurement after it is cheaper to run.
 Tasks 1 and 2 are the unglamorous ones and they are the two that make everything
 after them honest — if only two land, those are the two.
+
+## Implementation Notes (2026-08-18)
+
+The first implementation slice completes tasks 1 and 3 and establishes the
+trace type needed by task 2:
+
+- `Planner::reflect` replaces `assess` and `refine_queries`. Its typed response
+  must explicitly include `should_continue`; malformed model output cannot
+  silently declare convergence.
+- Reflection receives title/year/venue entries and semantic coverage for the
+  whole pool, plus at most eight abstracts nearest the relevance floor. When
+  the local reranker is unavailable it degrades to titles without inventing
+  scores.
+- Query breadth decays `5 → 3 → 2 → 1`. A provider is retired after two
+  consecutive rounds with no new candidate, independently of productive
+  sibling providers in the same fan-out.
+- `RunOutcome` records `complete` and a `RoundTrace` per round. The manager
+  stores completion and stop reason in the search summary and labels exhausted
+  results as `stopped early` while preserving the ranked pool.
+
+Focused Rust tests cover convergence, exhaustion, reflection parsing and prompt
+shape, bounded abstract context, breadth decay, provider retirement, provider
+fan-out accounting, final-round target success, and final status messages. The
+offline recall fixtures, lineage expansion, `PageReader`, clarification, and
+delegation remain pending; therefore the RFC is not complete and its full
+success criteria have not passed.
 
 ## Risks
 

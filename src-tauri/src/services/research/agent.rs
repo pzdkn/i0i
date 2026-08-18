@@ -1,29 +1,48 @@
-//! The orchestrated agent loop (RFC 0037).
+//! The orchestrated agent loop (RFC 0037, reshaped by RFC 0088).
 //!
-//! Rust drives `plan → search → filter → dedup → assess → refine → rank`,
-//! bounded by the strategy budget, with the LLM able to break early via
-//! `assess`. The loop is free of I/O side effects: it depends on the `Planner`
-//! and `CandidateSource` seams, takes a cancellation flag and a progress
-//! callback, and returns an outcome. Persistence and event emission live in the
-//! manager, so the loop is unit-testable with fakes (no DB, no network).
+//! Rust drives `plan | reflect → search → filter → dedup → rank`, bounded by the
+//! strategy budget, with the LLM able to break early via `reflect`.
+//!
+//! Three things RFC 0088 took from the harnesses surveyed there:
+//!
+//! - **One reflection call, not two** (R1.1). `assess` and `refine_queries` did
+//!   overlapping work — one decided whether to stop, the other wrote the next
+//!   queries from gaps computed separately. `reflect` returns both.
+//! - **Retire a provider that stops paying** (R1.4, from jina-ai). `new_count`
+//!   was already computed and discarded; it now decides.
+//! - **Narrow as the run deepens** (R1.5, from dzhng). The query allowance
+//!   halves each round instead of casting the same wide net every time.
+//!
+//! The loop is free of I/O side effects: it depends on the `Planner` and
+//! `CandidateSource` seams, takes a cancellation flag and a progress callback,
+//! and returns an outcome. Persistence and event emission live in the manager,
+//! so the loop is unit-testable with fakes (no DB, no network).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::commands::discovery::orchestrator::{
-    apply_semantic_floor, legacy_top_n, rank_candidates, SEMANTIC_RERANK_WINDOW,
+    apply_semantic_floor, legacy_top_n, rank_candidates, SEMANTIC_FLOOR, SEMANTIC_RERANK_WINDOW,
 };
 use crate::domain::discovery::{DiscoveryProviderChoice, PaperCandidate};
-use crate::services::embedding::EmbeddingReranker;
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, SearchConstraints, SearchStrategy,
 };
-use crate::services::research::budget::{evaluate_stop, BudgetUsage, StopReason};
+use crate::services::embedding::EmbeddingReranker;
+use crate::services::research::budget::{
+    evaluate_stop, provider_is_paying, query_budget_for_round, BudgetRemaining, BudgetUsage,
+    ProviderStats, StopReason, BASE_QUERIES_PER_ROUND,
+};
 use crate::services::research::dedup::{dedup, diff};
 use crate::services::research::error::ResearchError;
 use crate::services::research::filter::apply_constraints;
-use crate::services::research::planner::Planner;
+use crate::services::research::planner::{
+    CandidateDetail, CoverageStats, Planner, PoolEntry, PoolSummary, Query,
+};
 use crate::services::research::source::CandidateSource;
+
+/// Maximum abstracts included in one reflection prompt (RFC 0088 R6.3).
+const REFLECTION_DETAIL_LIMIT: usize = 8;
 
 /// Inputs for one run.
 pub struct RunInputs<'a> {
@@ -40,6 +59,23 @@ pub struct RunOutcome {
     pub ranked: Vec<RankedCandidate>,
     pub stop_reason: StopReason,
     pub iterations: u32,
+    /// RFC 0088 R6.2: did the run finish, or did it run out? A spent budget
+    /// still returns its pool, but the caller must be able to say so.
+    pub complete: bool,
+    /// RFC 0088 R6.4: per-round record, for the evaluation fixtures.
+    pub trace: Vec<RoundTrace>,
+}
+
+/// One round, as the evaluation harness sees it (RFC 0088 R6.4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundTrace {
+    pub round: u32,
+    pub queries_issued: u32,
+    pub queries_skipped_retired: u32,
+    pub candidates_after_dedup: usize,
+    pub new_candidates: u32,
+    pub gaps: Vec<String>,
+    pub should_continue: bool,
 }
 
 /// Progress signals emitted as the loop runs (mapped to events by the manager).
@@ -75,8 +111,12 @@ where
 
     let mut pool: Vec<PaperCandidate> = Vec::new();
     let mut usage = BudgetUsage::default();
-    let mut gaps: Vec<String> = Vec::new();
     let mut stop_reason = StopReason::MaxIterations;
+    let mut trace: Vec<RoundTrace> = Vec::new();
+    // R1.4: one tally per provider, keyed by the label the loop already builds.
+    let mut provider_stats: HashMap<String, ProviderStats> = HashMap::new();
+    // Queries `reflect` asked for last round; empty on round 0, where `plan` runs.
+    let mut planned: Vec<Query> = Vec::new();
 
     'run: for iteration in 0..strategy.max_iterations {
         if cancelled.load(Ordering::Relaxed) {
@@ -90,42 +130,81 @@ where
 
         on(Progress::Planning { iteration });
         let queries = if iteration == 0 {
-            planner.plan_queries(inputs.goal, constraints).await?
+            let planned = planner.plan_queries(inputs.goal, constraints).await?;
+            usage.llm_calls += 1;
+            planned
         } else {
-            let titles = pool_titles(&pool);
-            planner.refine_queries(inputs.goal, &gaps, &titles).await?
+            // R1.1: `reflect` already wrote these at the end of the previous
+            // round, in the same call that decided to continue.
+            std::mem::take(&mut planned)
         };
-        usage.llm_calls += 1;
 
-        for query in queries {
+        // R1.5: the allowance narrows as the run deepens.
+        let allowance = query_budget_for_round(iteration, BASE_QUERIES_PER_ROUND) as usize;
+        let mut queries_issued = 0u32;
+        let mut queries_skipped_retired = 0u32;
+        let before_round = pool.len();
+        let known_before_round = pool.iter().map(candidate_dedup_key).collect::<HashSet<_>>();
+        // Per-provider deltas for this round, folded into the tallies after it.
+        let mut round_found: HashMap<String, (u32, u32, HashSet<String>)> = HashMap::new();
+
+        for query in queries.into_iter().take(allowance) {
             if cancelled.load(Ordering::Relaxed) {
                 stop_reason = StopReason::Cancelled;
                 break 'run;
             }
-            let provider_call_cost = provider_call_cost(&query.provider, constraints);
+            let (active_providers, skipped) =
+                active_providers(&query.provider, constraints, &provider_stats);
+            queries_skipped_retired += skipped;
+            if active_providers.is_empty() {
+                continue;
+            }
+
+            let provider_call_cost = active_providers.len() as u32;
             if usage.provider_queries + provider_call_cost > strategy.max_provider_queries {
                 break;
             }
-            let provider = provider_label(&query.provider, constraints);
+            let provider = active_providers
+                .iter()
+                .map(provider_name)
+                .collect::<Vec<_>>()
+                .join("+");
+            let mut query_constraints = constraints.clone();
+            if !constraints.providers.is_empty() {
+                query_constraints.providers = active_providers.clone();
+            }
+            for choice in &active_providers {
+                round_found
+                    .entry(provider_name(choice).to_string())
+                    .or_insert_with(|| (0, 0, HashSet::new()))
+                    .0 += 1;
+            }
             on(Progress::Searching {
                 provider: provider.clone(),
                 text: query.text.clone(),
             });
-            match source.search(&query, constraints).await {
+            match source.search(&query, &query_constraints).await {
                 Ok(mut found) => {
                     on(Progress::SearchResult {
-                        provider,
+                        provider: provider.clone(),
                         count: found.len(),
                     });
+                    for candidate in &found {
+                        if let Some(entry) = round_found.get_mut(candidate_provider(candidate)) {
+                            entry.1 += 1;
+                            entry.2.insert(candidate_dedup_key(candidate));
+                        }
+                    }
                     pool.append(&mut found);
                 }
                 Err(error) => {
                     on(Progress::SearchFailed {
-                        provider,
+                        provider: provider.clone(),
                         error: error.to_string(),
                     });
                 }
             }
+            queries_issued += 1;
             usage.provider_queries += provider_call_cost;
         }
 
@@ -139,20 +218,52 @@ where
         }
         usage.candidate_count = new_count(&pool, &inputs.existing_keys);
 
+        // What the round actually added, after dedup — the number R1.4 needs.
+        let round_gain = pool.len().saturating_sub(before_round) as u32;
+        for (provider, (queries, candidates, returned_keys)) in round_found {
+            let provider_gain = returned_keys.difference(&known_before_round).count() as u32;
+            provider_stats.entry(provider).or_default().record_round(
+                queries,
+                candidates,
+                provider_gain,
+            );
+        }
+
         if cancelled.load(Ordering::Relaxed) {
             stop_reason = StopReason::Cancelled;
             break;
         }
 
         on(Progress::Assessing);
-        let assessment = planner.assess(inputs.goal, &pool_titles(&pool)).await?;
+        let summary = build_pool_summary(&pool, reranker, inputs.goal).await;
+        usage.iterations += 1;
+        let remaining = BudgetRemaining::from_usage(&usage, strategy);
+        let reflection = planner.reflect(inputs.goal, &summary, &remaining).await?;
         usage.llm_calls += 1;
-        if !assessment.refine {
-            stop_reason = StopReason::CoverageSufficient;
+
+        trace.push(RoundTrace {
+            round: iteration,
+            queries_issued,
+            queries_skipped_retired,
+            candidates_after_dedup: pool.len(),
+            new_candidates: round_gain,
+            gaps: reflection.gaps.clone(),
+            should_continue: reflection.should_continue,
+        });
+
+        // The target is a hard success condition even when it is reached on
+        // the final allowed round and reflection would otherwise continue.
+        if target > 0 && usage.candidate_count >= target {
+            stop_reason = StopReason::TargetReached;
             break;
         }
-        gaps = assessment.gaps;
-        usage.iterations += 1;
+        if !reflection.should_continue {
+            // R1.3: converged — the pool answers the goal — which is a different
+            // outcome from running out of rounds.
+            stop_reason = StopReason::Converged;
+            break;
+        }
+        planned = reflection.next_queries;
     }
 
     // Stacking: rank only the candidates not already in the saved pool.
@@ -189,11 +300,82 @@ where
         ranked,
         stop_reason,
         iterations: usage.iterations,
+        complete: stop_reason.is_complete(),
+        trace,
     })
 }
 
-fn pool_titles(pool: &[PaperCandidate]) -> Vec<String> {
-    pool.iter().map(|c| c.title.clone()).collect()
+/// Build the bounded, abstract-aware summary used by the reflection call.
+async fn build_pool_summary(
+    pool: &[PaperCandidate],
+    reranker: &EmbeddingReranker,
+    goal: &str,
+) -> PoolSummary {
+    let semantic_scores = reranker.semantic_scores(goal, pool).await;
+    let has_semantic_scores = !pool.is_empty() && semantic_scores.len() == pool.len();
+
+    let entries = pool
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| PoolEntry {
+            title: candidate.title.clone(),
+            year: candidate.year,
+            venue: candidate.venue.clone(),
+            semantic_score: has_semantic_scores.then(|| semantic_scores[index]),
+        })
+        .collect::<Vec<_>>();
+
+    let mut borderline_indices = if has_semantic_scores {
+        (0..pool.len()).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    borderline_indices.sort_by(|left, right| {
+        let left_distance = (semantic_scores[*left] - SEMANTIC_FLOOR).abs();
+        let right_distance = (semantic_scores[*right] - SEMANTIC_FLOOR).abs();
+        left_distance.total_cmp(&right_distance)
+    });
+    let detailed = borderline_indices
+        .into_iter()
+        .filter_map(|index| {
+            let candidate = &pool[index];
+            let abstract_text = candidate.abstract_text.as_deref()?.trim();
+            if abstract_text.is_empty() {
+                return None;
+            }
+            Some(CandidateDetail {
+                title: candidate.title.clone(),
+                year: candidate.year,
+                abstract_text: abstract_text.to_string(),
+            })
+        })
+        .take(REFLECTION_DETAIL_LIMIT)
+        .collect();
+
+    let years = pool.iter().filter_map(|candidate| candidate.year);
+    let year_min = years.clone().min();
+    let year_max = years.max();
+    let coverage = CoverageStats {
+        total: pool.len(),
+        below_floor: if has_semantic_scores {
+            semantic_scores
+                .iter()
+                .filter(|score| **score < SEMANTIC_FLOOR)
+                .count()
+        } else {
+            0
+        },
+        mean_score: has_semantic_scores
+            .then(|| semantic_scores.iter().sum::<f64>() / semantic_scores.len().max(1) as f64),
+        year_min,
+        year_max,
+    };
+
+    PoolSummary {
+        entries,
+        detailed,
+        coverage,
+    }
 }
 
 fn new_count(pool: &[PaperCandidate], existing: &HashSet<String>) -> u32 {
@@ -202,27 +384,32 @@ fn new_count(pool: &[PaperCandidate], existing: &HashSet<String>) -> u32 {
         .count() as u32
 }
 
-fn provider_call_cost(
-    _query_provider: &DiscoveryProviderChoice,
-    constraints: &SearchConstraints,
-) -> u32 {
-    constraints.providers.len().max(1) as u32
-}
-
-fn provider_label(
+/// Return only providers that have not exhausted their marginal value.
+fn active_providers(
     query_provider: &DiscoveryProviderChoice,
     constraints: &SearchConstraints,
-) -> String {
-    if constraints.providers.is_empty() {
-        return provider_name(query_provider).to_string();
-    }
-
-    constraints
-        .providers
-        .iter()
-        .map(provider_name)
-        .collect::<Vec<_>>()
-        .join("+")
+    stats: &HashMap<String, ProviderStats>,
+) -> (Vec<DiscoveryProviderChoice>, u32) {
+    let requested = if constraints.providers.is_empty() {
+        vec![*query_provider]
+    } else {
+        constraints.providers.clone()
+    };
+    let mut skipped = 0;
+    let active = requested
+        .into_iter()
+        .filter(|provider| {
+            let paying = match stats.get(provider_name(provider)) {
+                Some(provider_stats) => provider_is_paying(provider_stats),
+                None => true,
+            };
+            if !paying {
+                skipped += 1;
+            }
+            paying
+        })
+        .collect();
+    (active, skipped)
 }
 
 fn provider_name(provider: &DiscoveryProviderChoice) -> &'static str {
@@ -231,6 +418,15 @@ fn provider_name(provider: &DiscoveryProviderChoice) -> &'static str {
         DiscoveryProviderChoice::Arxiv => "arxiv",
         DiscoveryProviderChoice::EuropePmc => "europe_pmc",
         DiscoveryProviderChoice::Core => "core",
+    }
+}
+
+/// Normalize provider labels carried by candidates to the run's tally keys.
+fn candidate_provider(candidate: &PaperCandidate) -> &str {
+    match candidate.source_provider.as_str() {
+        "openalex" => "open_alex",
+        "europepmc" => "europe_pmc",
+        provider => provider,
     }
 }
 
@@ -245,7 +441,7 @@ mod tests {
     use crate::domain::discovery::{CandidateMatch, DiscoveryProviderChoice, PaperCandidate};
     use crate::domain::research::Depth;
     use crate::services::embedding::TextEmbedder;
-    use crate::services::research::planner::{Assessment, Query};
+    use crate::services::research::planner::{Query, Reflection};
 
     fn candidate(title: &str, doi: &str) -> PaperCandidate {
         PaperCandidate {
@@ -276,10 +472,11 @@ mod tests {
     }
 
     /// Returns a fixed batch each search; `refine_budget` controls how many
-    /// times `assess` says "refine" before declaring coverage sufficient.
+    /// reflections request another round before declaring convergence.
     struct FakePlanner {
         refine_budget: AtomicU32,
         plan_calls: AtomicU32,
+        query_count: usize,
     }
 
     impl FakePlanner {
@@ -287,7 +484,22 @@ mod tests {
             Self {
                 refine_budget: AtomicU32::new(refine_budget),
                 plan_calls: AtomicU32::new(0),
+                query_count: 1,
             }
+        }
+
+        fn with_query_count(mut self, query_count: usize) -> Self {
+            self.query_count = query_count;
+            self
+        }
+
+        fn queries(&self, prefix: &str) -> Vec<Query> {
+            (0..self.query_count)
+                .map(|index| Query {
+                    provider: DiscoveryProviderChoice::OpenAlex,
+                    text: format!("{prefix}-{index}"),
+                })
+                .collect()
         }
     }
 
@@ -299,40 +511,28 @@ mod tests {
             _constraints: &SearchConstraints,
         ) -> Result<Vec<Query>, ResearchError> {
             self.plan_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(vec![Query {
-                provider: DiscoveryProviderChoice::OpenAlex,
-                text: "q".to_string(),
-            }])
+            Ok(self.queries("q"))
         }
 
-        async fn refine_queries(
+        async fn reflect(
             &self,
             _goal: &str,
-            _gaps: &[String],
-            _titles: &[String],
-        ) -> Result<Vec<Query>, ResearchError> {
-            Ok(vec![Query {
-                provider: DiscoveryProviderChoice::OpenAlex,
-                text: "refined".to_string(),
-            }])
-        }
-
-        async fn assess(
-            &self,
-            _goal: &str,
-            _titles: &[String],
-        ) -> Result<Assessment, ResearchError> {
+            _pool: &PoolSummary,
+            _remaining: &BudgetRemaining,
+        ) -> Result<Reflection, ResearchError> {
             let remaining = self.refine_budget.load(Ordering::Relaxed);
             if remaining > 0 {
                 self.refine_budget.fetch_sub(1, Ordering::Relaxed);
-                Ok(Assessment {
-                    refine: true,
+                Ok(Reflection {
+                    should_continue: true,
                     gaps: vec!["a gap".to_string()],
+                    next_queries: self.queries("refined"),
                 })
             } else {
-                Ok(Assessment {
-                    refine: false,
+                Ok(Reflection {
+                    should_continue: false,
                     gaps: Vec::new(),
+                    next_queries: Vec::new(),
                 })
             }
         }
@@ -359,6 +559,16 @@ mod tests {
 
     struct FakeSource {
         batch: Vec<PaperCandidate>,
+        calls: AtomicU32,
+    }
+
+    impl FakeSource {
+        fn new(batch: Vec<PaperCandidate>) -> Self {
+            Self {
+                batch,
+                calls: AtomicU32::new(0),
+            }
+        }
     }
 
     #[async_trait]
@@ -368,7 +578,28 @@ mod tests {
             _query: &Query,
             _constraints: &SearchConstraints,
         ) -> Result<Vec<PaperCandidate>, ResearchError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(self.batch.clone())
+        }
+    }
+
+    /// Returns one never-before-seen paper per query.
+    struct GrowingSource {
+        next: AtomicU32,
+    }
+
+    #[async_trait]
+    impl CandidateSource for GrowingSource {
+        async fn search(
+            &self,
+            _query: &Query,
+            _constraints: &SearchConstraints,
+        ) -> Result<Vec<PaperCandidate>, ResearchError> {
+            let index = self.next.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![candidate(
+                &format!("Paper {index}"),
+                &format!("10/growing-{index}"),
+            )])
         }
     }
 
@@ -420,8 +651,8 @@ mod tests {
             candidate("Alpha copy", "10/a"),
             candidate("Beta", "10/b"),
         ];
-        let planner = FakePlanner::new(0); // assess: stop immediately
-        let source = FakeSource { batch };
+        let planner = FakePlanner::new(0); // reflect: converge immediately
+        let source = FakeSource::new(batch);
         let outcome = run_loop(
             &planner,
             &source,
@@ -431,7 +662,8 @@ mod tests {
             &AtomicBool::new(false),
         )
         .await;
-        assert_eq!(outcome.stop_reason, StopReason::CoverageSufficient);
+        assert_eq!(outcome.stop_reason, StopReason::Converged);
+        assert!(outcome.complete);
         assert_eq!(outcome.ranked.len(), 2);
         assert_eq!(outcome.ranked[0].rank, 1);
     }
@@ -444,7 +676,7 @@ mod tests {
             candidate("Beta", "10/b"),
         ];
         let planner = FakePlanner::new(0);
-        let source = FakeSource { batch };
+        let source = FakeSource::new(batch);
         let constraints = constraints(20);
         let strategy = Depth::Standard.budget();
         let inputs = RunInputs {
@@ -481,7 +713,7 @@ mod tests {
     async fn refine_drives_a_second_round_then_stops() {
         let batch = vec![candidate("Alpha", "10/a")];
         let planner = FakePlanner::new(1); // refine once, then stop
-        let source = FakeSource { batch };
+        let source = FakeSource::new(batch);
         let outcome = run_loop(
             &planner,
             &source,
@@ -491,16 +723,19 @@ mod tests {
             &AtomicBool::new(false),
         )
         .await;
-        assert_eq!(outcome.stop_reason, StopReason::CoverageSufficient);
-        assert_eq!(planner.plan_calls.load(Ordering::Relaxed), 1); // plan once; round 2 used refine
-        assert_eq!(outcome.iterations, 1); // one refine bump
+        assert_eq!(outcome.stop_reason, StopReason::Converged);
+        assert_eq!(planner.plan_calls.load(Ordering::Relaxed), 1); // round 2 used reflection's queries
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(outcome.trace.len(), 2);
+        assert_eq!(outcome.trace[0].gaps, vec!["a gap"]);
+        assert!(!outcome.trace[1].should_continue);
     }
 
     #[tokio::test]
     async fn cancellation_stops_the_run() {
         let batch = vec![candidate("Alpha", "10/a")];
         let planner = FakePlanner::new(5);
-        let source = FakeSource { batch };
+        let source = FakeSource::new(batch);
         let outcome = run_loop(
             &planner,
             &source,
@@ -517,7 +752,7 @@ mod tests {
     async fn budget_exhaustion_reports_max_iterations() {
         let batch = vec![candidate("Alpha", "10/a")];
         let planner = FakePlanner::new(99); // never satisfied
-        let source = FakeSource { batch };
+        let source = FakeSource::new(batch);
         // target 0 = unbounded, so only the iteration ceiling stops it.
         let outcome = run_loop(
             &planner,
@@ -529,13 +764,119 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.stop_reason, StopReason::MaxIterations);
+        assert!(!outcome.complete);
+    }
+
+    #[tokio::test]
+    async fn target_reached_on_final_round_is_complete() {
+        let planner = FakePlanner::new(99);
+        let source = FakeSource::new(vec![candidate("Alpha", "10/a")]);
+        let outcome = run_loop(
+            &planner,
+            &source,
+            &constraints(1),
+            &Depth::Quick.budget(),
+            HashSet::new(),
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert_eq!(outcome.stop_reason, StopReason::TargetReached);
+        assert!(outcome.complete);
+    }
+
+    #[tokio::test]
+    async fn later_rounds_issue_fewer_queries() {
+        let planner = FakePlanner::new(99).with_query_count(5);
+        let source = GrowingSource {
+            next: AtomicU32::new(0),
+        };
+        let strategy = Depth::Thorough.budget();
+        let search_constraints = constraints(0);
+        let inputs = RunInputs {
+            goal: "goal",
+            constraints: &search_constraints,
+            strategy: &strategy,
+            existing_keys: HashSet::new(),
+        };
+
+        let outcome = run(
+            &planner,
+            &source,
+            &EmbeddingReranker::disabled(),
+            inputs,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .await
+        .expect("loop ok");
+
+        let issued = outcome
+            .trace
+            .iter()
+            .map(|round| round.queries_issued)
+            .collect::<Vec<_>>();
+        assert_eq!(issued, vec![5, 3, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn provider_is_retired_after_two_dry_rounds() {
+        let planner = FakePlanner::new(99);
+        let source = FakeSource::new(vec![candidate("Alpha", "10/a")]);
+        let outcome = run_loop(
+            &planner,
+            &source,
+            &constraints(0),
+            &Depth::Thorough.budget(),
+            HashSet::new(),
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert_eq!(source.calls.load(Ordering::Relaxed), 3);
+        assert_eq!(outcome.trace.len(), 4);
+        assert_eq!(outcome.trace[3].queries_issued, 0);
+        assert_eq!(outcome.trace[3].queries_skipped_retired, 1);
+    }
+
+    #[test]
+    fn provider_retirement_does_not_remove_productive_siblings() {
+        let mut search_constraints = constraints(0);
+        search_constraints.providers = vec![
+            DiscoveryProviderChoice::OpenAlex,
+            DiscoveryProviderChoice::Arxiv,
+        ];
+        let mut stats = HashMap::new();
+        stats.insert(
+            "open_alex".to_string(),
+            ProviderStats {
+                dry_rounds: 2,
+                ..ProviderStats::default()
+            },
+        );
+        stats.insert(
+            "arxiv".to_string(),
+            ProviderStats {
+                new_candidates: 3,
+                ..ProviderStats::default()
+            },
+        );
+
+        let (active, skipped) = active_providers(
+            &DiscoveryProviderChoice::OpenAlex,
+            &search_constraints,
+            &stats,
+        );
+
+        assert_eq!(active, vec![DiscoveryProviderChoice::Arxiv]);
+        assert_eq!(skipped, 1);
     }
 
     #[tokio::test]
     async fn provider_budget_counts_selected_provider_fanout() {
         let batch = vec![candidate("Alpha", "10/a")];
         let planner = FakePlanner::new(0);
-        let source = FakeSource { batch };
+        let source = FakeSource::new(batch);
         let mut constraints = constraints(20);
         constraints.providers = vec![
             DiscoveryProviderChoice::OpenAlex,
@@ -578,7 +919,7 @@ mod tests {
     async fn stacking_excludes_existing_candidates() {
         let batch = vec![candidate("Alpha", "10/a"), candidate("Beta", "10/b")];
         let planner = FakePlanner::new(0);
-        let source = FakeSource { batch };
+        let source = FakeSource::new(batch);
         let mut existing = HashSet::new();
         existing.insert("doi:10/a".to_string()); // Alpha already in the pool
         let outcome = run_loop(
@@ -617,6 +958,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reflection_summary_uses_scores_and_bounds_abstracts() {
+        let pool = (0..10)
+            .map(|index| {
+                if index == 0 {
+                    candidate("Distributed language model training", "10/relevant")
+                } else {
+                    candidate(
+                        &format!("Image recognition paper {index}"),
+                        &format!("10/off-{index}"),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let reranker = EmbeddingReranker::with_embedder(Arc::new(KeywordEmbedder));
+
+        let summary = build_pool_summary(&pool, &reranker, "distributed llm training").await;
+
+        assert_eq!(summary.entries.len(), 10);
+        assert!(summary
+            .entries
+            .iter()
+            .all(|entry| entry.semantic_score.is_some()));
+        assert_eq!(summary.detailed.len(), REFLECTION_DETAIL_LIMIT);
+        assert_eq!(summary.coverage.total, 10);
+        assert!(summary.coverage.below_floor > 0);
+        assert!(summary.coverage.mean_score.is_some());
+        assert_eq!(summary.coverage.year_min, Some(2024));
+        assert_eq!(summary.coverage.year_max, Some(2024));
+    }
+
+    #[tokio::test]
+    async fn reflection_summary_degrades_to_titles_without_reranker() {
+        let pool = vec![candidate("Alpha", "10/a")];
+
+        let summary = build_pool_summary(&pool, &EmbeddingReranker::disabled(), "goal").await;
+
+        assert_eq!(summary.entries.len(), 1);
+        assert_eq!(summary.entries[0].semantic_score, None);
+        assert!(summary.detailed.is_empty());
+        assert_eq!(summary.coverage.mean_score, None);
+    }
+
+    #[tokio::test]
     async fn deep_research_ranks_by_semantic_similarity_to_goal() {
         // A relevant paper with zero citations vs. a famous, off-topic one.
         // Legacy ranking would reward the citation count; the biencoder must
@@ -628,9 +1012,7 @@ mod tests {
         famous_offtopic.citation_count = Some(200_000);
 
         let planner = FakePlanner::new(0);
-        let source = FakeSource {
-            batch: vec![famous_offtopic, relevant],
-        };
+        let source = FakeSource::new(vec![famous_offtopic, relevant]);
         let reranker = EmbeddingReranker::with_embedder(Arc::new(KeywordEmbedder));
         let strategy = Depth::Standard.budget();
         let constraints = constraints(20);
@@ -671,7 +1053,7 @@ mod tests {
         // Disabled reranker ⇒ empty scores ⇒ legacy ranking, no semantic reason.
         let batch = vec![candidate("Alpha", "10/a")];
         let planner = FakePlanner::new(0);
-        let source = FakeSource { batch };
+        let source = FakeSource::new(batch);
         let outcome = run_loop(
             &planner,
             &source,

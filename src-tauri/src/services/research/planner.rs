@@ -1,9 +1,9 @@
-//! The `Planner` seam: the LLM-backed primitives (plan/refine/assess/rank).
+//! The `Planner` seam: the LLM-backed plan, reflect, and rank primitives.
 //!
-//! Real impl talks to OpenRouter and parses JSON tolerantly; the loop depends on
-//! the trait so tests can substitute a fake. Candidates are never invented — the
-//! planner ranks by *index* into a provided candidate list, so it can only
-//! reorder/score real provider results.
+//! The real implementation talks to OpenRouter and parses JSON tolerantly; the
+//! loop depends on the trait so tests can substitute a fake. Candidates are
+//! never invented: the planner ranks by index into a provided candidate list,
+//! so it can only reorder or score real provider results.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::domain::discovery::{DiscoveryProviderChoice, PaperCandidate};
 use crate::domain::research::{RankedCandidate, SearchConstraints};
 use crate::services::llm::{self, CompletionRequest, WireMessage};
+use crate::services::research::budget::BudgetRemaining;
 use crate::services::research::error::ResearchError;
 
 /// One planned provider query.
@@ -25,13 +26,69 @@ pub struct Query {
     pub text: String,
 }
 
-/// The planner's read on coverage after an iteration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Assessment {
-    /// Whether another query round is warranted. `false` => coverage sufficient.
-    pub refine: bool,
+/// One pool entry as `reflect` sees it (RFC 0088 R6.3).
+///
+/// Title, year, venue and — when the reranker is available — the semantic score
+/// that already accounts for the abstract. Roughly twenty tokens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolEntry {
+    pub title: String,
+    pub year: Option<i32>,
+    pub venue: Option<String>,
+    pub semantic_score: Option<f64>,
+}
+
+/// A candidate shown to `reflect` in full, abstract included.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateDetail {
+    pub title: String,
+    pub year: Option<i32>,
+    pub abstract_text: String,
+}
+
+/// Computed coverage, not narrated (RFC 0088 R6.3).
+///
+/// A score distribution is a harder signal than a model's impression of a title
+/// list, and it costs nothing to produce — the reranker has already read the
+/// abstracts.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CoverageStats {
+    pub total: usize,
+    /// Candidates below `SEMANTIC_FLOOR` — present but probably off-topic.
+    pub below_floor: usize,
+    pub mean_score: Option<f64>,
+    pub year_min: Option<i32>,
+    pub year_max: Option<i32>,
+}
+
+/// What `reflect` is shown of the pool.
+///
+/// Three tiers, because the three questions differ: coverage is answerable from
+/// titles, keep-or-drop needs the abstract, and "how good is this pool overall"
+/// is arithmetic. RFC 0088 §6.3 argues the whole case; the short version is that
+/// `candidate_embed_text` already embeds title + abstract, so sending abstracts
+/// to the model pays it to re-derive a signal we computed locally for free.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PoolSummary {
+    pub entries: Vec<PoolEntry>,
+    /// Abstracts for uncertain candidates, bounded by the research loop.
+    pub detailed: Vec<CandidateDetail>,
+    pub coverage: CoverageStats,
+}
+
+/// The planner's read on the pool after a round (RFC 0088 R1.1).
+///
+/// Replaces `Assessment`: one call now answers "is this enough", "what is
+/// missing" and "what would close the gap", which were previously two calls
+/// with the gaps passed between them as loose strings.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Reflection {
+    /// Whether another round is warranted. `false` => converged.
+    pub should_continue: bool,
     #[serde(default)]
     pub gaps: Vec<String>,
+    #[serde(default)]
+    pub next_queries: Vec<Query>,
 }
 
 /// Room for a JSON object holding a handful of queries, and no more.
@@ -39,22 +96,25 @@ const PLANNER_MAX_TOKENS: u32 = 1_024;
 
 #[async_trait]
 pub trait Planner: Send + Sync {
+    /// Expand a research goal into the first round of provider queries.
     async fn plan_queries(
         &self,
         goal: &str,
         constraints: &SearchConstraints,
     ) -> Result<Vec<Query>, ResearchError>;
 
-    async fn refine_queries(
+    /// RFC 0088 R1.1/R6.1: one call that decides whether to continue, names the
+    /// gaps, and writes the queries that would close them. Replaces the
+    /// `assess` + `refine_queries` pair, which cost two round trips to reach the
+    /// same place and left the continue decision implicit.
+    async fn reflect(
         &self,
         goal: &str,
-        gaps: &[String],
-        pool_titles: &[String],
-    ) -> Result<Vec<Query>, ResearchError>;
+        pool: &PoolSummary,
+        remaining: &BudgetRemaining,
+    ) -> Result<Reflection, ResearchError>;
 
-    async fn assess(&self, goal: &str, pool_titles: &[String])
-        -> Result<Assessment, ResearchError>;
-
+    /// Rank retrieved candidates without creating new candidate identities.
     async fn rank(
         &self,
         goal: &str,
@@ -190,9 +250,13 @@ const PLAN_SYSTEM: &str = "You are a scholarly search planner. Expand the user's
 goal into focused provider queries (synonyms, key methods, datasets). Reply with a single \
 JSON object: {\"queries\":[{\"provider\":\"open_alex\"|\"arxiv\",\"text\":\"...\"}]}. No prose.";
 
-const ASSESS_SYSTEM: &str = "You judge whether a paper search has enough coverage for the \
-goal. Reply with a single JSON object: {\"refine\":true|false,\"gaps\":[\"...\"]}. Set \
-refine=false when coverage is sufficient. No prose.";
+const REFLECT_SYSTEM: &str = "You review a paper search in progress. Decide whether the \
+pool answers the goal, name what is still missing, and write the queries that would close \
+those gaps. Reply with a single JSON object: {\"should_continue\":true|false,\
+\"gaps\":[\"...\"],\"next_queries\":[{\"provider\":\"open_alex\"|\"arxiv\",\"text\":\"...\"}]}. \
+Set should_continue=false when coverage is sufficient, and leave next_queries empty then. \
+Judge coverage from the titles and the score summary; the detailed entries are the \
+borderline cases. No prose.";
 
 const RANK_SYSTEM: &str = "You rank candidate papers by fit to the goal. You are given a \
 numbered list; reply with a single JSON object {\"ranked\":[{\"index\":N,\"score\":0..1,\
@@ -221,37 +285,15 @@ impl Planner for OpenRouterPlanner {
         Ok(parsed.queries)
     }
 
-    async fn refine_queries(
+    async fn reflect(
         &self,
         goal: &str,
-        gaps: &[String],
-        pool_titles: &[String],
-    ) -> Result<Vec<Query>, ResearchError> {
-        let user = format!(
-            "Goal: {goal}\nCoverage gaps: {}\nAlready found ({} papers): {}\n\
-             Propose 3-5 NEW queries targeting the gaps.",
-            gaps.join("; "),
-            pool_titles.len(),
-            preview_titles(pool_titles),
-        );
-        let value = self.complete_json(PLAN_SYSTEM, &user).await?;
-        let parsed: QueriesResponse = serde_json::from_value(value)
-            .map_err(|e| ResearchError::new(format!("refine_queries shape: {e}")))?;
-        Ok(parsed.queries)
-    }
-
-    async fn assess(
-        &self,
-        goal: &str,
-        pool_titles: &[String],
-    ) -> Result<Assessment, ResearchError> {
-        let user = format!(
-            "Goal: {goal}\nFound {} papers: {}\nIs coverage sufficient?",
-            pool_titles.len(),
-            preview_titles(pool_titles),
-        );
-        let value = self.complete_json(ASSESS_SYSTEM, &user).await?;
-        serde_json::from_value(value).map_err(|e| ResearchError::new(format!("assess shape: {e}")))
+        pool: &PoolSummary,
+        remaining: &BudgetRemaining,
+    ) -> Result<Reflection, ResearchError> {
+        let user = render_reflect_prompt(goal, pool, remaining);
+        let value = self.complete_json(REFLECT_SYSTEM, &user).await?;
+        serde_json::from_value(value).map_err(|e| ResearchError::new(format!("reflect shape: {e}")))
     }
 
     async fn rank(
@@ -297,14 +339,82 @@ fn provider_name(choice: &DiscoveryProviderChoice) -> &'static str {
     }
 }
 
-fn preview_titles(titles: &[String]) -> String {
-    titles
-        .iter()
-        .take(40)
-        .map(|t| t.as_str())
-        .collect::<Vec<_>>()
-        .join(" | ")
+/// Render the three tiers of `PoolSummary` into one prompt (RFC 0088 R6.3).
+///
+/// Kept as a free function so it can be asserted on directly: the shape of what
+/// `reflect` sees is a design decision, and a test that pins it is cheaper than
+/// re-reading the prompt string every time the loop changes.
+fn render_reflect_prompt(goal: &str, pool: &PoolSummary, remaining: &BudgetRemaining) -> String {
+    let mut out = format!("Goal: {goal}\n");
+
+    let coverage = &pool.coverage;
+    out.push_str(&format!("Pool: {} papers", coverage.total));
+    if let Some(mean) = coverage.mean_score {
+        out.push_str(&format!(", mean relevance {mean:.2}"));
+    }
+    if coverage.below_floor > 0 {
+        out.push_str(&format!(
+            ", {} below the relevance floor",
+            coverage.below_floor
+        ));
+    }
+    if let (Some(min), Some(max)) = (coverage.year_min, coverage.year_max) {
+        out.push_str(&format!(", years {min}-{max}"));
+    }
+    out.push('\n');
+
+    out.push_str(&format!(
+        "Budget left: {} rounds, {} provider queries\n",
+        remaining.rounds, remaining.provider_queries
+    ));
+
+    out.push_str("Found:\n");
+    for entry in pool.entries.iter().take(POOL_ENTRY_CAP) {
+        out.push_str("- ");
+        out.push_str(&entry.title);
+        if let Some(year) = entry.year {
+            out.push_str(&format!(" ({year})"));
+        }
+        if let Some(venue) = entry.venue.as_deref().filter(|v| !v.is_empty()) {
+            out.push_str(&format!(" · {venue}"));
+        }
+        if let Some(score) = entry.semantic_score {
+            out.push_str(&format!(" · {score:.2}"));
+        }
+        out.push('\n');
+    }
+    if pool.entries.len() > POOL_ENTRY_CAP {
+        out.push_str(&format!(
+            "… and {} more\n",
+            pool.entries.len() - POOL_ENTRY_CAP
+        ));
+    }
+
+    if !pool.detailed.is_empty() {
+        out.push_str("Borderline (abstracts):\n");
+        for detail in &pool.detailed {
+            out.push_str(&format!(
+                "- {}{}: {}\n",
+                detail.title,
+                detail.year.map(|y| format!(" ({y})")).unwrap_or_default(),
+                detail
+                    .abstract_text
+                    .chars()
+                    .take(DETAIL_ABSTRACT_CHARS)
+                    .collect::<String>()
+            ));
+        }
+    }
+
+    out
 }
+
+/// Titles shown to `reflect`. Beyond this the list stops informing a coverage
+/// judgement and starts costing tokens.
+const POOL_ENTRY_CAP: usize = 60;
+
+/// Abstract characters per borderline candidate. ~250 tokens at 1000 chars.
+const DETAIL_ABSTRACT_CHARS: usize = 1_000;
 
 #[cfg(test)]
 mod tests {
@@ -312,13 +422,14 @@ mod tests {
 
     #[test]
     fn parses_clean_json_object() {
-        let value = extract_json_object(r#"{"refine": false, "gaps": []}"#).unwrap();
-        assert_eq!(value["refine"], false);
+        let value = extract_json_object(r#"{"should_continue":false,"gaps":[],"next_queries":[]}"#)
+            .unwrap();
+        assert_eq!(value["should_continue"], false);
     }
 
     #[test]
     fn parses_fenced_json() {
-        let raw = "```json\n{\"refine\": true, \"gaps\": [\"long-context\"]}\n```";
+        let raw = "```json\n{\"should_continue\":true,\"gaps\":[\"long-context\"],\"next_queries\":[]}\n```";
         let value = extract_json_object(raw).unwrap();
         assert_eq!(value["gaps"][0], "long-context");
     }
@@ -364,6 +475,68 @@ mod tests {
             parsed.queries[0].provider,
             DiscoveryProviderChoice::OpenAlex
         );
+    }
+
+    #[test]
+    fn reflection_requires_an_explicit_continue_decision() {
+        let missing_decision = serde_json::json!({
+            "gaps": ["missing benchmarks"],
+            "next_queries": []
+        });
+        assert!(serde_json::from_value::<Reflection>(missing_decision).is_err());
+
+        let reflection: Reflection = serde_json::from_value(serde_json::json!({
+            "should_continue": true,
+            "gaps": ["missing benchmarks"],
+            "next_queries": [{
+                "provider": "arxiv",
+                "text": "benchmark sparse autoencoders"
+            }]
+        }))
+        .unwrap();
+        assert!(reflection.should_continue);
+        assert_eq!(
+            reflection.next_queries[0].provider,
+            DiscoveryProviderChoice::Arxiv
+        );
+    }
+
+    #[test]
+    fn reflection_prompt_contains_coverage_budget_and_bounded_detail() {
+        let summary = PoolSummary {
+            entries: vec![PoolEntry {
+                title: "Sparse Autoencoders".to_string(),
+                year: Some(2024),
+                venue: Some("ICML".to_string()),
+                semantic_score: Some(0.81),
+            }],
+            detailed: vec![CandidateDetail {
+                title: "Borderline Paper".to_string(),
+                year: Some(2023),
+                abstract_text: "An uncertain but relevant abstract.".to_string(),
+            }],
+            coverage: CoverageStats {
+                total: 1,
+                below_floor: 0,
+                mean_score: Some(0.81),
+                year_min: Some(2024),
+                year_max: Some(2024),
+            },
+        };
+        let prompt = render_reflect_prompt(
+            "mechanistic interpretability",
+            &summary,
+            &BudgetRemaining {
+                rounds: 2,
+                provider_queries: 5,
+            },
+        );
+
+        assert!(prompt.contains("Goal: mechanistic interpretability"));
+        assert!(prompt.contains("mean relevance 0.81"));
+        assert!(prompt.contains("Budget left: 2 rounds, 5 provider queries"));
+        assert!(prompt.contains("Sparse Autoencoders (2024) · ICML · 0.81"));
+        assert!(prompt.contains("An uncertain but relevant abstract."));
     }
 
     #[test]
