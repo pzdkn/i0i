@@ -13,19 +13,21 @@ use crate::domain::chat::{
 };
 use crate::domain::chunking::{chunk_blocks, CHUNK_VERSION};
 use crate::domain::context::{ContextItem, ContextItemDraft, ContextKey, PageRects};
-use crate::pdf_layout::NormRect;
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
     CiteRecord, DocumentAsset, DocumentBlock, DocumentChunk, DocumentExtraction, DocumentPage,
     DocumentSource, DocumentSpan, EmbeddingCoverage, ExtractionStructure, LibrarySnapshot, Paper,
-    PaperDraft,
-    PaperMetadataEnrichment, PaperMetadataUpdate, PaperSourceDraft, Vault, VaultDraft, VaultPaper,
-    VaultRenameDraft,
+    PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate, PaperSourceDraft, Vault, VaultDraft,
+    VaultPaper, VaultRenameDraft,
 };
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, Search, SearchCandidate, SearchDraft, SearchRun,
     SearchRunStatus,
 };
+use crate::domain::vault_suggestion::{
+    VaultSuggestion, VaultSuggestionRun, VaultSuggestionSnapshot,
+};
+use crate::pdf_layout::NormRect;
 
 type StoreResult<T> = Result<T, String>;
 
@@ -803,9 +805,7 @@ impl LibraryStore {
         // best chunk — which is the right degradation: broad-but-shallow beats
         // deep-in-the-first-few-papers when someone searches their whole
         // library.
-        let per_partition_k = (limit as usize)
-            .div_ceil(paper_ids.len())
-            .max(1) as i64;
+        let per_partition_k = (limit as usize).div_ceil(paper_ids.len()).max(1) as i64;
 
         // The partition filter takes a set, which is what lets one query serve
         // any scope — verified by `vec0_partition_filter_accepts_a_set_of_papers`.
@@ -1005,8 +1005,7 @@ impl LibraryStore {
         query: &str,
         limit: i64,
     ) -> StoreResult<Vec<DocumentChunk>> {
-        let ranking =
-            self.lexical_chunk_ranking(&[paper_id.to_string()], query, limit)?;
+        let ranking = self.lexical_chunk_ranking(&[paper_id.to_string()], query, limit)?;
         let ids: Vec<String> = ranking.iter().map(|(id, _)| id.clone()).collect();
         let mut chunks = self.chunks_by_ids(&ids)?;
         // `chunks_by_ids` returns rows in table order; restore rank order.
@@ -1126,7 +1125,13 @@ impl LibraryStore {
         local_path: &str,
     ) -> StoreResult<()> {
         self.add_local_source_to_vault(
-            paper, vault_id, source_id, source_url, local_path, "pdf", "local_import",
+            paper,
+            vault_id,
+            source_id,
+            source_url,
+            local_path,
+            "pdf",
+            "local_import",
         )
     }
 
@@ -1142,7 +1147,13 @@ impl LibraryStore {
         local_path: &str,
     ) -> StoreResult<()> {
         self.add_local_source_to_vault(
-            paper, vault_id, source_id, source_url, local_path, "html", "html_import",
+            paper,
+            vault_id,
+            source_id,
+            source_url,
+            local_path,
+            "html",
+            "html_import",
         )
     }
 
@@ -1571,7 +1582,10 @@ impl LibraryStore {
         // RFC 0079 R6.2: `highlights` declares no FK to papers at all, so its
         // rows survived every paper deletion. Explicit here rather than a table
         // rebuild — the FK is the better fix, this is the safe one.
-        tx.execute("delete from highlights where paper_id = ?1", params![paper_id])
+        tx.execute(
+            "delete from highlights where paper_id = ?1",
+            params![paper_id],
+        )
             .map_err(|error| error.to_string())?;
 
         tx.commit().map_err(|error| error.to_string())?;
@@ -2955,6 +2969,42 @@ impl LibraryStore {
 
             create index if not exists idx_search_candidates_search_id
               on search_candidates(search_id);
+
+            create table if not exists vault_suggestion_runs (
+              id text primary key,
+              vault_id text not null,
+              status text not null,
+              message text not null default '',
+              stop_reason text,
+              error text,
+              result_count integer not null default 0,
+              started_at text,
+              finished_at text,
+              created_at text not null,
+              foreign key (vault_id) references vaults(id) on delete cascade
+            );
+
+            create index if not exists idx_vault_suggestion_runs_vault
+              on vault_suggestion_runs(vault_id, created_at desc);
+
+            create table if not exists vault_suggestions (
+              id text primary key,
+              vault_id text not null,
+              run_id text not null,
+              paper_ref text not null,
+              candidate_json text not null,
+              reason text not null,
+              score real not null,
+              state text not null,
+              created_at text not null,
+              updated_at text not null,
+              unique (vault_id, paper_ref),
+              foreign key (vault_id) references vaults(id) on delete cascade,
+              foreign key (run_id) references vault_suggestion_runs(id) on delete cascade
+            );
+
+            create index if not exists idx_vault_suggestions_vault_state
+              on vault_suggestions(vault_id, state);
             ",
         )
         .map_err(|error| error.to_string())?;
@@ -3647,10 +3697,7 @@ fn point_from_rects_json(raw: Option<&str>) -> (f64, f64) {
     )
 }
 
-fn read_highlight(
-    conn: &Connection,
-    id: &str,
-) -> StoreResult<crate::domain::highlight::Highlight> {
+fn read_highlight(conn: &Connection, id: &str) -> StoreResult<crate::domain::highlight::Highlight> {
     conn.query_row(
         "
         select id, paper_id, source_id, locator_kind, start_offset, end_offset,
@@ -4204,6 +4251,328 @@ impl LibraryStore {
         .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    /// Read the actionable suggestion inbox and its latest run for one vault.
+    pub fn get_vault_suggestions(&self, vault_id: &str) -> StoreResult<VaultSuggestionSnapshot> {
+        let conn = self.open_connection()?;
+        Ok(VaultSuggestionSnapshot {
+            suggestions: read_vault_suggestions(&conn, vault_id, Some("pending"))?,
+            latest_run: read_latest_vault_suggestion_run(&conn, vault_id)?,
+        })
+    }
+
+    /// Start a vault-scoped run ledger entry in `queued` state.
+    pub fn create_vault_suggestion_run(&self, vault_id: &str) -> StoreResult<VaultSuggestionRun> {
+        let conn = self.open_connection()?;
+        let id = timestamped_id("vsr")?;
+        conn.execute(
+            "insert into vault_suggestion_runs
+               (id, vault_id, status, message, started_at, created_at)
+             values (?1, ?2, 'queued', 'Queued', datetime('now'), datetime('now'))",
+            params![id, vault_id],
+        )
+        .map_err(|error| error.to_string())?;
+        read_vault_suggestion_run(&conn, &id)
+    }
+
+    /// Update the durable user-facing lifecycle for a suggestion run.
+    pub fn set_vault_suggestion_run_status(
+        &self,
+        run_id: &str,
+        status: &str,
+        message: &str,
+        stop_reason: Option<&str>,
+        error: Option<&str>,
+        result_count: i32,
+        finished: bool,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let finished_sql = if finished {
+            "datetime('now')"
+        } else {
+            "finished_at"
+        };
+        conn.execute(
+            &format!(
+                "update vault_suggestion_runs
+                 set status = ?2, message = ?3, stop_reason = ?4, error = ?5,
+                     result_count = ?6, finished_at = {finished_sql}
+                 where id = ?1"
+            ),
+            params![run_id, status, message, stop_reason, error, result_count],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Atomically replace pending rows after a successful refresh.
+    ///
+    /// Added and dismissed rows survive and suppress matching candidates in
+    /// later runs. This is also what keeps a failed refresh from erasing the
+    /// previous inbox: callers replace only after all retrieval has succeeded.
+    pub fn replace_vault_suggestions(
+        &self,
+        vault_id: &str,
+        run_id: &str,
+        suggestions: &[VaultSuggestion],
+    ) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "delete from vault_suggestions where vault_id = ?1 and state = 'pending'",
+            params![vault_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        for suggestion in suggestions {
+            let candidate_json =
+                serde_json::to_string(&suggestion.candidate).map_err(|error| error.to_string())?;
+            tx.execute(
+                "insert into vault_suggestions
+                   (id, vault_id, run_id, paper_ref, candidate_json, reason,
+                    score, state, created_at, updated_at)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', datetime('now'), datetime('now'))
+                 on conflict(vault_id, paper_ref) do nothing",
+                params![
+                    suggestion.id,
+                    vault_id,
+                    run_id,
+                    suggestion.paper_ref,
+                    candidate_json,
+                    suggestion.reason,
+                    suggestion.score,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// Move one suggestion between pending, dismissed, and added.
+    pub fn set_vault_suggestion_state(&self, suggestion_id: &str, state: &str) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update vault_suggestions
+             set state = ?2, updated_at = datetime('now') where id = ?1",
+            params![suggestion_id, state],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Persist a decision made on a provisional row before finalisation.
+    pub fn upsert_vault_suggestion_decision(
+        &self,
+        suggestion: &VaultSuggestion,
+        state: &str,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let candidate_json =
+            serde_json::to_string(&suggestion.candidate).map_err(|error| error.to_string())?;
+        conn.execute(
+            "insert into vault_suggestions
+               (id, vault_id, run_id, paper_ref, candidate_json, reason, score,
+                state, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
+             on conflict(vault_id, paper_ref) do update set
+               state = excluded.state, updated_at = datetime('now')",
+            params![
+                suggestion.id,
+                suggestion.vault_id,
+                suggestion.run_id,
+                suggestion.paper_ref,
+                candidate_json,
+                suggestion.reason,
+                suggestion.score,
+                state,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Load one suggestion for Add and Undo commands.
+    pub fn get_vault_suggestion(&self, suggestion_id: &str) -> StoreResult<VaultSuggestion> {
+        let conn = self.open_connection()?;
+        read_vault_suggestion(&conn, suggestion_id)
+    }
+
+    /// Candidate refs permanently suppressed by a prior decision.
+    pub fn decided_vault_suggestion_refs(&self, vault_id: &str) -> StoreResult<Vec<String>> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select paper_ref from vault_suggestions
+                 where vault_id = ?1 and state in ('added', 'dismissed')",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![vault_id], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
+    /// Mean current-model chunk embedding for papers in one vault.
+    pub fn vault_embedding_centroid(
+        &self,
+        vault_id: &str,
+        model: &str,
+        model_version: &str,
+    ) -> StoreResult<Option<Vec<f32>>> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select e.embedding, e.dimensions
+                 from document_chunk_embeddings e
+                 join document_chunks c on c.id = e.chunk_id
+                 join vault_papers vp on vp.paper_id = c.paper_id
+                 where vp.vault_id = ?1 and e.model = ?2 and e.model_version = ?3",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![vault_id, model, model_version], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let vectors = collect_rows(rows)?;
+        mean_embedding(&vectors)
+    }
+
+    /// Pick at most one vault due for the weekly suggestion schedule.
+    pub fn due_vault_for_weekly_suggestions(&self) -> StoreResult<Option<String>> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "select v.id
+             from vaults v
+             where (select count(*) from vault_papers vp where vp.vault_id = v.id) >= 3
+               and coalesce(
+                 (select max(r.finished_at) from vault_suggestion_runs r where r.vault_id = v.id),
+                 '1970-01-01'
+               ) < datetime('now', '-7 days')
+             order by v.updated_at desc, v.id
+             limit 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn read_vault_suggestions(
+    conn: &Connection,
+    vault_id: &str,
+    state: Option<&str>,
+) -> StoreResult<Vec<VaultSuggestion>> {
+    let sql = format!(
+        "select {VAULT_SUGGESTION_COLUMNS} from vault_suggestions
+         where vault_id = ?1 and (?2 is null or state = ?2)
+         order by score desc, id"
+    );
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![vault_id, state], vault_suggestion_from_row)
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+const VAULT_SUGGESTION_COLUMNS: &str =
+    "id, vault_id, run_id, paper_ref, candidate_json, reason, score, state, created_at, updated_at";
+
+fn read_vault_suggestion(conn: &Connection, id: &str) -> StoreResult<VaultSuggestion> {
+    conn.query_row(
+        &format!("select {VAULT_SUGGESTION_COLUMNS} from vault_suggestions where id = ?1"),
+        params![id],
+        vault_suggestion_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn vault_suggestion_from_row(row: &rusqlite::Row) -> rusqlite::Result<VaultSuggestion> {
+    let candidate_json: String = row.get(4)?;
+    let candidate = serde_json::from_str(&candidate_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(VaultSuggestion {
+        id: row.get(0)?,
+        vault_id: row.get(1)?,
+        run_id: row.get(2)?,
+        paper_ref: row.get(3)?,
+        candidate,
+        reason: row.get(5)?,
+        score: row.get(6)?,
+        state: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+const VAULT_SUGGESTION_RUN_COLUMNS: &str =
+    "id, vault_id, status, message, stop_reason, error, result_count, started_at, finished_at, created_at";
+
+fn read_vault_suggestion_run(conn: &Connection, id: &str) -> StoreResult<VaultSuggestionRun> {
+    conn.query_row(
+        &format!("select {VAULT_SUGGESTION_RUN_COLUMNS} from vault_suggestion_runs where id = ?1"),
+        params![id],
+        vault_suggestion_run_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn read_latest_vault_suggestion_run(
+    conn: &Connection,
+    vault_id: &str,
+) -> StoreResult<Option<VaultSuggestionRun>> {
+    conn.query_row(
+        &format!(
+            "select {VAULT_SUGGESTION_RUN_COLUMNS} from vault_suggestion_runs
+             where vault_id = ?1 order by created_at desc, id desc limit 1"
+        ),
+        params![vault_id],
+        vault_suggestion_run_from_row,
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+}
+
+fn vault_suggestion_run_from_row(row: &rusqlite::Row) -> rusqlite::Result<VaultSuggestionRun> {
+    Ok(VaultSuggestionRun {
+        id: row.get(0)?,
+        vault_id: row.get(1)?,
+        status: row.get(2)?,
+        message: row.get(3)?,
+        stop_reason: row.get(4)?,
+        error: row.get(5)?,
+        result_count: row.get(6)?,
+        started_at: row.get(7)?,
+        finished_at: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+fn mean_embedding(rows: &[(Vec<u8>, i64)]) -> StoreResult<Option<Vec<f32>>> {
+    let Some((_, dimensions)) = rows.first() else {
+        return Ok(None);
+    };
+    let dimensions = *dimensions as usize;
+    let mut mean = vec![0.0_f32; dimensions];
+    let mut count = 0_f32;
+    for (blob, row_dimensions) in rows {
+        if *row_dimensions as usize != dimensions || blob.len() != dimensions * 4 {
+            continue;
+        }
+        for (index, bytes) in blob.chunks_exact(4).enumerate() {
+            mean[index] += f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        count += 1.0;
+    }
+    if count == 0.0 {
+        return Ok(None);
+    }
+    for value in &mut mean {
+        *value /= count;
+    }
+    Ok(Some(mean))
 }
 
 fn read_search(conn: &Connection, id: &str) -> StoreResult<Search> {
@@ -4871,7 +5240,9 @@ fn register_sqlite_vec() {
                     *mut *mut i8,
                     *const rusqlite::ffi::sqlite3_api_routines,
                 ) -> i32,
-            >(sqlite_vec::sqlite3_vec_init as *const ())));
+            >(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
         }
     });
 }
@@ -6035,9 +6406,14 @@ mod tests {
         assert_eq!(source.source_kind, "html");
         assert_eq!(source.status, "cached");
         assert_eq!(source.acquisition_method.as_deref(), Some("html_import"));
-        assert_eq!(source.source_url.as_deref(), Some("https://example.com/post"));
         assert_eq!(
-            paper(&snapshot, "web:deadbeef1234").active_source_id.as_deref(),
+            source.source_url.as_deref(),
+            Some("https://example.com/post")
+        );
+        assert_eq!(
+            paper(&snapshot, "web:deadbeef1234")
+                .active_source_id
+                .as_deref(),
             Some(source_id)
         );
 
@@ -6455,14 +6831,20 @@ mod tests {
             Some("important"),
             &crate::domain::highlight::HighlightAuthor::User,
         )?;
-        assert_eq!(hl.color, Some(crate::domain::highlight::HighlightColor::Yellow));
+        assert_eq!(
+            hl.color,
+            Some(crate::domain::highlight::HighlightColor::Yellow)
+        );
         assert_eq!(hl.excerpt, "quoted text");
 
         db.store
             .recolor_highlight(&hl.id, crate::domain::highlight::HighlightColor::Red)?;
         let listed = db.store.list_highlights(paper_id)?;
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].color, Some(crate::domain::highlight::HighlightColor::Red));
+        assert_eq!(
+            listed[0].color,
+            Some(crate::domain::highlight::HighlightColor::Red)
+        );
 
         db.store.remove_highlight(&hl.id)?;
         assert!(db.store.list_highlights(paper_id)?.is_empty());
@@ -6553,14 +6935,20 @@ mod tests {
         db.store.migrate_threads_to_highlights()?;
 
         // Before: the auto-pinned note is in Pins.
-        assert_eq!(db.store.list_pinned_chat_entries("paper", paper_id)?.len(), 1);
+        assert_eq!(
+            db.store.list_pinned_chat_entries("paper", paper_id)?.len(),
+            1
+        );
 
         assert_eq!(db.store.migrate_notes_into_highlight_field()?, 1);
 
         // After: content lives on the passage; Pins no longer carries the note.
         let highlights = db.store.list_highlights(paper_id)?;
         assert_eq!(highlights[0].note.as_deref(), Some("kept note"));
-        assert_eq!(db.store.list_pinned_chat_entries("paper", paper_id)?.len(), 0);
+        assert_eq!(
+            db.store.list_pinned_chat_entries("paper", paper_id)?.len(),
+            0
+        );
         Ok(())
     }
 
@@ -6816,8 +7204,14 @@ mod tests {
             &db,
             paper_id,
             &[
-                ("paragraph", "Scaled dot-product attention divides by sqrt(d_k)."),
-                ("paragraph", "Multi-head attention runs several in parallel."),
+                (
+                    "paragraph",
+                    "Scaled dot-product attention divides by sqrt(d_k).",
+                ),
+                (
+                    "paragraph",
+                    "Multi-head attention runs several in parallel.",
+                ),
             ],
         )?;
         let chunk_ids: Vec<String> = db
@@ -6925,8 +7319,12 @@ mod tests {
     #[test]
     fn delete_annotation_on_a_sticky_removes_only_the_sticky() -> StoreResult<()> {
         let db = test_db()?;
-        db.store
-            .add_note_at_anchor("paper", "vaswani2017", &ThreadAnchor::Document, "unrelated")?;
+        db.store.add_note_at_anchor(
+            "paper",
+            "vaswani2017",
+            &ThreadAnchor::Document,
+            "unrelated",
+        )?;
         let sticky = db.store.insert_highlight(
             "vaswani2017",
             &Locator::PdfPoint {
@@ -7503,16 +7901,15 @@ mod tests {
 
         // Vault only.
         assert_eq!(
-            db.store.resolve_search_scope(&none, &[other_vault.clone()])?,
+            db.store
+                .resolve_search_scope(&none, &[other_vault.clone()])?,
             vec!["lonely".to_string()]
         );
 
         // Both, intersecting.
         assert_eq!(
-            db.store.resolve_search_scope(
-                &["vaswani2017".to_string()],
-                &["attention".to_string()]
-            )?,
+            db.store
+                .resolve_search_scope(&["vaswani2017".to_string()], &["attention".to_string()])?,
             vec!["vaswani2017".to_string()]
         );
 
@@ -7556,8 +7953,8 @@ mod tests {
 
         // Scoping to the far paper returns *its* chunk, not the globally nearer
         // one — the whole reason paper_id is a partition key.
-        let scoped =
-            db.store
+        let scoped = db
+            .store
                 .semantic_chunk_ranking(&["far-paper".to_string()], &on_axis, 10)?;
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].0, far_chunk.id);
@@ -7577,10 +7974,14 @@ mod tests {
         db.store
             .save_chunk_embedding(&chunk.id, "m", "1", CHUNK_VERSION, &vector)?;
 
-        let ranked = db
-            .store
+        let ranked =
+            db.store
             .semantic_chunk_ranking(&["reembed-paper".to_string()], &vector, 10)?;
-        assert_eq!(ranked.len(), 1, "vec0 has no upsert; the insert must replace");
+        assert_eq!(
+            ranked.len(),
+            1,
+            "vec0 has no upsert; the insert must replace"
+        );
         Ok(())
     }
 
@@ -7682,7 +8083,9 @@ mod tests {
                     *mut *mut i8,
                     *const rusqlite::ffi::sqlite3_api_routines,
                 ) -> i32,
-            >(sqlite_vec::sqlite3_vec_init as *const ())));
+            >(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
         }
 
         let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
@@ -7893,7 +8296,9 @@ mod tests {
                     *mut *mut i8,
                     *const rusqlite::ffi::sqlite3_api_routines,
                 ) -> i32,
-            >(sqlite_vec::sqlite3_vec_init as *const ())));
+            >(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
         }
     }
 
@@ -8078,7 +8483,15 @@ mod tests {
                   (select count(*) from document_chunk_vectors)
                 ",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .map_err(|error| error.to_string())?;
 
@@ -8140,8 +8553,13 @@ mod tests {
         assert_eq!(before.embedded, 0);
         assert_eq!(before.chunks, chunks.len() as i64);
 
-        db.store
-            .save_chunk_embedding(&chunks[0].id, "test-model", "1", CHUNK_VERSION, &[0.5; 8])?;
+        db.store.save_chunk_embedding(
+            &chunks[0].id,
+            "test-model",
+            "1",
+            CHUNK_VERSION,
+            &[0.5; 8],
+        )?;
 
         let after = db
             .store
@@ -8160,11 +8578,8 @@ mod tests {
     #[test]
     fn chunks_missing_embedding_is_the_whole_work_queue() -> StoreResult<()> {
         let db = test_db()?;
-        let extraction = extracted_paper(
-            &db,
-            "queue-paper",
-            &[("paragraph", &"token ".repeat(900))],
-        )?;
+        let extraction =
+            extracted_paper(&db, "queue-paper", &[("paragraph", &"token ".repeat(900))])?;
         let chunks = db.store.chunks_for_extraction(&extraction.id)?;
         assert!(chunks.len() >= 2);
 
@@ -8281,7 +8696,10 @@ mod tests {
         let extraction = extracted_paper(
             &db,
             "vaswani2017",
-            &[("paragraph", "First passage."), ("paragraph", "Second passage.")],
+            &[
+                ("paragraph", "First passage."),
+                ("paragraph", "Second passage."),
+            ],
         )?;
         let chunks = db.store.chunks_for_extraction(&extraction.id)?;
         let thread = db
@@ -8367,7 +8785,10 @@ mod tests {
         let extraction = extracted_paper(
             &db,
             "vaswani2017",
-            &[("paragraph", "First passage."), ("paragraph", "Second passage.")],
+            &[
+                ("paragraph", "First passage."),
+                ("paragraph", "Second passage."),
+            ],
         )?;
         let chunks = db.store.chunks_for_extraction(&extraction.id)?;
         let thread = db
@@ -8400,7 +8821,11 @@ mod tests {
         )?;
 
         let items = db.store.context_items(&thread.id)?;
-        assert_eq!(items.len(), 1, "the chunk items were replaced, not added to");
+        assert_eq!(
+            items.len(),
+            1,
+            "the chunk items were replaced, not added to"
+        );
         assert_eq!(items[0].kind, "summary");
         assert_eq!(items[0].covers_through_entry_id.as_deref(), Some("entry-9"));
 
@@ -8412,7 +8837,8 @@ mod tests {
     #[test]
     fn chunks_overlapping_finds_the_passage_after_its_chunk_id_is_gone() -> StoreResult<()> {
         let db = test_db()?;
-        let extraction = extracted_paper(&db, "vaswani2017", &[("paragraph", "A durable passage.")])?;
+        let extraction =
+            extracted_paper(&db, "vaswani2017", &[("paragraph", "A durable passage.")])?;
         let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
         let (start, end) = (chunk.source_start, chunk.source_end);
 
@@ -8524,6 +8950,102 @@ mod tests {
             .store
             .extractions_needing_rechunk()?
             .contains(&extraction.id));
+        Ok(())
+    }
+
+    #[test]
+    fn dismissed_vault_suggestion_survives_refresh_replacement() -> StoreResult<()> {
+        let db = test_db()?;
+        let first_run = db.store.create_vault_suggestion_run("attention")?;
+        let candidate = sample_candidate("Durably dismissed", Some("10.1/dismissed"));
+        let suggestion = VaultSuggestion {
+            id: "vs-dismissed".to_string(),
+            vault_id: "attention".to_string(),
+            run_id: first_run.id.clone(),
+            paper_ref: candidate_dedup_key(&candidate),
+            candidate: candidate.clone(),
+            reason: "Related".to_string(),
+            score: 1.0,
+            state: "pending".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.store.replace_vault_suggestions(
+            "attention",
+            &first_run.id,
+            std::slice::from_ref(&suggestion),
+        )?;
+        db.store
+            .set_vault_suggestion_state(&suggestion.id, "dismissed")?;
+
+        let second_run = db.store.create_vault_suggestion_run("attention")?;
+        db.store.replace_vault_suggestions(
+            "attention",
+            &second_run.id,
+            std::slice::from_ref(&suggestion),
+        )?;
+
+        assert!(db
+            .store
+            .get_vault_suggestions("attention")?
+            .suggestions
+            .is_empty());
+        assert_eq!(
+            db.store.decided_vault_suggestion_refs("attention")?,
+            vec![candidate_dedup_key(&candidate)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_vault_suggestions_are_replaced_atomically() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = db.store.create_vault_suggestion_run("attention")?;
+        let make = |id: &str| {
+            let candidate = sample_candidate(id, None);
+            VaultSuggestion {
+                id: format!("vs-{id}"),
+                vault_id: "attention".to_string(),
+                run_id: run.id.clone(),
+                paper_ref: candidate_dedup_key(&candidate),
+                candidate,
+                reason: "Related".to_string(),
+                score: 1.0,
+                state: "pending".to_string(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            }
+        };
+        db.store
+            .replace_vault_suggestions("attention", &run.id, &[make("old")])?;
+        db.store
+            .replace_vault_suggestions("attention", &run.id, &[make("new")])?;
+
+        let suggestions = db.store.get_vault_suggestions("attention")?.suggestions;
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].candidate.title, "new");
+        Ok(())
+    }
+
+    #[test]
+    fn mean_embedding_averages_compatible_rows() -> StoreResult<()> {
+        let rows = vec![
+            (
+                [1.0_f32, 3.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+                2,
+            ),
+            (
+                [3.0_f32, 5.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+                2,
+            ),
+        ];
+        assert_eq!(mean_embedding(&rows)?, Some(vec![2.0, 4.0]));
         Ok(())
     }
 }

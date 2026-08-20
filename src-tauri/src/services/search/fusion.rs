@@ -10,6 +10,29 @@
 /// agreeing on a chunk should outrank one signal's enthusiasm for another.
 const RRF_K: f64 = 60.0;
 
+/// Fuse any number of rankings by position, best first.
+///
+/// Vault suggestions have Deep Research, vault similarity, graph frequency,
+/// and citation-prior rankings. Their native scores are incomparable, so the
+/// same position-only rule used by hybrid search is the honest combiner.
+pub fn reciprocal_rank_fusion_many(rankings: &[Vec<(String, f64)>]) -> Vec<(String, f64)> {
+    let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for ranking in rankings {
+        for (index, (id, _)) in ranking.iter().enumerate() {
+            *scores.entry(id.clone()).or_default() += 1.0 / (RRF_K + index as f64 + 1.0);
+        }
+    }
+    let mut fused: Vec<(String, f64)> = scores.into_iter().collect();
+    fused.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    fused
+}
+
 /// One signal's opinion of one chunk.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,10 +62,7 @@ pub struct Fused {
 /// that is comparable across both.
 ///
 /// Native scores are carried through untouched so a UI can explain a hit.
-pub fn reciprocal_rank_fusion(
-    lexical: &[(String, f64)],
-    semantic: &[(String, f64)],
-) -> Vec<Fused> {
+pub fn reciprocal_rank_fusion(lexical: &[(String, f64)], semantic: &[(String, f64)]) -> Vec<Fused> {
     let mut fused: Vec<Fused> = Vec::new();
 
     let mut absorb = |ranking: &[(String, f64)], is_lexical: bool| {
@@ -139,8 +159,12 @@ mod tests {
         let fused = reciprocal_rank_fusion(&ranking(&["a"]), &ranking(&["b"]));
 
         assert_eq!(fused.len(), 2);
-        assert!(fused.iter().any(|f| f.chunk_id == "a" && f.semantic.is_none()));
-        assert!(fused.iter().any(|f| f.chunk_id == "b" && f.lexical.is_none()));
+        assert!(fused
+            .iter()
+            .any(|f| f.chunk_id == "a" && f.semantic.is_none()));
+        assert!(fused
+            .iter()
+            .any(|f| f.chunk_id == "b" && f.lexical.is_none()));
     }
 
     #[test]
@@ -197,5 +221,16 @@ mod tests {
         assert_eq!(fused[0].score, 3.5, "single-mode score is the native score");
         assert_eq!(fused[0].lexical.unwrap().rank, 1);
         assert!(fused[0].semantic.is_none());
+    }
+
+    #[test]
+    fn many_signal_fusion_rewards_repeated_candidates() {
+        let fused = reciprocal_rank_fusion_many(&[
+            ranking(&["deep", "shared"]),
+            ranking(&["semantic", "shared"]),
+            ranking(&["shared"]),
+        ]);
+
+        assert_eq!(fused[0].0, "shared");
     }
 }

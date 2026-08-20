@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use crate::commands::discovery::orchestrator::DiscoveryOrchestrator;
 use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
-    DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
+    DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort, Lineage, PaperCandidate,
 };
 use crate::domain::research::SearchConstraints;
 use crate::services::research::error::ResearchError;
@@ -43,6 +43,19 @@ pub struct RealCandidateSource {
 impl RealCandidateSource {
     pub fn new(openalex: OpenAlexProvider, arxiv: ArxivProvider) -> Self {
         Self { openalex, arxiv }
+    }
+
+    /// Fetch a bounded OpenAlex citation neighbourhood for vault suggestions.
+    pub async fn lineage(
+        &self,
+        work_id: &str,
+        lineage: Lineage,
+        limit: i32,
+    ) -> Result<Vec<PaperCandidate>, ResearchError> {
+        self.openalex
+            .lineage(work_id, lineage, limit)
+            .await
+            .map_err(|error| ResearchError::new(error.to_string()))
     }
 
     fn request_for(query: &Query, constraints: &SearchConstraints) -> DiscoverySearchRequest {

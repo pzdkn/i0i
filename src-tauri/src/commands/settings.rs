@@ -225,7 +225,7 @@ pub fn get_reranker_status(
 
 /// Only allow writes to the known setting namespaces.
 fn is_allowed_key(key: &str) -> bool {
-    ["secret.", "model.", "search.", "acquisition."]
+    ["secret.", "model.", "search.", "acquisition.", "suggestions."]
         .iter()
         .any(|prefix| key.starts_with(prefix))
 }
@@ -239,6 +239,7 @@ mod tests {
         assert!(is_allowed_key("secret.openrouter"));
         assert!(is_allowed_key("model.chat"));
         assert!(is_allowed_key("search.default_expand"));
+        assert!(is_allowed_key("suggestions.weekly_enabled"));
         assert!(!is_allowed_key("arbitrary.key"));
         assert!(!is_allowed_key("../../etc/passwd"));
     }

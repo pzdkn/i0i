@@ -12,3 +12,4 @@ pub mod research;
 pub mod search;
 pub mod settings;
 pub mod source_acquisition;
+pub mod vault_suggestions;

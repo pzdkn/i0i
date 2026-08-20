@@ -6,6 +6,7 @@
   } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
   import MetadataPanel from "$lib/features/library/MetadataPanel.svelte";
+  import type { VaultSuggestion, VaultSuggestionRun } from "$lib/domain/vault-suggestion";
 
   let {
     papers,
@@ -15,6 +16,11 @@
     onAutofillMetadata,
     onApplyMetadataCandidate,
     onUpdatePaperMetadata,
+    activeVaultView,
+    selectedSuggestion,
+    suggestionCount,
+    suggestionRun,
+    onOpenSuggestions,
   }: {
     papers: Paper[];
     selectedPaper: Paper | undefined;
@@ -23,6 +29,11 @@
     onAutofillMetadata: (paperId: string) => void | Promise<void>;
     onApplyMetadataCandidate: (paperId: string, candidate: MetadataCandidate) => void | Promise<void>;
     onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
+    activeVaultView: "papers" | "suggestions";
+    selectedSuggestion: VaultSuggestion | undefined;
+    suggestionCount: number;
+    suggestionRun: VaultSuggestionRun | undefined;
+    onOpenSuggestions: () => void;
   } = $props();
 
   const readCount = $derived(papers.filter((paper) => paper.status === "READ").length);
@@ -35,7 +46,13 @@
 
 <aside class="inspector hair-l">
   <header class="hair-b">
-    {#if selectedPaper}
+    {#if activeVaultView === "suggestions" && selectedSuggestion}
+      <div class="paper-name truncate">{selectedSuggestion.candidate.title}</div>
+      <div class="mono-dim">suggested / {selectedSuggestion.candidate.sourceProvider}</div>
+    {:else if activeVaultView === "suggestions"}
+      <div class="paper-name truncate">Suggestions</div>
+      <div class="mono-dim">{suggestionRun?.message ?? "No suggestion selected"}</div>
+    {:else if selectedPaper}
       <div class="paper-name truncate">{selectedPaper.title}</div>
       <div class="mono-dim">{selectedPaper.year} / {selectedPaper.venue} / selected</div>
     {:else}
@@ -44,7 +61,27 @@
     {/if}
   </header>
 
-  {#if selectedPaper}
+  {#if activeVaultView === "suggestions"}
+    <section>
+      <div class="label hot">Suggestion run</div>
+      <div class="meta">
+        <div><span>state</span>{suggestionRun?.status ?? "not run"}</div>
+        <div><span>pending</span>{suggestionCount}</div>
+        {#if suggestionRun?.finishedAt}<div><span>finished</span>{suggestionRun.finishedAt}</div>{/if}
+      </div>
+    </section>
+    {#if selectedSuggestion}
+      <section>
+        <div class="label hot">Why this vault</div>
+        <p class="suggestion-reason">{selectedSuggestion.reason}</p>
+        <div class="meta">
+          <div><span>year</span>{selectedSuggestion.candidate.year ?? "—"}</div>
+          <div><span>venue</span>{selectedSuggestion.candidate.venue ?? "—"}</div>
+          <div><span>cites</span>{selectedSuggestion.candidate.citationCount ?? 0}</div>
+        </div>
+      </section>
+    {/if}
+  {:else if selectedPaper}
     <section class="metadata-section">
       <MetadataPanel
         paperId={selectedPaper.id}
@@ -68,6 +105,7 @@
     </section>
   {/if}
 
+  {#if activeVaultView === "papers"}
   <section>
     <div class="label hot">Reading stats</div>
     <div class="stat-row">
@@ -86,21 +124,14 @@
       <span>{unreadCount} / {papers.length}</span>
     </div>
   </section>
-
-  <section>
-    <div class="label hot">Ask this folder</div>
-    <div class="ask-box">
-      <p>What are the main arguments against scaled dot-product attention's O(n^2) complexity?</p>
-      <div class="row">
-        <button class="btn primary" type="button">Run</button>
-        <button class="btn ghost" type="button">cite 22</button>
-      </div>
-    </div>
-  </section>
+  {/if}
 
   <div class="flex1"></div>
 
   <section class="footer-section hair-t">
+    <button class="suggestion-link" type="button" onclick={onOpenSuggestions}>
+      <span>Suggestions</span><strong>{suggestionCount}</strong>
+    </button>
     <div class="label">Folder health</div>
     <div class="meta">
       <div><span>papers</span>{papers.length}</div>
@@ -173,22 +204,30 @@
     color: var(--fg-3);
   }
 
-  .ask-box {
-    margin-top: 8px;
-    padding: 8px;
-    border: 1px solid var(--amber-dim);
-    background: rgba(242, 169, 59, 0.04);
-  }
-
-  .ask-box p {
-    margin: 0 0 8px;
-    color: var(--fg-1);
+  .suggestion-reason {
+    margin: 8px 0 0;
+    color: var(--fg-2);
     font-size: 11px;
-    line-height: 1.5;
+    line-height: 1.45;
   }
 
-  .ask-box .row {
-    gap: 6px;
+  .suggestion-link {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    margin: 0 0 10px;
+    padding: 0 0 8px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-2);
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .suggestion-link:hover {
+    color: var(--cyan);
   }
 
   .footer-section {

@@ -14,6 +14,7 @@
     listenSearchUpdated,
     runSearch as runResearchSearch,
   } from "$lib/bridge/research";
+  import { addVaultSuggestion } from "$lib/bridge/vault-suggestions";
   import {
     addPaperToVaults,
     applyPaperMetadataCandidate,
@@ -41,6 +42,7 @@
   import type { ChunkHit } from "$lib/domain/search";
   import type { VaultStatus } from "$lib/domain/vault";
   import type { WorkspaceTab } from "$lib/domain/workspace";
+  import type { VaultSuggestion } from "$lib/domain/vault-suggestion";
   import DiscoverView from "$lib/features/discover/DiscoverView.svelte";
   import ReaderView from "$lib/features/reader/ReaderView.svelte";
   import VaultExplorer from "$lib/features/vault/VaultExplorer.svelte";
@@ -679,6 +681,55 @@
     }
   }
 
+  function openVaultSuggestion(suggestion: VaultSuggestion) {
+    const candidate = suggestion.candidate;
+    const paper: Paper = {
+      id: candidate.id,
+      title: candidate.title,
+      authors: [...candidate.authors],
+      venue: candidate.venue ?? "",
+      year: candidate.year ?? 0,
+      citations: candidate.citationCount ?? 0,
+      tags: [],
+      highlightCount: 0,
+      annotationCount: 0,
+      status: "UNREAD",
+      abstract: candidate.abstract,
+    };
+    const readerCandidate: DiscoveryReaderCandidate = {
+      id: candidate.id,
+      sourceProvider: candidate.sourceProvider,
+      sourceId: candidate.sourceId,
+      title: candidate.title,
+      authors: [...candidate.authors],
+      venue: candidate.venue ?? "",
+      year: candidate.year ?? 0,
+      citations: candidate.citationCount ?? 0,
+      tags: [],
+      abstract: candidate.abstract,
+      externalUrl: candidate.externalUrl,
+      pdfUrl: candidate.pdfUrl,
+      doi: candidate.doi,
+      arxivId: candidate.arxivId,
+    };
+    selectedPaperId = paper.id;
+    selectedReaderPaper = paper;
+    const readerTab: WorkspaceTab = {
+      id: `reader:${paper.id}`,
+      kind: "reader",
+      title: paper.title,
+      paperId: paper.id,
+      readerCandidate,
+    };
+    tabs = withReaderTab(readerTab);
+    activeTabId = readerTab.id;
+  }
+
+  async function addSuggestionToVault(suggestion: VaultSuggestion) {
+    const snapshot = await addVaultSuggestion(suggestion);
+    hydrateLibrary(snapshot);
+  }
+
   async function importPdfsToVault(vaultId: string, paths: string[]) {
     try {
       const result = await importLocalPdfs(vaultId, paths);
@@ -972,6 +1023,8 @@
                 onUpdatePaperMetadata={updatePaperMetadataForPaper}
                 onRemovePaperFromVault={removePaperFromActiveVault}
                 onRemovePaperFromLibrary={removePaperFromLibrary}
+                onOpenSuggestion={openVaultSuggestion}
+                onAddSuggestion={addSuggestionToVault}
               />
             {:else}
               <div class="empty-workspace col">

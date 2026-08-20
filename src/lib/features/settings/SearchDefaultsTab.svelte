@@ -33,6 +33,7 @@
   const defaultExpand = $derived(prefs["search.default_expand"] !== "false");
   const defaultOnlyViewable = $derived(prefs["search.default_only_viewable"] === "true");
   const resultLimit = $derived(prefs["search.default_result_limit"] ?? "25");
+  const weeklySuggestions = $derived(prefs["suggestions.weekly_enabled"] !== "false");
 
   async function saveLimit(event: Event) {
     const value = (event.currentTarget as HTMLSelectElement).value;
@@ -62,6 +63,13 @@
     label="Expand my search by default"
     hint="Runs a cheap LLM to widen recall — costs an extra call + provider fan-out per search."
     checked={defaultExpand}
+    onSaved={onChanged}
+  />
+  <TogglePref
+    settingKey="suggestions.weekly_enabled"
+    label="Refresh vault suggestions weekly"
+    hint="Runs Deep Research for one due vault when i0i starts."
+    checked={weeklySuggestions}
     onSaved={onChanged}
   />
   <TogglePref

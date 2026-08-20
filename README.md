@@ -99,3 +99,4 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [ ] RFC 0084 - Opening a paper adds a tab instead of closing the one you were reading. (implemented; awaiting manual verification)
 - [ ] RFC 0085 - Notes and Chat each list only their own kind, and a mark can be deleted from the page it lives on. (implemented; awaiting manual verification)
 - [ ] RFC 0088 - Deep research reflects once per round, narrows query breadth, retires dry providers, and reports convergence separately. (partially implemented: tasks 1 and 3; evaluation and browsing remain)
+- [x] RFC 0091 - Vaults now suggest up to five missing papers using Deep Research, citation neighbours, local similarity, and durable Add or Dismiss decisions.

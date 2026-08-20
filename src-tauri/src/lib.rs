@@ -2,8 +2,8 @@ mod commands;
 mod domain;
 mod html_ingestion;
 mod pdf_extraction;
-mod pdf_layout;
 mod pdf_ingestion;
+mod pdf_layout;
 mod services;
 mod shared;
 mod storage;
@@ -15,6 +15,7 @@ use services::metadata_enrichment::MetadataEnrichmentService;
 use services::reader_service::ReaderService;
 use services::research::manager::SearchManager;
 use services::source_acquisition::SourceAcquisitionService;
+use services::vault_suggestions::VaultSuggestionManager;
 use storage::library_store::LibraryStore;
 use tauri::{Listener, Manager};
 
@@ -114,7 +115,10 @@ pub fn run() {
                 store.clone(),
                 embedder,
             );
-            eprintln!("[embedding] chunk worker ready={}", chunk_embedder.is_ready());
+            eprintln!(
+                "[embedding] chunk worker ready={}",
+                chunk_embedder.is_ready()
+            );
 
             // Search within our own papers (RFC 0076) — not deep-research
             // discovery, which is SearchManager above.
@@ -124,8 +128,8 @@ pub fn run() {
             // The agent's working memory (RFC 0077). Built after SearchService
             // because ContextManager is the only door to retrieval — ChatService
             // never calls search directly.
-            let chat_config = services::chat::config::ChatConfig::load()
-                .map_err(std::io::Error::other)?;
+            let chat_config =
+                services::chat::config::ChatConfig::load().map_err(std::io::Error::other)?;
             let context_manager = services::chat::ContextManager::new(
                 store.clone(),
                 std::sync::Arc::new(search_service.clone()),
@@ -159,7 +163,8 @@ pub fn run() {
                 // already exists keeps the extractor from having to know the
                 // embedding worker exists at all.
                 let worker = chunk_embedder.clone();
-                app.handle().listen("document_extraction_updated", move |event| {
+                app.handle()
+                    .listen("document_extraction_updated", move |event| {
                     if event.payload().contains("\"status\":\"ready\"") {
                         worker.request_sweep();
                     }
@@ -172,6 +177,14 @@ pub fn run() {
             );
             search_manager
                 .recover_and_queue_startup_runs()
+                .map_err(std::io::Error::other)?;
+            let vault_suggestion_manager = VaultSuggestionManager::new(
+                app.handle().clone(),
+                store.clone(),
+                embedding_reranker.clone(),
+            );
+            vault_suggestion_manager
+                .recover_and_queue_startup_run()
                 .map_err(std::io::Error::other)?;
             // Query expansion (RFC 0054). Disabled without an OpenRouter key.
             let query_expander = services::query_expansion::QueryExpander::from_app_config();
@@ -186,6 +199,7 @@ pub fn run() {
             app.manage(metadata_enrichment);
             app.manage(discovery_providers);
             app.manage(search_manager);
+            app.manage(vault_suggestion_manager);
             app.manage(embedding_reranker);
             app.manage(chunk_embedder);
             app.manage(search_service);
@@ -253,6 +267,12 @@ pub fn run() {
             commands::research::cancel_search_run,
             commands::research::mark_search_candidate_saved,
             commands::research::mark_search_candidates_seen,
+            commands::vault_suggestions::get_vault_suggestions,
+            commands::vault_suggestions::run_vault_suggestions,
+            commands::vault_suggestions::cancel_vault_suggestion_run,
+            commands::vault_suggestions::dismiss_vault_suggestion,
+            commands::vault_suggestions::undo_vault_suggestion_dismissal,
+            commands::vault_suggestions::add_vault_suggestion,
             commands::source_acquisition::debug_obscura_start,
             commands::source_acquisition::debug_obscura_fetch,
             commands::highlight::create_highlight,

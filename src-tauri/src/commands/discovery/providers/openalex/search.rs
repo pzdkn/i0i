@@ -30,6 +30,52 @@ impl OpenAlexProvider {
             config: OpenAlexConfig::load()?,
         })
     }
+
+    /// Traverse one side of the OpenAlex citation graph from a work id.
+    ///
+    /// This deliberately bypasses full-text search: lineage is expressed as an
+    /// OpenAlex filter and returns normalized candidates like any other source.
+    pub async fn lineage(
+        &self,
+        work_id: &str,
+        lineage: Lineage,
+        limit: i32,
+    ) -> Result<Vec<crate::domain::discovery::PaperCandidate>, DiscoveryError> {
+        let query_params = vec![
+            ("api_key", self.api_key()?),
+            ("filter", openalex_lineage_filter(work_id, lineage)),
+            (
+                "per-page",
+                clamp_result_limit(limit, self.config.max_result_limit()).to_string(),
+            ),
+            ("select", openalex_select_fields().join(",")),
+        ];
+        let response = self
+            .client
+            .get(self.build_url(&query_params)?)
+            .header("User-Agent", "ioi/0.1 local Tauri Discovery")
+            .send()
+            .await
+            .map_err(|error| {
+                DiscoveryError::new(format!("OpenAlex lineage request failed: {error}"))
+            })?;
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(DiscoveryError::new(format!(
+                "OpenAlex lineage request failed with {status}: {}",
+                response.text().await.unwrap_or_default()
+            )));
+        }
+        let payload = response
+            .json::<OpenAlexWorksResponse>()
+            .await
+            .map_err(|error| DiscoveryError::new(format!("Invalid OpenAlex response: {error}")))?;
+        Ok(payload
+            .results
+            .into_iter()
+            .map(|work| normalize_work(work, "citation graph"))
+            .collect())
+    }
 }
 
 impl DiscoveryProvider for OpenAlexProvider {
@@ -184,7 +230,6 @@ fn openalex_filters(request: &DiscoverySearchRequest) -> Vec<String> {
 /// `cited_by:<id>` returns the works a paper *references*, and `cites:<id>`
 /// returns the works that *cite* it.
 // Wired into RealCandidateSource in the RFC 0037 seams layer.
-#[allow(dead_code)]
 fn openalex_lineage_filter(work_id: &str, lineage: Lineage) -> String {
     match lineage {
         Lineage::References => format!("cited_by:{work_id}"),

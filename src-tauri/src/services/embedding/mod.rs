@@ -153,6 +153,41 @@ impl EmbeddingReranker {
             .map(|embedding| cosine_similarity(query_embedding, embedding).clamp(0.0, 1.0))
             .collect()
     }
+
+    /// Score candidates against an already-computed vector in this model's
+    /// space. Vault suggestions use this with the mean of stored chunk vectors.
+    pub async fn semantic_scores_against(
+        &self,
+        reference: &[f32],
+        candidates: &[PaperCandidate],
+    ) -> Vec<f64> {
+        if !crate::services::settings::preference_bool("search.reranker_enabled", true) {
+            return Vec::new();
+        }
+        let Some(embedder) = self.embedder.clone() else {
+            return Vec::new();
+        };
+        if reference.is_empty() || candidates.is_empty() {
+            return Vec::new();
+        }
+        let texts: Vec<String> = candidates.iter().map(candidate_embed_text).collect();
+        let embeddings = match tokio::task::spawn_blocking(move || embedder.embed(&texts)).await {
+            Ok(Ok(embeddings)) if embeddings.len() == candidates.len() => embeddings,
+            Ok(Ok(_)) => return Vec::new(),
+            Ok(Err(error)) => {
+                eprintln!("[embedding] candidate embed failed: {error}");
+                return Vec::new();
+            }
+            Err(error) => {
+                eprintln!("[embedding] candidate embed task panicked: {error}");
+                return Vec::new();
+            }
+        };
+        embeddings
+            .iter()
+            .map(|embedding| cosine_similarity(reference, embedding).clamp(0.0, 1.0))
+            .collect()
+    }
 }
 
 /// The text we embed for a candidate: title plus a bounded abstract slice.
