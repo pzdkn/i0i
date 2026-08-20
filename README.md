@@ -101,3 +101,4 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [ ] RFC 0088 - Deep research reflects once per round, narrows query breadth, retires dry providers, and reports convergence separately. (partially implemented: tasks 1 and 3; evaluation and browsing remain)
 - [x] RFC 0091 - Vaults now suggest up to five missing papers using Deep Research, citation neighbours, local similarity, and durable Add or Dismiss decisions.
 - [x] RFC 0094 - Vault suggestions now prepare reviewable query paths, run only selected searches concurrently, persist controls, and stream progress in the contextual inspector.
+- [x] RFC 0095 - Vault suggestions now preserve query evidence, rank against the closest vault paper, suppress reviews by default, and omit weak results.

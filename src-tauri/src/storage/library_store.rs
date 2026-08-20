@@ -4519,6 +4519,56 @@ impl LibraryStore {
         mean_embedding(&vectors)
     }
 
+    /// Mean current-model chunk embedding for each paper in one vault.
+    ///
+    /// Papers without ready chunk embeddings are omitted. Results are ordered
+    /// by paper id so the same database state produces stable ranking inputs.
+    pub fn vault_paper_embedding_centroids(
+        &self,
+        vault_id: &str,
+        model: &str,
+        model_version: &str,
+    ) -> StoreResult<Vec<(String, Vec<f32>)>> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select c.paper_id, e.embedding, e.dimensions
+                 from document_chunk_embeddings e
+                 join document_chunks c on c.id = e.chunk_id
+                 join vault_papers vp on vp.paper_id = c.paper_id
+                 where vp.vault_id = ?1 and e.model = ?2 and e.model_version = ?3
+                 order by c.paper_id, c.chunk_index",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![vault_id, model, model_version], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut by_paper: HashMap<String, Vec<(Vec<u8>, i64)>> = HashMap::new();
+        for row in rows {
+            let (paper_id, embedding, dimensions) = row.map_err(|error| error.to_string())?;
+            by_paper
+                .entry(paper_id)
+                .or_default()
+                .push((embedding, dimensions));
+        }
+
+        let mut centroids = Vec::new();
+        for (paper_id, embeddings) in by_paper {
+            if let Some(centroid) = mean_embedding(&embeddings)? {
+                centroids.push((paper_id, centroid));
+            }
+        }
+        centroids.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(centroids)
+    }
+
     /// Pick at most one vault due for the weekly suggestion schedule.
     pub fn due_vault_for_weekly_suggestions(&self) -> StoreResult<Option<String>> {
         let conn = self.open_connection()?;
@@ -8659,6 +8709,37 @@ mod tests {
             .store
             .embedding_coverage("coverage-paper", "other-model", "1")?;
         assert_eq!(other.embedded, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn vault_paper_centroids_remain_separate() -> StoreResult<()> {
+        let db = test_db()?;
+        let first = extracted_paper(&db, "centroid-a", &[("paragraph", "first paper")])?;
+        let second = extracted_paper(&db, "centroid-b", &[("paragraph", "second paper")])?;
+        let first_chunk = db.store.chunks_for_extraction(&first.id)?.remove(0);
+        let second_chunk = db.store.chunks_for_extraction(&second.id)?.remove(0);
+        db.store.save_chunk_embedding(
+            &first_chunk.id,
+            "test-model",
+            "1",
+            CHUNK_VERSION,
+            &[1.0, 0.0],
+        )?;
+        db.store.save_chunk_embedding(
+            &second_chunk.id,
+            "test-model",
+            "1",
+            CHUNK_VERSION,
+            &[0.0, 1.0],
+        )?;
+
+        let centroids = db
+            .store
+            .vault_paper_embedding_centroids("attention", "test-model", "1")?;
+
+        assert!(centroids.contains(&("centroid-a".to_string(), vec![1.0, 0.0])));
+        assert!(centroids.contains(&("centroid-b".to_string(), vec![0.0, 1.0])));
         Ok(())
     }
 

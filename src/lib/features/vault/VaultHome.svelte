@@ -604,7 +604,7 @@
                 {:else if suggestionPlan}
                   <div class="suggestion-empty">Review the proposed queries in the inspector.</div>
                 {:else if latestSuggestionRun?.status === "ready"}
-                  <div class="suggestion-empty">No new suggestions</div>
+                  <div class="suggestion-empty">No strong suggestions</div>
                 {:else}
                   <div class="suggestion-empty"><button class="link-btn" type="button" onclick={prepareSuggestionQueries}>Prepare suggestion queries</button></div>
                 {/if}

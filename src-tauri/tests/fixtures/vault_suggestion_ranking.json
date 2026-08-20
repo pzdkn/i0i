@@ -1,0 +1,43 @@
+{
+  "vaults": [
+    {
+      "name": "sparse-attention-methods",
+      "includeReviews": false,
+      "focus": "empirical sparse attention",
+      "candidates": [
+        { "id": "survey", "title": "A Survey of Efficient Transformers", "label": "plausible", "citations": 1800, "legacyRank": 0, "centroid": 0.72, "nearest": 0.55, "focusScore": 0.58, "pathCount": 1, "graphOrigins": 3 },
+        { "id": "specific", "title": "Learned Token Pruning for Sparse Attention", "label": "strong", "citations": 44, "legacyRank": 2, "centroid": 0.69, "nearest": 0.91, "focusScore": 0.88, "pathCount": 3, "graphOrigins": 1 },
+        { "id": "benchmark", "title": "An Empirical Benchmark of Sparse Attention", "label": "strong", "citations": 18, "legacyRank": 4, "centroid": 0.66, "nearest": 0.86, "focusScore": 0.93, "pathCount": 2, "graphOrigins": 0 },
+        { "id": "canonical", "title": "Deep Learning: A General Overview", "label": "irrelevant", "citations": 12000, "legacyRank": 1, "centroid": 0.54, "nearest": 0.18, "focusScore": 0.12, "pathCount": 1, "graphOrigins": 2 },
+        { "id": "vision", "title": "Sparse Convolution for Satellite Images", "label": "irrelevant", "citations": 930, "legacyRank": 3, "centroid": 0.49, "nearest": 0.22, "focusScore": 0.16, "pathCount": 1, "graphOrigins": 0 },
+        { "id": "extension", "title": "Long-Context Inference with Structured Sparsity", "label": "plausible", "citations": 9, "legacyRank": 5, "centroid": 0.61, "nearest": 0.79, "focusScore": 0.67, "pathCount": 2, "graphOrigins": 1 }
+      ]
+    },
+    {
+      "name": "mixed-ml-systems",
+      "includeReviews": false,
+      "focus": null,
+      "candidates": [
+        { "id": "ml-survey", "title": "A Systematic Review of Machine Learning Systems", "label": "plausible", "citations": 2200, "legacyRank": 0, "centroid": 0.70, "nearest": 0.57, "focusScore": null, "pathCount": 1, "graphOrigins": 3 },
+        { "id": "compiler", "title": "Compiler Scheduling for Sparse Neural Networks", "label": "strong", "citations": 31, "legacyRank": 3, "centroid": 0.58, "nearest": 0.90, "focusScore": null, "pathCount": 2, "graphOrigins": 1 },
+        { "id": "serving", "title": "Adaptive Batching for Long-Context Serving", "label": "strong", "citations": 12, "legacyRank": 4, "centroid": 0.56, "nearest": 0.87, "focusScore": null, "pathCount": 2, "graphOrigins": 0 },
+        { "id": "general-ai", "title": "Artificial Intelligence in Society", "label": "irrelevant", "citations": 8800, "legacyRank": 1, "centroid": 0.52, "nearest": 0.16, "focusScore": null, "pathCount": 1, "graphOrigins": 2 },
+        { "id": "database", "title": "A Database Systems Retrospective", "label": "irrelevant", "citations": 1400, "legacyRank": 2, "centroid": 0.48, "nearest": 0.20, "focusScore": null, "pathCount": 1, "graphOrigins": 0 },
+        { "id": "memory", "title": "Memory-Aware Attention Kernel Fusion", "label": "plausible", "citations": 7, "legacyRank": 5, "centroid": 0.54, "nearest": 0.82, "focusScore": null, "pathCount": 3, "graphOrigins": 1 }
+      ]
+    },
+    {
+      "name": "review-useful-biomedicine",
+      "includeReviews": true,
+      "focus": null,
+      "candidates": [
+        { "id": "useful-review", "title": "Systematic Review of Biomarkers for Early Sepsis", "label": "strong", "citations": 410, "legacyRank": 0, "centroid": 0.82, "nearest": 0.88, "focusScore": null, "pathCount": 3, "graphOrigins": 3 },
+        { "id": "validation", "title": "External Validation of an Early Sepsis Biomarker", "label": "strong", "citations": 55, "legacyRank": 1, "centroid": 0.77, "nearest": 0.91, "focusScore": null, "pathCount": 2, "graphOrigins": 1 },
+        { "id": "assay", "title": "A Rapid Assay for Early Sepsis Detection", "label": "plausible", "citations": 22, "legacyRank": 3, "centroid": 0.69, "nearest": 0.81, "focusScore": null, "pathCount": 2, "graphOrigins": 0 },
+        { "id": "oncology", "title": "Biomarkers in Precision Oncology", "label": "irrelevant", "citations": 1900, "legacyRank": 2, "centroid": 0.53, "nearest": 0.21, "focusScore": null, "pathCount": 1, "graphOrigins": 0 },
+        { "id": "policy", "title": "Global Health Policy Priorities", "label": "irrelevant", "citations": 800, "legacyRank": 4, "centroid": 0.42, "nearest": 0.12, "focusScore": null, "pathCount": 1, "graphOrigins": 0 },
+        { "id": "cohort", "title": "Prospective Cohort Evidence for Sepsis Prediction", "label": "plausible", "citations": 8, "legacyRank": 5, "centroid": 0.64, "nearest": 0.79, "focusScore": null, "pathCount": 2, "graphOrigins": 1 }
+      ]
+    }
+  ]
+}

@@ -194,6 +194,18 @@
             </select>
           </label>
         </div>
+        <label class="review-option">
+          <input
+            type="checkbox"
+            checked={suggestionOptions.includeReviews}
+            disabled={suggestionBusy}
+            onchange={(event) => onSuggestionOptionsChange({
+              ...suggestionOptions,
+              includeReviews: event.currentTarget.checked,
+            })}
+          />
+          <span>Include reviews</span>
+        </label>
         {#if yearError}<p class="control-error">{yearError}</p>{/if}
         <button
           class="control-command"
@@ -394,6 +406,19 @@
 
   .wide-field {
     margin-top: 9px;
+  }
+
+  .review-option {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 9px;
+    color: var(--fg-2);
+    font-size: 10px;
+  }
+
+  .review-option input {
+    margin: 0;
   }
 
   .field input,

@@ -154,20 +154,17 @@ impl EmbeddingReranker {
             .collect()
     }
 
-    /// Score candidates against an already-computed vector in this model's
-    /// space. Vault suggestions use this with the mean of stored chunk vectors.
-    pub async fn semantic_scores_against(
-        &self,
-        reference: &[f32],
-        candidates: &[PaperCandidate],
-    ) -> Vec<f64> {
+    /// Embed candidates once for callers that compare them with several stored
+    /// reference vectors. Returns an empty vector when semantic ranking is not
+    /// available or the model returns an unexpected shape.
+    pub async fn candidate_embeddings(&self, candidates: &[PaperCandidate]) -> Vec<Vec<f32>> {
         if !crate::services::settings::preference_bool("search.reranker_enabled", true) {
             return Vec::new();
         }
         let Some(embedder) = self.embedder.clone() else {
             return Vec::new();
         };
-        if reference.is_empty() || candidates.is_empty() {
+        if candidates.is_empty() {
             return Vec::new();
         }
         let texts: Vec<String> = candidates.iter().map(candidate_embed_text).collect();
@@ -184,9 +181,30 @@ impl EmbeddingReranker {
             }
         };
         embeddings
-            .iter()
-            .map(|embedding| cosine_similarity(reference, embedding).clamp(0.0, 1.0))
-            .collect()
+    }
+
+    /// Embed one free-form reference such as a vault Focus string.
+    pub async fn text_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        if !crate::services::settings::preference_bool("search.reranker_enabled", true) {
+            return None;
+        }
+        let embedder = self.embedder.clone()?;
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        match tokio::task::spawn_blocking(move || embedder.embed(&[text])).await {
+            Ok(Ok(mut embeddings)) if embeddings.len() == 1 => embeddings.pop(),
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => {
+                eprintln!("[embedding] text embed failed: {error}");
+                None
+            }
+            Err(error) => {
+                eprintln!("[embedding] text embed task panicked: {error}");
+                None
+            }
+        }
     }
 }
 
@@ -338,6 +356,22 @@ mod tests {
         let reranker = EmbeddingReranker::with_embedder(Arc::new(BagOfWordsEmbedder));
         let scores = tokio_block(reranker.semantic_scores("llm", &[]));
         assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn a_free_form_reference_can_be_embedded_once() {
+        let reranker = EmbeddingReranker::with_embedder(Arc::new(BagOfWordsEmbedder));
+        let embedding =
+            tokio_block(reranker.text_embedding("language model")).expect("reference embedding");
+
+        assert_eq!(
+            embedding[VOCAB.iter().position(|word| *word == "language").unwrap()],
+            1.0
+        );
+        assert_eq!(
+            embedding[VOCAB.iter().position(|word| *word == "model").unwrap()],
+            1.0
+        );
     }
 
     fn tokio_block<F: std::future::Future>(future: F) -> F::Output {
