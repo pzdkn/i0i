@@ -1,48 +1,60 @@
-//! Vault-scoped paper recommendations (RFC 0091).
+//! Vault-scoped paper recommendations (RFC 0091 and RFC 0094).
 //!
-//! This manager reuses the RFC 0088 research loop without creating a Discover
-//! search. It builds a bounded profile from the vault, filters owned and
-//! dismissed papers, fuses Deep Research with local vault similarity and a
-//! weak citation prior, then atomically replaces the five-row inbox.
+//! The manager prepares a reviewable query agenda without contacting paper
+//! providers. Once the user approves paths, it searches them concurrently,
+//! filters owned and dismissed papers, adds citation neighbours, fuses the
+//! existing vault ranking signals, and atomically replaces the inbox.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures_util::stream::{self, StreamExt};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Semaphore;
 
+use crate::commands::discovery::orchestrator::{
+    apply_semantic_floor, legacy_top_n, rank_candidates, SEMANTIC_RERANK_WINDOW,
+};
 use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
     paper_candidate_dedup_key, DiscoveryProviderChoice, Lineage, PaperCandidate,
 };
-use crate::domain::research::{Depth, SearchConstraints};
+use crate::domain::research::SearchConstraints;
 use crate::domain::vault_suggestion::{
-    VaultSuggestion, VaultSuggestionPreview, VaultSuggestionUpdated,
+    VaultSuggestion, VaultSuggestionOptions, VaultSuggestionPreview, VaultSuggestionQueryPath,
+    VaultSuggestionQueryPlan, VaultSuggestionUpdated,
 };
 use crate::services::chat::config::ChatConfig;
 use crate::services::embedding::{EmbeddingReranker, MODEL_NAME, MODEL_VERSION};
-use crate::services::research::agent::{self, Progress, RunInputs};
-use crate::services::research::budget::StopReason;
-use crate::services::research::planner::OpenRouterPlanner;
-use crate::services::research::source::RealCandidateSource;
+use crate::services::research::planner::{OpenRouterPlanner, Query};
+use crate::services::research::source::{CandidateSource, RealCandidateSource};
 use crate::services::search::fusion::reciprocal_rank_fusion_many;
 use crate::storage::library_store::LibraryStore;
 
-const MAX_SUGGESTIONS: usize = 5;
 const MAX_PROFILE_CHARS: usize = 12_000;
 const MAX_PAPERS_IN_PROFILE: usize = 24;
 const MAX_CHUNKS_PER_PAPER: usize = 2;
 const GRAPH_SEED_LIMIT: usize = 6;
 const GRAPH_PER_SEED_LIMIT: i32 = 10;
 const GRAPH_HOP_TWO_SEEDS: usize = 4;
+const MAX_CONCURRENT_QUERY_SEARCHES: usize = 3;
+const RETRIEVAL_POOL_LIMIT: i32 = 25;
 /// Structural agreement is the distinctive vault signal. Repeating its rank
 /// list makes RRF treat it as three independent arrivals without blending raw
 /// counts with incomparable semantic and citation scores.
 const GRAPH_RRF_WEIGHT: usize = 3;
 
 type Cancellations = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+#[derive(Clone)]
+struct PendingQueryPlan {
+    plan: VaultSuggestionQueryPlan,
+    options: VaultSuggestionOptions,
+}
 
 /// Owns manual suggestion runs and their transient progress events.
 #[derive(Clone)]
@@ -52,6 +64,7 @@ pub struct VaultSuggestionManager {
     reranker: EmbeddingReranker,
     active_vaults: Arc<Mutex<HashSet<String>>>,
     cancellations: Cancellations,
+    plans: Arc<Mutex<HashMap<String, PendingQueryPlan>>>,
 }
 
 impl VaultSuggestionManager {
@@ -63,23 +76,78 @@ impl VaultSuggestionManager {
             reranker,
             active_vaults: Arc::new(Mutex::new(HashSet::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
+            plans: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Queue at most one due weekly run during startup.
+    /// Preserve explicit query approval by never starting retrieval at startup.
+    ///
+    /// RFC 0091's weekly automatic run cannot choose paths on the user's behalf
+    /// after RFC 0094. A future scheduler may prepare a visible proposal, but
+    /// provider search remains manual.
     pub fn recover_and_queue_startup_run(&self) -> Result<(), String> {
-        if !crate::services::settings::preference_bool("suggestions.weekly_enabled", true) {
-            return Ok(());
-        }
-        if let Some(vault_id) = self.store.due_vault_for_weekly_suggestions()? {
-            self.run(vault_id)?;
-        }
         Ok(())
     }
 
-    /// Queue one run and return its durable id immediately.
-    pub fn run(&self, vault_id: String) -> Result<String, String> {
+    /// Prepare reviewable query paths without contacting paper providers.
+    pub async fn prepare_queries(
+        &self,
+        vault_id: String,
+        options: VaultSuggestionOptions,
+    ) -> Result<VaultSuggestionQueryPlan, String> {
+        let options = validate_options(options)?;
         let snapshot = self.store.get_library()?;
+        let vault_papers = papers_for_vault(&snapshot, &vault_id);
+        if vault_papers.is_empty() {
+            return Err("No papers to match yet".to_string());
+        }
+        let profile = build_vault_profile(&self.store, &vault_papers, options.focus.as_deref())?;
+        let queries = suggestion_planner()?
+            .plan_vault_suggestion_queries(&profile, options.query_path_count)
+            .await
+            .map_err(|error| error.to_string())?;
+        let revision = vault_revision(&vault_papers);
+        let plan = VaultSuggestionQueryPlan {
+            id: query_plan_id(&vault_id, &revision)?,
+            vault_id: vault_id.clone(),
+            vault_revision: revision,
+            queries,
+        };
+        self.store
+            .save_vault_suggestion_options(&vault_id, &options)?;
+        let mut plans = self.plans.lock().expect("suggestion plan lock");
+        plans.retain(|_, pending| pending.plan.vault_id != vault_id);
+        plans.insert(
+            plan.id.clone(),
+            PendingQueryPlan {
+                plan: plan.clone(),
+                options,
+            },
+        );
+        Ok(plan)
+    }
+
+    /// Validate and persist controls without preparing or running a search.
+    pub fn save_options(
+        &self,
+        vault_id: &str,
+        options: VaultSuggestionOptions,
+    ) -> Result<(), String> {
+        let options = validate_options(options)?;
+        self.store.save_vault_suggestion_options(vault_id, &options)
+    }
+
+    /// Queue searches for the approved paths and return the durable run id.
+    pub fn run(
+        &self,
+        vault_id: String,
+        plan_id: String,
+        selected_query_ids: Vec<String>,
+        options: VaultSuggestionOptions,
+    ) -> Result<String, String> {
+        let options = validate_options(options)?;
+        let snapshot = self.store.get_library()?;
+        let vault_papers = papers_for_vault(&snapshot, &vault_id);
         let paper_count = snapshot
             .vault_papers
             .iter()
@@ -89,6 +157,25 @@ impl VaultSuggestionManager {
             return Err("No papers to match yet".to_string());
         }
 
+        let pending = self
+            .plans
+            .lock()
+            .expect("suggestion plan lock")
+            .get(&plan_id)
+            .cloned()
+            .ok_or_else(|| "Suggestion queries expired; prepare them again".to_string())?;
+        if pending.plan.vault_id != vault_id
+            || pending.plan.vault_revision != vault_revision(&vault_papers)
+        {
+            return Err("Vault changed; prepare suggestion queries again".to_string());
+        }
+        if pending.options.focus != options.focus
+            || pending.options.query_path_count != options.query_path_count
+        {
+            return Err("Search focus changed; prepare suggestion queries again".to_string());
+        }
+        let selected_paths = selected_query_paths(&pending.plan, &selected_query_ids)?;
+
         if !self
             .active_vaults
             .lock()
@@ -97,7 +184,13 @@ impl VaultSuggestionManager {
         {
             return Err("A suggestion run is already active for this vault".to_string());
         }
-        let run = match self.store.create_vault_suggestion_run(&vault_id) {
+        self.store
+            .save_vault_suggestion_options(&vault_id, &options)?;
+        let run = match self.store.create_vault_suggestion_run_with_options(
+            &vault_id,
+            &options,
+            &selected_paths,
+        ) {
             Ok(run) => run,
             Err(error) => {
                 self.active_vaults
@@ -118,7 +211,15 @@ impl VaultSuggestionManager {
         let manager = self.clone();
         let run_id_for_job = run_id.clone();
         tauri::async_runtime::spawn(async move {
-            let result = manager.execute(&vault_id, &run_id_for_job, cancelled).await;
+            let result = manager
+                .execute(
+                    &vault_id,
+                    &run_id_for_job,
+                    selected_paths,
+                    options,
+                    cancelled,
+                )
+                .await;
             manager
                 .active_vaults
                 .lock()
@@ -152,120 +253,205 @@ impl VaultSuggestionManager {
         &self,
         vault_id: &str,
         run_id: &str,
+        query_paths: Vec<VaultSuggestionQueryPath>,
+        options: VaultSuggestionOptions,
         cancelled: Arc<AtomicBool>,
     ) -> Result<(), String> {
-        self.update(vault_id, run_id, "planning", "Planning", 0, false)?;
+        let sequence = AtomicU64::new(0);
+        self.update(vault_id, run_id, "searching", "Starting searches", 0, false)?;
         let snapshot = self.store.get_library()?;
-        let vault_paper_ids: HashSet<&str> = snapshot
-            .vault_papers
-            .iter()
-            .filter(|membership| membership.vault_id == vault_id)
-            .map(|membership| membership.paper_id.as_str())
-            .collect();
-        let vault_papers: Vec<_> = snapshot
-            .papers
-            .iter()
-            .filter(|paper| vault_paper_ids.contains(paper.id.as_str()))
-            .collect();
-        let profile = build_vault_profile(&self.store, &vault_papers)?;
+        let vault_papers = papers_for_vault(&snapshot, vault_id);
+        let profile = build_vault_profile(&self.store, &vault_papers, options.focus.as_deref())?;
         let blocked = blocked_candidate_refs(
             &snapshot.papers,
             self.store.decided_vault_suggestion_refs(vault_id)?,
         );
 
-        let chat = ChatConfig::load()?;
-        let planner = OpenRouterPlanner::new(
-            Client::new(),
-            chat.url.clone(),
-            chat.resolve_api_key()?,
-            crate::services::settings::preference("model.planner")
-                .unwrap_or_else(|| chat.model.clone()),
-        );
         let source = RealCandidateSource::new(
             OpenAlexProvider::from_app_config().map_err(|error| error.to_string())?,
             ArxivProvider::from_app_config().map_err(|error| error.to_string())?,
         );
         let constraints = SearchConstraints {
-            year_from: None,
-            year_to: None,
-            providers: vec![
-                DiscoveryProviderChoice::OpenAlex,
-                DiscoveryProviderChoice::Arxiv,
-            ],
+            year_from: options.year_from,
+            year_to: options.year_to,
+            providers: Vec::new(),
             open_access: false,
-            target_count: 25,
+            target_count: options.result_count as i32,
             venues: Vec::new(),
             authors: Vec::new(),
             fields_of_study: Vec::new(),
             seed_paper_ids: vault_papers.iter().map(|paper| paper.id.clone()).collect(),
         };
-        let strategy = Depth::Standard.budget();
 
-        let app = self.app.clone();
-        let vault = vault_id.to_string();
-        let run = run_id.to_string();
-        let blocked_for_preview = blocked.clone();
-        let seen_previews = Arc::new(Mutex::new(HashSet::<String>::new()));
-        let seen_for_callback = seen_previews.clone();
-        let on_progress = move |progress: Progress| match progress {
-            Progress::CandidatePreview { candidates } => {
-                let mut seen = seen_for_callback.lock().expect("preview lock");
-                let preview: Vec<VaultSuggestion> = candidates
-                    .into_iter()
-                    .filter(|candidate| !candidate_is_blocked(candidate, &blocked_for_preview))
-                    .filter(|candidate| seen.insert(paper_candidate_dedup_key(candidate)))
-                    .take(MAX_SUGGESTIONS)
-                    .map(|candidate| {
-                        suggestion_from_candidate(&vault, &run, candidate, 0.0, None, None)
-                    })
-                    .collect();
-                if !preview.is_empty() {
-                    let _ = app.emit(
-                        "vault_suggestion_preview",
-                        VaultSuggestionPreview {
-                            vault_id: vault.clone(),
-                            run_id: run.clone(),
-                            suggestions: preview,
-                        },
-                    );
+        // Fan each approved path across both providers under one shared cap.
+        let providers = [
+            DiscoveryProviderChoice::OpenAlex,
+            DiscoveryProviderChoice::Arxiv,
+        ];
+        let jobs: Vec<(VaultSuggestionQueryPath, DiscoveryProviderChoice)> = query_paths
+            .iter()
+            .flat_map(|path| {
+                providers
+                    .iter()
+                    .cloned()
+                    .map(move |provider| (path.clone(), provider))
+            })
+            .collect();
+        let arxiv_gate = Arc::new(Semaphore::new(1));
+        let searches = stream::iter(jobs.into_iter().map(|(path, provider)| {
+            let source = &source;
+            let manager = self;
+            let sequence = &sequence;
+            let mut query_constraints = constraints.clone();
+            query_constraints.providers = vec![provider.clone()];
+            let query = Query {
+                provider: provider.clone(),
+                text: path.query.clone(),
+            };
+            let cancelled = cancelled.clone();
+            let arxiv_gate = arxiv_gate.clone();
+            async move {
+                if cancelled.load(Ordering::Relaxed) {
+                    return (path, provider, None);
                 }
-            }
-            other => {
-                let (status, message, found) = describe_progress(&other);
-                let _ = app.emit(
-                    "vault_suggestion_updated",
-                    VaultSuggestionUpdated {
-                        vault_id: vault.clone(),
-                        run_id: run.clone(),
-                        status: status.to_string(),
-                        message,
-                        found,
-                    },
+                let _provider_permit = if provider == DiscoveryProviderChoice::Arxiv {
+                    Some(
+                        arxiv_gate
+                            .acquire_owned()
+                            .await
+                            .expect("arXiv suggestion gate"),
+                    )
+                } else {
+                    None
+                };
+                manager.emit_progress(
+                    vault_id,
+                    run_id,
+                    sequence,
+                    "provider",
+                    Some(path.id.clone()),
+                    format!("{} · {}", provider_display_name(&provider), path.intent),
+                    Some("Searching".to_string()),
+                    0,
                 );
+                let result = source.search(&query, &query_constraints).await;
+                (path, provider, Some(result))
             }
-        };
+        }))
+        .buffer_unordered(MAX_CONCURRENT_QUERY_SEARCHES);
+        futures_util::pin_mut!(searches);
 
-        let outcome = agent::run(
-            &planner,
-            &source,
-            &self.reranker,
-            RunInputs {
-                goal: &profile,
-                constraints: &constraints,
-                strategy: &strategy,
-                existing_keys: HashSet::new(),
-            },
-            &cancelled,
-            on_progress,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let mut candidates = Vec::new();
+        let mut seen_previews = HashSet::new();
+        let mut completed_searches = 0_u32;
+        while let Some((path, provider, result)) = searches.next().await {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            completed_searches += 1;
+            let provider_name = provider_display_name(&provider);
+            match result {
+                Some(Ok(found)) => {
+                    self.emit_progress(
+                        vault_id,
+                        run_id,
+                        &sequence,
+                        "provider",
+                        Some(path.id.clone()),
+                        format!("{provider_name} · {}", path.intent),
+                        Some(format!("{} found", found.len())),
+                        found.len() as u32,
+                    );
+                    let preview: Vec<VaultSuggestion> = found
+                        .iter()
+                        .filter(|candidate| !candidate_is_blocked(candidate, &blocked))
+                        .filter(|candidate| {
+                            seen_previews.insert(paper_candidate_dedup_key(candidate))
+                        })
+                        .take(options.result_count as usize)
+                        .cloned()
+                        .map(|candidate| {
+                            suggestion_from_candidate(vault_id, run_id, candidate, 0.0, None, None)
+                        })
+                        .collect();
+                    if !preview.is_empty() {
+                        let _ = self.app.emit(
+                            "vault_suggestion_preview",
+                            VaultSuggestionPreview {
+                                vault_id: vault_id.to_string(),
+                                run_id: run_id.to_string(),
+                                suggestions: preview,
+                            },
+                        );
+                    }
+                    candidates.extend(found);
+                }
+                Some(Err(error)) => self.emit_progress(
+                    vault_id,
+                    run_id,
+                    &sequence,
+                    "provider",
+                    Some(path.id),
+                    format!("{provider_name} unavailable"),
+                    Some(short_error(&error.to_string())),
+                    0,
+                ),
+                None => {}
+            }
+            let message = format!("Searching {completed_searches}/{}", query_paths.len() * 2);
+            self.store.set_vault_suggestion_run_status(
+                run_id,
+                "searching",
+                &message,
+                None,
+                None,
+                candidates.len() as i32,
+                false,
+            )?;
+        }
 
-        if outcome.stop_reason == StopReason::Cancelled {
+        if cancelled.load(Ordering::Relaxed) {
             self.update(vault_id, run_id, "cancelled", "Cancelled", 0, true)?;
             return Ok(());
         }
 
+        // Collapse provider duplicates, then preserve the existing deterministic
+        // Deep Research ranking behavior before adding graph candidates.
+        candidates = deduplicate_candidates(candidates);
+        self.emit_progress(
+            vault_id,
+            run_id,
+            &sequence,
+            "filtering",
+            None,
+            "Filtering candidates".to_string(),
+            Some(format!("{} unique", candidates.len())),
+            candidates.len() as u32,
+        );
+        self.emit_progress(
+            vault_id,
+            run_id,
+            &sequence,
+            "ranking",
+            None,
+            "Ranking retrieved papers".to_string(),
+            Some(format!("{} candidates", candidates.len())),
+            candidates.len() as u32,
+        );
+        let windowed = if self.reranker.is_ready() && candidates.len() > SEMANTIC_RERANK_WINDOW {
+            legacy_top_n(candidates, &profile, SEMANTIC_RERANK_WINDOW)
+        } else {
+            candidates
+        };
+        let semantic_scores = self.reranker.semantic_scores(&profile, &windowed).await;
+        let (windowed, semantic_scores) = apply_semantic_floor(windowed, semantic_scores);
+        let mut candidates: Vec<PaperCandidate> =
+            rank_candidates(windowed, &profile, RETRIEVAL_POOL_LIMIT, &semantic_scores)
+                .into_iter()
+                .filter(|candidate| !candidate_is_blocked(candidate, &blocked))
+                .collect();
+
+        // Add bounded citation neighbours, then fuse them with vault similarity.
         self.update(
             vault_id,
             run_id,
@@ -274,17 +460,25 @@ impl VaultSuggestionManager {
             0,
             false,
         )?;
+        self.emit_progress(
+            vault_id,
+            run_id,
+            &sequence,
+            "graph",
+            None,
+            "Citation graph".to_string(),
+            Some(format!(
+                "{} vault seeds",
+                vault_papers.len().min(GRAPH_SEED_LIMIT)
+            )),
+            0,
+        );
         let graph = graph_candidates(&source, &vault_papers).await;
-        let mut candidates: Vec<PaperCandidate> = outcome
-            .ranked
-            .into_iter()
-            .map(|ranked| ranked.candidate)
-            .filter(|candidate| !candidate_is_blocked(candidate, &blocked))
-            .collect();
         let mut candidate_refs: HashSet<String> =
             candidates.iter().map(paper_candidate_dedup_key).collect();
         for (paper_ref, graph_candidate) in &graph.candidates {
-            if !candidate_is_blocked(graph_candidate, &blocked)
+            if candidate_in_year_range(graph_candidate, &options)
+                && !candidate_is_blocked(graph_candidate, &blocked)
                 && candidate_refs.insert(paper_ref.clone())
             {
                 candidates.push(graph_candidate.clone());
@@ -301,13 +495,27 @@ impl VaultSuggestionManager {
             }
             None => Vec::new(),
         };
+        self.emit_progress(
+            vault_id,
+            run_id,
+            &sequence,
+            "ranking",
+            None,
+            "Ranking vault fit".to_string(),
+            Some(format!("{} candidates", candidates.len())),
+            candidates.len() as u32,
+        );
         let suggestions = rank_suggestions(
             vault_id,
             run_id,
             candidates,
             &semantic_scores,
             &graph.arrivals,
+            options.result_count as usize,
         );
+
+        // Replace the inbox only after every stage succeeds, preserving old
+        // suggestions when a refresh fails.
         self.store
             .replace_vault_suggestions(vault_id, run_id, &suggestions)?;
         let count = suggestions.len() as i32;
@@ -320,12 +528,21 @@ impl VaultSuggestionManager {
             run_id,
             "ready",
             &message,
-            Some(outcome.stop_reason.as_str()),
+            Some("selected_queries_completed"),
             None,
             count,
             true,
         )?;
-        self.emit(vault_id, run_id, "ready", &message, count as u32);
+        self.emit_progress(
+            vault_id,
+            run_id,
+            &sequence,
+            "complete",
+            None,
+            message.clone(),
+            None,
+            count as u32,
+        );
         Ok(())
     }
 
@@ -360,6 +577,49 @@ impl VaultSuggestionManager {
                 status: status.to_string(),
                 message: message.to_string(),
                 found,
+                sequence: 0,
+                phase: status.to_string(),
+                query_path: None,
+                label: message.to_string(),
+                detail: None,
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_progress(
+        &self,
+        vault_id: &str,
+        run_id: &str,
+        sequence: &AtomicU64,
+        phase: &str,
+        query_path: Option<String>,
+        label: String,
+        detail: Option<String>,
+        found: u32,
+    ) {
+        let status = match phase {
+            "complete" => "ready",
+            "graph" | "filtering" | "ranking" => "ranking",
+            _ => "searching",
+        };
+        let message = detail
+            .as_ref()
+            .map(|detail| format!("{label} · {detail}"))
+            .unwrap_or_else(|| label.clone());
+        let _ = self.app.emit(
+            "vault_suggestion_updated",
+            VaultSuggestionUpdated {
+                vault_id: vault_id.to_string(),
+                run_id: run_id.to_string(),
+                status: status.to_string(),
+                message,
+                found,
+                sequence: sequence.fetch_add(1, Ordering::Relaxed) + 1,
+                phase: phase.to_string(),
+                query_path,
+                label,
+                detail,
             },
         );
     }
@@ -382,8 +642,14 @@ impl VaultSuggestionManager {
 fn build_vault_profile(
     store: &LibraryStore,
     papers: &[&crate::domain::library::Paper],
+    focus: Option<&str>,
 ) -> Result<String, String> {
     let mut profile = String::from("Find research papers related to this vault:\n");
+    if let Some(focus) = focus.filter(|focus| !focus.trim().is_empty()) {
+        profile.push_str("Focus within the vault: ");
+        profile.push_str(focus.trim());
+        profile.push('\n');
+    }
     for paper in papers.iter().take(MAX_PAPERS_IN_PROFILE) {
         profile.push_str("\n- ");
         profile.push_str(&paper.title);
@@ -407,6 +673,140 @@ fn build_vault_profile(
         }
     }
     Ok(profile)
+}
+
+fn papers_for_vault<'a>(
+    snapshot: &'a crate::domain::library::LibrarySnapshot,
+    vault_id: &str,
+) -> Vec<&'a crate::domain::library::Paper> {
+    let paper_ids: HashSet<&str> = snapshot
+        .vault_papers
+        .iter()
+        .filter(|membership| membership.vault_id == vault_id)
+        .map(|membership| membership.paper_id.as_str())
+        .collect();
+    snapshot
+        .papers
+        .iter()
+        .filter(|paper| paper_ids.contains(paper.id.as_str()))
+        .collect()
+}
+
+fn vault_revision(papers: &[&crate::domain::library::Paper]) -> String {
+    let mut ids: Vec<&str> = papers.iter().map(|paper| paper.id.as_str()).collect();
+    ids.sort_unstable();
+    let digest = Sha256::digest(ids.join("\n"));
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn query_plan_id(vault_id: &str, revision: &str) -> Result<String, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let digest = Sha256::digest(format!("{vault_id}:{revision}:{now}"));
+    Ok(format!(
+        "vsp:{}",
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn selected_query_paths(
+    plan: &VaultSuggestionQueryPlan,
+    selected_query_ids: &[String],
+) -> Result<Vec<VaultSuggestionQueryPath>, String> {
+    let selected_ids: HashSet<&str> = selected_query_ids.iter().map(String::as_str).collect();
+    if selected_ids.is_empty() {
+        return Err("Select at least one suggestion query".to_string());
+    }
+    let selected: Vec<VaultSuggestionQueryPath> = plan
+        .queries
+        .iter()
+        .filter(|path| selected_ids.contains(path.id.as_str()))
+        .cloned()
+        .collect();
+    if selected.len() != selected_ids.len() {
+        return Err("One or more selected queries are not part of this plan".to_string());
+    }
+    Ok(selected)
+}
+
+fn suggestion_planner() -> Result<OpenRouterPlanner, String> {
+    let chat = ChatConfig::load()?;
+    Ok(OpenRouterPlanner::new(
+        Client::new(),
+        chat.url.clone(),
+        chat.resolve_api_key()?,
+        crate::services::settings::preference("model.planner")
+            .unwrap_or_else(|| chat.model.clone()),
+    ))
+}
+
+fn validate_options(mut options: VaultSuggestionOptions) -> Result<VaultSuggestionOptions, String> {
+    options.focus = options
+        .focus
+        .map(|focus| focus.trim().to_string())
+        .filter(|focus| !focus.is_empty());
+    if options
+        .focus
+        .as_ref()
+        .is_some_and(|focus| focus.len() > 500)
+    {
+        return Err("Suggestion focus must be 500 characters or fewer".to_string());
+    }
+    for year in [options.year_from, options.year_to].into_iter().flatten() {
+        if !(1000..=2100).contains(&year) {
+            return Err("Suggestion years must be between 1000 and 2100".to_string());
+        }
+    }
+    if options
+        .year_from
+        .zip(options.year_to)
+        .is_some_and(|(from, to)| from > to)
+    {
+        return Err("Suggestion start year cannot be after the end year".to_string());
+    }
+    if ![1, 3, 5].contains(&options.query_path_count) {
+        return Err("Proposed query count must be 1, 3, or 5".to_string());
+    }
+    if ![3, 5, 10].contains(&options.result_count) {
+        return Err("Suggestion result count must be 3, 5, or 10".to_string());
+    }
+    Ok(options)
+}
+
+fn provider_display_name(provider: &DiscoveryProviderChoice) -> &'static str {
+    match provider {
+        DiscoveryProviderChoice::OpenAlex => "OpenAlex",
+        DiscoveryProviderChoice::Arxiv => "arXiv",
+        DiscoveryProviderChoice::EuropePmc => "Europe PMC",
+        DiscoveryProviderChoice::Core => "CORE",
+    }
+}
+
+fn short_error(error: &str) -> String {
+    error.chars().take(160).collect()
+}
+
+fn deduplicate_candidates(candidates: Vec<PaperCandidate>) -> Vec<PaperCandidate> {
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| seen.insert(paper_candidate_dedup_key(candidate)))
+        .collect()
+}
+
+fn candidate_in_year_range(candidate: &PaperCandidate, options: &VaultSuggestionOptions) -> bool {
+    candidate.year.is_none_or(|year| {
+        options.year_from.is_none_or(|from| year >= from)
+            && options.year_to.is_none_or(|to| year <= to)
+    })
 }
 
 fn blocked_candidate_refs(
@@ -444,6 +844,7 @@ fn rank_suggestions(
     candidates: Vec<PaperCandidate>,
     semantic_scores: &[f64],
     graph_arrivals: &HashMap<String, usize>,
+    result_limit: usize,
 ) -> Vec<VaultSuggestion> {
     let deep: Vec<(String, f64)> = candidates
         .iter()
@@ -505,7 +906,7 @@ fn rank_suggestions(
 
     fused
         .into_iter()
-        .take(MAX_SUGGESTIONS)
+        .take(result_limit)
         .filter_map(|(paper_ref, score)| {
             let candidate = by_ref.get(&paper_ref)?.clone();
             Some(suggestion_from_candidate(
@@ -656,27 +1057,6 @@ fn suggestion_id(vault_id: &str, paper_ref: &str) -> String {
     format!("vs:{short}")
 }
 
-fn describe_progress(progress: &Progress) -> (&'static str, String, u32) {
-    match progress {
-        Progress::Planning { .. } => ("planning", "Planning".to_string(), 0),
-        Progress::Searching { .. } => ("searching", "Searching".to_string(), 0),
-        Progress::SearchResult { count, .. } => (
-            "searching",
-            format!("Searching · {count} found"),
-            *count as u32,
-        ),
-        Progress::SearchFailed { .. } => ("searching", "Searching other sources".to_string(), 0),
-        Progress::Deduped { unique } => ("searching", format!("{unique} unique"), *unique as u32),
-        Progress::Assessing => ("assessing", "Assessing coverage".to_string(), 0),
-        Progress::Ranking { count } => ("ranking", "Ranking".to_string(), *count as u32),
-        Progress::CandidatePreview { candidates } => (
-            "searching",
-            "Searching".to_string(),
-            candidates.len() as u32,
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,8 +1105,8 @@ mod tests {
         let candidates = (0..8)
             .map(|index| candidate(&format!("c{index}"), &format!("Paper {index}"), index))
             .collect();
-        let suggestions = rank_suggestions("vault", "run", candidates, &[], &HashMap::new());
-        assert_eq!(suggestions.len(), MAX_SUGGESTIONS);
+        let suggestions = rank_suggestions("vault", "run", candidates, &[], &HashMap::new(), 5);
+        assert_eq!(suggestions.len(), 5);
         assert!(suggestions.iter().all(|item| !item.reason.is_empty()));
     }
 
@@ -740,10 +1120,59 @@ mod tests {
             (normalized_title("Single"), 1_usize),
             (normalized_title("Shared"), 3_usize),
         ]);
-        let suggestions = rank_suggestions("vault", "run", candidates, &[], &arrivals);
+        let suggestions = rank_suggestions("vault", "run", candidates, &[], &arrivals, 5);
 
         assert_eq!(suggestions[0].candidate.id, "shared");
         assert!(suggestions[0].reason.contains("3 papers"));
+    }
+
+    #[test]
+    fn suggestion_options_reject_inverted_years() {
+        let options = VaultSuggestionOptions {
+            year_from: Some(2026),
+            year_to: Some(2020),
+            ..VaultSuggestionOptions::default()
+        };
+
+        assert!(validate_options(options).is_err());
+    }
+
+    #[test]
+    fn candidate_deduplication_preserves_first_path_order() {
+        let candidates = vec![
+            candidate("first", "Shared", 1),
+            candidate("duplicate", "Shared", 4),
+            candidate("second", "Distinct", 2),
+        ];
+
+        let deduplicated = deduplicate_candidates(candidates);
+
+        assert_eq!(deduplicated.len(), 2);
+        assert_eq!(deduplicated[0].id, "first");
+        assert_eq!(deduplicated[1].id, "second");
+    }
+
+    #[test]
+    fn only_approved_query_paths_are_selected() {
+        let plan = VaultSuggestionQueryPlan {
+            id: "plan".to_string(),
+            vault_id: "vault".to_string(),
+            vault_revision: "revision".to_string(),
+            queries: ["one", "two", "three"]
+                .into_iter()
+                .map(|id| VaultSuggestionQueryPath {
+                    id: id.to_string(),
+                    intent: id.to_string(),
+                    query: format!("query {id}"),
+                })
+                .collect(),
+        };
+
+        let selected = selected_query_paths(&plan, &["two".to_string()]).expect("valid path");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "two");
+        assert!(selected_query_paths(&plan, &["unknown".to_string()]).is_err());
     }
 
     #[test]

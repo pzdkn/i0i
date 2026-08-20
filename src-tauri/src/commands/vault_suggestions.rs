@@ -1,7 +1,9 @@
 //! Tauri commands for the vault Suggestions inbox (RFC 0091).
 
 use crate::domain::library::{LibrarySnapshot, PaperDraft, PaperSourceDraft};
-use crate::domain::vault_suggestion::{VaultSuggestion, VaultSuggestionSnapshot};
+use crate::domain::vault_suggestion::{
+    VaultSuggestion, VaultSuggestionOptions, VaultSuggestionQueryPlan, VaultSuggestionSnapshot,
+};
 use crate::pdf_ingestion::PdfDownloadManager;
 use crate::services::reader_service::ReaderService;
 use crate::services::vault_suggestions::VaultSuggestionManager;
@@ -16,13 +18,45 @@ pub fn get_vault_suggestions(
     store.get_vault_suggestions(&vault_id)
 }
 
-/// Queue a manual suggestion run.
+/// Load the controls saved for this vault.
+#[tauri::command]
+pub fn get_vault_suggestion_options(
+    store: tauri::State<'_, LibraryStore>,
+    vault_id: String,
+) -> Result<VaultSuggestionOptions, String> {
+    store.get_vault_suggestion_options(&vault_id)
+}
+
+/// Persist controls without starting planning or retrieval.
+#[tauri::command]
+pub fn save_vault_suggestion_options(
+    manager: tauri::State<'_, VaultSuggestionManager>,
+    vault_id: String,
+    options: VaultSuggestionOptions,
+) -> Result<(), String> {
+    manager.save_options(&vault_id, options)
+}
+
+/// Ask the planner for reviewable paths without contacting paper providers.
+#[tauri::command]
+pub async fn plan_vault_suggestion_queries(
+    manager: tauri::State<'_, VaultSuggestionManager>,
+    vault_id: String,
+    options: VaultSuggestionOptions,
+) -> Result<VaultSuggestionQueryPlan, String> {
+    manager.prepare_queries(vault_id, options).await
+}
+
+/// Queue searches for the explicitly approved query paths.
 #[tauri::command]
 pub fn run_vault_suggestions(
     manager: tauri::State<'_, VaultSuggestionManager>,
     vault_id: String,
+    plan_id: String,
+    selected_query_ids: Vec<String>,
+    options: VaultSuggestionOptions,
 ) -> Result<String, String> {
-    manager.run(vault_id)
+    manager.run(vault_id, plan_id, selected_query_ids, options)
 }
 
 /// Cancel one active suggestion run.

@@ -3,7 +3,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { LibrarySnapshot } from "$lib/domain/library";
 import type {
   VaultSuggestion,
+  VaultSuggestionOptions,
   VaultSuggestionPreview,
+  VaultSuggestionQueryPlan,
   VaultSuggestionSnapshot,
   VaultSuggestionUpdated,
 } from "$lib/domain/vault-suggestion";
@@ -12,8 +14,31 @@ export function getVaultSuggestions(vaultId: string): Promise<VaultSuggestionSna
   return invoke("get_vault_suggestions", { vaultId });
 }
 
-export function runVaultSuggestions(vaultId: string): Promise<string> {
-  return invoke("run_vault_suggestions", { vaultId });
+export function getVaultSuggestionOptions(vaultId: string): Promise<VaultSuggestionOptions> {
+  return invoke("get_vault_suggestion_options", { vaultId });
+}
+
+export function saveVaultSuggestionOptions(
+  vaultId: string,
+  options: VaultSuggestionOptions,
+): Promise<void> {
+  return invoke("save_vault_suggestion_options", { vaultId, options });
+}
+
+export function planVaultSuggestionQueries(
+  vaultId: string,
+  options: VaultSuggestionOptions,
+): Promise<VaultSuggestionQueryPlan> {
+  return invoke("plan_vault_suggestion_queries", { vaultId, options });
+}
+
+export function runVaultSuggestions(
+  vaultId: string,
+  planId: string,
+  selectedQueryIds: string[],
+  options: VaultSuggestionOptions,
+): Promise<string> {
+  return invoke("run_vault_suggestions", { vaultId, planId, selectedQueryIds, options });
 }
 
 export function cancelVaultSuggestionRun(runId: string): Promise<void> {

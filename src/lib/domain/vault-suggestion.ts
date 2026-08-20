@@ -1,5 +1,27 @@
 import type { ResearchPaper } from "$lib/domain/research";
 
+export type VaultSuggestionOptions = {
+  focus: string | null;
+  yearFrom: number | null;
+  yearTo: number | null;
+  queryPathCount: 1 | 3 | 5;
+  resultCount: 3 | 5 | 10;
+  includeReviews: boolean;
+};
+
+export type VaultSuggestionQueryPath = {
+  id: string;
+  intent: string;
+  query: string;
+};
+
+export type VaultSuggestionQueryPlan = {
+  id: string;
+  vaultId: string;
+  vaultRevision: string;
+  queries: VaultSuggestionQueryPath[];
+};
+
 export type VaultSuggestion = {
   id: string;
   vaultId: string;
@@ -24,6 +46,8 @@ export type VaultSuggestionRun = {
   startedAt?: string;
   finishedAt?: string;
   createdAt: string;
+  options: VaultSuggestionOptions;
+  queryPaths: VaultSuggestionQueryPath[];
 };
 
 export type VaultSuggestionSnapshot = {
@@ -37,6 +61,11 @@ export type VaultSuggestionUpdated = {
   status: string;
   message: string;
   found: number;
+  sequence: number;
+  phase: "planning" | "provider" | "graph" | "filtering" | "ranking" | "complete" | string;
+  queryPath?: string;
+  label: string;
+  detail?: string;
 };
 
 export type VaultSuggestionPreview = {

@@ -1,14 +1,17 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { RefreshCw, Search } from "@lucide/svelte";
+  import { LoaderCircle, RefreshCw, Search } from "@lucide/svelte";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { exportVaultBibtex } from "$lib/bridge/library";
   import {
     dismissVaultSuggestion,
+    getVaultSuggestionOptions,
     getVaultSuggestions,
     listenVaultSuggestionPreview,
     listenVaultSuggestionUpdated,
+    planVaultSuggestionQueries,
     runVaultSuggestions,
+    saveVaultSuggestionOptions,
     undoVaultSuggestionDismissal,
   } from "$lib/bridge/vault-suggestions";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
@@ -23,7 +26,10 @@
   } from "$lib/domain/library";
   import type {
     VaultSuggestion,
+    VaultSuggestionOptions,
+    VaultSuggestionQueryPlan,
     VaultSuggestionRun,
+    VaultSuggestionUpdated,
   } from "$lib/domain/vault-suggestion";
 
   let {
@@ -76,6 +82,21 @@
   let suggestionBusyIds = $state<string[]>([]);
   let dismissedSuggestion = $state<VaultSuggestion | undefined>();
   let refreshInProgress = $state(false);
+  let planningSuggestionQueries = $state(false);
+  let suggestionOptions = $state<VaultSuggestionOptions>({
+    focus: null,
+    yearFrom: null,
+    yearTo: null,
+    queryPathCount: 3,
+    resultCount: 5,
+    includeReviews: false,
+  });
+  let suggestionPlan = $state<VaultSuggestionQueryPlan | undefined>();
+  let selectedSuggestionQueryIds = $state<string[]>([]);
+  let suggestionActivity = $state<VaultSuggestionUpdated[]>([]);
+  let preparedFocus = $state<string | null>(null);
+  let preparedQueryPathCount = $state<number | undefined>();
+  let preparedPaperKey = $state("");
   let suggestionLoadSequence = 0;
   // RFC 0087 R2: the filter box was bound to `localFilter` and the value was
   // never read. Substring over the three columns the list already shows —
@@ -104,21 +125,40 @@
       latestSuggestionRun?.status ?? "",
     ) || Boolean(activeSuggestionRunId),
   );
+  const suggestionBusy = $derived(planningSuggestionQueries || suggestionRunning);
+  const suggestionPaperKey = $derived(
+    workspace.papers.map((paper) => paper.id).sort().join("\n"),
+  );
+  const suggestionPlanStale = $derived(
+    Boolean(suggestionPlan) &&
+      (preparedFocus !== (suggestionOptions.focus?.trim() || null) ||
+        preparedQueryPathCount !== suggestionOptions.queryPathCount ||
+        preparedPaperKey !== suggestionPaperKey),
+  );
   const suggestionToolbarStatus = $derived(
-    suggestionRunning
+    planningSuggestionQueries
+      ? "Preparing query paths"
+      : suggestionRunning
       ? suggestionStatus || latestSuggestionRun?.message || "Searching"
+      : suggestionPlanStale
+        ? "Queries need to be regenerated"
+        : suggestionPlan
+          ? `${selectedSuggestionQueryIds.length} of ${suggestionPlan.queries.length} queries selected`
       : latestSuggestionRun?.finishedAt
         ? `${latestSuggestionRun.message} · ${latestSuggestionRun.finishedAt}`
         : latestSuggestionRun?.message || "Not run yet",
   );
-  const hasCompletedSuggestionRun = $derived(latestSuggestionRun?.status === "ready");
 
   // R2.3: the filter is view state, and a vault switch is a new view.
   $effect(() => {
     void workspace.id;
     localFilter = "";
     activeVaultView = "papers";
+    suggestionPlan = undefined;
+    selectedSuggestionQueryIds = [];
+    suggestionActivity = [];
     void loadSuggestions(workspace.id);
+    void loadSuggestionOptions(workspace.id);
   });
 
   $effect(() => {
@@ -210,10 +250,64 @@
     }
   }
 
+  async function loadSuggestionOptions(vaultId: string) {
+    try {
+      const options = await getVaultSuggestionOptions(vaultId);
+      if (workspace.id === vaultId) suggestionOptions = options;
+    } catch (error) {
+      if (workspace.id === vaultId) suggestionError = String(error);
+    }
+  }
+
+  async function updateSuggestionOptions(options: VaultSuggestionOptions) {
+    suggestionOptions = options;
+    suggestionError = "";
+    try {
+      await saveVaultSuggestionOptions(workspace.id, options);
+    } catch (error) {
+      suggestionError = String(error);
+    }
+  }
+
+  async function prepareSuggestionQueries() {
+    if (suggestionBusy || workspace.papers.length === 0) return;
+    planningSuggestionQueries = true;
+    suggestionError = "";
+    suggestionStatus = "Preparing query paths";
+    try {
+      const plan = await planVaultSuggestionQueries(workspace.id, suggestionOptions);
+      suggestionPlan = plan;
+      selectedSuggestionQueryIds = plan.queries.map((query) => query.id);
+      preparedFocus = suggestionOptions.focus?.trim() || null;
+      preparedQueryPathCount = suggestionOptions.queryPathCount;
+      preparedPaperKey = suggestionPaperKey;
+      suggestionStatus = `${plan.queries.length} queries ready`;
+    } catch (error) {
+      suggestionError = String(error);
+    } finally {
+      planningSuggestionQueries = false;
+    }
+  }
+
+  function toggleSuggestionQuery(queryId: string) {
+    selectedSuggestionQueryIds = selectedSuggestionQueryIds.includes(queryId)
+      ? selectedSuggestionQueryIds.filter((id) => id !== queryId)
+      : [...selectedSuggestionQueryIds, queryId];
+  }
+
+  function selectAllSuggestionQueries() {
+    selectedSuggestionQueryIds = suggestionPlan?.queries.map((query) => query.id) ?? [];
+  }
+
   onMount(() => {
     const unlisteners: Array<() => void> = [];
     void listenVaultSuggestionUpdated((event) => {
       if (event.vaultId !== workspace.id) return;
+      if (event.sequence > 0) {
+        suggestionActivity = [...suggestionActivity, event]
+          .sort((left, right) => left.sequence - right.sequence)
+          .slice(-8);
+      }
       activeSuggestionRunId = event.status === "ready" || event.status === "failed" || event.status === "cancelled" ? "" : event.runId;
       suggestionStatus = event.message;
       latestSuggestionRun = {
@@ -223,6 +317,8 @@
         message: event.message,
         resultCount: event.found,
         createdAt: latestSuggestionRun?.createdAt ?? "",
+        options: latestSuggestionRun?.options ?? suggestionOptions,
+        queryPaths: latestSuggestionRun?.queryPaths ?? suggestionPlan?.queries ?? [],
       };
       if (event.status === "ready") {
         refreshInProgress = false;
@@ -238,20 +334,31 @@
       if (event.vaultId !== workspace.id || event.runId !== activeSuggestionRunId || refreshInProgress) return;
       const known = new Set(suggestions.map((suggestion) => suggestion.paperRef));
       const incoming = event.suggestions.filter((suggestion) => !known.has(suggestion.paperRef));
-      suggestions = [...suggestions, ...incoming].slice(0, 5);
+      suggestions = [...suggestions, ...incoming].slice(0, suggestionOptions.resultCount);
       selectedSuggestionId ||= suggestions[0]?.id ?? "";
     }).then((unlisten) => unlisteners.push(unlisten));
     return () => unlisteners.forEach((unlisten) => unlisten());
   });
 
-  async function findSuggestions() {
-    if (suggestionRunning || workspace.papers.length === 0) return;
+  async function runSelectedSuggestionQueries() {
+    if (
+      suggestionBusy ||
+      !suggestionPlan ||
+      suggestionPlanStale ||
+      selectedSuggestionQueryIds.length === 0
+    ) return;
     suggestionError = "";
     suggestionStatus = "Queued";
+    suggestionActivity = [];
     refreshInProgress = suggestions.length > 0;
     if (!refreshInProgress) suggestions = [];
     try {
-      activeSuggestionRunId = await runVaultSuggestions(workspace.id);
+      activeSuggestionRunId = await runVaultSuggestions(
+        workspace.id,
+        suggestionPlan.id,
+        selectedSuggestionQueryIds,
+        suggestionOptions,
+      );
     } catch (error) {
       refreshInProgress = false;
       suggestionError = String(error);
@@ -424,7 +531,7 @@
                 class:active={activeVaultView === "suggestions"}
                 onclick={() => activateVaultView("suggestions")}
                 onkeydown={(event) => handleTabKeydown(event, "suggestions")}
-              >Suggestions <strong>{suggestions.length}</strong>{#if suggestionRunning}<i class="run-dot"></i>{/if}</button>
+              >Suggestions <strong>{suggestions.length}</strong>{#if suggestionBusy}<LoaderCircle size={11} class="tab-spinner" />{/if}</button>
             </div>
 
             {#if activeVaultView === "papers"}
@@ -458,12 +565,19 @@
                     <button
                       class="suggestion-run"
                       type="button"
-                      disabled={suggestionRunning}
-                      title={hasCompletedSuggestionRun ? "Refresh suggestions" : "Find similar papers"}
-                      aria-label={hasCompletedSuggestionRun ? "Refresh suggestions" : "Find similar papers"}
-                      onclick={findSuggestions}
+                      disabled={suggestionBusy}
+                      aria-busy={suggestionBusy}
+                      title={suggestionPlan ? "Regenerate suggestion queries" : "Prepare suggestion queries"}
+                      aria-label={suggestionPlan ? "Regenerate suggestion queries" : "Prepare suggestion queries"}
+                      onclick={prepareSuggestionQueries}
                     >
-                      {#if hasCompletedSuggestionRun}<RefreshCw size={14} class={suggestionRunning ? "spinning" : ""} />{:else}<Search size={14} /> <span>Find similar papers</span>{/if}
+                      {#if suggestionBusy}
+                        <LoaderCircle size={14} class="spinning" />
+                      {:else if suggestionPlan}
+                        <RefreshCw size={14} />
+                      {:else}
+                        <Search size={14} />
+                      {/if}
                     </button>
                   {/if}
                 </div>
@@ -471,8 +585,9 @@
                   <div class="undo-bar" role="status">Dismissed · <button class="undo-dismiss" type="button" onclick={undoDismissal}>Undo</button></div>
                 {/if}
                 {#if suggestionError}
-                  <div class="suggestion-empty" role="alert"><strong>Suggestion run failed</strong><span>{suggestionError}</span><button class="link-btn" type="button" onclick={findSuggestions}>Retry</button></div>
-                {:else if workspace.papers.length === 0}
+                  <div class="suggestion-error-banner" role="alert">{suggestionError}</div>
+                {/if}
+                {#if workspace.papers.length === 0}
                   <div class="suggestion-empty">No papers to match yet</div>
                 {:else if suggestions.length > 0}
                   <VaultSuggestionList
@@ -486,10 +601,12 @@
                   />
                 {:else if suggestionRunning}
                   <div class="suggestion-empty">{suggestionStatus || "Searching"}</div>
+                {:else if suggestionPlan}
+                  <div class="suggestion-empty">Review the proposed queries in the inspector.</div>
                 {:else if latestSuggestionRun?.status === "ready"}
                   <div class="suggestion-empty">No new suggestions</div>
                 {:else}
-                  <div class="suggestion-empty">Find up to five papers related to this vault.</div>
+                  <div class="suggestion-empty"><button class="link-btn" type="button" onclick={prepareSuggestionQueries}>Prepare suggestion queries</button></div>
                 {/if}
                 {#if workspace.papers.length > 0 && workspace.papers.length < 3}
                   <p class="small-basis">Based on {workspace.papers.length} paper{workspace.papers.length === 1 ? "" : "s"}; suggestions may be broad.</p>
@@ -505,6 +622,18 @@
             {selectedSuggestion}
             suggestionCount={suggestions.length}
             suggestionRun={latestSuggestionRun}
+            {suggestionOptions}
+            {suggestionPlan}
+            selectedSuggestionQueryIds={selectedSuggestionQueryIds}
+            suggestionPlanStale={suggestionPlanStale}
+            suggestionBusy={suggestionBusy}
+            planningSuggestionQueries={planningSuggestionQueries}
+            activity={suggestionActivity}
+            onSuggestionOptionsChange={updateSuggestionOptions}
+            onPrepareSuggestionQueries={prepareSuggestionQueries}
+            onToggleSuggestionQuery={toggleSuggestionQuery}
+            onSelectAllSuggestionQueries={selectAllSuggestionQueries}
+            onRunSelectedSuggestionQueries={runSelectedSuggestionQueries}
             onOpenSuggestions={() => (activeVaultView = "suggestions")}
             {metadataAutofillProgressByPaperId}
             {autofillingMetadataPaperIds}
@@ -678,13 +807,6 @@
     font-weight: 500;
   }
 
-  .run-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--cyan);
-  }
-
   .view-panel {
     min-height: 0;
     flex: 1;
@@ -701,11 +823,12 @@
   }
 
   .suggestion-run {
+    width: 24px;
     height: 24px;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 0 7px;
+    justify-content: center;
+    padding: 0;
     border: 1px solid var(--border-2);
     background: var(--bg);
     color: var(--fg-2);
@@ -723,7 +846,8 @@
     opacity: 0.65;
   }
 
-  :global(.suggestion-run .spinning) {
+  :global(.suggestion-run .spinning),
+  :global(.tab-spinner) {
     animation: spin 1s linear infinite;
   }
 
@@ -758,9 +882,15 @@
     text-align: center;
   }
 
-  .suggestion-empty span {
-    max-width: 460px;
+  .suggestion-error-banner {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(217, 92, 76, 0.08);
     color: var(--red);
+    font-size: 10px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
   }
 
   .small-basis {
@@ -771,5 +901,12 @@
 
   @keyframes spin {
     to { transform: rotate(360deg); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(.suggestion-run .spinning),
+    :global(.tab-spinner) {
+      animation: none;
+    }
   }
 </style>

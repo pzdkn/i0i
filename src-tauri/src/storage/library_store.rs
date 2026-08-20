@@ -25,7 +25,8 @@ use crate::domain::research::{
     SearchRunStatus,
 };
 use crate::domain::vault_suggestion::{
-    VaultSuggestion, VaultSuggestionRun, VaultSuggestionSnapshot,
+    VaultSuggestion, VaultSuggestionOptions, VaultSuggestionQueryPath, VaultSuggestionRun,
+    VaultSuggestionSnapshot,
 };
 use crate::pdf_layout::NormRect;
 
@@ -2980,6 +2981,8 @@ impl LibraryStore {
               result_count integer not null default 0,
               started_at text,
               finished_at text,
+              options_json text not null default '{}',
+              query_paths_json text not null default '[]',
               created_at text not null,
               foreign key (vault_id) references vaults(id) on delete cascade
             );
@@ -3005,6 +3008,13 @@ impl LibraryStore {
 
             create index if not exists idx_vault_suggestions_vault_state
               on vault_suggestions(vault_id, state);
+
+            create table if not exists vault_suggestion_settings (
+              vault_id text primary key,
+              options_json text not null,
+              updated_at text not null,
+              foreign key (vault_id) references vaults(id) on delete cascade
+            );
             ",
         )
         .map_err(|error| error.to_string())?;
@@ -3024,7 +3034,19 @@ impl LibraryStore {
         add_column_if_missing(conn, "search_runs", "provider_set", "text")?;
         add_column_if_missing(conn, "search_runs", "query_expansions", "text")?;
         add_column_if_missing(conn, "search_candidates", "rank_signals_json", "text")?;
-        add_column_if_missing(conn, "search_candidates", "provider_hits_json", "text")
+        add_column_if_missing(conn, "search_candidates", "provider_hits_json", "text")?;
+        add_column_if_missing(
+            conn,
+            "vault_suggestion_runs",
+            "options_json",
+            "text not null default '{}'",
+        )?;
+        add_column_if_missing(
+            conn,
+            "vault_suggestion_runs",
+            "query_paths_json",
+            "text not null default '[]'",
+        )
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -4263,16 +4285,75 @@ impl LibraryStore {
 
     /// Start a vault-scoped run ledger entry in `queued` state.
     pub fn create_vault_suggestion_run(&self, vault_id: &str) -> StoreResult<VaultSuggestionRun> {
+        self.create_vault_suggestion_run_with_options(
+            vault_id,
+            &VaultSuggestionOptions::default(),
+            &[],
+        )
+    }
+
+    /// Start a run and snapshot the controls and approved query paths.
+    pub fn create_vault_suggestion_run_with_options(
+        &self,
+        vault_id: &str,
+        options: &VaultSuggestionOptions,
+        query_paths: &[VaultSuggestionQueryPath],
+    ) -> StoreResult<VaultSuggestionRun> {
         let conn = self.open_connection()?;
         let id = timestamped_id("vsr")?;
+        let options_json = serde_json::to_string(options).map_err(|error| error.to_string())?;
+        let query_paths_json =
+            serde_json::to_string(query_paths).map_err(|error| error.to_string())?;
         conn.execute(
             "insert into vault_suggestion_runs
-               (id, vault_id, status, message, started_at, created_at)
-             values (?1, ?2, 'queued', 'Queued', datetime('now'), datetime('now'))",
-            params![id, vault_id],
+               (id, vault_id, status, message, started_at, options_json,
+                query_paths_json, created_at)
+             values (?1, ?2, 'queued', 'Queued', datetime('now'), ?3, ?4,
+                     datetime('now'))",
+            params![id, vault_id, options_json, query_paths_json],
         )
         .map_err(|error| error.to_string())?;
         read_vault_suggestion_run(&conn, &id)
+    }
+
+    /// Load the controls last saved for this vault, or their product defaults.
+    pub fn get_vault_suggestion_options(
+        &self,
+        vault_id: &str,
+    ) -> StoreResult<VaultSuggestionOptions> {
+        let conn = self.open_connection()?;
+        let options_json: Option<String> = conn
+            .query_row(
+                "select options_json from vault_suggestion_settings where vault_id = ?1",
+                params![vault_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        options_json
+            .map(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
+            .transpose()
+            .map(|options| options.unwrap_or_default())
+    }
+
+    /// Persist the controls used to prepare the vault's next query proposal.
+    pub fn save_vault_suggestion_options(
+        &self,
+        vault_id: &str,
+        options: &VaultSuggestionOptions,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let options_json = serde_json::to_string(options).map_err(|error| error.to_string())?;
+        conn.execute(
+            "insert into vault_suggestion_settings (vault_id, options_json, updated_at)
+             values (?1, ?2, datetime('now'))
+             on conflict(vault_id) do update set
+               options_json = excluded.options_json,
+               updated_at = excluded.updated_at",
+            params![vault_id, options_json],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Update the durable user-facing lifecycle for a suggestion run.
@@ -4508,7 +4589,7 @@ fn vault_suggestion_from_row(row: &rusqlite::Row) -> rusqlite::Result<VaultSugge
 }
 
 const VAULT_SUGGESTION_RUN_COLUMNS: &str =
-    "id, vault_id, status, message, stop_reason, error, result_count, started_at, finished_at, created_at";
+    "id, vault_id, status, message, stop_reason, error, result_count, started_at, finished_at, created_at, options_json, query_paths_json";
 
 fn read_vault_suggestion_run(conn: &Connection, id: &str) -> StoreResult<VaultSuggestionRun> {
     conn.query_row(
@@ -4536,6 +4617,10 @@ fn read_latest_vault_suggestion_run(
 }
 
 fn vault_suggestion_run_from_row(row: &rusqlite::Row) -> rusqlite::Result<VaultSuggestionRun> {
+    let options_json: String = row.get(10)?;
+    let query_paths_json: String = row.get(11)?;
+    let options = serde_json::from_str(&options_json).unwrap_or_default();
+    let query_paths = serde_json::from_str(&query_paths_json).unwrap_or_default();
     Ok(VaultSuggestionRun {
         id: row.get(0)?,
         vault_id: row.get(1)?,
@@ -4547,6 +4632,8 @@ fn vault_suggestion_run_from_row(row: &rusqlite::Row) -> rusqlite::Result<VaultS
         started_at: row.get(7)?,
         finished_at: row.get(8)?,
         created_at: row.get(9)?,
+        options,
+        query_paths,
     })
 }
 
@@ -8994,6 +9081,37 @@ mod tests {
             db.store.decided_vault_suggestion_refs("attention")?,
             vec![candidate_dedup_key(&candidate)]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn vault_suggestion_settings_and_run_snapshot_are_durable() -> StoreResult<()> {
+        let db = test_db()?;
+        let options = VaultSuggestionOptions {
+            focus: Some("empirical methods".to_string()),
+            year_from: Some(2020),
+            year_to: Some(2026),
+            query_path_count: 3,
+            result_count: 10,
+            include_reviews: false,
+        };
+        let paths = vec![VaultSuggestionQueryPath {
+            id: "path-1".to_string(),
+            intent: "Methods".to_string(),
+            query: "empirical sparse attention".to_string(),
+        }];
+
+        db.store
+            .save_vault_suggestion_options("attention", &options)?;
+        let run = db.store.create_vault_suggestion_run_with_options(
+            "attention",
+            &options,
+            &paths,
+        )?;
+
+        assert_eq!(db.store.get_vault_suggestion_options("attention")?, options);
+        assert_eq!(run.options, options);
+        assert_eq!(run.query_paths, paths);
         Ok(())
     }
 

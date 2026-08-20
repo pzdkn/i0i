@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::domain::discovery::{DiscoveryProviderChoice, PaperCandidate};
 use crate::domain::research::{RankedCandidate, SearchConstraints};
+use crate::domain::vault_suggestion::VaultSuggestionQueryPath;
 use crate::services::llm::{self, CompletionRequest, WireMessage};
 use crate::services::research::budget::BudgetRemaining;
 use crate::services::research::error::ResearchError;
@@ -131,6 +132,18 @@ struct QueriesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct SuggestionQueriesResponse {
+    #[serde(default)]
+    queries: Vec<SuggestionQueryItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SuggestionQueryItem {
+    intent: String,
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct RankResponse {
     #[serde(default)]
     ranked: Vec<RankedItem>,
@@ -244,11 +257,31 @@ impl OpenRouterPlanner {
             .await
             .map_err(ResearchError::new)
     }
+
+    /// Propose a fixed number of distinct, provider-neutral vault search paths.
+    pub async fn plan_vault_suggestion_queries(
+        &self,
+        profile: &str,
+        count: u8,
+    ) -> Result<Vec<VaultSuggestionQueryPath>, ResearchError> {
+        let user =
+            format!("Vault profile:\n{profile}\n\nPropose exactly {count} distinct query paths.");
+        let value = self.complete_json(SUGGESTION_PLAN_SYSTEM, &user).await?;
+        let parsed: SuggestionQueriesResponse = serde_json::from_value(value)
+            .map_err(|error| ResearchError::new(format!("suggestion query shape: {error}")))?;
+        normalize_suggestion_queries(parsed.queries, count)
+    }
 }
 
 const PLAN_SYSTEM: &str = "You are a scholarly search planner. Expand the user's research \
 goal into focused provider queries (synonyms, key methods, datasets). Reply with a single \
 JSON object: {\"queries\":[{\"provider\":\"open_alex\"|\"arxiv\",\"text\":\"...\"}]}. No prose.";
+
+const SUGGESTION_PLAN_SYSTEM: &str = "You prepare a small search agenda for a research vault. \
+Each path must cover a distinct method, application, or open question from the vault rather than \
+paraphrasing one broad topic. Write concise provider-neutral scholarly queries. Reply with one JSON \
+object: {\"queries\":[{\"intent\":\"short human-readable angle\",\"query\":\"search query\"}]}. \
+Return exactly the requested count. No prose.";
 
 const REFLECT_SYSTEM: &str = "You review a paper search in progress. Decide whether the \
 pool answers the goal, name what is still missing, and write the queries that would close \
@@ -337,6 +370,38 @@ fn provider_name(choice: &DiscoveryProviderChoice) -> &'static str {
         DiscoveryProviderChoice::EuropePmc => "europe_pmc",
         DiscoveryProviderChoice::Core => "core",
     }
+}
+
+fn normalize_suggestion_queries(
+    items: Vec<SuggestionQueryItem>,
+    count: u8,
+) -> Result<Vec<VaultSuggestionQueryPath>, ResearchError> {
+    let mut seen = std::collections::HashSet::new();
+    let queries: Vec<VaultSuggestionQueryPath> = items
+        .into_iter()
+        .filter_map(|item| {
+            let query = item.query.trim().to_string();
+            let intent = item.intent.trim().to_string();
+            if query.is_empty() || intent.is_empty() || !seen.insert(query.to_lowercase()) {
+                return None;
+            }
+            Some((intent, query))
+        })
+        .take(count as usize)
+        .enumerate()
+        .map(|(index, (intent, query))| VaultSuggestionQueryPath {
+            id: format!("path-{}", index + 1),
+            intent,
+            query,
+        })
+        .collect();
+    if queries.len() != count as usize {
+        return Err(ResearchError::new(format!(
+            "Planner returned {} distinct queries; expected {count}",
+            queries.len()
+        )));
+    }
+    Ok(queries)
 }
 
 /// Render the three tiers of `PoolSummary` into one prompt (RFC 0088 R6.3).
@@ -444,6 +509,41 @@ mod tests {
     #[test]
     fn malformed_output_errors() {
         assert!(extract_json_object("no json at all").is_err());
+    }
+
+    #[test]
+    fn suggestion_queries_are_trimmed_deduplicated_and_bounded() {
+        let items = vec![
+            SuggestionQueryItem {
+                intent: " Methods ".to_string(),
+                query: " sparse attention ".to_string(),
+            },
+            SuggestionQueryItem {
+                intent: "Duplicate".to_string(),
+                query: "SPARSE ATTENTION".to_string(),
+            },
+            SuggestionQueryItem {
+                intent: "Inference".to_string(),
+                query: "efficient transformer inference".to_string(),
+            },
+        ];
+
+        let queries = normalize_suggestion_queries(items, 2).expect("two distinct queries");
+
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0].intent, "Methods");
+        assert_eq!(queries[0].query, "sparse attention");
+        assert_eq!(queries[1].id, "path-2");
+    }
+
+    #[test]
+    fn suggestion_query_plan_requires_the_requested_count() {
+        let items = vec![SuggestionQueryItem {
+            intent: "Only angle".to_string(),
+            query: "one query".to_string(),
+        }];
+
+        assert!(normalize_suggestion_queries(items, 3).is_err());
     }
 
     #[test]
