@@ -5,7 +5,14 @@
   import SettingsDialog from "$lib/features/settings/SettingsDialog.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
-  import { searchPapers, expandSearch, listenDiscoveryProgress } from "$lib/bridge/discovery";
+  import {
+    searchPapers,
+    expandSearch,
+    getBrowserRuntimeStatus,
+    listenBrowserRuntimeStatus,
+    listenDiscoveryProgress,
+    retryBrowserRuntime,
+  } from "$lib/bridge/discovery";
   import { getSettings } from "$lib/bridge/settings";
   import {
     createSearch,
@@ -80,6 +87,7 @@
     setDiscoverSelectedCandidate,
   } from "$lib/state/library-cache.svelte";
   import { depthStrategy, isTerminalStatus, type SearchCandidatesPreview, type SearchUpdated } from "$lib/domain/research";
+  import type { BrowserRuntimeStatus } from "$lib/domain/discover";
 
   // RFC 0087 R3: the status bar used to read a Rust command that returned the
   // literals 234 papers / 12 unread, fetched once on mount. It is derived from
@@ -102,6 +110,10 @@
   let bridgeError = $state("");
   let settingsOpen = $state(false);
   let settingsAttention = $state(false);
+  let browserStatus = $state<BrowserRuntimeStatus>({
+    state: "starting",
+    message: "Starting browser...",
+  });
 
   // Load user settings: seed Discover defaults and flag the gear when a required
   // key (OpenRouter) is unresolved (RFC 0055). Re-run when Settings closes.
@@ -176,6 +188,30 @@
     }
     await refreshSettingsState();
   });
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+    listenBrowserRuntimeStatus((status) => {
+      browserStatus = status;
+    })
+      .then(async (nextUnlisten) => {
+        unlisten = nextUnlisten;
+        browserStatus = await getBrowserRuntimeStatus();
+      })
+      .catch((error) => {
+        browserStatus = { state: "failed", message: String(error) };
+      });
+    return () => unlisten?.();
+  });
+
+  async function retryBrowser() {
+    browserStatus = { state: "starting", message: "Starting browser..." };
+    try {
+      browserStatus = await retryBrowserRuntime();
+    } catch (error) {
+      browserStatus = { state: "failed", message: String(error) };
+    }
+  }
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
@@ -506,6 +542,9 @@
   }
 
   async function runDiscoverSearch(discoverId: string) {
+    if (browserStatus.state !== "ready") {
+      return;
+    }
     const workspace = workspaceForNewRun(discoverId);
     const query = workspace.query.trim();
     if (!query) {
@@ -1063,6 +1102,8 @@
                 onOpenCandidate={openCandidate}
                 onAddCandidate={addCandidate}
                 {getCandidateVaultTargets}
+                {browserStatus}
+                onRetryBrowser={() => void retryBrowser()}
               />
             {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
               <VaultHome

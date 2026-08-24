@@ -1,8 +1,10 @@
 <script lang="ts">
   import { tick } from "svelte";
   import {
+    type BrowserRuntimeStatus,
     type DiscoverWorkspace,
   } from "$lib/domain/discover";
+  import { LoaderCircle } from "@lucide/svelte";
 
   let {
     workspace,
@@ -11,6 +13,7 @@
     onActivateSearch,
     onRunSearch,
     onImproveSearch,
+    browserStatus,
   }: {
     workspace: DiscoverWorkspace;
     discoverWorkspaces: DiscoverWorkspace[];
@@ -18,11 +21,13 @@
     onActivateSearch: (discoverId: string) => void;
     onRunSearch: (discoverId: string) => void;
     onImproveSearch: (discoverId: string) => void;
+    browserStatus: BrowserRuntimeStatus;
   } = $props();
 
   let queryInput: HTMLInputElement;
   let settingsOpen = $state(false);
   const isRunning = $derived(workspace.status === "running");
+  const browserReady = $derived(browserStatus.state === "ready");
   const statusLabel = $derived(workspace.status === "idle" ? "Idle" : workspace.status);
   const resultLabel = $derived(
     workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
@@ -59,7 +64,7 @@
   });
 
   function runSearch() {
-    if (!isRunning) {
+    if (!isRunning && browserReady) {
       onRunSearch(workspace.id);
     }
   }
@@ -125,14 +130,21 @@
       >
         Deep
       </button>
-      <button class="btn primary" type="submit" disabled={isRunning || !workspace.query.trim()}>
-        {isRunning ? "Running" : "Run"}
+      <button class="btn primary run-button" type="submit" disabled={isRunning || !browserReady || !workspace.query.trim()}>
+        {#if browserStatus.state === "starting" || browserStatus.state === "stopped"}
+          <LoaderCircle class="spinner" size={13} aria-hidden="true" />
+          Starting
+        {:else if browserStatus.state === "failed"}
+          Unavailable
+        {:else}
+          {isRunning ? "Running" : "Run"}
+        {/if}
       </button>
       {#if workspace.candidates.length > 0}
         <button
           class="btn"
           type="button"
-          disabled={isRunning}
+          disabled={isRunning || !browserReady}
           onclick={() => onImproveSearch(workspace.id)}
         >
           Improve
@@ -253,6 +265,18 @@
     gap: 10px;
     padding: 10px 18px 12px;
     background: var(--bg-1);
+  }
+
+  .run-button {
+    min-width: 78px;
+  }
+
+  .run-button :global(.spinner) {
+    animation: spin 0.9s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 
   .window-strip {

@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::domain::chat::{ChatContextSummary, ChatEntry};
+use crate::domain::chat::{ChatContextSummary, ChatEntry, WebLookupOutcome};
 use crate::domain::chunking::{estimate_tokens, CHARS_PER_TOKEN};
 use crate::domain::context::{
     preview_of, ContextCitation, ContextItem, ContextItemDraft, ContextItemView, ContextKey,
@@ -343,6 +343,7 @@ impl ContextManager {
                 passages: citations.iter().map(PassageRef::from_citation).collect(),
                 citations,
                 external_citations: Vec::new(),
+                web_lookup: WebLookupOutcome::NotRequested,
                 research_activities: Vec::new(),
                 paper_title: request.paper.title.to_string(),
                 included_chars: bundle.summary.included_chars,

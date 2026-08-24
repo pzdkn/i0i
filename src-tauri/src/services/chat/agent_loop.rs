@@ -14,7 +14,7 @@
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::domain::chat::{ChatEntry, ResearchActivity, ENTRY_ANSWER};
+use crate::domain::chat::{ChatEntry, ResearchActivity, WebLookupOutcome, ENTRY_ANSWER};
 use crate::domain::context::ExternalCitation;
 use crate::domain::context::ORIGIN_AGENT;
 use crate::domain::library::DocumentChunk;
@@ -98,6 +98,8 @@ pub struct RetrievalOutcome {
     pub paper_indexed: bool,
     /// External evidence read during the routing phase, numbered for assembly.
     pub external_citations: Vec<ExternalCitation>,
+    /// Typed result propagated to the final answer phase and persisted audit.
+    pub web_lookup: WebLookupOutcome,
     /// Background research launched by this turn. At most one is accepted.
     pub research_activities: Vec<ResearchActivity>,
 }
@@ -110,6 +112,7 @@ impl Default for RetrievalOutcome {
             queries: Vec::new(),
             paper_indexed: true,
             external_citations: Vec::new(),
+            web_lookup: WebLookupOutcome::NotRequested,
             research_activities: Vec::new(),
         }
     }
@@ -185,6 +188,16 @@ where
     // the round trip that used to decide whether to run it costs hundreds. An
     // ask can no longer reach the answer model with nothing to cite.
     baseline_search(context, &request, &mut outcome, &mut on_event).await;
+
+    // An explicit command is not a classification problem. Honor it before
+    // asking the optional planner, which may otherwise decline every tool.
+    if explicit_web_search_request(request.question) {
+        search_web(research, request.question, &mut outcome, &mut on_event).await;
+        on_event(LoopEvent::Retrieved {
+            count: outcome.chunks.len() + outcome.external_citations.len(),
+        });
+        return outcome;
+    }
 
     on_event(LoopEvent::Deciding);
 
@@ -572,7 +585,13 @@ where
     });
     let evidence = match research.search_web(query, WEB_SOURCE_LIMIT).await {
         Ok(evidence) => evidence,
-        Err(error) => return format!("Web search failed: {error}"),
+        Err(error) => {
+            let message = web_unavailable_message(&error);
+            outcome.web_lookup = WebLookupOutcome::Unavailable {
+                message: message.clone(),
+            };
+            return message;
+        }
     };
 
     let evidence = evidence.into_iter().take(WEB_SOURCE_LIMIT);
@@ -598,13 +617,46 @@ where
     }
 
     if lines.is_empty() {
+        outcome.web_lookup = WebLookupOutcome::NoEvidence;
         "No external sources matched. Say that the lookup found no usable evidence.".to_string()
     } else {
+        outcome.web_lookup = WebLookupOutcome::Succeeded {
+            source_count: outcome.external_citations.len(),
+        };
         format!(
             "{} external source(s). Cite only the [W…] handles below.\n{}",
             lines.len(),
             lines.join("\n")
         )
+    }
+}
+
+fn explicit_web_search_request(question: &str) -> bool {
+    let question = question.to_ascii_lowercase();
+    [
+        "search the web",
+        "search web",
+        "search online",
+        "look this up online",
+        "look it up online",
+        "look online",
+        "find current sources",
+        "check the internet",
+        "search the internet",
+    ]
+    .iter()
+    .any(|phrase| question.contains(phrase))
+}
+
+fn web_unavailable_message(error: &str) -> String {
+    crate::shared::log::warn("chat", format!("web lookup unavailable: {error}"));
+    if error.to_ascii_lowercase().contains("browser")
+        || error.to_ascii_lowercase().contains("obscura")
+    {
+        "Web search is temporarily unavailable because the browser could not start. Retry after the browser is ready."
+            .to_string()
+    } else {
+        "Web search was temporarily unavailable for this turn. Retry in a moment.".to_string()
     }
 }
 
@@ -894,6 +946,8 @@ mod tests {
     static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
     struct FakeResearch;
+    struct EmptyResearch;
+    struct FailingResearch;
 
     #[derive(Deserialize)]
     struct EvalCase {
@@ -929,6 +983,44 @@ mod tests {
                 title: title.to_string(),
                 status: "queued".to_string(),
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ResearchToolbox for FailingResearch {
+        async fn search_web(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<WebEvidence>, String> {
+            Err("browser_process_unavailable: Obscura did not become healthy".to_string())
+        }
+
+        fn start_deep_research(
+            &self,
+            _title: &str,
+            _goal: &str,
+        ) -> Result<ResearchActivity, String> {
+            unreachable!("this test requests web search")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ResearchToolbox for EmptyResearch {
+        async fn search_web(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<WebEvidence>, String> {
+            Ok(Vec::new())
+        }
+
+        fn start_deep_research(
+            &self,
+            _title: &str,
+            _goal: &str,
+        ) -> Result<ResearchActivity, String> {
+            unreachable!("this test requests web search")
         }
     }
 
@@ -1341,6 +1433,83 @@ mod tests {
         assert!(result.contains("[W1]"), "{result}");
         assert_eq!(outcome.external_citations.len(), 1);
         assert_eq!(outcome.external_citations[0].handle, "W1");
+    }
+
+    #[test]
+    fn explicit_web_commands_are_detected_conservatively() {
+        assert!(explicit_web_search_request(
+            "Please search the web for newer DINO results"
+        ));
+        assert!(explicit_web_search_request("Look this up online"));
+        assert!(!explicit_web_search_request(
+            "What does the current paper conclude?"
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_web_request_bypasses_a_planner_that_could_decline_tools() {
+        let fixture = fixture();
+        let mut request = request(None);
+        request.question = "Search the web for current comparisons";
+
+        // `url` is deliberately invalid. Reaching the planner would fail; the
+        // explicit command must invoke the toolbox directly instead.
+        let outcome = run(
+            &reqwest::Client::new(),
+            &fixture.manager,
+            &FakeResearch,
+            request,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(outcome.external_citations.len(), 1);
+        assert_eq!(
+            outcome.web_lookup,
+            WebLookupOutcome::Succeeded { source_count: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_failure_becomes_a_typed_unavailable_outcome() {
+        let fixture = fixture();
+        let mut request = request(None);
+        request.question = "Search online for current comparisons";
+
+        let outcome = run(
+            &reqwest::Client::new(),
+            &fixture.manager,
+            &FailingResearch,
+            request,
+            |_| {},
+        )
+        .await;
+
+        assert!(outcome.external_citations.is_empty());
+        assert!(matches!(
+            outcome.web_lookup,
+            WebLookupOutcome::Unavailable { ref message }
+                if message.contains("browser could not start")
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_web_results_are_distinct_from_browser_failure() {
+        let fixture = fixture();
+        let mut request = request(None);
+        request.question = "Search online for current comparisons";
+
+        let outcome = run(
+            &reqwest::Client::new(),
+            &fixture.manager,
+            &EmptyResearch,
+            request,
+            |_| {},
+        )
+        .await;
+
+        assert!(outcome.external_citations.is_empty());
+        assert_eq!(outcome.web_lookup, WebLookupOutcome::NoEvidence);
     }
 
     #[test]

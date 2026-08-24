@@ -310,6 +310,9 @@ pub struct ChatContextSummary {
     /// Kept separate from PDF citations because URLs have no page geometry.
     #[serde(default)]
     pub external_citations: Vec<crate::domain::context::ExternalCitation>,
+    /// Whether this turn attempted a bounded web lookup and how it ended.
+    #[serde(default)]
+    pub web_lookup: WebLookupOutcome,
     /// Background Deep Research runs started by this turn.
     #[serde(default)]
     pub research_activities: Vec<ResearchActivity>,
@@ -350,11 +353,27 @@ impl Default for ChatContextSummary {
             passages: Vec::new(),
             citations: Vec::new(),
             external_citations: Vec::new(),
+            web_lookup: WebLookupOutcome::NotRequested,
             research_activities: Vec::new(),
             retrieval_queries: Vec::new(),
             paper_indexed: true,
         }
     }
+}
+
+/// Durable, user-safe outcome of one bounded chat web lookup (RFC 0101).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WebLookupOutcome {
+    #[default]
+    NotRequested,
+    Succeeded {
+        source_count: usize,
+    },
+    NoEvidence,
+    Unavailable {
+        message: String,
+    },
 }
 
 /// A durable link from a chat answer to an asynchronous Deep Research run.
@@ -530,6 +549,7 @@ mod tests {
 
         assert!(summary.external_citations.is_empty());
         assert!(summary.research_activities.is_empty());
+        assert_eq!(summary.web_lookup, WebLookupOutcome::NotRequested);
         assert!(summary.paper_indexed);
     }
 }

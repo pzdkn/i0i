@@ -32,6 +32,8 @@ export type ChatContextSummary = {
   citations: ContextCitation[];
   /** External sources actually cited by this answer. */
   externalCitations: ExternalCitation[];
+  /** Outcome of the bounded web lookup attempted for this answer. */
+  webLookup: WebLookupOutcome;
   /** Background research runs started by this turn. */
   researchActivities: ResearchActivity[];
   /**
@@ -46,6 +48,12 @@ export type ChatContextSummary = {
    */
   paperIndexed: boolean;
 };
+
+export type WebLookupOutcome =
+  | { status: "not_requested" }
+  | { status: "succeeded"; sourceCount: number }
+  | { status: "no_evidence" }
+  | { status: "unavailable"; message: string };
 
 export type ResearchActivity = {
   searchId: string;

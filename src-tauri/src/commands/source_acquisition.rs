@@ -1,6 +1,21 @@
 use crate::services::source_acquisition::{
-    BrowserEndpoint, BrowserPageSnapshot, SourceAcquisitionService,
+    BrowserEndpoint, BrowserPageSnapshot, BrowserRuntimeStatus, SourceAcquisitionService,
 };
+
+#[tauri::command]
+pub fn get_browser_runtime_status(
+    source_acquisition: tauri::State<'_, SourceAcquisitionService>,
+) -> BrowserRuntimeStatus {
+    source_acquisition.browser_status()
+}
+
+#[tauri::command]
+pub async fn retry_browser_runtime(
+    source_acquisition: tauri::State<'_, SourceAcquisitionService>,
+) -> Result<BrowserRuntimeStatus, String> {
+    let _ = source_acquisition.ensure_browser_ready().await;
+    Ok(source_acquisition.browser_status())
+}
 
 #[tauri::command]
 pub async fn debug_obscura_start(

@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use super::client::ObscuraClient;
 use super::manager::ObscuraManager;
 use crate::services::source_acquisition::types::{
-    AcquisitionResult, BrowserEndpoint, BrowserRuntime, FetchResponse, PageInspection,
+    AcquisitionResult, BrowserEndpoint, BrowserRuntime, BrowserRuntimeStatus, FetchResponse,
+    PageInspection,
 };
 
 #[derive(Clone)]
@@ -33,5 +34,9 @@ impl BrowserRuntime for ObscuraBrowserRuntime {
     async fn inspect_page(&self, url: &str) -> AcquisitionResult<PageInspection> {
         self.manager.ensure_ready().await?;
         self.client.inspect_page(url).await
+    }
+
+    fn status(&self) -> BrowserRuntimeStatus {
+        self.manager.status()
     }
 }

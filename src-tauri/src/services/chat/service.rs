@@ -18,7 +18,8 @@ use super::context_manager::{retain_cited, ContextManager, ContextRequest, Paper
 use super::research_tools::ResearchToolbox;
 use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatProgress, ChatScope, ChatThreadSummary,
-    ChatThreadUpdated, ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
+    ChatThreadUpdated, ChatThreadView, PinnedHighlight, ThreadAnchor, WebLookupOutcome,
+    ENTRY_ANSWER,
 };
 use crate::domain::context::EphemeralContext;
 use crate::services::llm::{self as openrouter, CompletionRequest, WireMessage};
@@ -963,6 +964,17 @@ fn apply_research_context(
     summary.retrieval_queries = retrieval.queries;
     summary.paper_indexed = retrieval.paper_indexed;
 
+    match &retrieval.web_lookup {
+        WebLookupOutcome::NotRequested | WebLookupOutcome::Succeeded { .. } => {}
+        WebLookupOutcome::NoEvidence => system_prompt.push_str(
+            "\n\nA bounded web lookup ran for this turn but found no usable external evidence. Say so briefly if the question required it. Do not claim that i0i lacks internet access.\n",
+        ),
+        WebLookupOutcome::Unavailable { message } => system_prompt.push_str(&format!(
+            "\n\nA bounded web lookup was requested but was unavailable for this turn: {message}\n\
+             i0i does have web-search capability. Explain this temporary browser failure briefly. Never claim that you cannot access the internet in general, and do not ask the reader to retrieve or paste sources manually.\n"
+        )),
+    }
+
     if !retrieval.external_citations.is_empty() {
         system_prompt.push_str(
             "\n\nExternal evidence read for this turn. Cite external factual claims with \
@@ -1000,6 +1012,7 @@ fn apply_research_context(
     }
 
     summary.external_citations = retrieval.external_citations;
+    summary.web_lookup = retrieval.web_lookup;
     summary.research_activities = retrieval.research_activities;
     system_prompt
 }
@@ -1330,6 +1343,29 @@ mod tests {
         assert_eq!(summary.external_citations.len(), 1);
 
         retain_answer_citations(&mut summary, "An answer with no source marker.");
+        assert!(summary.external_citations.is_empty());
+    }
+
+    #[test]
+    fn unavailable_web_lookup_reaches_final_synthesis_without_fake_capability_denial() {
+        let retrieval = RetrievalOutcome {
+            web_lookup: WebLookupOutcome::Unavailable {
+                message:
+                    "Web search is temporarily unavailable because the browser could not start."
+                        .to_string(),
+            },
+            ..RetrievalOutcome::default()
+        };
+        let mut summary = ChatContextSummary::default();
+
+        let prompt = apply_research_context("base".to_string(), &mut summary, retrieval);
+
+        assert!(prompt.contains("i0i does have web-search capability"));
+        assert!(prompt.contains("do not ask the reader to retrieve or paste sources manually"));
+        assert!(matches!(
+            summary.web_lookup,
+            WebLookupOutcome::Unavailable { .. }
+        ));
         assert!(summary.external_citations.is_empty());
     }
 

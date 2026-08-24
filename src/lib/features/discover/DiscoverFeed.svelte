@@ -1,7 +1,8 @@
 <script lang="ts">
-  import type { DiscoverWorkspace } from "$lib/domain/discover";
+  import type { BrowserRuntimeStatus, DiscoverWorkspace } from "$lib/domain/discover";
   import type { VaultWorkspace } from "$lib/domain/library";
   import DiscoverTargetEditor from "$lib/features/discover/DiscoverTargetEditor.svelte";
+  import { LoaderCircle, RefreshCw } from "@lucide/svelte";
 
   let {
     workspace,
@@ -10,6 +11,8 @@
     onOpenCandidate,
     onAddCandidate,
     getCandidateVaultTargets,
+    browserStatus,
+    onRetryBrowser,
   }: {
     workspace: DiscoverWorkspace;
     vaults: VaultWorkspace[];
@@ -17,6 +20,8 @@
     onOpenCandidate: (candidateId: string) => void;
     onAddCandidate: (candidateId: string, vaultIds: string[]) => void;
     getCandidateVaultTargets: (candidateId: string) => VaultWorkspace[];
+    browserStatus: BrowserRuntimeStatus;
+    onRetryBrowser: () => void;
   } = $props();
 
   let editingCandidateId = $state("");
@@ -64,7 +69,20 @@
   </div>
 
   <div class="feed-body">
-    {#if workspace.status === "idle" && workspace.candidates.length === 0}
+    {#if browserStatus.state !== "ready" && workspace.candidates.length === 0}
+      <div class="empty-state terminal-empty browser-state col">
+        {#if browserStatus.state === "failed"}
+          <div class="label hot">Browser unavailable</div>
+          <p>{browserStatus.message ?? "Browser could not start."}</p>
+          <button class="btn retry" type="button" onclick={onRetryBrowser}>
+            <RefreshCw size={14} aria-hidden="true" /> Retry
+          </button>
+        {:else}
+          <LoaderCircle class="browser-spinner" size={20} aria-hidden="true" />
+          <div class="prompt-line row"><span>&gt;</span><em>starting browser...</em></div>
+        {/if}
+      </div>
+    {:else if workspace.status === "idle" && workspace.candidates.length === 0}
       <div class="empty-state terminal-empty col">
         <div class="prompt-line row"><span>&gt;</span><em>find papers about...</em></div>
       </div>
@@ -180,6 +198,24 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+  }
+
+  .browser-state {
+    gap: 8px;
+  }
+
+  :global(.browser-spinner) {
+    color: var(--amber);
+    animation: browser-spin 0.9s linear infinite;
+  }
+
+  .retry {
+    gap: 6px;
+    align-self: center;
+  }
+
+  @keyframes browser-spin {
+    to { transform: rotate(360deg); }
   }
 
   .feed-header {

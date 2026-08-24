@@ -157,6 +157,51 @@ pub trait BrowserRuntime: Send + Sync {
     async fn ensure_ready(&self) -> AcquisitionResult<BrowserEndpoint>;
     async fn fetch_original(&self, url: &str) -> AcquisitionResult<FetchResponse>;
     async fn inspect_page(&self, url: &str) -> AcquisitionResult<PageInspection>;
+
+    /// Current managed-browser lifecycle state.
+    fn status(&self) -> BrowserRuntimeStatus {
+        BrowserRuntimeStatus::ready()
+    }
+}
+
+/// Readiness exposed to browser-backed features and the Discover UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserRuntimeStatus {
+    pub state: BrowserRuntimeState,
+    pub message: Option<String>,
+}
+
+impl BrowserRuntimeStatus {
+    pub fn starting() -> Self {
+        Self {
+            state: BrowserRuntimeState::Starting,
+            message: Some("Starting browser...".to_string()),
+        }
+    }
+
+    pub fn ready() -> Self {
+        Self {
+            state: BrowserRuntimeState::Ready,
+            message: None,
+        }
+    }
+
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            state: BrowserRuntimeState::Failed,
+            message: Some(message.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRuntimeState {
+    Stopped,
+    Starting,
+    Ready,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

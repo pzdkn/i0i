@@ -207,7 +207,7 @@ pub fn run() {
             app.manage(highlight_service);
             app.manage(pdf_downloads);
             app.manage(pdf_extractions);
-            app.manage(source_acquisition);
+            app.manage(source_acquisition.clone());
             app.manage(reader_service);
             app.manage(chat_service);
             app.manage(metadata_enrichment);
@@ -220,6 +220,13 @@ pub fn run() {
             app.manage(context_manager);
             app.manage(query_expander);
             app.manage(settings_store);
+            // RFC 0100: pay browser startup latency while the rest of the app
+            // initializes. Browser-backed commands still call ensure_ready(),
+            // so they join this same single-flight attempt if it is in flight.
+            let eager_browser = source_acquisition.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = eager_browser.ensure_browser_ready().await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -292,6 +299,8 @@ pub fn run() {
             commands::vault_suggestions::add_vault_suggestion,
             commands::source_acquisition::debug_obscura_start,
             commands::source_acquisition::debug_obscura_fetch,
+            commands::source_acquisition::get_browser_runtime_status,
+            commands::source_acquisition::retry_browser_runtime,
             commands::highlight::create_highlight,
             commands::highlight::recolor_highlight,
             commands::highlight::set_highlight_label,

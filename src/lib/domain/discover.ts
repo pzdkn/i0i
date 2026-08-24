@@ -77,6 +77,11 @@ export function sanitizeProviders(providers: readonly string[]): DiscoveryProvid
 
 export type DiscoverRunStatus = "idle" | "running" | "completed" | "failed";
 
+export type BrowserRuntimeStatus = {
+  state: "stopped" | "starting" | "ready" | "failed";
+  message: string | null;
+};
+
 export type DiscoverRunMode = "shallow" | "deep" | "improve";
 
 export type DiscoverDepth = "quick" | "standard" | "thorough";

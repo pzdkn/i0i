@@ -1,10 +1,15 @@
 <script lang="ts">
-  import { providerDisplayName, type DiscoverCandidate, type DiscoveryProviderChoice, type DiscoverWorkspace } from "$lib/domain/discover";
+  import { providerDisplayName, type BrowserRuntimeStatus, type DiscoverCandidate, type DiscoveryProviderChoice, type DiscoverWorkspace } from "$lib/domain/discover";
+  import { LoaderCircle, RefreshCw } from "@lucide/svelte";
 
   let {
     workspace,
+    browserStatus,
+    onRetryBrowser,
   }: {
     workspace: DiscoverWorkspace;
+    browserStatus: BrowserRuntimeStatus;
+    onRetryBrowser: () => void;
   } = $props();
 
   const selectedCandidate = $derived(
@@ -62,6 +67,18 @@
   </header>
 
   <section class="panel-section col">
+    <div class="browser-runtime row">
+      <span>Browser</span>
+      {#if browserStatus.state === "starting" || browserStatus.state === "stopped"}
+        <span class="runtime-state row"><LoaderCircle class="runtime-spinner" size={12} aria-hidden="true" /> Starting</span>
+      {:else if browserStatus.state === "failed"}
+        <button class="runtime-retry row" type="button" onclick={onRetryBrowser}>
+          <RefreshCw size={12} aria-hidden="true" /> Retry
+        </button>
+      {:else}
+        <span class="runtime-ready">Ready</span>
+      {/if}
+    </div>
     <div class="row section-title">
       <span>Current Run</span>
       <span class="mono-dim">{runLabel}</span>
@@ -206,6 +223,35 @@
 </aside>
 
 <style>
+  .browser-runtime {
+    justify-content: space-between;
+    color: var(--fg-2);
+  }
+
+  .runtime-state,
+  .runtime-retry {
+    gap: 5px;
+  }
+
+  .runtime-ready {
+    color: var(--green, #75a478);
+  }
+
+  .runtime-retry {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--amber);
+    cursor: pointer;
+  }
+
+  :global(.runtime-spinner) {
+    animation: runtime-spin 0.9s linear infinite;
+  }
+
+  @keyframes runtime-spin {
+    to { transform: rotate(360deg); }
+  }
   .discover-inspector {
     width: 100%;
     height: 100%;

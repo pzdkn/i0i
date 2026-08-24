@@ -63,7 +63,7 @@ impl SourceAcquisitionService {
         } else {
             AcquisitionMethod::ObscuraBrowser
         };
-        let manager = ObscuraManager::new(obscura_config);
+        let manager = ObscuraManager::with_app(obscura_config, app.clone());
         let browser = Arc::new(ObscuraBrowserRuntime::new(manager));
         let http = Arc::new(DirectHttpFetcher::new(client));
         Self::new(config, http, browser, browser_method)
@@ -317,6 +317,13 @@ impl SourceAcquisitionService {
         &self,
     ) -> AcquisitionResult<crate::services::source_acquisition::types::BrowserEndpoint> {
         self.browser.ensure_ready().await
+    }
+
+    /// Snapshot used by Discover when it mounts after the latest status event.
+    pub fn browser_status(
+        &self,
+    ) -> crate::services::source_acquisition::types::BrowserRuntimeStatus {
+        self.browser.status()
     }
 
     pub async fn acquire_web_page(&self, url: &str) -> AcquisitionResult<BrowserPageSnapshot> {

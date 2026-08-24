@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { DiscoverWorkspace } from "$lib/domain/discover";
+  import type { BrowserRuntimeStatus, DiscoverWorkspace } from "$lib/domain/discover";
   import type { VaultWorkspace } from "$lib/domain/library";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
   import DiscoverFeed from "$lib/features/discover/DiscoverFeed.svelte";
@@ -18,6 +18,8 @@
     onOpenCandidate,
     onAddCandidate,
     getCandidateVaultTargets,
+    browserStatus,
+    onRetryBrowser,
   }: {
     workspace: DiscoverWorkspace;
     discoverWorkspaces: DiscoverWorkspace[];
@@ -30,6 +32,8 @@
     onOpenCandidate: (candidateId: string) => void;
     onAddCandidate: (candidateId: string, vaultIds: string[]) => void;
     getCandidateVaultTargets: (candidateId: string) => VaultWorkspace[];
+    browserStatus: BrowserRuntimeStatus;
+    onRetryBrowser: () => void;
   } = $props();
 </script>
 
@@ -41,6 +45,7 @@
     {onActivateSearch}
     {onRunSearch}
     {onImproveSearch}
+    {browserStatus}
   />
   <div class="discover-body row">
     <ResizableSplit
@@ -59,9 +64,11 @@
             {onOpenCandidate}
             {onAddCandidate}
             {getCandidateVaultTargets}
+            {browserStatus}
+            {onRetryBrowser}
           />
         {:else}
-          <DiscoverInspector {workspace} />
+          <DiscoverInspector {workspace} {browserStatus} {onRetryBrowser} />
         {/if}
       {/snippet}
     </ResizableSplit>
