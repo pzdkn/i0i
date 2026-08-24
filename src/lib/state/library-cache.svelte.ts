@@ -1,5 +1,5 @@
 import type { Paper } from "$lib/domain/paper";
-import { providerDisplayName, sanitizeProviders, type DiscoverCandidate, type DiscoverRunProgress, type DiscoverWorkspace, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
+import { providerDisplayName, sanitizeProviders, type DiscoverCandidate, type DiscoverRunProgress, type DiscoverWorkspace, type DiscoveryProgress, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
 import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
 import type { ResearchPaper, SearchCandidate, SearchUpdated } from "$lib/domain/research";
 import { citeKey, refSlug, type RefIndex, type RefPaper } from "$lib/features/reader/paper-refs";
@@ -330,6 +330,32 @@ export function applyDiscoverSearchResponse(discoverId: string, response: Discov
   workspace.candidates = response.candidates.map(toDiscoverCandidate);
   workspace.selectedCandidateId = workspace.candidates[0]?.id;
   markDiscoverOwnership();
+}
+
+/** Apply a Quick Search progress event without completing the active run. */
+export function applyDiscoverProgress(discoverId: string, event: DiscoveryProgress) {
+  const workspace = getDiscoverWorkspace(discoverId);
+  if (
+    workspace.status !== "running" ||
+    workspace.activeRunMode !== "shallow" ||
+    workspace.query.trim() !== event.query.trim()
+  ) {
+    return;
+  }
+
+  workspace.runProgress = {
+    message: event.message,
+    iteration: 0,
+    found: event.candidates.length,
+    unique: event.candidates.length || workspace.candidates.length,
+    new: event.candidates.length,
+  };
+  workspace.runTrace = [...workspace.runTrace.slice(-79), event.message];
+  if (event.candidates.length > 0) {
+    workspace.candidates = event.candidates.map(toDiscoverCandidate);
+    workspace.selectedCandidateId ??= workspace.candidates[0]?.id;
+    markDiscoverOwnership();
+  }
 }
 
 /// Merge a query-expansion superset (RFC 0054) into an already-rendered quick

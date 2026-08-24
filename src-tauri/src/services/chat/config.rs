@@ -38,6 +38,8 @@ pub struct ChatConfig {
     pub url: String,
     api_key_env: String,
     pub model: String,
+    /// Model used for tool routing and Deep Research planning.
+    pub planner_model: String,
     pub annotation_model: String,
     pub max_context_chars: usize,
     /// Cap on generated tokens per answer. See `DEFAULT_MAX_ANSWER_TOKENS`.
@@ -67,7 +69,9 @@ impl ChatConfig {
             api_key_env: app_config.chat.provider.api_key,
             // A user model override (Settings) wins over app.conf.json (RFC 0055).
             model: crate::services::settings::preference("model.chat")
-                .unwrap_or(app_config.chat.provider.model),
+                .unwrap_or_else(|| app_config.chat.provider.model.clone()),
+            planner_model: crate::services::settings::preference("model.planner")
+                .unwrap_or_else(|| app_config.chat.provider.model.clone()),
             // Fast/cheap model for agent annotation, separate from the answer
             // model (RFC 0059 follow-up). Falls back to a cheap open default.
             annotation_model: crate::services::settings::preference("model.annotation")
@@ -176,6 +180,7 @@ mod tests {
         let config = ChatConfig::from_json(FIXTURE).expect("chat block parses");
         assert_eq!(config.url, "https://openrouter.ai/api/v1/chat/completions");
         assert_eq!(config.model, "anthropic/claude-sonnet-4.5");
+        assert_eq!(config.planner_model, "anthropic/claude-sonnet-4.5");
         // The configured 60000 is clamped to the latency cap (CONTEXT_CHARS_CAP).
         assert_eq!(config.max_context_chars, CONTEXT_CHARS_CAP);
         assert!(config.title_model.is_none());
@@ -214,6 +219,7 @@ mod tests {
             url: "u".to_string(),
             api_key_env: "   ".to_string(),
             model: "m".to_string(),
+            planner_model: "p".to_string(),
             annotation_model: "a".to_string(),
             max_context_chars: 10,
             max_answer_tokens: 2_048,
@@ -233,6 +239,7 @@ mod tests {
             url: "u".to_string(),
             api_key_env: "I0I_CHAT_KEY_DEFINITELY_MISSING_XYZ".to_string(),
             model: "m".to_string(),
+            planner_model: "p".to_string(),
             annotation_model: "a".to_string(),
             max_context_chars: 10,
             max_answer_tokens: 2_048,

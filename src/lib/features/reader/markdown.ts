@@ -21,6 +21,8 @@ export type Inline =
   | { kind: "code"; text: string }
   | { kind: "strong"; text: string }
   | { kind: "em"; text: string }
+  /** A parsed inline TeX expression; `raw` is the readable fallback. */
+  | { kind: "math"; tex: string; raw: string }
   /** A `[1]`-style citation marker; the caller resolves the handle. */
   | { kind: "cite"; handle: string }
   /**
@@ -39,6 +41,8 @@ export type Block =
   | { kind: "list"; ordered: boolean; items: Inline[][] }
   /** `lang` is the fence tag, when the model gave one. */
   | { kind: "code"; text: string; lang: string }
+  /** A standalone TeX expression; `raw` is the readable fallback. */
+  | { kind: "math"; tex: string; raw: string }
   | { kind: "quote"; spans: Inline[] }
   | { kind: "hr" };
 
@@ -48,6 +52,58 @@ const NUMBERED = /^\s*\d+[.)]\s+(.*)$/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const RULE = /^\s*([-*_])\1{2,}\s*$/;
 const FENCE = /^\s*```(.*)$/;
+
+type DisplayMathMatch = {
+  block: Extract<Block, { kind: "math" }>;
+  closingIndex: number;
+};
+
+/** Parse a complete standalone display expression without consuming partial streams. */
+function parseDisplayMath(lines: string[], openingIndex: number): DisplayMathMatch | null {
+  const line = lines[openingIndex];
+  const trimmed = line.trim();
+  const delimiters = [
+    { opening: "\\[", closing: "\\]" },
+    { opening: "$$", closing: "$$" },
+  ];
+
+  for (const { opening, closing } of delimiters) {
+    if (
+      trimmed.startsWith(opening) &&
+      trimmed.endsWith(closing) &&
+      trimmed.length > opening.length + closing.length
+    ) {
+      return {
+        block: {
+          kind: "math",
+          tex: trimmed.slice(opening.length, -closing.length).trim(),
+          raw: trimmed,
+        },
+        closingIndex: openingIndex,
+      };
+    }
+
+    if (trimmed !== opening) {
+      continue;
+    }
+
+    for (let index = openingIndex + 1; index < lines.length; index += 1) {
+      if (lines[index].trim() !== closing) {
+        continue;
+      }
+      return {
+        block: {
+          kind: "math",
+          tex: lines.slice(openingIndex + 1, index).join("\n"),
+          raw: lines.slice(openingIndex, index + 1).join("\n"),
+        },
+        closingIndex: index,
+      };
+    }
+  }
+
+  return null;
+}
 
 export function parseMarkdown(body: string): Block[] {
   const lines = body.split("\n");
@@ -81,6 +137,14 @@ export function parseMarkdown(body: string): Block[] {
         code.pop();
       }
       blocks.push({ kind: "code", text: code.join("\n"), lang });
+      continue;
+    }
+
+    const displayMath = parseDisplayMath(lines, index);
+    if (displayMath) {
+      flushParagraph();
+      blocks.push(displayMath.block);
+      index = displayMath.closingIndex;
       continue;
     }
 
@@ -171,11 +235,33 @@ export function parseInline(text: string): Inline[] {
   while (index < text.length) {
     const rest = text.slice(index);
 
+    if (rest.startsWith("\\$")) {
+      plain += "$";
+      index += 2;
+      continue;
+    }
+
     const code = rest.match(/^`([^`\n]+)`/);
     if (code) {
       pushPlain();
       spans.push({ kind: "code", text: code[1] });
       index += code[0].length;
+      continue;
+    }
+
+    const canonicalMath = rest.match(/^\\\(([^\n]+?)\\\)/);
+    if (canonicalMath) {
+      pushPlain();
+      spans.push({ kind: "math", tex: canonicalMath[1], raw: canonicalMath[0] });
+      index += canonicalMath[0].length;
+      continue;
+    }
+
+    const dollarMath = rest.match(/^\$([^\n$]+)\$/);
+    if (dollarMath && dollarMath[1] === dollarMath[1].trim()) {
+      pushPlain();
+      spans.push({ kind: "math", tex: dollarMath[1], raw: dollarMath[0] });
+      index += dollarMath[0].length;
       continue;
     }
 
@@ -215,7 +301,9 @@ export function parseInline(text: string): Inline[] {
       continue;
     }
 
-    const cite = rest.match(/^\[(\d+)\]/);
+    // New answers distinguish local passages (`C1`) from web evidence (`W1`).
+    // Numeric handles remain valid so pre-RFC 0097 entries still render.
+    const cite = rest.match(/^\[([CW]?\d+)\]/);
     if (cite) {
       pushPlain();
       spans.push({ kind: "cite", handle: cite[1] });

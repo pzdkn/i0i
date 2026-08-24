@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   ChatScope,
+  ChatProgress,
   ChatThreadSummary,
   ChatThreadView,
   PinnedHighlight,
@@ -45,6 +46,7 @@ export async function deleteChatThread(threadId: string): Promise<void> {
 }
 
 type ChatStreamEvent =
+  | { event: "progress"; progress: ChatProgress }
   | { event: "delta"; text: string }
   | { event: "done"; thread: ChatThreadView }
   | { event: "error"; message: string };
@@ -70,8 +72,9 @@ export async function askChatThreadStreamed(
   threadId: string,
   body: string,
   onDelta: (text: string) => void,
+  onProgress: (progress: ChatProgress) => void = () => {},
 ): Promise<ChatThreadView> {
-  return streamAsk("ask_chat_thread_streamed", { threadId, body }, onDelta);
+  return streamAsk("ask_chat_thread_streamed", { threadId, body }, onDelta, onProgress);
 }
 
 /// Ask at an anchor; the thread is created lazily on success and returned
@@ -90,8 +93,9 @@ export async function askAtAnchorStreamed(
   body: string,
   onDelta: (text: string) => void,
   newThread = false,
+  onProgress: (progress: ChatProgress) => void = () => {},
 ): Promise<ChatThreadView> {
-  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body, newThread }, onDelta);
+  return streamAsk("ask_at_anchor_streamed", { scope, anchor, body, newThread }, onDelta, onProgress);
 }
 
 export type LogLevel = "error" | "warn" | "info" | "debug" | "trace";
@@ -152,12 +156,15 @@ function streamAsk(
   command: string,
   args: Record<string, unknown>,
   onDelta: (text: string) => void,
+  onProgress: (progress: ChatProgress) => void,
 ): Promise<ChatThreadView> {
   const channel = new Channel<ChatStreamEvent>();
 
   return new Promise<ChatThreadView>((resolve, reject) => {
     channel.onmessage = (message) => {
-      if (message.event === "delta") {
+      if (message.event === "progress") {
+        onProgress(message.progress);
+      } else if (message.event === "delta") {
         onDelta(message.text);
       } else if (message.event === "done") {
         resolve(message.thread);

@@ -1,20 +1,30 @@
 <script lang="ts">
-  import type { ContextCitation } from "$lib/domain/context";
+  import type { ContextCitation, ExternalCitation } from "$lib/domain/context";
   import { citationLabel } from "$lib/features/reader/cited-answer";
   import { parseMarkdown, type Inline } from "$lib/features/reader/markdown";
+  import MathExpression from "$lib/features/reader/MathExpression.svelte";
 
   let {
     body,
     citations = [],
+    externalCitations = [],
     onOpenCitation = () => {},
+    onOpenExternalCitation = () => {},
   }: {
     body: string;
     citations?: ContextCitation[];
+    externalCitations?: ExternalCitation[];
     onOpenCitation?: (citation: ContextCitation) => void;
+    onOpenExternalCitation?: (citation: ExternalCitation) => void;
   } = $props();
 
   const blocks = $derived(parseMarkdown(body));
-  const byHandle = $derived(new Map(citations.map((citation) => [citation.handle, citation])));
+  type AnswerCitation = ContextCitation | ExternalCitation;
+  const byHandle = $derived(
+    new Map<string, AnswerCitation>(
+      [...citations, ...externalCitations].map((citation) => [citation.handle, citation]),
+    ),
+  );
 
   /**
    * A `[n]` the assembly never minted stays literal text.
@@ -24,6 +34,10 @@
    */
   function citationFor(handle: string) {
     return byHandle.get(handle) ?? null;
+  }
+
+  function isExternal(citation: AnswerCitation): citation is ExternalCitation {
+    return "url" in citation;
   }
 </script>
 
@@ -41,8 +55,10 @@
         <button
           class="cite"
           type="button"
-          title={citationLabel(citation)}
-          onclick={() => onOpenCitation(citation)}>[{span.handle}]</button
+          title={isExternal(citation) ? citation.title : citationLabel(citation)}
+          onclick={() => isExternal(citation)
+            ? onOpenExternalCitation(citation)
+            : onOpenCitation(citation)}>[{span.handle}]</button
         >
       {:else}
         [{span.handle}]
@@ -51,6 +67,8 @@
       <!-- RFC 0090: a reference inside a model answer is not resolved — the
            notation is for the reader's own notes. It reads as what was typed. -->
       {span.raw}
+    {:else if span.kind === "math"}
+      <MathExpression tex={span.tex} raw={span.raw} />
     {:else}
       {span.text}
     {/if}
@@ -89,6 +107,8 @@
         {/if}
         <pre>{block.text}</pre>
       </div>
+    {:else if block.kind === "math"}
+      <MathExpression tex={block.tex} raw={block.raw} display />
     {:else if block.kind === "quote"}
       <blockquote>{@render inline(block.spans)}</blockquote>
     {:else}

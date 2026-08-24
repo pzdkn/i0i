@@ -20,7 +20,8 @@ use crate::services::chat::config::ChatConfig;
 use crate::services::embedding::EmbeddingReranker;
 use crate::services::research::agent::{self, Progress, RunInputs};
 use crate::services::research::planner::OpenRouterPlanner;
-use crate::services::research::source::RealCandidateSource;
+use crate::services::research::source::BrowserCandidateSource;
+use crate::services::source_acquisition::SourceAcquisitionService;
 use crate::storage::library_store::LibraryStore;
 
 type Cancellations = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
@@ -34,6 +35,7 @@ pub struct SearchManager {
     /// (`Option<Arc<…>>`); disabled when the model isn't built/available, in
     /// which case deep research falls back to legacy ranking.
     reranker: EmbeddingReranker,
+    source_acquisition: SourceAcquisitionService,
     queued_or_active: Arc<Mutex<HashSet<String>>>,
     cancellations: Cancellations,
 }
@@ -69,11 +71,17 @@ struct RunSummary {
 }
 
 impl SearchManager {
-    pub fn new(app: AppHandle, store: LibraryStore, reranker: EmbeddingReranker) -> Self {
+    pub fn new(
+        app: AppHandle,
+        store: LibraryStore,
+        reranker: EmbeddingReranker,
+        source_acquisition: SourceAcquisitionService,
+    ) -> Self {
         Self {
             app,
             store,
             reranker,
+            source_acquisition,
             queued_or_active: Arc::new(Mutex::new(HashSet::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -162,7 +170,9 @@ impl SearchManager {
             .unwrap_or_else(|| chat.model.clone());
         let planner =
             OpenRouterPlanner::new(Client::new(), chat.url.clone(), api_key, planner_model);
-        let source = RealCandidateSource::new(
+        let source = BrowserCandidateSource::from_app(
+            &self.app,
+            self.source_acquisition.clone(),
             OpenAlexProvider::from_app_config().map_err(|e| e.to_string())?,
             ArxivProvider::from_app_config().map_err(|e| e.to_string())?,
         );
@@ -366,6 +376,11 @@ fn describe(progress: &Progress) -> (SearchRunStatus, String, (u32, u32, u32)) {
             SearchRunStatus::Searching,
             format!("preview → {} unique", candidates.len()),
             (0, candidates.len() as u32, candidates.len() as u32),
+        ),
+        Progress::Resolving { count } => (
+            SearchRunStatus::Searching,
+            format!("resolving metadata for {count} papers"),
+            (0, *count as u32, 0),
         ),
         Progress::Assessing => (
             SearchRunStatus::Assessing,

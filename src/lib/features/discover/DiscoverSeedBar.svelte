@@ -1,9 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
   import {
-    providerDisplayName,
-    DEFAULT_PROVIDERS,
-    SUPPORTED_PROVIDERS,
     type DiscoverWorkspace,
   } from "$lib/domain/discover";
 
@@ -30,23 +27,8 @@
   const resultLabel = $derived(
     workspace.status === "completed" ? `${workspace.candidates.length} candidates` : undefined,
   );
-  const allProvidersSelected = $derived(workspace.providers.length === SUPPORTED_PROVIDERS.length);
-  const providerLabel = $derived(
-    allProvidersSelected
-      ? "All providers"
-      : workspace.providers.map(providerDisplayName).join(", ") || providerDisplayName(workspace.provider),
-  );
-  // arXiv has no citation-count sort.
-  const mostCitedDisabled = $derived(workspace.provider === "arxiv");
-  const isDefaultProviders = $derived(
-    workspace.providers.length === DEFAULT_PROVIDERS.length &&
-      DEFAULT_PROVIDERS.every((provider) => workspace.providers.includes(provider)),
-  );
   const nonDefaultFilters = $derived.by(() => {
     const filters: string[] = [];
-    if (!isDefaultProviders) {
-      filters.push(providerLabel);
-    }
     if (workspace.onlyViewable) {
       filters.push("openable only");
     }
@@ -80,18 +62,6 @@
     if (!isRunning) {
       onRunSearch(workspace.id);
     }
-  }
-
-  function toggleProvider(provider: DiscoverWorkspace["provider"]) {
-    if (workspace.providers.includes(provider)) {
-      if (workspace.providers.length === 1) {
-        return;
-      }
-      workspace.providers = workspace.providers.filter((item) => item !== provider);
-    } else {
-      workspace.providers = [...workspace.providers, provider];
-    }
-    workspace.provider = workspace.providers[0] ?? "open_alex";
   }
 
   function sortLabel(sortBy: DiscoverWorkspace["sortBy"]) {
@@ -191,45 +161,6 @@
 
     {#if settingsOpen}
       <div class="settings-panel row">
-        <fieldset class="provider-set">
-          <legend>Providers</legend>
-          <label>
-            <input
-              type="checkbox"
-              checked={workspace.providers.includes("open_alex")}
-              disabled={isRunning}
-              onchange={() => toggleProvider("open_alex")}
-            />
-            <span>OpenAlex</span>
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={workspace.providers.includes("arxiv")}
-              disabled={isRunning}
-              onchange={() => toggleProvider("arxiv")}
-            />
-            <span>arXiv</span>
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={workspace.providers.includes("europe_pmc")}
-              disabled={isRunning}
-              onchange={() => toggleProvider("europe_pmc")}
-            />
-            <span>Europe PMC</span>
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={workspace.providers.includes("core")}
-              disabled={isRunning}
-              onchange={() => toggleProvider("core")}
-            />
-            <span>CORE</span>
-          </label>
-        </fieldset>
         {#if workspace.deep}
           <label>
             <span>Depth</span>
@@ -244,8 +175,8 @@
             <span>Sort</span>
             <select bind:value={workspace.sortBy} disabled={isRunning}>
               <option value="relevance">Relevance</option>
-              <option value="newest" disabled={mostCitedDisabled}>Newest</option>
-              <option value="most_cited" disabled={mostCitedDisabled}>Most cited</option>
+              <option value="newest">Newest</option>
+              <option value="most_cited">Most cited</option>
             </select>
           </label>
         {/if}
@@ -473,35 +404,6 @@
     flex-wrap: wrap;
     min-width: 0;
     padding: 8px 0 0 18px;
-  }
-
-  .provider-set {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    min-height: 36px;
-    margin: 0;
-    border: 1px solid var(--border-2);
-    padding: 4px 8px;
-  }
-
-  .provider-set legend {
-    color: var(--fg-3);
-    font-size: 9px;
-    text-transform: uppercase;
-  }
-
-  .provider-set label {
-    flex-direction: row;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .provider-set input {
-    width: 12px;
-    height: 12px;
-    min-width: 12px;
-    accent-color: var(--green);
   }
 
   .inline-setting {

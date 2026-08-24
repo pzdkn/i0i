@@ -20,6 +20,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use futures_util::future::join_all;
 
 use crate::commands::discovery::orchestrator::{
     apply_semantic_floor, legacy_top_n, rank_candidates, SEMANTIC_FLOOR, SEMANTIC_RERANK_WINDOW,
@@ -40,6 +43,7 @@ use crate::services::research::planner::{
     CandidateDetail, CoverageStats, Planner, PoolEntry, PoolSummary, Query,
 };
 use crate::services::research::source::CandidateSource;
+use crate::services::research::source::SourceProgress;
 
 /// Maximum abstracts included in one reflection prompt (RFC 0088 R6.3).
 const REFLECTION_DETAIL_LIMIT: usize = 8;
@@ -87,6 +91,7 @@ pub enum Progress {
     SearchFailed { provider: String, error: String },
     Deduped { unique: usize },
     CandidatePreview { candidates: Vec<PaperCandidate> },
+    Resolving { count: usize },
     Assessing,
     Ranking { count: usize },
 }
@@ -99,12 +104,13 @@ pub async fn run<P, S>(
     reranker: &EmbeddingReranker,
     inputs: RunInputs<'_>,
     cancelled: &AtomicBool,
-    mut on: impl FnMut(Progress),
+    on: impl FnMut(Progress) + Send,
 ) -> Result<RunOutcome, ResearchError>
 where
     P: Planner,
     S: CandidateSource,
 {
+    let on = Mutex::new(on);
     let strategy = inputs.strategy;
     let constraints = inputs.constraints;
     let target = constraints.target_count.max(0) as u32;
@@ -128,7 +134,7 @@ where
             break;
         }
 
-        on(Progress::Planning { iteration });
+        emit_progress(&on, Progress::Planning { iteration });
         let queries = if iteration == 0 {
             let planned = planner.plan_queries(inputs.goal, constraints).await?;
             usage.llm_calls += 1;
@@ -148,7 +154,91 @@ where
         // Per-provider deltas for this round, folded into the tallies after it.
         let mut round_found: HashMap<String, (u32, u32, HashSet<String>)> = HashMap::new();
 
-        for query in queries.into_iter().take(allowance) {
+        let browser_transport = source.transport_name();
+        let mut remaining_queries = queries.into_iter().take(allowance).collect::<Vec<_>>();
+
+        if let Some(transport) = browser_transport {
+            let budget_left = strategy
+                .max_provider_queries
+                .saturating_sub(usage.provider_queries) as usize;
+            remaining_queries.truncate(budget_left);
+            queries_issued = remaining_queries.len() as u32;
+            usage.provider_queries += queries_issued;
+            round_found
+                .entry(transport.to_string())
+                .or_insert_with(|| (0, 0, HashSet::new()))
+                .0 += queries_issued;
+
+            // Browser navigation dominates elapsed time. Planned lanes are
+            // independent, so pay that latency once per round while retaining
+            // the existing round and provider-query budgets.
+            let progress_sink = &on;
+            let searches = remaining_queries.drain(..).map(|query| {
+                let mut query_constraints = constraints.clone();
+                query_constraints.providers.clear();
+                let provider = transport.to_string();
+                emit_progress(
+                    progress_sink,
+                    Progress::Searching {
+                        provider: provider.clone(),
+                        text: query.text.clone(),
+                    },
+                );
+                async move {
+                    let result = source
+                        .search_with_progress(&query, &query_constraints, &|source_progress| {
+                            match source_progress {
+                                SourceProgress::SearchingWeb => {}
+                                SourceProgress::Provisional(candidates) => emit_progress(
+                                    progress_sink,
+                                    Progress::CandidatePreview { candidates },
+                                ),
+                                SourceProgress::ResolvingMetadata(count) => {
+                                    emit_progress(progress_sink, Progress::Resolving { count })
+                                }
+                                SourceProgress::Resolved(count) => emit_progress(
+                                    progress_sink,
+                                    Progress::SearchResult {
+                                        provider: provider.clone(),
+                                        count,
+                                    },
+                                ),
+                            }
+                        })
+                        .await;
+                    (provider, result)
+                }
+            });
+
+            for (provider, result) in join_all(searches).await {
+                match result {
+                    Ok(mut found) => {
+                        emit_progress(
+                            &on,
+                            Progress::SearchResult {
+                                provider: provider.clone(),
+                                count: found.len(),
+                            },
+                        );
+                        let tally = round_found
+                            .entry(provider)
+                            .or_insert_with(|| (0, 0, HashSet::new()));
+                        tally.1 += found.len() as u32;
+                        tally.2.extend(found.iter().map(candidate_dedup_key));
+                        pool.append(&mut found);
+                    }
+                    Err(error) => emit_progress(
+                        &on,
+                        Progress::SearchFailed {
+                            provider,
+                            error: error.to_string(),
+                        },
+                    ),
+                }
+            }
+        }
+
+        for query in remaining_queries {
             if cancelled.load(Ordering::Relaxed) {
                 stop_reason = StopReason::Cancelled;
                 break 'run;
@@ -179,18 +269,43 @@ where
                     .or_insert_with(|| (0, 0, HashSet::new()))
                     .0 += 1;
             }
-            on(Progress::Searching {
-                provider: provider.clone(),
-                text: query.text.clone(),
-            });
-            match source.search(&query, &query_constraints).await {
+            emit_progress(
+                &on,
+                Progress::Searching {
+                    provider: provider.clone(),
+                    text: query.text.clone(),
+                },
+            );
+            match source
+                .search_with_progress(&query, &query_constraints, &|progress| match progress {
+                    SourceProgress::SearchingWeb => {}
+                    SourceProgress::Provisional(candidates) => {
+                        emit_progress(&on, Progress::CandidatePreview { candidates })
+                    }
+                    SourceProgress::ResolvingMetadata(count) => {
+                        emit_progress(&on, Progress::Resolving { count })
+                    }
+                    SourceProgress::Resolved(count) => emit_progress(
+                        &on,
+                        Progress::SearchResult {
+                            provider: "web".to_string(),
+                            count,
+                        },
+                    ),
+                })
+                .await
+            {
                 Ok(mut found) => {
-                    on(Progress::SearchResult {
-                        provider: provider.clone(),
-                        count: found.len(),
-                    });
+                    emit_progress(
+                        &on,
+                        Progress::SearchResult {
+                            provider: provider.clone(),
+                            count: found.len(),
+                        },
+                    );
                     for candidate in &found {
-                        if let Some(entry) = round_found.get_mut(candidate_provider(candidate)) {
+                        let tally = candidate_provider(candidate);
+                        if let Some(entry) = round_found.get_mut(tally) {
                             entry.1 += 1;
                             entry.2.insert(candidate_dedup_key(candidate));
                         }
@@ -198,10 +313,13 @@ where
                     pool.append(&mut found);
                 }
                 Err(error) => {
-                    on(Progress::SearchFailed {
-                        provider: provider.clone(),
-                        error: error.to_string(),
-                    });
+                    emit_progress(
+                        &on,
+                        Progress::SearchFailed {
+                            provider: provider.clone(),
+                            error: error.to_string(),
+                        },
+                    );
                 }
             }
             queries_issued += 1;
@@ -210,11 +328,14 @@ where
 
         pool = apply_constraints(pool, constraints);
         pool = dedup(pool);
-        on(Progress::Deduped { unique: pool.len() });
+        emit_progress(&on, Progress::Deduped { unique: pool.len() });
         if !pool.is_empty() {
-            on(Progress::CandidatePreview {
-                candidates: pool.clone(),
-            });
+            emit_progress(
+                &on,
+                Progress::CandidatePreview {
+                    candidates: pool.clone(),
+                },
+            );
         }
         usage.candidate_count = new_count(&pool, &inputs.existing_keys);
 
@@ -234,7 +355,7 @@ where
             break;
         }
 
-        on(Progress::Assessing);
+        emit_progress(&on, Progress::Assessing);
         let summary = build_pool_summary(&pool, reranker, inputs.goal).await;
         usage.iterations += 1;
         let remaining = BudgetRemaining::from_usage(&usage, strategy);
@@ -268,9 +389,12 @@ where
 
     // Stacking: rank only the candidates not already in the saved pool.
     let new_candidates = diff(pool, &inputs.existing_keys);
-    on(Progress::Ranking {
-        count: new_candidates.len(),
-    });
+    emit_progress(
+        &on,
+        Progress::Ranking {
+            count: new_candidates.len(),
+        },
+    );
     // Rank by meaning (RFC 0057). Bound the embedding set to the legacy-top-N,
     // score each candidate's semantic similarity to the goal, drop off-topic
     // results below the floor, then rank with the semantic-aware weights. When
@@ -303,6 +427,14 @@ where
         complete: stop_reason.is_complete(),
         trace,
     })
+}
+
+fn emit_progress<F>(on: &Mutex<F>, progress: Progress)
+where
+    F: FnMut(Progress),
+{
+    let mut callback = on.lock().expect("research progress callback lock");
+    callback(progress);
 }
 
 /// Build the bounded, abstract-aware summary used by the reflection call.
@@ -603,6 +735,33 @@ mod tests {
         }
     }
 
+    struct ConcurrentBrowserSource {
+        active: AtomicU32,
+        max_active: AtomicU32,
+    }
+
+    #[async_trait]
+    impl CandidateSource for ConcurrentBrowserSource {
+        fn transport_name(&self) -> Option<&'static str> {
+            Some("web")
+        }
+
+        async fn search(
+            &self,
+            query: &Query,
+            _constraints: &SearchConstraints,
+        ) -> Result<Vec<PaperCandidate>, ResearchError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(vec![candidate(
+                &query.text,
+                &format!("10/concurrent-{}", query.text),
+            )])
+        }
+    }
+
     fn constraints(target: i32) -> SearchConstraints {
         SearchConstraints {
             year_from: None,
@@ -666,6 +825,37 @@ mod tests {
         assert!(outcome.complete);
         assert_eq!(outcome.ranked.len(), 2);
         assert_eq!(outcome.ranked[0].rank, 1);
+    }
+
+    #[tokio::test]
+    async fn browser_queries_in_one_round_run_concurrently() {
+        let planner = FakePlanner::new(0).with_query_count(3);
+        let source = ConcurrentBrowserSource {
+            active: AtomicU32::new(0),
+            max_active: AtomicU32::new(0),
+        };
+        let search_constraints = constraints(20);
+        let strategy = Depth::Standard.budget();
+        let inputs = RunInputs {
+            goal: "goal",
+            constraints: &search_constraints,
+            strategy: &strategy,
+            existing_keys: HashSet::new(),
+        };
+
+        let outcome = run(
+            &planner,
+            &source,
+            &EmbeddingReranker::disabled(),
+            inputs,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .await
+        .expect("browser run");
+
+        assert_eq!(outcome.ranked.len(), 3);
+        assert!(source.max_active.load(Ordering::SeqCst) >= 2);
     }
 
     #[tokio::test]

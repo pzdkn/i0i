@@ -131,6 +131,23 @@ pub struct ContextCitation {
     pub rects_json: String,
 }
 
+/// A web source used as evidence in one answer (RFC 0097).
+///
+/// Unlike [`ContextCitation`], an external citation has no PDF geometry. It is
+/// persisted with the answer so reopening a thread preserves the exact source
+/// and excerpt the model saw instead of attempting to reconstruct them later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCitation {
+    /// `"W1"`, without brackets. Assigned per answer assembly.
+    pub handle: String,
+    pub url: String,
+    pub title: String,
+    pub publisher: Option<String>,
+    pub retrieved_at: String,
+    pub excerpt: String,
+}
+
 /// Characters of a passage shown in a reference row. About one line at the
 /// panel's width — enough to recognize the passage, short enough not to
 /// compete with the answer.
@@ -204,14 +221,20 @@ mod tests {
 
     #[test]
     fn a_preview_is_flattened_to_one_line() {
-        assert_eq!(preview_of("  We divide\n  by sqrt(d_k).  "), "We divide by sqrt(d_k).");
+        assert_eq!(
+            preview_of("  We divide\n  by sqrt(d_k).  "),
+            "We divide by sqrt(d_k)."
+        );
     }
 
     #[test]
     fn a_long_preview_is_clipped_without_a_trailing_space() {
         let preview = preview_of(&"word ".repeat(200));
         assert!(preview.ends_with("…"));
-        assert!(!preview.contains(" …"), "clipped mid-space leaves a gap: {preview}");
+        assert!(
+            !preview.contains(" …"),
+            "clipped mid-space leaves a gap: {preview}"
+        );
         assert!(preview.chars().count() <= PREVIEW_CHARS + 1);
     }
 

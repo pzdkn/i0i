@@ -21,6 +21,57 @@ pub fn apply_constraints(
         .collect()
 }
 
+/// Apply constraints after browser candidates have had a chance to resolve.
+/// Unknown structured metadata cannot satisfy an explicit browser-search
+/// filter; unconstrained searches still retain honest partial candidates.
+pub fn apply_resolved_constraints(
+    candidates: Vec<PaperCandidate>,
+    constraints: &SearchConstraints,
+) -> Vec<PaperCandidate> {
+    candidates
+        .into_iter()
+        .filter(|candidate| within_resolved_year(candidate, constraints))
+        .filter(|candidate| {
+            constraints.venues.is_empty()
+                || candidate
+                    .venue
+                    .as_deref()
+                    .is_some_and(|venue| contains_any(venue, &constraints.venues))
+        })
+        .filter(|candidate| {
+            constraints.authors.is_empty()
+                || candidate
+                    .authors
+                    .iter()
+                    .any(|author| contains_any(author, &constraints.authors))
+        })
+        .filter(|candidate| {
+            !constraints.open_access
+                || candidate
+                    .open_access
+                    .as_ref()
+                    .is_some_and(|access| access.is_open_access)
+        })
+        .collect()
+}
+
+fn within_resolved_year(candidate: &PaperCandidate, constraints: &SearchConstraints) -> bool {
+    if constraints.year_from.is_none() && constraints.year_to.is_none() {
+        return true;
+    }
+    candidate.year.is_some_and(|year| {
+        constraints.year_from.is_none_or(|from| year >= from)
+            && constraints.year_to.is_none_or(|to| year <= to)
+    })
+}
+
+fn contains_any(value: &str, filters: &[String]) -> bool {
+    let value = value.to_lowercase();
+    filters
+        .iter()
+        .any(|filter| value.contains(&filter.trim().to_lowercase()))
+}
+
 fn within_year(candidate: &PaperCandidate, constraints: &SearchConstraints) -> bool {
     let Some(year) = candidate.year else {
         return true; // unknown year: keep
@@ -131,5 +182,20 @@ mod tests {
         let out = apply_constraints(pool, &constraints(None, None, true));
         let titles: Vec<&str> = out.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(titles, vec!["open", "unknown"]);
+    }
+
+    #[test]
+    fn resolved_filters_require_known_matching_metadata() {
+        let mut matching = candidate("matching", Some(2024), Some(true));
+        matching.venue = Some("NeurIPS".to_string());
+        matching.authors = vec!["Ada Lovelace".to_string()];
+        let unknown = candidate("unknown", None, None);
+        let mut constraints = constraints(Some(2023), Some(2025), false);
+        constraints.venues = vec!["neurips".to_string()];
+        constraints.authors = vec!["Lovelace".to_string()];
+
+        let out = apply_resolved_constraints(vec![matching, unknown], &constraints);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "matching");
     }
 }

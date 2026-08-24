@@ -2,6 +2,8 @@
 //!
 //! Thin wrappers over `ChatService`; all orchestration lives in the service.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
 
 use crate::domain::chat::{
@@ -96,11 +98,21 @@ pub async fn ask_chat_thread_streamed(
         body.len()
     ));
 
+    let turn_id = next_turn_id();
     let deltas = on_event.clone();
+    let progress = on_event.clone();
     let result = chat_service
-        .ask_in_thread_streamed(&thread_id, body, move |text| {
-            let _ = deltas.send(ChatStreamEvent::Delta { text });
-        })
+        .ask_in_thread_streamed(
+            &thread_id,
+            body,
+            turn_id,
+            move |text| {
+                let _ = deltas.send(ChatStreamEvent::Delta { text });
+            },
+            move |value| {
+                let _ = progress.send(ChatStreamEvent::Progress { progress: value });
+            },
+        )
         .await;
 
     match result {
@@ -126,8 +138,7 @@ pub async fn ask_at_anchor_streamed(
     // Start a fresh conversation rather than appending to this paper's
     // existing whole-paper thread. camelCase because Tauri matches the
     // JavaScript argument name verbatim.
-    #[allow(non_snake_case)]
-    newThread: Option<bool>,
+    #[allow(non_snake_case)] newThread: Option<bool>,
     on_event: Channel<ChatStreamEvent>,
 ) -> Result<(), String> {
     chat_log(format!(
@@ -138,11 +149,23 @@ pub async fn ask_at_anchor_streamed(
         body.len()
     ));
 
+    let turn_id = next_turn_id();
     let deltas = on_event.clone();
+    let progress = on_event.clone();
     let result = chat_service
-        .ask_at_anchor_streamed(&scope, anchor, body, newThread.unwrap_or(false), move |text| {
-            let _ = deltas.send(ChatStreamEvent::Delta { text });
-        })
+        .ask_at_anchor_streamed(
+            &scope,
+            anchor,
+            body,
+            newThread.unwrap_or(false),
+            turn_id,
+            move |text| {
+                let _ = deltas.send(ChatStreamEvent::Delta { text });
+            },
+            move |value| {
+                let _ = progress.send(ChatStreamEvent::Progress { progress: value });
+            },
+        )
         .await;
 
     match result {
@@ -154,6 +177,17 @@ pub async fn ask_at_anchor_streamed(
         }
     }
     Ok(())
+}
+
+/// Mint a process-local id that correlates every progress event for one turn.
+fn next_turn_id() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("turn_{millis}_{sequence}")
 }
 
 /// Surface a frontend log line in the backend terminal at a chosen level, so

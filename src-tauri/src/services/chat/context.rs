@@ -47,8 +47,17 @@ pub(super) fn build_context(
 
     let system_prompt = format!(
         "You are a research assistant inside i0i. Answer questions about the\n\
-         paper below. Ground every claim in the paper text. If the paper does\n\
-         not contain the answer, say so explicitly.\n\
+         paper below and any explicitly supplied evidence. Claims about the\n\
+         paper cite local [C…] evidence; external factual claims cite [W…]\n\
+         evidence. Never attribute your own reasoning to the paper's authors.\n\
+         \n\
+         Reasoning beyond the sources is allowed when it helps. Introduce it as\n\
+         **Inference** and cite the premises. Introduce uncertain proposals as\n\
+         **Hypothesis**, explain why they might follow, and state a practical\n\
+         test or falsifier. Cross-field connections are inferences unless an\n\
+         external source supports them. Use these labels only when crossing an\n\
+         epistemic boundary, not on every paragraph. If evidence is missing, say\n\
+         so rather than inventing a source.\n\
          \n\
          Be brief. Two or three sentences answers most questions; a short list\n\
          answers the rest. No preamble, no restating the question, no summary\n\
@@ -57,6 +66,8 @@ pub(super) fn build_context(
          \n\
          Write in Markdown: **bold** for the load-bearing term, `code` for\n\
          symbols and identifiers, - lists where the answer is a set of things.\n\
+         Write inline mathematics as \\(x^2 + y^2\\) and standalone equations\n\
+         as \\[E = mc^2\\]. Do not put mathematical expressions in code spans.\n\
          \n\
          When the answer is an algorithm, a procedure, a loss, or a shape\n\
          transformation, show it as pseudocode in a fenced block rather than\n\
@@ -142,6 +153,22 @@ mod tests {
         assert!(bundle.system_prompt.contains("NeurIPS"));
         assert!(!bundle.system_prompt.contains("truncated"));
         assert!(!bundle.system_prompt.contains("focused on this passage"));
+        assert!(bundle.system_prompt.contains("**Inference**"));
+        assert!(bundle.system_prompt.contains("**Hypothesis**"));
+        assert!(bundle.system_prompt.contains("test or falsifier"));
+        assert!(bundle.system_prompt.contains("[C…]"));
+        assert!(bundle.system_prompt.contains("[W…]"));
+    }
+
+    #[test]
+    fn context_requests_canonical_math_delimiters() {
+        let bundle = build_context("T", &authors(), "V", 2020, "body", 100, None);
+
+        assert!(bundle.system_prompt.contains(r"\(x^2 + y^2\)"));
+        assert!(bundle.system_prompt.contains(r"\[E = mc^2\]"));
+        assert!(bundle
+            .system_prompt
+            .contains("Do not put mathematical expressions in code spans"));
     }
 
     #[test]

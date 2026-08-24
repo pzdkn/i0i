@@ -14,16 +14,20 @@ This is the working index for active RFCs and older documents reviewed on
 
 1. [RFC 0096: Fluid PDF highlight rendering](rfcs/reader/0096-fluid-pdf-highlight-rendering.md)
    — preserve precise anchors while rendering each passage as soft, unified
-   bands and one logical interaction target.
+   bands and one logical interaction target. Implementation is landed; manual
+   PDF visual checks remain.
 2. [RFC 0097: Research-connected chat with epistemic boundaries](rfcs/chat/0097-research-connected-chat-with-epistemic-boundaries.md)
    — connect chat to library search, bounded web evidence, and asynchronous
    Deep Research while distinguishing evidence, inference, and hypothesis.
+   Production paths are landed; the live prompt-quality comparison remains.
 3. [RFC 0098: Browser-first scholarly discovery](rfcs/discovery/0098-browser-first-scholarly-discovery.md)
    — discover through Obscura by default and retain provider APIs only for
-   identifiers and verified exact-title metadata resolution.
+   identifiers and verified exact-title metadata resolution. Production paths
+   are landed; the fixed-corpus live migration benchmark remains.
 4. [RFC 0099: Reliable math in chat and notes](rfcs/chat/0099-reliable-math-in-chat-and-notes.md)
    — add typed math nodes and locally bundled KaTeX with stable streaming and
-   readable failure behavior.
+   readable failure behavior. Implementation is landed; packaged-app offline
+   visual verification remains.
 5. [RFC 0052: Reliable Obscura sessions and web-reader fallback](rfcs/source-acquisition/0052-reliable-obscura-and-web-reader-fallback.md)
    — finish the shared persistent browser session required by RFCs 0097 and
    0098.

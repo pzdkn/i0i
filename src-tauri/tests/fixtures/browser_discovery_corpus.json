@@ -1,0 +1,52 @@
+[
+  {
+    "goal": "transformer attention architecture",
+    "expected_title": "Attention Is All You Need",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/1706.03762'>Attention Is All You Need</a></h3><div class='gs_rs'>A sequence transduction architecture based solely on attention.</div></div>"
+  },
+  {
+    "goal": "residual networks image recognition",
+    "expected_title": "Deep Residual Learning for Image Recognition",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/1512.03385'>Deep Residual Learning for Image Recognition</a></h3><div class='gs_rs'>Residual learning eases training of deep networks.</div></div>"
+  },
+  {
+    "goal": "batch normalization deep networks",
+    "expected_title": "Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/1502.03167'>Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift</a></h3></div>"
+  },
+  {
+    "goal": "generative adversarial networks",
+    "expected_title": "Generative Adversarial Nets",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://doi.org/10.5555/2969033.2969125'>Generative Adversarial Nets</a></h3></div>"
+  },
+  {
+    "goal": "bert language representation",
+    "expected_title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/1810.04805'>BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding</a></h3></div>"
+  },
+  {
+    "goal": "graph attention networks",
+    "expected_title": "Graph Attention Networks",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/1710.10903'>Graph Attention Networks</a></h3></div>"
+  },
+  {
+    "goal": "retrieval augmented generation",
+    "expected_title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/2005.11401'>Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</a></h3></div>"
+  },
+  {
+    "goal": "vision transformer images",
+    "expected_title": "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/2010.11929'>An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale</a></h3></div>"
+  },
+  {
+    "goal": "contrastive language image pretraining",
+    "expected_title": "Learning Transferable Visual Models From Natural Language Supervision",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/2103.00020'>Learning Transferable Visual Models From Natural Language Supervision</a></h3></div>"
+  },
+  {
+    "goal": "diffusion probabilistic models",
+    "expected_title": "Denoising Diffusion Probabilistic Models",
+    "html": "<div class='gs_ri'><h3 class='gs_rt'><a href='https://arxiv.org/abs/2006.11239'>Denoising Diffusion Probabilistic Models</a></h3></div>"
+  }
+]

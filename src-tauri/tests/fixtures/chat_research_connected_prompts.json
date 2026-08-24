@@ -1,0 +1,38 @@
+[
+  {
+    "name": "paper-local fact",
+    "question": "Why do the authors scale the dot products?",
+    "expected_tool": "search_paper",
+    "expected_boundary": "evidence"
+  },
+  {
+    "name": "library comparison",
+    "question": "How does this mechanism differ from the sparse-attention paper in my library?",
+    "expected_tool": "search_library",
+    "expected_boundary": "evidence"
+  },
+  {
+    "name": "current external comparison",
+    "question": "How does this compare with the current state of the art?",
+    "expected_tool": "search_web",
+    "expected_boundary": "external"
+  },
+  {
+    "name": "explicit broad research",
+    "question": "Start Deep Research to find papers applying this idea to biology.",
+    "expected_tool": "start_deep_research",
+    "expected_boundary": "activity"
+  },
+  {
+    "name": "inference",
+    "question": "What might follow from these results?",
+    "expected_tool": "search_paper",
+    "expected_boundary": "inference"
+  },
+  {
+    "name": "falsifiable hypothesis",
+    "question": "Propose a hypothesis connecting this method to active learning.",
+    "expected_tool": "search_library",
+    "expected_boundary": "hypothesis"
+  }
+]

@@ -135,12 +135,34 @@ pub fn run() {
                 std::sync::Arc::new(search_service.clone()),
                 chat_config.max_context_chars,
             );
+            let search_manager = SearchManager::new(
+                app.handle().clone(),
+                store.clone(),
+                embedding_reranker.clone(),
+                source_acquisition.clone(),
+            );
+            search_manager
+                .recover_and_queue_startup_runs()
+                .map_err(std::io::Error::other)?;
+            let chat_browser_discovery = commands::discovery::browser::BrowserDiscoverySource::new(
+                source_acquisition.clone(),
+                discovery_providers.openalex.clone(),
+                discovery_providers.arxiv.clone(),
+                commands::discovery::browser::BrowserDiscoveryConfig::load(&app.handle()),
+            );
+            let chat_research = services::chat::AppResearchToolbox::new(
+                store.clone(),
+                search_manager.clone(),
+                chat_browser_discovery,
+                source_acquisition.clone(),
+            );
             let chat_service = ChatService::new(
                 app.handle().clone(),
                 chat_config,
                 store.clone(),
                 reader_service.clone(),
                 context_manager.clone(),
+                std::sync::Arc::new(chat_research),
             );
             {
                 let worker = chunk_embedder.clone();
@@ -165,19 +187,11 @@ pub fn run() {
                 let worker = chunk_embedder.clone();
                 app.handle()
                     .listen("document_extraction_updated", move |event| {
-                    if event.payload().contains("\"status\":\"ready\"") {
-                        worker.request_sweep();
-                    }
-                });
+                        if event.payload().contains("\"status\":\"ready\"") {
+                            worker.request_sweep();
+                        }
+                    });
             }
-            let search_manager = SearchManager::new(
-                app.handle().clone(),
-                store.clone(),
-                embedding_reranker.clone(),
-            );
-            search_manager
-                .recover_and_queue_startup_runs()
-                .map_err(std::io::Error::other)?;
             let vault_suggestion_manager = VaultSuggestionManager::new(
                 app.handle().clone(),
                 store.clone(),

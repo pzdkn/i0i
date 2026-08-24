@@ -5,6 +5,7 @@
   import type { PdfRect, ReaderTextSelection } from "$lib/domain/reader";
   import { ensurePdfJsRuntimeCompatibility } from "$lib/features/reader/pdfjs-compat";
   import { markFill } from "$lib/features/reader/highlight-colors";
+  import { projectPdfHighlightRects } from "$lib/features/reader/pdf-highlight-geometry";
   import { resolveQuoteInText } from "$lib/features/reader/resolve-quote-html";
   import { debugLog } from "$lib/bridge/chat";
   import StickyGlyph from "$lib/features/reader/StickyGlyph.svelte";
@@ -132,6 +133,9 @@
         (mark.color !== null || mark.note !== null || Boolean(conversationIds?.has(mark.id))),
     ),
   );
+  const projectedPageMarks = $derived(
+    pageMarks.map((mark) => ({ mark, rects: projectPdfHighlightRects(markRects(mark)) })),
+  );
   // RFC 0074: standalone sticky notes on this page — annotations anchored to a
   // point rather than a range. They render as a glyph, never as a band.
   const pageStickies = $derived(
@@ -139,10 +143,18 @@
       (mark) => mark.locator.kind === "pdfPoint" && mark.locator.pageIndex === pageIndex,
     ),
   );
-  const draftRects = $derived(selection?.pageIndex === pageIndex ? rectsFromJson(selection.rectsJson) : []);
+  const draftRects = $derived(
+    selection?.pageIndex === pageIndex
+      ? projectPdfHighlightRects(rectsFromJson(selection.rectsJson))
+      : [],
+  );
   // RFC 0077: only the cited page paints. Transient on purpose — a persistent
   // band would be indistinguishable from a highlight the user made.
-  const flashRects = $derived(citationFlash?.pageIndex === pageIndex ? citationFlash.rects : []);
+  const flashRects = $derived(
+    citationFlash?.pageIndex === pageIndex
+      ? projectPdfHighlightRects(citationFlash.rects)
+      : [],
+  );
 
   // RFC 0073 Phase 1: the text layer and the canvas bitmap are now rendered by
   // SEPARATE effects. They used to share one, which meant that re-rendering a
@@ -602,37 +614,40 @@
   <canvas bind:this={canvasElement} aria-label={`PDF page ${pageNumber}`}></canvas>
   <div bind:this={textLayerElement} class="textLayer text-layer" aria-hidden="true"></div>
   <div class="annotation-layer" role="presentation">
-    {#each pageMarks as mark}
-      {#each markRects(mark) as rect, rectIndex}
-        <button
-          class="pdf-note-anchor"
-          type="button"
-          aria-label="Highlight actions"
-          style={`${rectStyle(rect)} background: ${markFill(mark.color)};`}
-          onclick={(event) => {
-            event.stopPropagation();
-            onHighlightClick(mark.id, event.clientX, event.clientY);
-          }}
-          oncontextmenu={(event) => {
-            // RFC 0085 R2.1: right-click names its actions instead of opening
-            // the same popover a left-click does.
-            event.preventDefault();
-            event.stopPropagation();
-            onHighlightContextMenu?.(mark.id, event.clientX, event.clientY);
-          }}
-        ></button>
-        <!-- RFC 0074 R3: a commented highlight has to look different from a bare
-             one, or the two are indistinguishable on the page. The glyph rides
-             the END of the mark's last rect. -->
-        {#if rectIndex === markRects(mark).length - 1 && mark.note?.trim()}
+    {#each projectedPageMarks as { mark, rects } (mark.id)}
+      <button
+        class="pdf-note-anchor"
+        type="button"
+        aria-label="Highlight actions"
+        onclick={(event) => {
+          event.stopPropagation();
+          onHighlightClick(mark.id, event.clientX, event.clientY);
+        }}
+        oncontextmenu={(event) => {
+          // RFC 0085 R2.1: right-click names its actions instead of opening
+          // the same popover a left-click does.
+          event.preventDefault();
+          event.stopPropagation();
+          onHighlightContextMenu?.(mark.id, event.clientX, event.clientY);
+        }}
+      >
+        {#each rects as rect}
           <span
-            class="pdf-comment-glyph"
-            style={`left: ${(rect.x + rect.width) * 100}%; top: ${rect.y * 100}%;`}
-          >
-            <StickyGlyph color={mark.color} size={10} />
-          </span>
-        {/if}
-      {/each}
+            class="pdf-highlight-band"
+            style={`${rectStyle(rect)} background: ${markFill(mark.color)};`}
+          ></span>
+        {/each}
+      </button>
+      <!-- RFC 0074 R3: the glyph rides the end of the final projected band. -->
+      {@const finalRect = rects.at(-1)}
+      {#if finalRect && mark.note?.trim()}
+        <span
+          class="pdf-comment-glyph"
+          style={`left: ${(finalRect.x + finalRect.width) * 100}%; top: ${finalRect.y * 100}%;`}
+        >
+          <StickyGlyph color={mark.color} size={10} />
+        </span>
+      {/if}
     {/each}
 
     <!-- RFC 0074: a sticky note is its own click target — a ~10px glyph cannot
@@ -785,18 +800,35 @@
 
   .pdf-note-anchor {
     position: absolute;
-    border: 1px solid rgba(242, 169, 59, 0.88);
-    background: rgba(242, 169, 59, 0.2);
+    inset: 0;
+    border: 0;
+    background: none;
     padding: 0;
     cursor: pointer;
+    pointer-events: none;
+  }
+
+  .pdf-highlight-band {
+    position: absolute;
+    border-radius: 2px;
     pointer-events: auto;
+  }
+
+  .pdf-note-anchor:focus-visible {
+    outline: none;
+  }
+
+  .pdf-note-anchor:focus-visible .pdf-highlight-band {
+    outline: 1px solid var(--focus-ring, var(--amber));
+    outline-offset: 1px;
   }
 
   /* RFC 0077: fades on its own so nothing has to clean it up visually. */
   .citation-flash {
     position: absolute;
     z-index: 3;
-    border: 1px solid var(--amber);
+    border: 0;
+    border-radius: 2px;
     background: color-mix(in srgb, var(--amber) 22%, transparent);
     pointer-events: none;
     animation: citation-fade 2.6s ease-out forwards;
@@ -811,7 +843,8 @@
 
   .pdf-note-draft-anchor {
     position: absolute;
-    border: 1px solid rgba(107, 160, 168, 0.95);
+    border: 0;
+    border-radius: 2px;
     background: rgba(107, 160, 168, 0.2);
     pointer-events: none;
   }

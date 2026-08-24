@@ -21,8 +21,9 @@ use std::sync::Arc;
 use crate::domain::chat::{ChatContextSummary, ChatEntry};
 use crate::domain::chunking::{estimate_tokens, CHARS_PER_TOKEN};
 use crate::domain::context::{
-    ContextCitation, ContextItem, ContextItemDraft, ContextItemView, ContextKey, EphemeralContext,
-    preview_of, PassageRef, CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY, ORIGIN_AGENT, ORIGIN_USER,
+    preview_of, ContextCitation, ContextItem, ContextItemDraft, ContextItemView, ContextKey,
+    EphemeralContext, PassageRef, CONTEXT_KIND_CHUNK, CONTEXT_KIND_SUMMARY, ORIGIN_AGENT,
+    ORIGIN_USER,
 };
 use crate::domain::library::DocumentChunk;
 use crate::services::chat::context::build_context;
@@ -200,9 +201,7 @@ impl ContextManager {
                         chunk_id: item.chunk_id.clone(),
                         paper_id: item.paper_id.clone(),
                         page_start: chunks.first().map(|chunk| chunk.page_start),
-                        heading_path: chunks
-                            .first()
-                            .and_then(|chunk| chunk.heading_path.clone()),
+                        heading_path: chunks.first().and_then(|chunk| chunk.heading_path.clone()),
                         text: join_chunk_text(&chunks),
                         token_estimate: item.token_estimate,
                         origin: item.origin.clone(),
@@ -253,7 +252,10 @@ impl ContextManager {
         let mut watermark: Option<String> = None;
 
         // Row 1 — compaction summaries, and the watermark they set.
-        for item in items.iter().filter(|item| item.kind == CONTEXT_KIND_SUMMARY) {
+        for item in items
+            .iter()
+            .filter(|item| item.kind == CONTEXT_KIND_SUMMARY)
+        {
             if let Some(entry_id) = &item.covers_through_entry_id {
                 watermark = Some(entry_id.clone());
             }
@@ -340,6 +342,8 @@ impl ContextManager {
             summary: ChatContextSummary {
                 passages: citations.iter().map(PassageRef::from_citation).collect(),
                 citations,
+                external_citations: Vec::new(),
+                research_activities: Vec::new(),
                 paper_title: request.paper.title.to_string(),
                 included_chars: bundle.summary.included_chars,
                 truncated: bundle.summary.truncated,
@@ -598,13 +602,13 @@ impl Assembly {
         }
 
         let mut block = String::from(
-            "Passages from this paper, numbered. When a sentence rests on one, \n\
-             end it with that number in brackets, like [1]. Cite only numbers \n\
+            "Passages from the paper or local library, numbered. When a sentence rests on one, \n\
+             end it with that handle in brackets, like [C1]. Cite only handles \n\
              listed below, and only where the passage actually supports the \n\
              claim — an uncited sentence is fine, a wrong number is not.\n",
         );
         for (index, passage) in self.passages.iter().enumerate() {
-            let handle = (index + 1).to_string();
+            let handle = format!("C{}", index + 1);
             // Pages are 0-based in storage and 1-based to a reader.
             let mut location = match &passage.heading_path {
                 Some(heading) => format!("p{} · {heading}", passage.page_start + 1),
@@ -894,7 +898,10 @@ mod tests {
         // order is actually exercised.
         let (paper_id, chunks) = seeded(
             &fixture,
-            &[&"First passage. ".repeat(200), &"Second passage. ".repeat(200)],
+            &[
+                &"First passage. ".repeat(200),
+                &"Second passage. ".repeat(200),
+            ],
         );
         assert!(chunks.len() >= 2, "the fixture must produce several chunks");
         let thread_id = thread_for(&fixture, &paper_id);
@@ -920,17 +927,20 @@ mod tests {
             })
             .expect("assembles");
 
-        assert!(assembled.system_prompt.contains("[1]"));
+        assert!(assembled.system_prompt.contains("[C1]"));
         assert_eq!(assembled.summary.citations.len(), chunks.len());
-        assert_eq!(assembled.summary.citations[0].handle, "1");
+        assert_eq!(assembled.summary.citations[0].handle, "C1");
         assert_eq!(assembled.summary.citations[0].paper_id, paper_id);
-        assert_eq!(assembled.summary.context_items, assembled.summary.citations.len());
+        assert_eq!(
+            assembled.summary.context_items,
+            assembled.summary.citations.len()
+        );
         // Handles are assigned in emission order, so C1 is the first passage
         // the model reads — not the most recently added. Selection under budget
         // pressure runs newest-first; these two orders are different and the
         // prompt must use the reading one.
         for (index, citation) in assembled.summary.citations.iter().enumerate() {
-            assert_eq!(citation.handle, (index + 1).to_string());
+            assert_eq!(citation.handle, format!("C{}", index + 1));
         }
         let first = assembled
             .system_prompt
@@ -994,7 +1004,7 @@ mod tests {
         assert_eq!(assembled.summary.dropped_items, 1);
         assert_eq!(assembled.summary.context_items, 0);
         // Dropped, not silently absorbed: no marker the model could cite.
-        assert!(!assembled.system_prompt.contains("[1]"));
+        assert!(!assembled.system_prompt.contains("[C1]"));
     }
 
     #[test]
@@ -1093,7 +1103,11 @@ mod tests {
     #[test]
     fn what_the_agent_read_survives_even_when_it_is_not_cited() {
         let mut summary = summary_with(&["1", "2", "3"]);
-        summary.passages = summary.citations.iter().map(PassageRef::from_citation).collect();
+        summary.passages = summary
+            .citations
+            .iter()
+            .map(PassageRef::from_citation)
+            .collect();
         retain_cited(&mut summary, "The scaling factor matters [2].");
 
         // References stay honest; the drawer still shows the whole audit trail.
@@ -1231,7 +1245,10 @@ mod tests {
                 .add_context(&thread_id, &chunk.id, ORIGIN_USER)
                 .expect("adds");
         }
-        let entries = vec![entry("e1", "what did they find"), entry("e2", "they found x")];
+        let entries = vec![
+            entry("e1", "what did they find"),
+            entry("e2", "they found x"),
+        ];
 
         let item = fixture
             .manager

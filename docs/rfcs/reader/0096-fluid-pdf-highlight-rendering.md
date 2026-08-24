@@ -1,6 +1,6 @@
 # RFC 0096: Fluid PDF Highlight Rendering
 
-Status: Open
+Status: Implemented (focused tests pass; manual visual verification pending)
 Date: 2026-08-24
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -124,16 +124,26 @@ The projection therefore stays pure, conservative, and reversible.
 
 ## Acceptance Criteria
 
-- [ ] A multiline highlight reads as one soft passage rather than outlined
+- [x] A multiline highlight reads as one soft passage rather than outlined
   boxes.
-- [ ] Fragments on the same line merge only across normal glyph spacing.
-- [ ] Columns, paragraphs, large gaps, and pages remain separate.
-- [ ] Rendering, reopening, and recoloring never change `rectsJson`.
-- [ ] Highlights remain aligned at every supported zoom level.
-- [ ] One highlight creates one keyboard focus stop and one logical action.
-- [ ] Draft, persisted, and citation highlights use the same projection.
-- [ ] Geometry tests cover fragments, multiple lines, columns, large gaps,
+- [x] Fragments on the same line merge only across normal glyph spacing.
+- [x] Columns, paragraphs, large gaps, and pages remain separate.
+- [x] Rendering, reopening, and recoloring never change `rectsJson`.
+- [x] Highlights remain aligned at every supported zoom level.
+- [x] One highlight creates one keyboard focus stop and one logical action.
+- [x] Draft, persisted, and citation highlights use the same projection.
+- [x] Geometry tests cover fragments, multiple lines, columns, large gaps,
   malformed rectangles, rotation fallback, and zoom independence.
 - [ ] Manual visual checks cover short selections, long passages, overlapping
   marks, and two-column papers.
 
+## Implementation Notes
+
+Implemented on 2026-08-24. `pdf-highlight-geometry.ts` projects stored PDF
+rectangles into display-only bands. `PdfRenderedPage.svelte` uses that single
+projection for persisted highlights, note drafts, and citation flashes, while
+retaining one semantic button per persisted highlight. Stored `rectsJson` is
+never rewritten.
+
+Focused geometry tests and the full frontend checks pass. Manual PDF visual
+verification remains open.

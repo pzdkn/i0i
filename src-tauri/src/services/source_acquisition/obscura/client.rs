@@ -1,6 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::process::Command;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use super::manager::ObscuraManager;
 use crate::services::source_acquisition::types::{
@@ -18,142 +21,375 @@ impl ObscuraClient {
     }
 
     pub async fn fetch_original(&self, url: &str) -> AcquisitionResult<FetchResponse> {
-        let bytes = self.run_fetch(url, "original").await?;
+        let mut page = self.open_page().await?;
+        page.navigate(url).await?;
+        let script = format!(
+            r#"(async () => {{
+                const response = await fetch({}, {{ credentials: "include" }});
+                const bytes = new Uint8Array(await response.arrayBuffer());
+                let binary = "";
+                const chunkSize = 0x8000;
+                for (let offset = 0; offset < bytes.length; offset += chunkSize) {{
+                    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+                }}
+                return {{
+                    body: btoa(binary),
+                    finalUrl: response.url,
+                    contentType: response.headers.get("content-type")
+                }};
+            }})()"#,
+            serde_json::to_string(url).map_err(browser_error)?
+        );
+        let value = page.evaluate(&script, true).await?;
+        let body = value
+            .get("body")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SourceAcquisitionError::Browser("missing response body".to_string()))?;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body)
+            .map_err(browser_error)?;
+        let final_url = value
+            .get("finalUrl")
+            .and_then(Value::as_str)
+            .unwrap_or(url)
+            .to_string();
+        let content_type = value
+            .get("contentType")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        page.close().await;
         Ok(FetchResponse {
             bytes,
-            final_url: url.to_string(),
-            content_type: None,
+            final_url,
+            content_type,
         })
     }
 
     pub async fn inspect_page(&self, url: &str) -> AcquisitionResult<PageInspection> {
-        let html = String::from_utf8_lossy(&self.run_fetch(url, "html").await?).to_string();
-        let text = String::from_utf8_lossy(&self.run_fetch(url, "text").await?).to_string();
-        let links = lines(&String::from_utf8_lossy(
-            &self.run_fetch(url, "links").await?,
-        ));
-        let assets = asset_urls(&String::from_utf8_lossy(
-            &self.run_fetch(url, "assets").await?,
-        ));
+        let mut page = self.open_page().await?;
+        page.navigate(url).await?;
+        let value = page
+            .evaluate(
+                r#"(() => ({
+                    url: location.href,
+                    title: document.title || null,
+                    html: document.documentElement?.outerHTML || "",
+                    text: document.body?.innerText || "",
+                    links: Array.from(document.querySelectorAll("a[href]"), a => ({
+                        url: a.href,
+                        text: (a.innerText || a.textContent || "").trim()
+                    })),
+                    assets: Array.from(document.querySelectorAll("img[src],script[src],link[href],iframe[src],embed[src],object[data]"), node =>
+                        node.src || node.href || node.data
+                    ).filter(Boolean)
+                }))()"#,
+                false,
+            )
+            .await?;
+
+        let final_url = value
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or(url)
+            .to_string();
+        let title = value
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let html = value
+            .get("html")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let text = value
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let links = value
+            .get("links")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|link| link.get("url").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        let assets = value
+            .get("assets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        let network_urls = page.network_urls();
+        page.close().await;
 
         Ok(PageInspection {
             snapshot: BrowserPageSnapshot {
                 url: url.to_string(),
-                final_url: url.to_string(),
-                title: None,
+                final_url,
+                title,
                 content_type: Some("text/html".to_string()),
                 html: Some(html),
                 text: Some(text),
             },
             links,
             assets,
-            network_urls: vec![],
+            network_urls,
         })
     }
 
-    async fn run_fetch(&self, url: &str, dump: &str) -> AcquisitionResult<Vec<u8>> {
-        let program = self.manager.program();
-        let timeout = Duration::from_millis(self.manager.config().request_timeout_ms);
-        let mut command = Command::new(&program);
-        command.arg("fetch").arg(url).arg("--dump").arg(dump);
-        if self.manager.config().stealth {
-            command.arg("--stealth");
+    async fn open_page(&self) -> AcquisitionResult<CdpPage> {
+        let endpoint = self.manager.ensure_ready().await?;
+        let websocket_url = endpoint.websocket_url.ok_or_else(|| {
+            SourceAcquisitionError::BrowserProcessUnavailable(
+                "Obscura did not expose a CDP websocket endpoint".to_string(),
+            )
+        })?;
+        CdpPage::open(&websocket_url, self.manager.config().request_timeout_ms).await
+    }
+}
+
+type CdpSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// One disposable page connected to the managed Obscura browser over CDP.
+struct CdpPage {
+    socket: CdpSocket,
+    target_id: String,
+    session_id: String,
+    next_id: u64,
+    deadline: Instant,
+    network_urls: Vec<String>,
+}
+
+impl CdpPage {
+    async fn open(websocket_url: &str, timeout_ms: u64) -> AcquisitionResult<Self> {
+        let (socket, _) = connect_async(websocket_url).await.map_err(browser_error)?;
+        let mut page = Self {
+            socket,
+            target_id: String::new(),
+            session_id: String::new(),
+            next_id: 1,
+            deadline: Instant::now() + Duration::from_millis(timeout_ms),
+            network_urls: Vec::new(),
+        };
+        let target = page
+            .command("Target.createTarget", json!({ "url": "about:blank" }), None)
+            .await?;
+        page.target_id = required_string(&target, "targetId")?;
+        let attached = page
+            .command(
+                "Target.attachToTarget",
+                json!({ "targetId": page.target_id, "flatten": true }),
+                None,
+            )
+            .await?;
+        page.session_id = required_string(&attached, "sessionId")?;
+        for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
+            page.command(method, json!({}), Some(page.session_id.clone()))
+                .await?;
+        }
+        Ok(page)
+    }
+
+    async fn navigate(&mut self, url: &str) -> AcquisitionResult<()> {
+        let navigation = self
+            .command(
+                "Page.navigate",
+                json!({ "url": url }),
+                Some(self.session_id.clone()),
+            )
+            .await?;
+        if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
+            return Err(SourceAcquisitionError::Browser(format!(
+                "page navigation failed: {error}"
+            )));
         }
 
-        let output = tokio::time::timeout(timeout, command.output())
+        loop {
+            // `Page.navigate` can return before the destination commits. Check
+            // the URL as well as readiness so the initial `about:blank` page
+            // cannot be mistaken for a completed navigation.
+            let state = self
+                .evaluate(
+                    "({ readyState: document.readyState, url: location.href })",
+                    false,
+                )
+                .await?;
+            let ready = state
+                .get("readyState")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let current_url = state.get("url").and_then(Value::as_str).unwrap_or_default();
+            if current_url != "about:blank" && matches!(ready, "interactive" | "complete") {
+                return Ok(());
+            }
+            if Instant::now() >= self.deadline {
+                return Err(SourceAcquisitionError::BrowserTimeout(
+                    "page navigation did not complete before the browser deadline".to_string(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn evaluate(
+        &mut self,
+        expression: &str,
+        await_promise: bool,
+    ) -> AcquisitionResult<Value> {
+        let result = self
+            .command(
+                "Runtime.evaluate",
+                json!({
+                    "expression": expression,
+                    "awaitPromise": await_promise,
+                    "returnByValue": true
+                }),
+                Some(self.session_id.clone()),
+            )
+            .await?;
+        if let Some(details) = result.get("exceptionDetails") {
+            return Err(SourceAcquisitionError::Browser(format!(
+                "browser evaluation failed: {details}"
+            )));
+        }
+        Ok(result
+            .get("result")
+            .and_then(|result| result.get("value"))
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
+    async fn command(
+        &mut self,
+        method: &str,
+        params: Value,
+        session_id: Option<String>,
+    ) -> AcquisitionResult<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut payload = json!({ "id": id, "method": method, "params": params });
+        if let Some(session_id) = session_id {
+            payload["sessionId"] = Value::String(session_id);
+        }
+        self.socket
+            .send(Message::Text(payload.to_string().into()))
             .await
-            .map_err(|_| {
-                SourceAcquisitionError::BrowserTimeout(format!(
-                    "obscura fetch timed out after {} ms for {url}",
-                    self.manager.config().request_timeout_ms
-                ))
-            })?
-            .map_err(|error| {
-                SourceAcquisitionError::BrowserProcessUnavailable(format!(
-                    "failed to run {}: {error}",
-                    program.display()
-                ))
-            })?;
+            .map_err(browser_error)?;
 
-        if !output.status.success() {
-            return Err(SourceAcquisitionError::Browser(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+        loop {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(SourceAcquisitionError::BrowserTimeout(format!(
+                    "CDP command {method} timed out"
+                )));
+            }
+            let message = tokio::time::timeout(remaining, self.socket.next())
+                .await
+                .map_err(|_| {
+                    SourceAcquisitionError::BrowserTimeout(format!(
+                        "CDP command {method} timed out"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    SourceAcquisitionError::Browser("CDP connection closed".to_string())
+                })?
+                .map_err(browser_error)?;
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(text.as_ref()).map_err(browser_error)?;
+            self.capture_event(&value);
+            if value.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = value.get("error") {
+                return Err(SourceAcquisitionError::Browser(format!(
+                    "CDP command {method} failed: {error}"
+                )));
+            }
+            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
         }
+    }
 
-        Ok(output.stdout)
+    fn capture_event(&mut self, value: &Value) {
+        if value.get("method").and_then(Value::as_str) != Some("Network.responseReceived") {
+            return;
+        }
+        let Some(url) = value
+            .pointer("/params/response/url")
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        if !self.network_urls.iter().any(|existing| existing == url) {
+            self.network_urls.push(url.to_string());
+        }
+    }
+
+    fn network_urls(&self) -> Vec<String> {
+        self.network_urls.clone()
+    }
+
+    async fn close(&mut self) {
+        let _ = self
+            .command(
+                "Target.closeTarget",
+                json!({ "targetId": self.target_id }),
+                None,
+            )
+            .await;
     }
 }
 
-fn lines(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+fn required_string(value: &Value, key: &str) -> AcquisitionResult<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
         .map(str::to_string)
-        .collect()
+        .ok_or_else(|| SourceAcquisitionError::Browser(format!("missing CDP field {key}")))
 }
 
-fn asset_urls(output: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    for line in lines(output) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-            collect_http_strings(&value, &mut urls);
-        } else {
-            push_unique_url(&mut urls, line);
-        }
-    }
-    urls
-}
-
-fn collect_http_strings(value: &serde_json::Value, urls: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(text) => push_unique_url(urls, text.clone()),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_http_strings(value, urls);
-            }
-        }
-        serde_json::Value::Object(fields) => {
-            for value in fields.values() {
-                collect_http_strings(value, urls);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn push_unique_url(urls: &mut Vec<String>, value: String) {
-    let trimmed = value.trim();
-    let is_http_url = trimmed.starts_with("http://") || trimmed.starts_with("https://");
-    if is_http_url && !urls.iter().any(|url| url == trimmed) {
-        urls.push(trimmed.to_string());
-    }
+fn browser_error(error: impl std::fmt::Display) -> SourceAcquisitionError {
+    SourceAcquisitionError::Browser(error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::services::source_acquisition::types::ObscuraConfig;
 
-    #[test]
-    fn parses_line_based_obscura_output() {
-        assert_eq!(
-            lines("https://a.test\n\n https://b.test \n"),
-            vec!["https://a.test", "https://b.test"]
-        );
-    }
+    #[tokio::test]
+    async fn inspects_a_page_through_the_managed_cdp_server() {
+        let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("obscura")
+            .join("obscura");
+        if !binary.exists() {
+            return;
+        }
+        let manager = ObscuraManager::new(ObscuraConfig {
+            path: Some(binary),
+            stealth: true,
+            request_timeout_ms: 10_000,
+            ..ObscuraConfig::default()
+        });
+        let client = ObscuraClient::new(manager);
 
-    #[test]
-    fn parses_json_line_asset_urls() {
-        assert_eq!(
-            asset_urls(
-                r#"{"url":"https://publisher.example/a.pdf","kind":"document"}
-{"src":"https://publisher.example/image.png"}"#
-            ),
-            vec![
-                "https://publisher.example/a.pdf",
-                "https://publisher.example/image.png"
-            ]
-        );
+        let page = client
+            .inspect_page("data:text/html,<title>CDP test</title><main>managed session</main>")
+            .await
+            .expect("managed Obscura page should be inspectable");
+
+        assert_eq!(page.snapshot.title.as_deref(), Some("CDP test"));
+        assert!(page
+            .snapshot
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("managed session"));
     }
 }

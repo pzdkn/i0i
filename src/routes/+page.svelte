@@ -5,10 +5,11 @@
   import SettingsDialog from "$lib/features/settings/SettingsDialog.svelte";
   import WorkspaceTabs from "$lib/app/WorkspaceTabs.svelte";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
-  import { searchPapers, expandSearch } from "$lib/bridge/discovery";
+  import { searchPapers, expandSearch, listenDiscoveryProgress } from "$lib/bridge/discovery";
   import { getSettings } from "$lib/bridge/settings";
   import {
     createSearch,
+    getSearch,
     listSearchCandidates,
     listenSearchCandidatesPreview,
     listenSearchUpdated,
@@ -63,6 +64,7 @@
     applyDiscoverResearchPreview,
     applyDiscoverResearchCandidates,
     applyDiscoverSearchResponse,
+    applyDiscoverProgress,
     applyDiscoverExpansion,
     applyDiscoverDefaults,
     createDiscoverWorkspace,
@@ -231,6 +233,27 @@
       };
       if (["applied", "failed", "no_match", "needs_review"].includes(event.payload.status)) {
         autofillingMetadataPaperIds = autofillingMetadataPaperIds.filter((paperId) => paperId !== event.payload.paperId);
+      }
+    })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
+    listenDiscoveryProgress((event) => {
+      const workspace = getDiscoverWorkspaces().find(
+        (item) => item.status === "running" && item.activeRunMode === "shallow" && item.query.trim() === event.query.trim(),
+      );
+      if (workspace) {
+        applyDiscoverProgress(workspace.id, event);
       }
     })
       .then((nextUnlisten) => {
@@ -419,6 +442,39 @@
     activeTabId = discoverTab.id;
   }
 
+  /** Open a Deep Research run linked from a chat answer in Discover. */
+  async function openResearchActivity(searchId: string, runId: string) {
+    const existing = getDiscoverWorkspaces().find(
+      (workspace) => workspace.researchSearchId === searchId,
+    );
+    if (existing) {
+      openDiscoverWorkspace(existing);
+      return;
+    }
+
+    const workspace = createDiscoverWorkspace();
+    workspace.title = "Deep Research";
+    workspace.deep = true;
+    setDiscoverStatus(workspace.id, "running");
+    setDiscoverRunStarted(workspace.id, "deep", searchId, runId);
+    openDiscoverWorkspace(workspace);
+
+    try {
+      const search = await getSearch(searchId);
+      workspace.title = search.title;
+      workspace.query = search.goal;
+      updateDiscoverTabTitle(workspace.id, search.title);
+      if (search.status === "ready") {
+        const candidates = await listSearchCandidates(searchId);
+        applyDiscoverResearchCandidates(workspace.id, search.goal, candidates);
+      } else if (search.status === "failed" || search.status === "cancelled") {
+        setDiscoverStatus(workspace.id, "failed", search.summary ?? `Research ${search.status}.`);
+      }
+    } catch (caught) {
+      setDiscoverStatus(workspace.id, "failed", String(caught));
+    }
+  }
+
   function updateDiscoverTabTitle(discoverId: string, title: string) {
     tabs = tabs.map((tab) => (tab.discoverId === discoverId ? { ...tab, title } : tab));
   }
@@ -442,10 +498,6 @@
     const nextWorkspace = createDiscoverWorkspaceFrom(workspace);
     openDiscoverWorkspace(nextWorkspace);
     return nextWorkspace;
-  }
-
-  function selectedProviders(workspace: ReturnType<typeof getDiscoverWorkspace>) {
-    return workspace.providers.length > 0 ? [...workspace.providers] : [workspace.provider];
   }
 
   function selectedVenues(workspace: ReturnType<typeof getDiscoverWorkspace>) {
@@ -476,7 +528,7 @@
       resultLimit: Number(workspace.resultLimit),
       sortBy: workspace.sortBy,
       provider: workspace.provider,
-      providers: selectedProviders(workspace),
+      providers: [],
       openAccess: workspace.openAccess,
       onlyViewable: workspace.onlyViewable,
       venues: selectedVenues(workspace),
@@ -517,7 +569,7 @@
         constraints: {
           yearFrom: parseOptionalYear(workspace.yearFrom),
           yearTo: parseOptionalYear(workspace.yearTo),
-          providers: selectedProviders(workspace),
+          providers: [],
           openAccess: workspace.openAccess,
           targetCount: Number(workspace.resultLimit),
           venues: selectedVenues(workspace),
@@ -556,7 +608,7 @@
         constraints: {
           yearFrom: parseOptionalYear(workspace.yearFrom),
           yearTo: parseOptionalYear(workspace.yearTo),
-          providers: selectedProviders(workspace),
+          providers: [],
           openAccess: workspace.openAccess,
           targetCount: Number(workspace.resultLimit),
           venues: selectedVenues(workspace),
@@ -956,6 +1008,7 @@
         onToggleFocus={exitReaderFocus}
         onOpenPaperReference={openPaper}
         onOpenVaultReference={openVault}
+        onOpenResearch={openResearchActivity}
         {activeVaultId}
       />
     </section>
@@ -994,6 +1047,7 @@
                 onToggleFocus={enterReaderFocus}
                 onOpenPaperReference={openPaper}
                 onOpenVaultReference={openVault}
+                onOpenResearch={openResearchActivity}
                 {activeVaultId}
               />
             {:else if activeTab?.kind === "discover"}

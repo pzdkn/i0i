@@ -2,6 +2,7 @@
   import { Pencil, Trash2, Minus, Sparkles, MessageSquare, StickyNote, Star, SlidersHorizontal, Info, ChevronDown, ChevronRight } from "@lucide/svelte";
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import CitedAnswer from "$lib/features/reader/CitedAnswer.svelte";
   import { citationLabel } from "$lib/features/reader/cited-answer";
   import {
@@ -10,7 +11,8 @@
     deleteChatContext,
     listChatContext,
   } from "$lib/bridge/context";
-  import type { ContextCitation, ContextItemView, PassageRef } from "$lib/domain/context";
+  import type { ContextCitation, ContextItemView, ExternalCitation, PassageRef } from "$lib/domain/context";
+  import { getSearch } from "$lib/bridge/research";
   import {
     askAtAnchorStreamed,
     askChatThreadStreamed,
@@ -23,6 +25,7 @@
   import { setHighlightNote } from "$lib/bridge/highlight";
   import {
     anchorSelectedText,
+    type ChatProgress,
     type ChatEntry,
     type ChatScope,
     type ChatThreadSummary,
@@ -81,6 +84,7 @@
     onRemoveHighlight,
     onOpenPaperReference,
     onOpenVaultReference,
+    onOpenResearch,
     activeVaultId = "",
     onHighlightIntent,
     onAskTurnStart,
@@ -121,6 +125,8 @@
     /** RFC 0090 R3.1: following a reference opens its paper in its own tab. */
     onOpenPaperReference?: (paperId: string) => void;
     onOpenVaultReference?: (vaultId: string) => void;
+    /** Open the Discover workspace linked to a background research activity. */
+    onOpenResearch?: (searchId: string, runId: string) => void | Promise<void>;
     /** Scope for unqualified `[@key]` references. */
     activeVaultId?: string;
     onHighlightIntent?: (intent: HighlightIntent) => Promise<boolean>;
@@ -213,6 +219,7 @@
   // and a static line looks hung too, so the glyph has to move.
   let retrievalProgress = $state("");
   let retrievalCount = $state(0);
+  let researchStatuses = $state<Record<string, string>>({});
   const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let spinnerFrame = $state(0);
 
@@ -259,7 +266,9 @@
     return parseInline(note)
       .map((span) => {
         if (span.kind !== "paperRef") {
-          return span.kind === "cite" ? `[${span.handle}]` : span.text;
+          if (span.kind === "cite") return `[${span.handle}]`;
+          if (span.kind === "math") return span.raw;
+          return span.text;
         }
         return resolveRef(referenceIndex, span, activeVaultId)?.label ?? span.raw;
       })
@@ -659,8 +668,15 @@
       const view = virtual
         ? // A virtual whole-paper thread is a new chat by construction — the
           // backend would otherwise fold it into the existing one.
-          await askAtAnchorStreamed(scope, anchor, body, onDelta, anchor.kind === "document")
-        : await askChatThreadStreamed(threadId, body, onDelta);
+          await askAtAnchorStreamed(
+            scope,
+            anchor,
+            body,
+            onDelta,
+            anchor.kind === "document",
+            handleChatProgress,
+          )
+        : await askChatThreadStreamed(threadId, body, onDelta, handleChatProgress);
       // The ANSWER is done: show it and unblock the composer immediately (the
       // `finally` below clears `isBusy`).
       if (activeAskId === askId) {
@@ -838,29 +854,70 @@
     void refreshContext();
   });
 
-  // RFC 0078: a global event, not a per-ask channel — the reader has one
-  // conversation open at a time, and the ask channel is committed to deltas.
+  /** Render progress received on this ask's own channel (RFC 0097). */
+  function handleChatProgress(progress: ChatProgress) {
+    if (!isBusy) {
+      return;
+    }
+    retrievalCount = progress.event === "retrieved" ? progress.count : 0;
+    switch (progress.event) {
+      case "deciding":
+        retrievalProgress = "Choosing evidence";
+        break;
+      case "searchingPaper":
+        retrievalProgress = `Searching paper · ${progress.query}`;
+        break;
+      case "searchingLibrary":
+        retrievalProgress = `Searching library · ${progress.query}`;
+        break;
+      case "searchingWeb":
+        retrievalProgress = `Searching web · ${progress.query}`;
+        break;
+      case "readingSource":
+        retrievalProgress = `Reading · ${progress.title}`;
+        break;
+      case "startingDeepResearch":
+        retrievalProgress = `Starting research · ${progress.title}`;
+        break;
+      case "retrieved":
+        retrievalProgress = "Evidence ready";
+        break;
+    }
+  }
+
+  // Deep Research has its own persisted lifecycle. Follow matching run events
+  // so an activity card can move from queued to ready while the thread is open.
   onMount(() => {
-    const unlisten = listen<{ event: string; query?: string; count?: number }>(
-      "chat://progress",
+    const unlisten = listen<{ searchId: string; runId: string; status: string }>(
+      "search_updated",
       ({ payload }) => {
-        if (!isBusy) {
-          return;
-        }
-        // "deciding" fires before the first round trip, so the panel says
-        // something even on a turn that ends up searching nothing.
-        if (payload.event === "deciding") {
-          retrievalCount = 0;
-          retrievalProgress = "";
-        } else if (payload.event === "searching") {
-          retrievalProgress = payload.query ?? "";
-        } else {
-          retrievalCount = payload.count ?? 0;
-        }
+        researchStatuses = { ...researchStatuses, [payload.runId]: payload.status };
       },
     );
     return () => void unlisten.then((stop) => stop());
   });
+
+  $effect(() => {
+    const activities = openThread?.entries.flatMap(
+      (entry) => entry.contextSummary?.researchActivities ?? [],
+    ) ?? [];
+    for (const activity of activities) {
+      if (researchStatuses[activity.runId]) {
+        continue;
+      }
+      void getSearch(activity.searchId)
+        .then((search) => {
+          researchStatuses = { ...researchStatuses, [activity.runId]: search.status };
+        })
+        .catch(() => {});
+    }
+  });
+
+  function openExternalCitation(citation: ExternalCitation) {
+    void openUrl(citation.url).catch((caught) => {
+      error = String(caught);
+    });
+  }
 
   async function refreshContext() {
     if (!openThread || isVirtual) {
@@ -1225,17 +1282,19 @@
                         <CitedAnswer
                           body={entry.body}
                           citations={entry.contextSummary?.citations ?? []}
+                          externalCitations={entry.contextSummary?.externalCitations ?? []}
                           {onOpenCitation}
+                          onOpenExternalCitation={openExternalCitation}
                         />
                       {:else}
                         <p>{entry.body}</p>
                       {/if}
-                      {#if entry.kind === "answer" && entry.contextSummary?.citations?.length}
+                      {#if entry.kind === "answer" && ((entry.contextSummary?.citations?.length ?? 0) + (entry.contextSummary?.externalCitations?.length ?? 0) > 0)}
                         <!-- RFC 0078: only passages the answer actually cited.
                              What the model was offered is not evidence. -->
                         <div class="references">
                           <div class="mono-dim ref-title">References</div>
-                          {#each entry.contextSummary.citations as citation (citation.handle)}
+                          {#each entry.contextSummary?.citations ?? [] as citation (citation.handle)}
                             <div class="ref-row">
                               <button
                                 class="ref-open"
@@ -1264,6 +1323,39 @@
                                 >keep</button>
                               {/if}
                             </div>
+                          {/each}
+                          {#each entry.contextSummary?.externalCitations ?? [] as citation (citation.handle)}
+                            <div class="ref-row">
+                              <button
+                                class="ref-open"
+                                type="button"
+                                title="Open external source"
+                                onclick={() => openExternalCitation(citation)}
+                              >
+                                <span class="row ref-top">
+                                  <span class="ref-handle">[{citation.handle}]</span>
+                                  <span class="ref-where">{citation.publisher ?? citation.title}</span>
+                                </span>
+                                <span class="ref-preview">{citation.excerpt}</span>
+                              </button>
+                            </div>
+                          {/each}
+                        </div>
+                      {/if}
+                      {#if entry.kind === "answer" && entry.contextSummary?.researchActivities?.length}
+                        <div class="research-activities">
+                          {#each entry.contextSummary.researchActivities as activity (activity.runId)}
+                            <button
+                              class="research-activity"
+                              type="button"
+                              onclick={() => onOpenResearch?.(activity.searchId, activity.runId)}
+                            >
+                              <span class="label">Deep Research</span>
+                              <span class="research-title">{activity.title}</span>
+                              <span class="mono-dim">
+                                {(researchStatuses[activity.runId] ?? activity.status).toUpperCase()} · Open Search
+                              </span>
+                            </button>
                           {/each}
                         </div>
                       {/if}
@@ -2234,6 +2326,36 @@
   .ref-handle {
     flex-shrink: 0;
     color: var(--amber);
+  }
+
+  .research-activities {
+    display: grid;
+    gap: 4px;
+    margin-top: 7px;
+  }
+
+  .research-activity {
+    display: grid;
+    gap: 2px;
+    width: 100%;
+    padding: 6px 7px;
+    border: 1px solid var(--border-2);
+    background: var(--bg-1);
+    color: var(--fg-2);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .research-activity:hover {
+    border-color: var(--amber-dim);
+  }
+
+  .research-title {
+    overflow: hidden;
+    color: var(--fg-1);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .working {

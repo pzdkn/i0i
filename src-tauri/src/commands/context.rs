@@ -4,8 +4,8 @@
 //! page are ephemeral — passed into assembly at ask time and never stored — so
 //! there is nothing to add or remove for them.
 
-use crate::domain::context::{ContextItem, ContextItemView, ContextKey, ORIGIN_USER};
 use crate::domain::chat::ChatThreadView;
+use crate::domain::context::{ContextItem, ContextItemView, ContextKey, ORIGIN_USER};
 use crate::services::chat::{ChatService, ContextManager};
 
 /// Commit a chunk to a thread's persistent context.
@@ -111,16 +111,36 @@ mod tests {
 
     #[test]
     fn progress_events_carry_the_tag_the_listener_switches_on() {
-        let json = serde_json::to_string(&ChatProgress::Searching {
+        let json = serde_json::to_string(&ChatProgress::SearchingPaper {
+            turn_id: "turn_1".to_string(),
+            thread_id: Some("thread_1".to_string()),
             query: "scaling".to_string(),
         })
         .expect("serializes");
-        assert_eq!(json, r#"{"event":"searching","query":"scaling"}"#);
+        assert_eq!(
+            json,
+            r#"{"event":"searchingPaper","turnId":"turn_1","threadId":"thread_1","query":"scaling"}"#
+        );
 
-        let json = serde_json::to_string(&ChatProgress::Retrieved { count: 3 }).expect("serializes");
-        assert_eq!(json, r#"{"event":"retrieved","count":3}"#);
+        let json = serde_json::to_string(&ChatProgress::Retrieved {
+            turn_id: "turn_1".to_string(),
+            thread_id: None,
+            count: 3,
+        })
+        .expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"event":"retrieved","turnId":"turn_1","threadId":null,"count":3}"#
+        );
 
-        let json = serde_json::to_string(&ChatProgress::Deciding).expect("serializes");
-        assert_eq!(json, r#"{"event":"deciding"}"#);
+        let json = serde_json::to_string(&ChatProgress::Deciding {
+            turn_id: "turn_1".to_string(),
+            thread_id: None,
+        })
+        .expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"event":"deciding","turnId":"turn_1","threadId":null}"#
+        );
     }
 }

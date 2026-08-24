@@ -1,6 +1,6 @@
 # RFC 0097: Research-Connected Chat With Epistemic Boundaries
 
-Status: Open
+Status: Partially Implemented - production paths landed; live prompt evaluation pending
 Date: 2026-08-24
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -148,6 +148,14 @@ contracts land before a model change is blamed or credited.
 - RFC 0098 owns browser-first discovery and web candidate resolution. Chat
   consumes its evidence boundary rather than duplicating it.
 
+### Web integration contract
+
+The bounded `search_web(query, limit)` tool obtains candidates through RFC
+0098's browser-first discovery boundary, then reads the selected pages through
+the shared source-acquisition service. Chat owns neither discovery parsing nor
+Obscura transport. Only successfully read, non-empty pages become typed web
+evidence, and the tool returns no more than the requested limit.
+
 ## Non-Goals
 
 - A hidden long-running crawl inside a chat turn.
@@ -159,17 +167,33 @@ contracts land before a model change is blamed or credited.
 
 ## Acceptance Criteria
 
-- [ ] A paper-local question uses no external tool and cites local passages.
-- [ ] A current comparison can search the web and persist clickable sources.
-- [ ] “What might follow?” can produce a labelled inference with cited
+- [x] A paper-local question uses no external tool and cites local passages.
+- [x] A current comparison can search the web and persist clickable sources.
+- [x] “What might follow?” can produce a labelled inference with cited
   premises.
-- [ ] A hypothesis states uncertainty and a possible test or falsifier.
-- [ ] A broad research request starts one visible background run without
+- [x] A hypothesis states uncertainty and a possible test or falsifier.
+- [x] A broad research request starts one visible background run without
   blocking chat.
-- [ ] Restarting preserves web citations and linked research activities.
-- [ ] Failed web lookup produces a clear limitation and no invented source.
-- [ ] Old chat entries still deserialize and render.
-- [ ] Progress events update only their owning turn or thread.
+- [x] Restarting preserves web citations and linked research activities.
+- [x] Failed web lookup produces a clear limitation and no invented source.
+- [x] Old chat entries still deserialize and render.
+- [x] Progress events update only their owning turn or thread.
 - [ ] The fixed prompt suite improves synthesis without reducing paper-grounded
   citation accuracy.
 
+The fixed prompt fixture and routing assertions are implemented. The remaining
+unchecked criterion requires a live comparative model evaluation; it is not
+simulated by unit tests.
+
+## Implementation Verification
+
+Verified on 2026-08-24:
+
+- `cargo check`
+- `cargo test services::chat --lib` (66 passed)
+- `pnpm check` (zero diagnostics)
+- focused Markdown, citation, and PDF geometry tests (38 passed)
+- `git diff --check`
+
+The production web adapter is wired through browser-first discovery and the
+shared source-acquisition service. A fixed live model comparison remains open.

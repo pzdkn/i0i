@@ -12,9 +12,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 
-use super::config::ChatConfig;
 use super::agent_loop::{self, RetrievalOutcome};
+use super::config::ChatConfig;
 use super::context_manager::{retain_cited, ContextManager, ContextRequest, PaperFacts};
+use super::research_tools::ResearchToolbox;
 use crate::domain::chat::{
     ChatContextSummary, ChatEntry, ChatEntryDraft, ChatProgress, ChatScope, ChatThreadSummary,
     ChatThreadUpdated, ChatThreadView, PinnedHighlight, ThreadAnchor, ENTRY_ANSWER,
@@ -34,6 +35,7 @@ pub struct ChatService {
     /// Decides what the model sees (RFC 0077). ChatService never calls
     /// SearchService itself — retrieval goes through here.
     context: ContextManager,
+    research: std::sync::Arc<dyn ResearchToolbox>,
 }
 
 impl ChatService {
@@ -43,6 +45,7 @@ impl ChatService {
         store: LibraryStore,
         reader: ReaderService,
         context: ContextManager,
+        research: std::sync::Arc<dyn ResearchToolbox>,
     ) -> Self {
         let client = Client::builder()
             .user_agent(concat!(
@@ -60,6 +63,7 @@ impl ChatService {
             store,
             reader,
             context,
+            research,
         }
     }
 
@@ -153,22 +157,27 @@ impl ChatService {
         let answer =
             openrouter::complete(&self.client, &self.config.url, &prep.api_key, &request).await?;
         let mut summary = prep.summary;
-        retain_cited(&mut summary, &answer);
+        retain_answer_citations(&mut summary, &answer);
         self.finalize_ask(thread_id, &prep.user_body, answer, summary)
             .await
     }
 
     /// Ask in a thread, streaming reply deltas, and return the updated thread.
-    pub async fn ask_in_thread_streamed<F>(
+    pub async fn ask_in_thread_streamed<F, P>(
         &self,
         thread_id: &str,
         body: String,
+        turn_id: String,
         on_delta: F,
+        on_progress: P,
     ) -> Result<ChatThreadView, String>
     where
         F: FnMut(String),
+        P: FnMut(ChatProgress),
     {
-        let prep = self.prepare_ask(thread_id, body).await?;
+        let prep = self
+            .prepare_ask_with_progress(thread_id, body, &turn_id, on_progress)
+            .await?;
         let request = CompletionRequest {
             model: self.config.model.clone(),
             messages: prep.request_messages,
@@ -187,7 +196,7 @@ impl ChatService {
         )
         .await?;
         let mut summary = prep.summary;
-        retain_cited(&mut summary, &outcome.text);
+        retain_answer_citations(&mut summary, &outcome.text);
         self.finalize_ask(thread_id, &prep.user_body, outcome.text, summary)
             .await
     }
@@ -201,18 +210,23 @@ impl ChatService {
     /// Prose only — agent marking is a separate fast-model pass
     /// (`annotate_streamed`), so the answer streams clean and quick and is
     /// never slowed by tool-call generation (RFC 0059 follow-up).
-    pub async fn ask_at_anchor_streamed<F>(
+    pub async fn ask_at_anchor_streamed<F, P>(
         &self,
         scope: &ChatScope,
         anchor: ThreadAnchor,
         body: String,
         new_thread: bool,
+        turn_id: String,
         on_delta: F,
+        on_progress: P,
     ) -> Result<ChatThreadView, String>
     where
         F: FnMut(String),
+        P: FnMut(ChatProgress),
     {
-        let prep = self.prepare_ask_at_anchor(scope, &anchor, body).await?;
+        let prep = self
+            .prepare_ask_at_anchor_with_progress(scope, &anchor, body, &turn_id, on_progress)
+            .await?;
         let request = CompletionRequest {
             model: self.config.model.clone(),
             messages: prep.request_messages,
@@ -233,7 +247,7 @@ impl ChatService {
 
         let answer_text = outcome.text;
         let mut summary = prep.summary;
-        retain_cited(&mut summary, &answer_text);
+        retain_answer_citations(&mut summary, &answer_text);
 
         let default_title = anchor.default_title();
         let selected_text = anchor.selected_text().map(ToString::to_string);
@@ -273,14 +287,17 @@ impl ChatService {
     {
         let prep = self.prepare_ask_at_anchor(scope, &anchor, body).await?;
         let mut messages = Vec::with_capacity(prep.request_messages.len() + 1);
-        messages.push(WireMessage::text("system", "You mark passages in a paper by calling the `highlight` tool. \
+        messages.push(WireMessage::text(
+            "system",
+            "You mark passages in a paper by calling the `highlight` tool. \
                       For each passage the user wants marked, quote a SHORT phrase — a \
                       single sentence or less — copied EXACTLY and VERBATIM from the \
                       paper text provided, character for character (do not paraphrase, \
                       shorten, or fix typos). Prefer a distinctive short span over a long \
                       one. Call `highlight` once per passage, choosing a fitting color. \
                       Do not answer in prose; only call the tool."
-                .to_string()));
+                .to_string(),
+        ));
         messages.extend(prep.request_messages);
         let request = CompletionRequest {
             model: self.config.annotation_model.clone(),
@@ -331,7 +348,10 @@ impl ChatService {
                 }
                 None => crate::shared::log::warn(
                     "annotate",
-                    format!("tool_call '{}' did not parse into an intent", tool_call.name),
+                    format!(
+                        "tool_call '{}' did not parse into an intent",
+                        tool_call.name
+                    ),
                 ),
             }
         }
@@ -385,9 +405,11 @@ impl ChatService {
         // an answer from title + metadata is degraded but not worthless, and the
         // inspector already labels that turn "Context: title + metadata only".
         if prep.summary.included_chars == 0 {
-            return Err("This document has no extracted text yet — marking can't run until \
+            return Err(
+                "This document has no extracted text yet — marking can't run until \
                         extraction finishes."
-                .to_string());
+                    .to_string(),
+            );
         }
         let mut messages = Vec::with_capacity(prep.request_messages.len() + 1);
         messages.push(WireMessage::text("system", "You mark passages in a paper. Return ONLY a JSON object matching the schema \
@@ -432,6 +454,21 @@ impl ChatService {
         anchor: &ThreadAnchor,
         body: String,
     ) -> Result<PreparedAsk, String> {
+        self.prepare_ask_at_anchor_with_progress(scope, anchor, body, "background", |_| {})
+            .await
+    }
+
+    async fn prepare_ask_at_anchor_with_progress<P>(
+        &self,
+        scope: &ChatScope,
+        anchor: &ThreadAnchor,
+        body: String,
+        turn_id: &str,
+        on_progress: P,
+    ) -> Result<PreparedAsk, String>
+    where
+        P: FnMut(ChatProgress),
+    {
         let user_body = body.trim().to_string();
         if user_body.is_empty() {
             return Err("Enter a message before sending.".to_string());
@@ -460,6 +497,8 @@ impl ChatService {
                     question: &user_body,
                 },
                 &api_key,
+                turn_id,
+                on_progress,
             )
             .await;
         let mut assembled = self.context.get_context(ContextRequest {
@@ -469,13 +508,12 @@ impl ChatService {
             ephemeral: &ephemeral,
             retrieved: &retrieval.chunks,
         })?;
-        assembled.summary.retrieval_capped = retrieval.capped;
-        assembled.summary.retrieval_queries = retrieval.queries.clone();
-        assembled.summary.paper_indexed = retrieval.paper_indexed;
+        let system_prompt =
+            apply_research_context(assembled.system_prompt, &mut assembled.summary, retrieval);
 
         Ok(PreparedAsk {
             api_key,
-            request_messages: build_wire_messages(assembled.system_prompt, &[], &user_body),
+            request_messages: build_wire_messages(system_prompt, &[], &user_body),
             summary: assembled.summary,
             user_body,
         })
@@ -483,6 +521,20 @@ impl ChatService {
 
     /// Validate, resolve the key, and assemble the prompt — persisting nothing.
     async fn prepare_ask(&self, thread_id: &str, body: String) -> Result<PreparedAsk, String> {
+        self.prepare_ask_with_progress(thread_id, body, "background", |_| {})
+            .await
+    }
+
+    async fn prepare_ask_with_progress<P>(
+        &self,
+        thread_id: &str,
+        body: String,
+        turn_id: &str,
+        on_progress: P,
+    ) -> Result<PreparedAsk, String>
+    where
+        P: FnMut(ChatProgress),
+    {
         let user_body = body.trim().to_string();
         if user_body.is_empty() {
             return Err("Enter a message before sending.".to_string());
@@ -498,11 +550,7 @@ impl ChatService {
 
         let ephemeral = EphemeralContext {
             paper_id: scope_id.clone(),
-            selection: view
-                .thread
-                .anchor
-                .selected_text()
-                .map(ToString::to_string),
+            selection: view.thread.anchor.selected_text().map(ToString::to_string),
         };
         let retrieval = self
             .retrieve_for_turn(
@@ -515,6 +563,8 @@ impl ChatService {
                     question: &user_body,
                 },
                 &api_key,
+                turn_id,
+                on_progress,
             )
             .await;
         let mut assembled = self.context.get_context(ContextRequest {
@@ -526,17 +576,12 @@ impl ChatService {
             ephemeral: &ephemeral,
             retrieved: &retrieval.chunks,
         })?;
-        assembled.summary.retrieval_capped = retrieval.capped;
-        assembled.summary.retrieval_queries = retrieval.queries.clone();
-        assembled.summary.paper_indexed = retrieval.paper_indexed;
+        let system_prompt =
+            apply_research_context(assembled.system_prompt, &mut assembled.summary, retrieval);
 
         Ok(PreparedAsk {
             api_key,
-            request_messages: build_wire_messages(
-                assembled.system_prompt,
-                &assembled.entries,
-                &user_body,
-            ),
+            request_messages: build_wire_messages(system_prompt, &assembled.entries, &user_body),
             summary: assembled.summary,
             user_body,
         })
@@ -559,7 +604,10 @@ impl ChatService {
             .compact_context(thread_id, &view.entries, move |material| async move {
                 let request = CompletionRequest {
                     model,
-                    messages: vec![WireMessage::text("user", format!("{COMPACTION_PROMPT}\n\n{material}"))],
+                    messages: vec![WireMessage::text(
+                        "user",
+                        format!("{COMPACTION_PROMPT}\n\n{material}"),
+                    )],
                     stream: false,
                     max_tokens: Some(COMPACTION_MAX_TOKENS),
                     response_format: None,
@@ -581,15 +629,22 @@ impl ChatService {
     ///
     /// Retrieval failing is not the ask failing: the loop swallows its own
     /// errors and returns whatever it managed to find.
-    async fn retrieve_for_turn(
+    async fn retrieve_for_turn<P>(
         &self,
         turn: TurnFacts<'_>,
         api_key: &str,
-    ) -> RetrievalOutcome {
-        let app = self.app.clone();
+        turn_id: &str,
+        mut on_progress: P,
+    ) -> RetrievalOutcome
+    where
+        P: FnMut(ChatProgress),
+    {
+        let progress_turn_id = turn_id.to_string();
+        let progress_thread_id = turn.thread_id.map(ToString::to_string);
         agent_loop::run(
             &self.client,
             &self.context,
+            self.research.as_ref(),
             agent_loop::LoopRequest {
                 paper_id: turn.paper_id,
                 thread_id: turn.thread_id,
@@ -597,26 +652,57 @@ impl ChatService {
                 question: turn.question,
                 selection: turn.selection,
                 recent: turn.recent,
-                // The cheap model decides; the answer model writes. Phase 1 is
-                // pure latency in front of the first token, and picking a
-                // search query does not need the expensive one.
-                decide_model: &self.config.annotation_model,
+                // The planner decides; the answer model writes. The annotation
+                // model remains reserved for extraction and marking.
+                decide_model: &self.config.planner_model,
                 url: &self.config.url,
                 api_key,
             },
             move |event| {
-                // The panel would otherwise sit dead through up to three round
-                // trips, which reads as hung rather than thinking.
+                let turn_id = progress_turn_id.clone();
+                let thread_id = progress_thread_id.clone();
                 let payload = match event {
-                    agent_loop::LoopEvent::Deciding => ChatProgress::Deciding,
-                    agent_loop::LoopEvent::Searching { query } => {
-                        ChatProgress::Searching { query }
+                    agent_loop::LoopEvent::Deciding => {
+                        ChatProgress::Deciding { turn_id, thread_id }
                     }
-                    agent_loop::LoopEvent::Retrieved { count } => {
-                        ChatProgress::Retrieved { count }
+                    agent_loop::LoopEvent::SearchingPaper { query } => {
+                        ChatProgress::SearchingPaper {
+                            turn_id,
+                            thread_id,
+                            query,
+                        }
                     }
+                    agent_loop::LoopEvent::SearchingLibrary { query } => {
+                        ChatProgress::SearchingLibrary {
+                            turn_id,
+                            thread_id,
+                            query,
+                        }
+                    }
+                    agent_loop::LoopEvent::SearchingWeb { query } => ChatProgress::SearchingWeb {
+                        turn_id,
+                        thread_id,
+                        query,
+                    },
+                    agent_loop::LoopEvent::ReadingSource { title } => ChatProgress::ReadingSource {
+                        turn_id,
+                        thread_id,
+                        title,
+                    },
+                    agent_loop::LoopEvent::StartingDeepResearch { title } => {
+                        ChatProgress::StartingDeepResearch {
+                            turn_id,
+                            thread_id,
+                            title,
+                        }
+                    }
+                    agent_loop::LoopEvent::Retrieved { count } => ChatProgress::Retrieved {
+                        turn_id,
+                        thread_id,
+                        count,
+                    },
                 };
-                let _ = app.emit(CHAT_PROGRESS_EVENT, payload);
+                on_progress(payload);
             },
         )
         .await
@@ -866,10 +952,65 @@ struct PreparedAsk {
     summary: ChatContextSummary,
 }
 
-/// Tauri event carrying phase-1 progress (RFC 0078). A global event rather than
-/// a per-ask channel: the reader has one conversation open at a time, and the
-/// existing ask channel is already committed to answer deltas.
-pub const CHAT_PROGRESS_EVENT: &str = "chat://progress";
+/// Add externally retrieved evidence and background activities to the final
+/// answer prompt and its persisted audit summary.
+fn apply_research_context(
+    mut system_prompt: String,
+    summary: &mut ChatContextSummary,
+    retrieval: RetrievalOutcome,
+) -> String {
+    summary.retrieval_capped = retrieval.capped;
+    summary.retrieval_queries = retrieval.queries;
+    summary.paper_indexed = retrieval.paper_indexed;
+
+    if !retrieval.external_citations.is_empty() {
+        system_prompt.push_str(
+            "\n\nExternal evidence read for this turn. Cite external factual claims with \
+             the listed [W…] handle. Do not cite a source for a claim its excerpt \
+             does not support.\n",
+        );
+        for source in &retrieval.external_citations {
+            system_prompt.push_str(&format!(
+                "\n[{}] {}{}\nURL: {}\nRetrieved: {}\n{}\n",
+                source.handle,
+                source.title,
+                source
+                    .publisher
+                    .as_deref()
+                    .map(|publisher| format!(" · {publisher}"))
+                    .unwrap_or_default(),
+                source.url,
+                source.retrieved_at,
+                source.excerpt,
+            ));
+        }
+    }
+
+    if !retrieval.research_activities.is_empty() {
+        system_prompt.push_str(
+            "\n\nDeep Research was started in the background for this turn. Mention \
+             that it is running, but do not treat unfinished results as evidence.\n",
+        );
+        for activity in &retrieval.research_activities {
+            system_prompt.push_str(&format!(
+                "- {} (search {}, run {}, {})\n",
+                activity.title, activity.search_id, activity.run_id, activity.status
+            ));
+        }
+    }
+
+    summary.external_citations = retrieval.external_citations;
+    summary.research_activities = retrieval.research_activities;
+    system_prompt
+}
+
+/// Persist only citations the completed answer actually used.
+fn retain_answer_citations(summary: &mut ChatContextSummary, answer: &str) {
+    retain_cited(summary, answer);
+    summary
+        .external_citations
+        .retain(|citation| answer.contains(&format!("[{}]", citation.handle)));
+}
 
 /// Steers compaction toward what a later turn can still use. A summary that
 /// drops the specifics is worse than no compaction: the turns it replaced are
@@ -982,6 +1123,7 @@ fn chat_title_log(message: impl AsRef<str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::context::ExternalCitation;
 
     fn entry(kind: &str, body: &str) -> ChatEntry {
         ChatEntry {
@@ -1156,12 +1298,66 @@ mod tests {
 
     #[test]
     fn parse_auto_highlights_empty_list_is_ok() {
-        assert!(parse_auto_highlights(r#"{"highlights":[]}"#).unwrap().is_empty());
+        assert!(parse_auto_highlights(r#"{"highlights":[]}"#)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn parse_auto_highlights_malformed_json_errors() {
         assert!(parse_auto_highlights("not json").is_err());
         assert!(parse_auto_highlights(r#"{"wrong":1}"#).is_err());
+    }
+
+    #[test]
+    fn external_evidence_is_typed_in_the_prompt_and_persisted_only_when_cited() {
+        let retrieval = RetrievalOutcome {
+            external_citations: vec![ExternalCitation {
+                handle: "W1".to_string(),
+                url: "https://example.test/current".to_string(),
+                title: "Current result".to_string(),
+                publisher: Some("Example".to_string()),
+                retrieved_at: "2026-08-24T00:00:00Z".to_string(),
+                excerpt: "The measured value increased.".to_string(),
+            }],
+            ..RetrievalOutcome::default()
+        };
+        let mut summary = ChatContextSummary::default();
+
+        let prompt = apply_research_context("base".to_string(), &mut summary, retrieval);
+        assert!(prompt.contains("[W1] Current result"));
+        assert!(prompt.contains("https://example.test/current"));
+        assert_eq!(summary.external_citations.len(), 1);
+
+        retain_answer_citations(&mut summary, "An answer with no source marker.");
+        assert!(summary.external_citations.is_empty());
+    }
+
+    #[test]
+    fn cited_external_evidence_and_research_links_survive_summary_serialization() {
+        let mut summary = ChatContextSummary {
+            external_citations: vec![ExternalCitation {
+                handle: "W1".to_string(),
+                url: "https://example.test/current".to_string(),
+                title: "Current result".to_string(),
+                publisher: None,
+                retrieved_at: "2026-08-24T00:00:00Z".to_string(),
+                excerpt: "Evidence".to_string(),
+            }],
+            research_activities: vec![crate::domain::chat::ResearchActivity {
+                search_id: "search-1".to_string(),
+                run_id: "run-1".to_string(),
+                title: "Sparse attention".to_string(),
+                status: "queued".to_string(),
+            }],
+            ..ChatContextSummary::default()
+        };
+
+        retain_answer_citations(&mut summary, "External fact [W1].");
+        let json = serde_json::to_string(&summary).expect("summary serializes");
+        let restored: ChatContextSummary = serde_json::from_str(&json).expect("summary restores");
+
+        assert_eq!(restored.external_citations[0].handle, "W1");
+        assert_eq!(restored.research_activities[0].run_id, "run-1");
     }
 }

@@ -2,7 +2,7 @@
 // `model` and `contextSummary` arrive as null (not omitted) for non-answer
 // entries, matching serde's Option serialization.
 
-import type { ContextCitation, PassageRef } from "$lib/domain/context";
+import type { ContextCitation, ExternalCitation, PassageRef } from "$lib/domain/context";
 
 export type ChatScope = { kind: "paper"; paperId: string };
 
@@ -30,6 +30,10 @@ export type ChatContextSummary = {
   passages: PassageRef[];
   /** Only the passages the answer actually cited. */
   citations: ContextCitation[];
+  /** External sources actually cited by this answer. */
+  externalCitations: ExternalCitation[];
+  /** Background research runs started by this turn. */
+  researchActivities: ResearchActivity[];
   /**
    * RFC 0079: what retrieval searched for this turn, oldest first. Stored with
    * the answer, so a past turn with no references can still be read back.
@@ -42,6 +46,22 @@ export type ChatContextSummary = {
    */
   paperIndexed: boolean;
 };
+
+export type ResearchActivity = {
+  searchId: string;
+  runId: string;
+  title: string;
+  status: string;
+};
+
+export type ChatProgress =
+  | { event: "deciding"; turnId: string; threadId: string | null }
+  | { event: "searchingPaper"; turnId: string; threadId: string | null; query: string }
+  | { event: "searchingLibrary"; turnId: string; threadId: string | null; query: string }
+  | { event: "searchingWeb"; turnId: string; threadId: string | null; query: string }
+  | { event: "readingSource"; turnId: string; threadId: string | null; title: string }
+  | { event: "startingDeepResearch"; turnId: string; threadId: string | null; title: string }
+  | { event: "retrieved"; turnId: string; threadId: string | null; count: number };
 
 export type ChatEntryKind = "note" | "question" | "answer";
 

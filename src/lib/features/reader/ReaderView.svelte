@@ -56,6 +56,7 @@
     layoutMode = "normal",
     onOpenPaperReference,
     onOpenVaultReference,
+    onOpenResearch,
     activeVaultId = "",
     metadataAutofillProgress,
     isAutofillingMetadata = false,
@@ -70,6 +71,7 @@
     /** RFC 0090 R3.1/R3.2: following a `[@vault/key]` reference from a note. */
     onOpenPaperReference?: (paperId: string) => void;
     onOpenVaultReference?: (vaultId: string) => void;
+    onOpenResearch?: (searchId: string, runId: string) => void | Promise<void>;
     activeVaultId?: string;
     metadataAutofillProgress?: MetadataAutofillProgress;
     isAutofillingMetadata?: boolean;
@@ -1668,6 +1670,7 @@
           onRemoveHighlight={deleteAnnotation}
           {onOpenPaperReference}
           {onOpenVaultReference}
+          {onOpenResearch}
           {activeVaultId}
           onOpenCitation={openCitation}
           onHighlightIntent={handleHighlightIntent}

@@ -16,6 +16,7 @@ use crate::domain::discovery::{DiscoverySearchRequest, PaperCandidate};
 /// has a real adapter, not when it is only an idea in an RFC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryProviderId {
+    Web,
     OpenAlex,
     Arxiv,
     EuropePmc,
@@ -25,6 +26,7 @@ pub enum DiscoveryProviderId {
 impl DiscoveryProviderId {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Web => "web",
             Self::OpenAlex => "openalex",
             Self::Arxiv => "arxiv",
             Self::EuropePmc => "europe_pmc",

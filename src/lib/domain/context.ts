@@ -30,6 +30,17 @@ export type ContextCitation = {
   rectsJson: string;
 };
 
+/** A durable web source used by one chat answer (RFC 0097). */
+export type ExternalCitation = {
+  /** `"W1"`, without brackets. */
+  handle: string;
+  url: string;
+  title: string;
+  publisher: string | null;
+  retrievedAt: string;
+  excerpt: string;
+};
+
 /**
  * A passage the model was shown this turn, cited or not (RFC 0078).
  *

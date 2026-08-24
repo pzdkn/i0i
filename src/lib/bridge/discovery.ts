@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DiscoverySearchRequest, DiscoverySearchResponse } from "$lib/domain/discover";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  DiscoveryProgress,
+  DiscoverySearchRequest,
+  DiscoverySearchResponse,
+} from "$lib/domain/discover";
 
 export async function searchPapers(request: DiscoverySearchRequest): Promise<DiscoverySearchResponse> {
   return invoke<DiscoverySearchResponse>("search_papers", { request });
@@ -12,4 +17,11 @@ export async function expandSearch(
   request: DiscoverySearchRequest,
 ): Promise<DiscoverySearchResponse> {
   return invoke<DiscoverySearchResponse>("expand_search", { request });
+}
+
+/** Subscribe to browser, resolver, and ranking progress for Quick Search. */
+export async function listenDiscoveryProgress(
+  onEvent: (payload: DiscoveryProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<DiscoveryProgress>("discovery_progress", (event) => onEvent(event.payload));
 }

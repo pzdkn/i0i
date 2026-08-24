@@ -1,19 +1,22 @@
 //! Discovery command-side modules.
 
+pub mod browser;
 pub mod error;
 pub mod orchestrator;
 pub mod provider;
 pub mod providers;
 pub mod service;
 
-use crate::domain::discovery::{DiscoverySearchRequest, DiscoverySearchResponse};
+use serde::Serialize;
+use tauri::Emitter;
 
-use self::{
-    orchestrator::DiscoveryOrchestrator,
-    providers::{
-        arxiv::ArxivProvider, core::CoreProvider, europe_pmc::EuropePmcProvider,
-        openalex::OpenAlexProvider,
-    },
+use crate::domain::discovery::{DiscoverySearchRequest, DiscoverySearchResponse, PaperCandidate};
+use crate::domain::research::SearchConstraints;
+use crate::services::source_acquisition::SourceAcquisitionService;
+
+use self::providers::{
+    arxiv::ArxivProvider, core::CoreProvider, europe_pmc::EuropePmcProvider,
+    openalex::OpenAlexProvider,
 };
 
 use super::discovery::error::DiscoveryError;
@@ -29,8 +32,18 @@ use super::discovery::error::DiscoveryError;
 pub struct DiscoveryProviders {
     pub openalex: OpenAlexProvider,
     pub arxiv: ArxivProvider,
+    #[allow(dead_code)]
     pub europe_pmc: EuropePmcProvider,
     pub core: CoreProvider,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryProgress {
+    pub query: String,
+    pub stage: String,
+    pub message: String,
+    pub candidates: Vec<PaperCandidate>,
 }
 
 impl DiscoveryProviders {
@@ -46,14 +59,13 @@ impl DiscoveryProviders {
 
 #[tauri::command]
 pub async fn search_papers(
+    app: tauri::AppHandle,
     providers: tauri::State<'_, DiscoveryProviders>,
     reranker: tauri::State<'_, crate::services::embedding::EmbeddingReranker>,
+    source_acquisition: tauri::State<'_, SourceAcquisitionService>,
     request: DiscoverySearchRequest,
 ) -> Result<DiscoverySearchResponse, String> {
-    orchestrator(&providers, &reranker)
-        .search(request)
-        .await
-        .map_err(|e| e.to_string())
+    browser_search(&app, &providers, &reranker, &source_acquisition, request).await
 }
 
 /// Progressive query expansion (RFC 0054). The frontend calls this after the
@@ -63,9 +75,11 @@ pub async fn search_papers(
 /// variants just reproduces the literal result.
 #[tauri::command]
 pub async fn expand_search(
+    app: tauri::AppHandle,
     providers: tauri::State<'_, DiscoveryProviders>,
     reranker: tauri::State<'_, crate::services::embedding::EmbeddingReranker>,
     expander: tauri::State<'_, crate::services::query_expansion::QueryExpander>,
+    source_acquisition: tauri::State<'_, SourceAcquisitionService>,
     request: DiscoverySearchRequest,
 ) -> Result<DiscoverySearchResponse, String> {
     let variants = expander.expand(&request.query).await;
@@ -76,10 +90,30 @@ pub async fn expand_search(
     if variants.is_empty() {
         return Ok(empty_expansion_response(&request));
     }
-    orchestrator(&providers, &reranker)
-        .search_expanded(request, variants)
-        .await
-        .map_err(|e| e.to_string())
+    // The literal result is already visible and the frontend merges this
+    // response into it. Search only the new variants, concurrently, so browser
+    // latency is paid once rather than once per expansion.
+    let searches = variants.into_iter().map(|variant| {
+        let mut variant_request = request.clone();
+        variant_request.query = variant;
+        browser_search(
+            &app,
+            &providers,
+            &reranker,
+            &source_acquisition,
+            variant_request,
+        )
+    });
+    let mut candidates = Vec::new();
+    for response in futures_util::future::join_all(searches).await {
+        if let Ok(response) = response {
+            candidates.extend(response.candidates);
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(empty_expansion_response(&request));
+    }
+    ranked_response(&reranker, &request, candidates).await
 }
 
 /// An empty-candidate response signalling "no expansion happened". The frontend
@@ -96,13 +130,129 @@ fn empty_expansion_response(request: &DiscoverySearchRequest) -> DiscoverySearch
     }
 }
 
-/// Build a quick-search orchestrator with the expansion providers (RFC 0053)
-/// and the embedding reranker (RFC 0054) attached.
-fn orchestrator(
+async fn browser_search(
+    app: &tauri::AppHandle,
     providers: &DiscoveryProviders,
     reranker: &crate::services::embedding::EmbeddingReranker,
-) -> DiscoveryOrchestrator {
-    DiscoveryOrchestrator::new(providers.openalex.clone(), providers.arxiv.clone())
-        .with_expansion_providers(providers.europe_pmc.clone(), providers.core.clone())
-        .with_reranker(reranker.clone())
+    source_acquisition: &SourceAcquisitionService,
+    request: DiscoverySearchRequest,
+) -> Result<DiscoverySearchResponse, String> {
+    let query = request.query.trim().to_string();
+    if query.is_empty() {
+        return Err("Enter a search query before running discovery.".to_string());
+    }
+    let source = browser::BrowserDiscoverySource::new(
+        source_acquisition.clone(),
+        providers.openalex.clone(),
+        providers.arxiv.clone(),
+        browser::BrowserDiscoveryConfig::load(app),
+    );
+    let progress_app = app.clone();
+    let event_query = query.clone();
+    let candidates = source
+        .discover(
+            &query,
+            request.result_limit.max(1) as usize,
+            &move |progress| {
+                let (stage, message, candidates) = match progress {
+                    browser::BrowserDiscoveryProgress::SearchingWeb => (
+                        "searching".to_string(),
+                        "Searching the web".to_string(),
+                        Vec::new(),
+                    ),
+                    browser::BrowserDiscoveryProgress::Provisional(candidates) => (
+                        "provisional".to_string(),
+                        format!("Found {} links", candidates.len()),
+                        candidates,
+                    ),
+                    browser::BrowserDiscoveryProgress::ResolvingMetadata { count } => (
+                        "resolving".to_string(),
+                        format!("Resolving metadata for {count} papers"),
+                        Vec::new(),
+                    ),
+                    browser::BrowserDiscoveryProgress::Resolved { count } => (
+                        "resolved".to_string(),
+                        format!("Resolved {count} papers"),
+                        Vec::new(),
+                    ),
+                };
+                let _ = progress_app.emit(
+                    "discovery_progress",
+                    DiscoveryProgress {
+                        query: event_query.clone(),
+                        stage,
+                        message,
+                        candidates,
+                    },
+                );
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let _ = app.emit(
+        "discovery_progress",
+        DiscoveryProgress {
+            query: query.clone(),
+            stage: "ranking".to_string(),
+            message: format!("Ranking {} papers", candidates.len()),
+            candidates: Vec::new(),
+        },
+    );
+    ranked_response(reranker, &request, candidates).await
+}
+
+async fn ranked_response(
+    reranker: &crate::services::embedding::EmbeddingReranker,
+    request: &DiscoverySearchRequest,
+    candidates: Vec<PaperCandidate>,
+) -> Result<DiscoverySearchResponse, String> {
+    let constraints = SearchConstraints {
+        year_from: request.year_from,
+        year_to: request.year_to,
+        providers: Vec::new(),
+        open_access: request.open_access,
+        target_count: request.result_limit,
+        venues: request.venues.clone(),
+        authors: request.authors.clone(),
+        fields_of_study: request.fields_of_study.clone(),
+        seed_paper_ids: Vec::new(),
+    };
+    let filtered =
+        crate::services::research::filter::apply_resolved_constraints(candidates, &constraints);
+    let merged = orchestrator::merge_and_filter(
+        vec![browser::BrowserDiscoverySource::as_provider_result(
+            filtered,
+        )],
+        request.only_viewable,
+    );
+    let semantic = reranker.semantic_scores(&request.query, &merged).await;
+    let mut candidates =
+        orchestrator::rank_candidates(merged, &request.query, request.result_limit, &semantic);
+    match request.sort_by {
+        crate::domain::discovery::DiscoverySort::Relevance => {}
+        crate::domain::discovery::DiscoverySort::Newest => candidates.sort_by(|left, right| {
+            right
+                .year
+                .unwrap_or(i32::MIN)
+                .cmp(&left.year.unwrap_or(i32::MIN))
+        }),
+        crate::domain::discovery::DiscoverySort::MostCited => candidates.sort_by(|left, right| {
+            right
+                .citation_count
+                .unwrap_or_default()
+                .cmp(&left.citation_count.unwrap_or_default())
+        }),
+    }
+    Ok(DiscoverySearchResponse {
+        provider: "browser".to_string(),
+        query: request.query.trim().to_string(),
+        filters: vec![
+            "browser-first".to_string(),
+            "exact metadata resolution".to_string(),
+        ],
+        sort_by: request.sort_by.clone(),
+        result_limit: request.result_limit,
+        result_count: candidates.len(),
+        candidates,
+    })
 }

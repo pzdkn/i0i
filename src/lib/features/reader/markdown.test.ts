@@ -7,6 +7,7 @@ function text(spans: Inline[]): string {
     .map((span) => {
       if (span.kind === "cite") return `[${span.handle}]`;
       if (span.kind === "paperRef") return span.raw;
+      if (span.kind === "math") return span.raw;
       return span.text;
     })
     .join("");
@@ -123,6 +124,14 @@ test("citation markers survive as their own spans", () => {
   assert.equal(spans[1].kind === "cite" && spans[1].handle, "1");
 });
 
+test("typed local and web citation handles survive as spans", () => {
+  const spans = parseInline("Paper claim [C1], current evidence [W2].");
+  assert.deepEqual(
+    spans.filter((span) => span.kind === "cite").map((span) => span.handle),
+    ["C1", "W2"],
+  );
+});
+
 test("a citation inside a list item still parses", () => {
   const blocks = parseMarkdown("- scaling matters [2]\n- softmax saturates");
   const list = blocks[0] as { items: Inline[][] };
@@ -140,6 +149,108 @@ test("a partially streamed bold does not swallow the rest", () => {
   // Mid-stream the closing ** has not arrived yet.
   const spans = parseInline("this is **half writ");
   assert.equal(text(spans), "this is **half writ");
+});
+
+test("canonical inline math becomes a typed span", () => {
+  const spans = parseInline(String.raw`The score is \(QK^T / \sqrt{d_k}\).`);
+
+  assert.deepEqual(spans, [
+    { kind: "text", text: "The score is " },
+    {
+      kind: "math",
+      tex: String.raw`QK^T / \sqrt{d_k}`,
+      raw: String.raw`\(QK^T / \sqrt{d_k}\)`,
+    },
+    { kind: "text", text: "." },
+  ]);
+});
+
+test("canonical display math is a block and preserves newlines", () => {
+  const blocks = parseMarkdown(String.raw`Before
+
+\[
+E = mc^2
++ \lambda R
+\]
+
+After`);
+
+  assert.deepEqual(kinds(blocks), ["p", "math", "p"]);
+  assert.deepEqual(blocks[1], {
+    kind: "math",
+    tex: "E = mc^2\n+ \\lambda R",
+    raw: "\\[\nE = mc^2\n+ \\lambda R\n\\]",
+  });
+});
+
+test("single-dollar inline math is accepted without consuming currency", () => {
+  assert.deepEqual(parseInline("Scale by $1 / \\sqrt{d_k}$ before softmax."), [
+    { kind: "text", text: "Scale by " },
+    {
+      kind: "math",
+      tex: String.raw`1 / \sqrt{d_k}`,
+      raw: String.raw`$1 / \sqrt{d_k}$`,
+    },
+    { kind: "text", text: " before softmax." },
+  ]);
+  assert.deepEqual(parseInline("The samples cost $10 and $20."), [
+    { kind: "text", text: "The samples cost $10 and $20." },
+  ]);
+});
+
+test("display math accepts canonical and double-dollar one-line forms", () => {
+  assert.deepEqual(parseMarkdown(String.raw`\[E = mc^2\]`), [
+    {
+      kind: "math",
+      tex: "E = mc^2",
+      raw: String.raw`\[E = mc^2\]`,
+    },
+  ]);
+  assert.deepEqual(parseMarkdown(String.raw`$$\sum_i x_i$$`), [
+    {
+      kind: "math",
+      tex: String.raw`\sum_i x_i`,
+      raw: String.raw`$$\sum_i x_i$$`,
+    },
+  ]);
+});
+
+test("code wins over math and escaped dollars stay literal", () => {
+  assert.deepEqual(parseInline("Use \\$10 and write `$x$`."), [
+    { kind: "text", text: "Use $10 and write " },
+    { kind: "code", text: "$x$" },
+    { kind: "text", text: "." },
+  ]);
+
+  const fenced = parseMarkdown("```tex\n$x$ and \\(y\\)\n```");
+  assert.deepEqual(fenced, [
+    { kind: "code", text: "$x$ and \\(y\\)", lang: "tex" },
+  ]);
+});
+
+test("incomplete streamed math remains literal until the delimiter closes", () => {
+  const expression = String.raw`\(\alpha + \beta\)`;
+
+  for (let length = 1; length < expression.length; length += 1) {
+    const prefix = expression.slice(0, length);
+    const spans = parseInline(prefix);
+    assert.equal(text(spans), prefix);
+    assert.equal(spans.some((span) => span.kind === "math"), false);
+  }
+
+  assert.equal(parseInline(expression)[0]?.kind, "math");
+});
+
+test("unmatched math delimiters remain readable text", () => {
+  const source = String.raw`Partial \(x + y and $z`;
+  assert.deepEqual(parseInline(source), [{ kind: "text", text: source }]);
+});
+
+test("malformed TeX retains its literal fallback", () => {
+  const raw = String.raw`\(\frac{1}{\)`;
+  assert.deepEqual(parseInline(raw), [
+    { kind: "math", tex: String.raw`\frac{1}{`, raw },
+  ]);
 });
 
 // RFC 0090: `[@vault/key]` is an inline node, resolved by the caller.

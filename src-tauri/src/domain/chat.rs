@@ -214,11 +214,46 @@ pub struct PinnedHighlight {
 /// Phase 1 can take up to three round trips before the first word of prose. A
 /// silent panel through that reads as hung rather than thinking.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "event", rename_all = "camelCase")]
+#[serde(
+    tag = "event",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ChatProgress {
-    Deciding,
-    Searching { query: String },
-    Retrieved { count: usize },
+    Deciding {
+        turn_id: String,
+        thread_id: Option<String>,
+    },
+    SearchingPaper {
+        turn_id: String,
+        thread_id: Option<String>,
+        query: String,
+    },
+    SearchingLibrary {
+        turn_id: String,
+        thread_id: Option<String>,
+        query: String,
+    },
+    SearchingWeb {
+        turn_id: String,
+        thread_id: Option<String>,
+        query: String,
+    },
+    ReadingSource {
+        turn_id: String,
+        thread_id: Option<String>,
+        title: String,
+    },
+    StartingDeepResearch {
+        turn_id: String,
+        thread_id: Option<String>,
+        title: String,
+    },
+    Retrieved {
+        turn_id: String,
+        thread_id: Option<String>,
+        count: usize,
+    },
 }
 
 /// Event emitted when background title generation updates a thread title.
@@ -263,13 +298,21 @@ pub struct ChatContextSummary {
     /// reference list.
     #[serde(default)]
     pub passages: Vec<crate::domain::context::PassageRef>,
-    /// Resolves the `[1]` markers in this answer back to places in the PDF.
+    /// Resolves the `[C1]` markers in this answer back to places in the PDF.
     ///
     /// Stored with the answer rather than recomputed: handles are assigned per
     /// assembly, so the same chunk is `[C3]` in one turn and `[C1]` in the next.
     /// Reopening a thread must show the markers the model actually wrote.
     #[serde(default)]
     pub citations: Vec<crate::domain::context::ContextCitation>,
+    /// Web evidence actually cited by the answer (RFC 0097).
+    ///
+    /// Kept separate from PDF citations because URLs have no page geometry.
+    #[serde(default)]
+    pub external_citations: Vec<crate::domain::context::ExternalCitation>,
+    /// Background Deep Research runs started by this turn.
+    #[serde(default)]
+    pub research_activities: Vec<ResearchActivity>,
     /// The queries retrieval ran this turn, oldest first (RFC 0079 R5.5).
     ///
     /// Stored, not just emitted as progress: a past answer with no references
@@ -306,10 +349,23 @@ impl Default for ChatContextSummary {
             retrieval_capped: false,
             passages: Vec::new(),
             citations: Vec::new(),
+            external_citations: Vec::new(),
+            research_activities: Vec::new(),
             retrieval_queries: Vec::new(),
             paper_indexed: true,
         }
     }
+}
+
+/// A durable link from a chat answer to an asynchronous Deep Research run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchActivity {
+    pub search_id: String,
+    pub run_id: String,
+    pub title: String,
+    /// Status when the activity was linked. The UI follows later updates by id.
+    pub status: String,
 }
 
 /// Event pushed to the frontend over a Tauri channel while a streamed reply
@@ -317,6 +373,8 @@ impl Default for ChatContextSummary {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event")]
 pub enum ChatStreamEvent {
+    #[serde(rename = "progress")]
+    Progress { progress: ChatProgress },
     #[serde(rename = "delta")]
     Delta { text: String },
     #[serde(rename = "done")]
@@ -462,5 +520,16 @@ mod tests {
             )
             .pinned
         );
+    }
+
+    #[test]
+    fn old_context_summaries_default_new_research_fields() {
+        let summary: ChatContextSummary =
+            serde_json::from_str(r#"{"paperTitle":"Old","includedChars":10,"truncated":false}"#)
+                .expect("old summary parses");
+
+        assert!(summary.external_citations.is_empty());
+        assert!(summary.research_activities.is_empty());
+        assert!(summary.paper_indexed);
     }
 }

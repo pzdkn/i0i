@@ -1,6 +1,6 @@
 # RFC 0098: Browser-First Scholarly Discovery
 
-Status: Open
+Status: Partially Implemented — production paths landed; live migration benchmark pending
 Date: 2026-08-24
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -163,15 +163,36 @@ search indefinitely.
 
 ## Acceptance Criteria
 
-- [ ] Quick and Deep Search obtain initial candidates through Obscura.
-- [ ] Broad provider API searches are absent from production discovery paths.
-- [ ] APIs are used only for identifier or verified exact-title resolution.
-- [ ] Provisional candidates appear before metadata resolution completes.
-- [ ] Verified metadata and provenance update candidate rows in place.
-- [ ] Existing deduplication and local semantic ranking remain shared.
-- [ ] Browser, resolver, and ranking progress appears in the inspector.
-- [ ] One failed browser lane does not fail a Deep Search run.
-- [ ] Discovery uses the managed persistent Obscura session.
+- [x] Quick and Deep Search obtain initial candidates through Obscura.
+- [x] Broad provider API searches are absent from production discovery paths.
+- [x] APIs are used only for identifier or verified exact-title resolution.
+- [x] Provisional candidates appear before metadata resolution completes.
+- [x] Verified metadata and provenance update candidate rows in place.
+- [x] Existing deduplication and local semantic ranking remain shared.
+- [x] Browser, resolver, and ranking progress appears in the inspector.
+- [x] One failed browser lane does not fail a Deep Search run.
+- [x] Discovery uses the managed persistent Obscura session.
 - [ ] The fixed corpus records acceptable recall, precision, resolution rate,
   and latency before browser-first becomes the default.
 
+## Implementation Note
+
+Implemented on 2026-08-24. Quick Search and Deep Research share
+`BrowserDiscoverySource`; provider adapters resolve only identifiers or
+normalized exact-title matches. The managed Obscura process is now used through
+CDP rather than one-shot `obscura fetch` subprocesses. Quick Search emits
+provisional rows and browser/resolver/ranking progress; Deep Research maps the
+same source progress into its existing preview and inspector events. Quick
+query expansions and the bounded browser lanes in each Deep Research round run
+concurrently; one failed lane does not discard successful lanes.
+
+The recorded ten-query fixture currently protects result-page parsing and
+hand-marked-title recall. It does not certify live search quality, metadata
+resolution rate, browser challenge rate, or latency. Those measurements require
+an explicit networked benchmark run and remain the migration gate, so this RFC
+must not be marked complete yet.
+
+Verification includes the full Rust library suite (460 passed, 4 ignored), the
+managed Obscura CDP integration test, frontend checks, and the production
+frontend build. The ignored live-provider tests and fixed-corpus migration
+benchmark remain explicit networked work.

@@ -53,6 +53,8 @@ export const SUPPORTED_PROVIDERS: DiscoveryProviderChoice[] = [
 export const DEFAULT_PROVIDERS: DiscoveryProviderChoice[] = ["open_alex", "arxiv"];
 
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  web: "Web",
+  browser: "Web",
   open_alex: "OpenAlex",
   openalex: "OpenAlex",
   arxiv: "arXiv",
@@ -172,4 +174,11 @@ export type DiscoverySearchResponse = {
     };
     alreadyInLibrary: boolean;
   }>;
+};
+
+export type DiscoveryProgress = {
+  query: string;
+  stage: "searching" | "provisional" | "resolving" | "resolved" | "ranking";
+  message: string;
+  candidates: DiscoverySearchResponse["candidates"];
 };

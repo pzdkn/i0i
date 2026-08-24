@@ -47,3 +47,4 @@ dom_smoothie = "0.18.0"
 base64 = "0.23.0"
 # 0.1.10-alpha.4 ships a broken package (missing sqlite-vec-diskann.c); pin exact.
 sqlite-vec = "=0.1.9"
+tokio-tungstenite = { version = "0.28", features = ["connect"] }

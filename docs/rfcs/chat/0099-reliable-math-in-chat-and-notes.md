@@ -1,6 +1,6 @@
 # RFC 0099: Reliable Math In Chat And Notes
 
-Status: Open
+Status: Implemented (manual packaged-app verification pending)
 Date: 2026-08-24
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -132,16 +132,30 @@ through their existing rendering paths.
 
 ## Acceptance Criteria
 
-- [ ] Inline and display equations render in completed and streaming answers.
-- [ ] The same syntax renders in saved notes.
-- [ ] Code spans and fences never interpret delimiters as math.
-- [ ] Currency, escaped dollars, unmatched delimiters, and invalid TeX remain
+- [x] Inline and display equations render in completed and streaming answers.
+- [x] The same syntax renders in saved notes.
+- [x] Code spans and fences never interpret delimiters as math.
+- [x] Currency, escaped dollars, unmatched delimiters, and invalid TeX remain
   readable.
-- [ ] Citations and paper references behave exactly as before.
-- [ ] Math cannot introduce scripts, external loads, custom HTML, or arbitrary
+- [x] Citations and paper references behave exactly as before.
+- [x] Math cannot introduce scripts, external loads, custom HTML, or arbitrary
   attributes.
-- [ ] Long equations do not widen or overflow the inspector.
-- [ ] Tests cover every supported delimiter, multiline display math, currency,
+- [x] Long equations do not widen or overflow the inspector.
+- [x] Tests cover every supported delimiter, multiline display math, currency,
   malformed TeX, and every streamed prefix of representative formulas.
 - [ ] A packaged application renders formulas and bundled fonts offline.
 
+## Implementation Notes
+
+Implemented on 2026-08-24 with typed inline and display math nodes, a shared
+KaTeX renderer for chat and notes, literal fallback on rendering errors, and a
+canonical math-output instruction in the chat prompt. The production frontend
+build emits KaTeX and its fonts locally; visual verification in a packaged
+Tauri application remains outstanding.
+
+Verification:
+
+- `node --test src/lib/features/reader/markdown.test.ts`
+- `cargo test services::chat::context::tests::context_requests_canonical_math_delimiters`
+- `pnpm check`
+- `pnpm build`

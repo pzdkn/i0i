@@ -323,6 +323,14 @@ impl SourceAcquisitionService {
         self.debug_fetch_url(url).await
     }
 
+    /// Inspect a rendered page in the managed browser, including its links and
+    /// observed network URLs. Discovery uses this richer form while the Reader
+    /// usually needs only the snapshot returned by `acquire_web_page`.
+    pub async fn inspect_browser_page(&self, url: &str) -> AcquisitionResult<PageInspection> {
+        self.browser.ensure_ready().await?;
+        self.browser.inspect_page(url).await
+    }
+
     /// Fetch a page over direct HTTP and ingest it into clean, annotatable
     /// article HTML (RFC 0056). Most article HTML needs no browser, so this
     /// uses the direct fetcher; the reader falls back to "View original" if a

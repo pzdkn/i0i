@@ -14,7 +14,8 @@
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::domain::chat::{ChatEntry, ENTRY_ANSWER};
+use crate::domain::chat::{ChatEntry, ResearchActivity, ENTRY_ANSWER};
+use crate::domain::context::ExternalCitation;
 use crate::domain::context::ORIGIN_AGENT;
 use crate::domain::library::DocumentChunk;
 use crate::services::llm::{
@@ -24,6 +25,7 @@ use crate::services::llm::{
 use crate::services::search::{SearchMode, SearchRequest};
 
 use super::context_manager::ContextManager;
+use super::research_tools::ResearchToolbox;
 
 /// Round trips the model may spend deciding.
 ///
@@ -63,6 +65,10 @@ const BASELINE_CHUNKS: usize = 4;
 /// agent can always search again with better wording.
 const SEARCH_LIMIT: usize = 3;
 
+/// External pages one chat turn may read. Web lookup stays a small evidence
+/// operation; broader work belongs to asynchronous Deep Research.
+const WEB_SOURCE_LIMIT: usize = 3;
+
 /// Preview length per hit. Enough to judge relevance, far short of the full
 /// text — which arrives once, in the final assembly, if the passage is used.
 const PREVIEW_CHARS: usize = 300;
@@ -90,6 +96,10 @@ pub struct RetrievalOutcome {
     /// to fix. Defaults to `true` so a failure to check never accuses the
     /// library of being unindexed.
     pub paper_indexed: bool,
+    /// External evidence read during the routing phase, numbered for assembly.
+    pub external_citations: Vec<ExternalCitation>,
+    /// Background research launched by this turn. At most one is accepted.
+    pub research_activities: Vec<ResearchActivity>,
 }
 
 impl Default for RetrievalOutcome {
@@ -99,6 +109,8 @@ impl Default for RetrievalOutcome {
             capped: false,
             queries: Vec::new(),
             paper_indexed: true,
+            external_citations: Vec::new(),
+            research_activities: Vec::new(),
         }
     }
 }
@@ -110,8 +122,24 @@ pub enum LoopEvent {
     /// says something immediately — deciding *not* to search still takes a
     /// round trip, and silence through it reads as a hang.
     Deciding,
-    Searching { query: String },
-    Retrieved { count: usize },
+    SearchingPaper {
+        query: String,
+    },
+    SearchingLibrary {
+        query: String,
+    },
+    SearchingWeb {
+        query: String,
+    },
+    ReadingSource {
+        title: String,
+    },
+    StartingDeepResearch {
+        title: String,
+    },
+    Retrieved {
+        count: usize,
+    },
 }
 
 pub struct LoopRequest<'a> {
@@ -142,6 +170,7 @@ pub struct LoopRequest<'a> {
 pub async fn run<F>(
     client: &Client,
     context: &ContextManager,
+    research: &dyn ResearchToolbox,
     request: LoopRequest<'_>,
     mut on_event: F,
 ) -> RetrievalOutcome
@@ -231,7 +260,15 @@ where
         ));
 
         for call in calls {
-            let result = run_tool(context, &request, call, &mut outcome, &mut on_event).await;
+            let result = run_tool(
+                context,
+                research,
+                &request,
+                call,
+                &mut outcome,
+                &mut on_event,
+            )
+            .await;
             messages.push(WireMessage::tool_result(call.id.clone(), result));
         }
 
@@ -300,7 +337,7 @@ async fn baseline_search<F>(
     let query = baseline_query(request);
 
     outcome.queries.push(query.clone());
-    on_event(LoopEvent::Searching {
+    on_event(LoopEvent::SearchingPaper {
         query: query.clone(),
     });
 
@@ -332,6 +369,7 @@ async fn baseline_search<F>(
 /// answers slightly less well.
 async fn run_tool<F>(
     context: &ContextManager,
+    research: &dyn ResearchToolbox,
     request: &LoopRequest<'_>,
     call: &openrouter::AssembledToolCall,
     outcome: &mut RetrievalOutcome,
@@ -341,19 +379,53 @@ where
     F: FnMut(LoopEvent),
 {
     match call.name.as_str() {
-        "search_context" => {
+        "search_paper" => {
             let Ok(args) = serde_json::from_str::<SearchArgs>(&call.arguments) else {
                 return "Could not parse arguments. Expected {\"query\": \"...\"}.".to_string();
             };
-            search(context, request, &args.query, outcome, on_event).await
+            search_chunks(
+                context,
+                request,
+                &args.query,
+                SearchScope::Paper,
+                outcome,
+                on_event,
+            )
+            .await
+        }
+        "search_library" => {
+            let Ok(args) = serde_json::from_str::<SearchArgs>(&call.arguments) else {
+                return "Could not parse arguments. Expected {\"query\": \"...\"}.".to_string();
+            };
+            search_chunks(
+                context,
+                request,
+                &args.query,
+                SearchScope::Library,
+                outcome,
+                on_event,
+            )
+            .await
+        }
+        "search_web" => {
+            let Ok(args) = serde_json::from_str::<SearchArgs>(&call.arguments) else {
+                return "Could not parse arguments. Expected {\"query\": \"...\"}.".to_string();
+            };
+            search_web(research, &args.query, outcome, on_event).await
+        }
+        "start_deep_research" => {
+            let Ok(args) = serde_json::from_str::<DeepResearchArgs>(&call.arguments) else {
+                return "Could not parse arguments. Expected {\"title\": \"...\", \"goal\": \"...\"}."
+                    .to_string();
+            };
+            start_deep_research(research, request, args, outcome, on_event)
         }
         "add_context" => {
             let Ok(args) = serde_json::from_str::<ChunkArgs>(&call.arguments) else {
                 return "Could not parse arguments. Expected {\"chunk_id\": \"...\"}.".to_string();
             };
             let Some(thread_id) = request.thread_id else {
-                return "This conversation has no history yet, so nothing can be kept."
-                    .to_string();
+                return "This conversation has no history yet, so nothing can be kept.".to_string();
             };
             match context.add_context(thread_id, &args.chunk_id, ORIGIN_AGENT) {
                 Ok(item) => format!("Kept as {}.", item.id),
@@ -375,10 +447,17 @@ where
     }
 }
 
-async fn search<F>(
+#[derive(Clone, Copy)]
+enum SearchScope {
+    Paper,
+    Library,
+}
+
+async fn search_chunks<F>(
     context: &ContextManager,
     request: &LoopRequest<'_>,
     query: &str,
+    scope: SearchScope,
     outcome: &mut RetrievalOutcome,
     on_event: &mut F,
 ) -> String
@@ -391,14 +470,22 @@ where
     }
 
     outcome.queries.push(query.to_string());
-    on_event(LoopEvent::Searching {
-        query: query.to_string(),
-    });
+    match scope {
+        SearchScope::Paper => on_event(LoopEvent::SearchingPaper {
+            query: query.to_string(),
+        }),
+        SearchScope::Library => on_event(LoopEvent::SearchingLibrary {
+            query: query.to_string(),
+        }),
+    }
 
     let response = context
         .search(SearchRequest {
             query: query.to_string(),
-            paper_ids: vec![request.paper_id.to_string()],
+            paper_ids: match scope {
+                SearchScope::Paper => vec![request.paper_id.to_string()],
+                SearchScope::Library => Vec::new(),
+            },
             vault_ids: Vec::new(),
             mode: SearchMode::Hybrid,
             limit: Some(SEARCH_LIMIT),
@@ -464,6 +551,119 @@ where
     )
 }
 
+/// Run one bounded external lookup and assign stable `W…` handles.
+async fn search_web<F>(
+    research: &dyn ResearchToolbox,
+    query: &str,
+    outcome: &mut RetrievalOutcome,
+    on_event: &mut F,
+) -> String
+where
+    F: FnMut(LoopEvent),
+{
+    if !outcome.external_citations.is_empty() {
+        outcome.capped = true;
+        return "The web-search budget for this turn is spent.".to_string();
+    }
+
+    outcome.queries.push(query.to_string());
+    on_event(LoopEvent::SearchingWeb {
+        query: query.to_string(),
+    });
+    let evidence = match research.search_web(query, WEB_SOURCE_LIMIT).await {
+        Ok(evidence) => evidence,
+        Err(error) => return format!("Web search failed: {error}"),
+    };
+
+    let evidence = evidence.into_iter().take(WEB_SOURCE_LIMIT);
+    let mut lines = Vec::new();
+    for source in evidence {
+        let handle = format!("W{}", outcome.external_citations.len() + 1);
+        on_event(LoopEvent::ReadingSource {
+            title: source.title.clone(),
+        });
+        lines.push(format!(
+            "[{handle}] {} :: {}",
+            source.title,
+            preview(&source.excerpt)
+        ));
+        outcome.external_citations.push(ExternalCitation {
+            handle,
+            url: source.url,
+            title: source.title,
+            publisher: source.publisher,
+            retrieved_at: source.retrieved_at,
+            excerpt: source.excerpt,
+        });
+    }
+
+    if lines.is_empty() {
+        "No external sources matched. Say that the lookup found no usable evidence.".to_string()
+    } else {
+        format!(
+            "{} external source(s). Cite only the [W…] handles below.\n{}",
+            lines.len(),
+            lines.join("\n")
+        )
+    }
+}
+
+/// Launch at most one background run, and only for an explicit user request.
+fn start_deep_research<F>(
+    research: &dyn ResearchToolbox,
+    request: &LoopRequest<'_>,
+    args: DeepResearchArgs,
+    outcome: &mut RetrievalOutcome,
+    on_event: &mut F,
+) -> String
+where
+    F: FnMut(LoopEvent),
+{
+    if !explicit_deep_research_request(request.question) {
+        return "Do not start research yet. Suggest it and ask the reader to confirm explicitly."
+            .to_string();
+    }
+    if !outcome.research_activities.is_empty() {
+        outcome.capped = true;
+        return "One Deep Research run is already linked to this turn.".to_string();
+    }
+
+    let title = args.title.trim();
+    let goal = args.goal.trim();
+    if goal.is_empty() {
+        return "Could not start Deep Research: the goal is empty.".to_string();
+    }
+    let title = if title.is_empty() { goal } else { title };
+    on_event(LoopEvent::StartingDeepResearch {
+        title: title.to_string(),
+    });
+    match research.start_deep_research(title, goal) {
+        Ok(activity) => {
+            let result = format!(
+                "Deep Research started: search_id={}, run_id={}. It is background activity, not evidence for this answer.",
+                activity.search_id, activity.run_id
+            );
+            outcome.research_activities.push(activity);
+            result
+        }
+        Err(error) => format!("Could not start Deep Research: {error}"),
+    }
+}
+
+fn explicit_deep_research_request(question: &str) -> bool {
+    let question = question.to_ascii_lowercase();
+    [
+        "deep research",
+        "start research",
+        "run research",
+        "search the literature",
+        "literature search",
+        "find papers",
+    ]
+    .iter()
+    .any(|phrase| question.contains(phrase))
+}
+
 fn preview(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     match flat.char_indices().nth(PREVIEW_CHARS) {
@@ -485,7 +685,8 @@ fn system_prompt(
     let mut prompt = format!(
         "You are preparing to answer a question about the paper \"{}\".\n\
          \n\
-         Your only job right now is to fetch evidence. Do not answer — reply \
+         Your only job right now is to fetch evidence or start explicitly \
+         requested background research. Do not answer — reply \
          with tool calls, or with nothing at all.\n\
          \n\
          A search on the reader's own words has already run, and what it \
@@ -501,8 +702,13 @@ fn system_prompt(
          do not end up citing cost the answer something.\n\
          \n\
          You get one round, so make it count: issue one query, or two if the \
-         question genuinely has two parts. Keep a passage with add_context \
-         only if later turns will need it.\n",
+         question genuinely has two parts. Use search_library for relevant work \
+         already in the reader's library. Use search_web only for current facts, \
+         comparisons, broader context, or an explicit request for outside \
+         evidence. Start Deep Research only when the reader explicitly asks to \
+         run broad research; otherwise suggest it in the final answer and wait \
+         for confirmation. Keep a passage with add_context only if later turns \
+         will need it.\n",
         request.paper_title,
     );
 
@@ -559,24 +765,53 @@ fn system_prompt(
 }
 
 fn context_tools(can_write: bool) -> Vec<Tool> {
+    let search_parameters = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "What to look for, in your own words. Keep it narrow and specific."
+            }
+        },
+        "required": ["query"]
+    });
     let mut tools = vec![Tool {
         kind: "function".into(),
         function: ToolFunction {
-            name: "search_context".into(),
+            name: "search_paper".into(),
             description: "Find passages in this paper by wording and meaning. \
                  Use it when the question turns on a specific claim, number, \
                  method, or term you have not already been shown. Do not use it \
                  for general questions about what the paper is about."
                 .into(),
+            parameters: search_parameters.clone(),
+        },
+    }, Tool {
+        kind: "function".into(),
+        function: ToolFunction {
+            name: "search_library".into(),
+            description: "Find passages across papers already saved in the user's library. Use for comparisons or cross-paper connections that do not require current web evidence.".into(),
+            parameters: search_parameters.clone(),
+        },
+    }, Tool {
+        kind: "function".into(),
+        function: ToolFunction {
+            name: "search_web".into(),
+            description: "Run one bounded external lookup and read at most three sources. Use for current facts, broader context, or comparisons requiring evidence outside the library.".into(),
+            parameters: search_parameters,
+        },
+    }, Tool {
+        kind: "function".into(),
+        function: ToolFunction {
+            name: "start_deep_research".into(),
+            description: "Start a persisted background literature search. Call only when the reader explicitly asks to start broad research; never use its unfinished run as evidence for the current answer.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "What to look for, in your own words. Be specific — a narrow query returns the passage you need instead of five you do not."
-                    }
+                    "title": { "type": "string", "description": "Short activity title." },
+                    "goal": { "type": "string", "description": "Self-contained research goal." }
                 },
-                "required": ["query"]
+                "required": ["title", "goal"]
             }),
         },
     }];
@@ -630,6 +865,12 @@ struct SearchArgs {
 }
 
 #[derive(Deserialize)]
+struct DeepResearchArgs {
+    title: String,
+    goal: String,
+}
+
+#[derive(Deserialize)]
 struct ChunkArgs {
     chunk_id: String,
 }
@@ -641,6 +882,7 @@ struct ItemArgs {
 
 #[cfg(test)]
 mod tests {
+    use super::super::research_tools::{ResearchToolbox, WebEvidence};
     use super::*;
     use crate::domain::context::ORIGIN_USER;
     use crate::services::search::SearchService;
@@ -650,6 +892,45 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    struct FakeResearch;
+
+    #[derive(Deserialize)]
+    struct EvalCase {
+        name: String,
+        question: String,
+        expected_tool: String,
+        expected_boundary: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ResearchToolbox for FakeResearch {
+        async fn search_web(&self, query: &str, limit: usize) -> Result<Vec<WebEvidence>, String> {
+            Ok(vec![WebEvidence {
+                url: "https://example.test/evidence".to_string(),
+                title: format!("Evidence for {query}"),
+                publisher: Some("Example".to_string()),
+                retrieved_at: "2026-08-24T00:00:00Z".to_string(),
+                excerpt: "A bounded external fact.".to_string(),
+            }]
+            .into_iter()
+            .take(limit)
+            .collect())
+        }
+
+        fn start_deep_research(
+            &self,
+            title: &str,
+            _goal: &str,
+        ) -> Result<ResearchActivity, String> {
+            Ok(ResearchActivity {
+                search_id: "search-1".to_string(),
+                run_id: "run-1".to_string(),
+                title: title.to_string(),
+                status: "queued".to_string(),
+            })
+        }
+    }
 
     struct Fixture {
         manager: ContextManager,
@@ -716,6 +997,7 @@ mod tests {
     ) -> String {
         run_tool(
             &fixture.manager,
+            &FakeResearch,
             &request(thread_id),
             call,
             outcome,
@@ -769,7 +1051,10 @@ mod tests {
         let mut outcome = RetrievalOutcome::default();
 
         for (name, expected) in [
-            ("search_context", "query"),
+            ("search_paper", "query"),
+            ("search_library", "query"),
+            ("search_web", "query"),
+            ("start_deep_research", "title"),
             ("add_context", "chunk_id"),
             ("drop_context", "item_id"),
         ] {
@@ -860,7 +1145,7 @@ mod tests {
         let result = run_one(
             &fixture,
             Some("t"),
-            &call("search_context", r#"{"query":"scaling"}"#),
+            &call("search_paper", r#"{"query":"scaling"}"#),
             &mut outcome,
         )
         .await;
@@ -1013,12 +1298,138 @@ mod tests {
             .map(|tool| tool.function.name)
             .collect();
         // Offering a tool that must then fail teaches the model nothing useful.
-        assert_eq!(names, vec!["search_context"]);
+        assert_eq!(
+            names,
+            vec![
+                "search_paper",
+                "search_library",
+                "search_web",
+                "start_deep_research"
+            ]
+        );
 
         let names: Vec<String> = context_tools(true)
             .into_iter()
             .map(|tool| tool.function.name)
             .collect();
-        assert_eq!(names, vec!["search_context", "add_context", "drop_context"]);
+        assert_eq!(
+            names,
+            vec![
+                "search_paper",
+                "search_library",
+                "search_web",
+                "start_deep_research",
+                "add_context",
+                "drop_context"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn web_search_is_bounded_and_assigns_external_handles() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+
+        let result = run_one(
+            &fixture,
+            Some("t"),
+            &call("search_web", r#"{"query":"current comparison"}"#),
+            &mut outcome,
+        )
+        .await;
+
+        assert!(result.contains("[W1]"), "{result}");
+        assert_eq!(outcome.external_citations.len(), 1);
+        assert_eq!(outcome.external_citations[0].handle, "W1");
+    }
+
+    #[test]
+    fn deep_research_requires_an_explicit_request() {
+        assert!(explicit_deep_research_request(
+            "Run deep research on sparse attention"
+        ));
+        assert!(explicit_deep_research_request(
+            "Find papers about this method"
+        ));
+        assert!(!explicit_deep_research_request(
+            "How does this compare with sparse attention?"
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_deep_research_starts_one_linked_background_run() {
+        let fixture = fixture();
+        let mut outcome = RetrievalOutcome::default();
+        let mut request = request(Some("t"));
+        request.question = "Run Deep Research about sparse attention";
+
+        let result = run_tool(
+            &fixture.manager,
+            &FakeResearch,
+            &request,
+            &call(
+                "start_deep_research",
+                r#"{"title":"Sparse attention","goal":"Find recent sparse attention papers"}"#,
+            ),
+            &mut outcome,
+            &mut |_| {},
+        )
+        .await;
+
+        assert!(result.contains("background activity"), "{result}");
+        assert_eq!(outcome.research_activities.len(), 1);
+        assert_eq!(outcome.research_activities[0].run_id, "run-1");
+    }
+
+    #[test]
+    fn routing_prompt_preserves_epistemic_and_latency_bounds() {
+        let fixture = fixture();
+        let prompt = system_prompt(&request(Some("t")), &fixture.manager, &[]);
+
+        assert!(prompt.contains("search_library"));
+        assert!(prompt.contains("search_web"));
+        assert!(prompt.contains("explicitly asks"));
+        assert_eq!(MAX_ITERATIONS, 1);
+        assert_eq!(WEB_SOURCE_LIMIT, 3);
+    }
+
+    #[test]
+    fn fixed_evaluation_suite_covers_every_tool_and_epistemic_boundary() {
+        let cases: Vec<EvalCase> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/chat_research_connected_prompts.json"
+        ))
+        .expect("evaluation fixture parses");
+        let tools = context_tools(true)
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect::<Vec<_>>();
+
+        for required in [
+            "search_paper",
+            "search_library",
+            "search_web",
+            "start_deep_research",
+        ] {
+            assert!(
+                cases.iter().any(|case| case.expected_tool == required),
+                "missing evaluation case for {required}"
+            );
+            assert!(tools.iter().any(|tool| tool == required));
+        }
+        for boundary in [
+            "evidence",
+            "external",
+            "inference",
+            "hypothesis",
+            "activity",
+        ] {
+            assert!(
+                cases.iter().any(|case| case.expected_boundary == boundary),
+                "missing evaluation boundary {boundary}"
+            );
+        }
+        assert!(cases
+            .iter()
+            .all(|case| !case.name.is_empty() && !case.question.is_empty()));
     }
 }
