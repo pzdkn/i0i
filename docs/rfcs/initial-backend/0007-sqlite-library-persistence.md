@@ -1,6 +1,6 @@
 # RFC 0007: SQLite Library Persistence
 
-Status: Draft  
+Status: Stale
 Date: 2026-05-24  
 Product: i0i  
 Target: Tauri v2 + Svelte, macOS first

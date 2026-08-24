@@ -1,6 +1,6 @@
 # RFC 0058: Highlight Primitive + Author-Agnostic Capability Layer (Phase 1)
 
-Status: Proposed
+Status: Stale
 Date: 2026-07-26
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

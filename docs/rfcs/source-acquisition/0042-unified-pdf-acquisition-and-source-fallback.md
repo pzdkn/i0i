@@ -1,6 +1,6 @@
 # RFC 0042: Unified PDF Acquisition And Source Fallback
 
-Status: Draft
+Status: Stale
 Date: 2026-07-08
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first
@@ -328,4 +328,3 @@ pnpm check
 4. Preserve temporary cache semantics.
 5. Simplify Reader PDF failure UI to show `Open Source` and `Retry`.
 6. Add regression tests for transient Discover PDFs.
-

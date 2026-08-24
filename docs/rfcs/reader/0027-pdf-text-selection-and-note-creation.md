@@ -1,6 +1,6 @@
 # RFC 0027: PDF Text Selection and Note Creation
 
-Status: Draft
+Status: Stale
 Date: 2026-06-03
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

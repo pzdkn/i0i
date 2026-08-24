@@ -1,9 +1,11 @@
 # RFC 0052: Reliable Obscura Sessions And Web Reader Fallback
 
-- Status: Proposed
+- Status: Open
 - Date: 2026-07-18
 - Area: Source acquisition / Reader
 - Builds on: RFC 0041, RFC 0042, RFC 0051
+- Extended by: RFC 0097 (research-connected chat), RFC 0098 (browser-first
+  scholarly discovery)
 
 ## Summary
 

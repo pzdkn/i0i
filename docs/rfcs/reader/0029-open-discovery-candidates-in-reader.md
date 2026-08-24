@@ -1,6 +1,6 @@
 # RFC 0029: Open Discovery Candidates In Reader
 
-Status: Draft
+Status: Stale
 Date: 2026-06-09
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

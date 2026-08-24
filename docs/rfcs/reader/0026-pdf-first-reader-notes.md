@@ -1,6 +1,6 @@
 # RFC 0026: PDF-First Reader Notes
 
-Status: Draft
+Status: Stale
 Date: 2026-05-31
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

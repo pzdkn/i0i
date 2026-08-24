@@ -1,6 +1,6 @@
 # RFC 0011: Vault Context Menu And Rename
 
-Status: Draft  
+Status: Stale
 Date: 2026-05-24  
 Product: i0i  
 Target: Tauri v2 + Svelte, macOS first

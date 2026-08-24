@@ -1,6 +1,6 @@
 # RFC 0090: `[@vault/paper]` — citing your own library from a note
 
-Status: Partially implemented — tasks 1 and 2 landed; task 3 (`[@` autocomplete) not started
+Status: Open — tasks 1 and 2 landed; task 3 (`[@` autocomplete) not started
 Date: 2026-08-13
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

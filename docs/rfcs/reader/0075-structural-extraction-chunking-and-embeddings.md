@@ -1,6 +1,6 @@
 # RFC 0075: Structural extraction, chunking, and chunk embeddings
 
-Status: Proposed
+Status: Stale
 Date: 2026-08-08
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

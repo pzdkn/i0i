@@ -1,6 +1,6 @@
 # RFC 0060: Iconography — adopt `@lucide/svelte`
 
-Status: Proposed
+Status: Stale
 Date: 2026-07-28
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

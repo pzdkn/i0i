@@ -1,6 +1,6 @@
 # RFC 0033: Anchored Chat Threads and Pinned Highlights
 
-Status: Draft
+Status: Stale
 Date: 2026-06-14
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

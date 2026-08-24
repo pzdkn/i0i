@@ -1,7 +1,8 @@
 # RFC 0088: Borrow the parts of an established deep-research harness that we lack
 
-Status: Partially implemented — tasks 1 and 3 landed; task 2 has trace collection
-but not the evaluation fixtures; tasks 4–7 are not started
+Status: Open — tasks 1 and 3 landed; task 2 has trace collection
+but not the evaluation fixtures; tasks 4 and 5 moved to RFC 0098; tasks 6 and 7
+are not started
 Date: 2026-08-13
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
@@ -9,6 +10,8 @@ Milestone: Release 0.0.1
 Builds on: RFC 0037 (deep-research scout agent), RFC 0043 (multi-provider),
 RFC 0054 (search relevance), RFC 0057 (semantic ranking), RFC 0041/0052
 (Obscura-backed acquisition), RFC 0078 (agentic context).
+Revised by: RFC 0098, which owns browser-first candidate generation and turns
+this RFC's fixed-corpus evaluation into its migration gate.
 
 ## Summary
 
@@ -415,11 +418,11 @@ pub fn split_budget(total: &SearchStrategy, ways: usize) -> Vec<SearchStrategy>;
 pub struct RoundTrace { round, queries, provider_calls, new_candidates, reflection }
 ```
 
-R6.5 `expand` wires `openalex_lineage_filter`
-(`providers/openalex/search.rs:186`), which has been written and marked
-`#[allow(dead_code)]` since RFC 0037 waiting for a caller. Citation-graph
-expansion is the cheapest large recall win available, and RFC 0091 wants the
-same primitive for vault suggestions — one implementation, two callers.
+R6.5 originally proposed wiring `openalex_lineage_filter` as another candidate
+generator. RFC 0098 supersedes that decision: broad provider calls no longer
+generate production discovery candidates. Citation relations may still inform
+ranking after exact metadata resolution, but they do not form a separate search
+lane.
 
 ---
 
@@ -430,8 +433,8 @@ same primitive for vault suggestions — one implementation, two callers.
 | 1 | **R1.4 + R1.5 budget shaping** — `query_budget_for_round`, `provider_is_paying` | Implemented | yes | S |
 | 2 | R5 + `RoundTrace` — evaluation fixtures, so 3–7 are measured not asserted | Trace implemented; fixtures pending | yes | M |
 | 3 | R1.1–R1.3 + R6.1–R6.3 `reflect` replacing `assess`/`refine_queries` | Implemented | yes | M |
-| 4 | R6.5 `expand` — wire the dead lineage filter | Not started | yes | M |
-| 5 | R4 + `PageReader` — Obscura browsing | Not started | yes | M |
+| 4 | R6.5 provider lineage expansion | Superseded by RFC 0098 | — | — |
+| 5 | R4 + `PageReader` — Obscura browsing | Moved to RFC 0098's browser candidate source | — | — |
 | 6 | R2 clarify step (default off) | Not started | yes | S |
 | 7 | R3 + `split_budget` — bounded sub-topic delegation | Not started | no — wants R1 | L |
 

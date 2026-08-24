@@ -1,6 +1,6 @@
 # RFC 0076: SearchService — hybrid retrieval over our own papers
 
-Status: Proposed
+Status: Stale
 Date: 2026-08-08
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

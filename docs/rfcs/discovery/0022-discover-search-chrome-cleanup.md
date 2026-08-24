@@ -1,6 +1,6 @@
 # RFC 0022: Discover Search Chrome Cleanup
 
-Status: Draft
+Status: Stale
 Date: 2026-05-29
 
 ## Summary

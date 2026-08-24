@@ -1,6 +1,6 @@
 # RFC 0044: Remove Semantic Scholar And Parallel Provider Fan-Out
 
-Status: Draft
+Status: Stale
 Date: 2026-07-08
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

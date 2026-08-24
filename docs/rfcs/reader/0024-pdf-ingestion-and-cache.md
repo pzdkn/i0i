@@ -1,6 +1,6 @@
 # RFC 0024: PDF Ingestion and Cache
 
-Status: Draft
+Status: Stale
 Date: 2026-05-30
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

@@ -1,6 +1,6 @@
 # RFC 0040: Bundle Pdfium As Reader Extraction Resource
 
-Status: Draft
+Status: Stale
 Date: 2026-07-07
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

@@ -1,6 +1,6 @@
 # RFC 0087: Three vault surfaces that look real and are not
 
-Status: Partially implemented — §2 and §3 landed; §1 (Ask this vault) not started
+Status: Open — §2 and §3 landed; §1 (Ask this vault) not started
 Date: 2026-08-13
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

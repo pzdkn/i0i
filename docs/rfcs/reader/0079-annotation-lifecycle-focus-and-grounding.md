@@ -9,6 +9,8 @@ note-ask separation), RFC 0062 (annotations panel), RFC 0067 (marks vs chats),
 RFC 0074 (sticky notes), RFC 0048 (focus mode), RFC 0077 (ContextManager),
 RFC 0078 (agent decides what it needs), RFC 0055 (settings).
 Amends: RFC 0078 — §5 revisits phase 1's authority to skip retrieval.
+Extended by: RFC 0097 — factual claims remain grounded while explicitly
+labelled inference and hypotheses may reason beyond their cited premises.
 
 ## Summary
 

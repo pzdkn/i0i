@@ -1,6 +1,6 @@
 # RFC 0035: Background Text Extraction
 
-Status: Draft
+Status: Stale
 Date: 2026-06-15
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

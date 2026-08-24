@@ -1,6 +1,6 @@
 # RFC 0089: Quiz the reader on the paper they just read
 
-Status: Proposed
+Status: Open
 Date: 2026-08-13
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

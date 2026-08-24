@@ -1,6 +1,6 @@
 # RFC 0037: Deep-Research Agentic Search
 
-Status: Draft
+Status: Stale
 Date: 2026-06-28
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

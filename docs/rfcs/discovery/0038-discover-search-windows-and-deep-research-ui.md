@@ -1,6 +1,6 @@
 # RFC 0038: Discover Search Windows And Deep Research UI
 
-Status: Draft
+Status: Stale
 Date: 2026-07-06
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

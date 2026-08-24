@@ -1,6 +1,6 @@
 # RFC 0039: Discover Settings And Incremental Deep Results
 
-Status: Draft
+Status: Stale
 Date: 2026-07-06
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

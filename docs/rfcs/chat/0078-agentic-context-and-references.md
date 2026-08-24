@@ -6,6 +6,8 @@ Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
 Builds on: RFC 0077 (ContextManager), RFC 0076 (SearchService),
 RFC 0059 (agent-authored highlights), RFC 0034 (threads).
+Extended by: RFC 0097, which preserves this two-phase loop but adds library,
+web-evidence, and Deep Research tools.
 
 ## Summary
 

@@ -1,6 +1,6 @@
 # RFC 0092: The week you actually had
 
-Status: Proposed
+Status: Open
 Date: 2026-08-13
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first

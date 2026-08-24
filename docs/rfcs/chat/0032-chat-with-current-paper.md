@@ -1,6 +1,6 @@
 # RFC 0032: Chat With the Current Paper
 
-Status: Draft
+Status: Stale
 Date: 2026-06-13
 Product: i0i
 Target: Tauri v2 + Svelte, macOS first

@@ -1,6 +1,6 @@
 # RFC 0031: Semantic Scholar Discovery Provider
 
-Status: Draft  
+Status: Stale
 Date: 2026-06-12  
 Product: i0i  
 Target: Tauri v2 + Svelte, macOS first

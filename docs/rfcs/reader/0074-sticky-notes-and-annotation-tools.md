@@ -1,6 +1,6 @@
 # RFC 0074: Sticky notes and Zotero-style annotation tools
 
-Status: Proposed
+Status: Stale
 Date: 2026-08-06
 Product: i0i
 Target: Tauri v2 + SvelteKit (Svelte 5), macOS first
