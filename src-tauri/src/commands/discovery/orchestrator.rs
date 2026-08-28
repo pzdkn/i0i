@@ -69,6 +69,16 @@ pub struct DiscoveryOrchestrator {
     reranker: EmbeddingReranker,
 }
 
+/// Raw successful provider results and independent source failures.
+///
+/// Quick Find adds its browser lane to this batch before the orchestrator
+/// performs the single final merge and rank pass.
+#[derive(Debug)]
+pub(crate) struct DiscoverySourceResults {
+    pub(crate) results: Vec<ProviderSearchResult>,
+    pub(crate) errors: Vec<String>,
+}
+
 impl DiscoveryOrchestrator {
     pub fn new(openalex: OpenAlexProvider, arxiv: ArxivProvider) -> Self {
         Self {
@@ -116,7 +126,20 @@ impl DiscoveryOrchestrator {
         request: DiscoverySearchRequest,
         extra_queries: Vec<String>,
     ) -> Result<DiscoverySearchResponse, DiscoveryError> {
-        let query = validated_query(&request)?;
+        let sources = self.search_sources(&request, extra_queries).await?;
+        self.response_from_sources(request, sources).await
+    }
+
+    /// Fetch raw provider results without merging or ranking them.
+    ///
+    /// This is the composition seam used by hybrid Quick Find: API fanout can
+    /// run concurrently with Obscura, then both lanes share one final ranking.
+    pub(crate) async fn search_sources(
+        &self,
+        request: &DiscoverySearchRequest,
+        extra_queries: Vec<String>,
+    ) -> Result<DiscoverySourceResults, DiscoveryError> {
+        let query = validated_query(request)?;
         // Drop providers this orchestrator can't serve — an unattached Europe
         // PMC/CORE (deep research) or a CORE without an API key. Filtering here
         // (rather than erroring inside `search_one`) avoids a spurious
@@ -134,10 +157,10 @@ impl DiscoveryOrchestrator {
 
         // Fan out the original query plus each expansion variant. Deduplicated
         // variants that repeat the original are skipped so we don't double-fetch.
-        let mut all_results = Vec::new();
+        let mut results = Vec::new();
         let mut errors = Vec::new();
-        let (results, mut query_errors) = self.fan_out(&request, &providers).await;
-        all_results.extend(results);
+        let (query_results, mut query_errors) = self.fan_out(request, &providers).await;
+        results.extend(query_results);
         errors.append(&mut query_errors);
 
         for extra in extra_queries {
@@ -147,23 +170,34 @@ impl DiscoveryOrchestrator {
             }
             let mut variant_request = request.clone();
             variant_request.query = trimmed.to_string();
-            let (results, mut variant_errors) = self.fan_out(&variant_request, &providers).await;
-            all_results.extend(results);
+            let (variant_results, mut variant_errors) =
+                self.fan_out(&variant_request, &providers).await;
+            results.extend(variant_results);
             errors.append(&mut variant_errors);
         }
 
-        if all_results.is_empty() {
+        Ok(DiscoverySourceResults { results, errors })
+    }
+
+    /// Merge, filter, score, sort, and limit one completed source batch.
+    pub(crate) async fn response_from_sources(
+        &self,
+        request: DiscoverySearchRequest,
+        sources: DiscoverySourceResults,
+    ) -> Result<DiscoverySearchResponse, DiscoveryError> {
+        let query = validated_query(&request)?;
+        if sources.results.is_empty() {
             return Err(DiscoveryError::new(format!(
                 "All selected providers failed: {}",
-                errors.join("; ")
+                sources.errors.join("; ")
             )));
         }
 
-        let filters = merged_filters(&all_results, &errors);
+        let filters = merged_filters(&sources.results, &sources.errors);
         // Merge + dedupe + viewability filter, then score semantic similarity on
         // the surviving set (never on candidates we're about to drop), then rank
         // against the original query (RFC 0054). Empty score slice ⇒ legacy.
-        let merged = merge_and_filter(all_results, request.only_viewable);
+        let merged = merge_and_filter(sources.results, request.only_viewable);
         // Bound embedding cost: on a large (expanded) set, keep only the
         // legacy-top-N as the working window before semantic scoring.
         let windowed = if self.reranker.is_ready() && merged.len() > SEMANTIC_RERANK_WINDOW {
@@ -172,7 +206,9 @@ impl DiscoveryOrchestrator {
             merged
         };
         let semantic_scores = self.reranker.semantic_scores(&query, &windowed).await;
-        let candidates = rank_candidates(windowed, &query, request.result_limit, &semantic_scores);
+        let mut candidates =
+            rank_candidates(windowed, &query, request.result_limit, &semantic_scores);
+        sort_candidates(&mut candidates, &request.sort_by);
         let result_count = candidates.len();
 
         Ok(DiscoverySearchResponse {
@@ -401,6 +437,28 @@ pub fn rank_candidates(
     candidates
 }
 
+/// Apply caller-selected ordering after relevance scoring and truncation.
+pub(crate) fn sort_candidates(
+    candidates: &mut [PaperCandidate],
+    sort: &crate::domain::discovery::DiscoverySort,
+) {
+    match sort {
+        crate::domain::discovery::DiscoverySort::Relevance => {}
+        crate::domain::discovery::DiscoverySort::Newest => candidates.sort_by(|left, right| {
+            right
+                .year
+                .unwrap_or(i32::MIN)
+                .cmp(&left.year.unwrap_or(i32::MIN))
+        }),
+        crate::domain::discovery::DiscoverySort::MostCited => candidates.sort_by(|left, right| {
+            right
+                .citation_count
+                .unwrap_or_default()
+                .cmp(&left.citation_count.unwrap_or_default())
+        }),
+    }
+}
+
 pub fn selected_providers(request: &DiscoverySearchRequest) -> Vec<DiscoveryProviderChoice> {
     if !request.providers.is_empty() {
         return dedup_providers(request.providers.clone());
@@ -581,25 +639,32 @@ fn rank_score(candidate: &PaperCandidate, query: &str, semantic: Option<f64>) ->
 fn keyword_score(candidate: &PaperCandidate, query: &str) -> f64 {
     let terms = query
         .split_whitespace()
-        .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric()))
+        .map(compact_alphanumeric)
         .filter(|term| term.len() > 2)
-        .map(str::to_lowercase)
         .collect::<Vec<_>>();
     if terms.is_empty() {
         return 0.0;
     }
 
-    let haystack = format!(
+    let haystack = compact_alphanumeric(&format!(
         "{} {}",
         candidate.title,
         candidate.abstract_text.clone().unwrap_or_default()
-    )
-    .to_lowercase();
+    ));
     let hits = terms
         .iter()
         .filter(|term| haystack.contains(term.as_str()))
         .count();
     hits as f64 / terms.len() as f64
+}
+
+/// Lowercase text and remove separators for orthography-tolerant matching.
+fn compact_alphanumeric(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn citation_score(citations: Option<i32>) -> f64 {
@@ -763,6 +828,46 @@ mod tests {
     }
 
     #[test]
+    fn merge_collapses_browser_and_api_results_with_the_same_arxiv_id() {
+        let mut browser = candidate("[2106.09685] LoRA", None, "web");
+        browser.arxiv_id = Some("2106.09685".to_string());
+        let mut arxiv = candidate(
+            "LoRA: Low-Rank Adaptation of Large Language Models",
+            None,
+            "arxiv",
+        );
+        arxiv.arxiv_id = Some("2106.09685".to_string());
+
+        let ranked = merge_rank_and_limit(
+            vec![
+                ProviderSearchResult {
+                    provider: DiscoveryProviderId::Web,
+                    filters: Vec::new(),
+                    candidates: vec![browser],
+                },
+                ProviderSearchResult {
+                    provider: DiscoveryProviderId::Arxiv,
+                    filters: Vec::new(),
+                    candidates: vec![arxiv],
+                },
+            ],
+            "lowrank adaptation",
+            25,
+            false,
+        );
+
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0]
+            .match_summary
+            .reasons
+            .contains(&"found_by:web".to_string()));
+        assert!(ranked[0]
+            .match_summary
+            .reasons
+            .contains(&"found_by:arxiv".to_string()));
+    }
+
+    #[test]
     fn merged_filters_preserve_provider_errors_alongside_successes() {
         let filters = merged_filters(
             &[ProviderSearchResult {
@@ -798,6 +903,25 @@ mod tests {
         );
 
         assert_eq!(ranked[0].title, "Diffusion Protein Design");
+    }
+
+    #[test]
+    fn keyword_matching_ignores_word_separators() {
+        let mut lora = candidate(
+            "LoRA: Low-Rank Adaptation of Large Language Models",
+            Some("10.1/lora"),
+            "arxiv",
+        );
+        lora.abstract_text = None;
+        let mut dino = candidate(
+            "Emerging Properties in Self-Supervised Vision Transformers",
+            Some("10.1/dino"),
+            "arxiv",
+        );
+        dino.abstract_text = None;
+
+        assert_eq!(keyword_score(&lora, "lowrank adaptation"), 1.0);
+        assert_eq!(keyword_score(&dino, "selfsupervised vision"), 1.0);
     }
 
     #[test]

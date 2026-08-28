@@ -104,3 +104,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [x] RFC 0095 - Vault suggestions now preserve query evidence, rank against the closest vault paper, suppress reviews by default, and omit weak results.
 - [ ] RFC 0100 - Obscura now starts eagerly through one shared lifecycle, and Discover gates Find on visible browser readiness. (implemented; awaiting manual UI verification)
 - [ ] RFC 0101 - Explicit web requests now route deterministically, with honest typed success, empty, and unavailable outcomes. (implemented; awaiting live model verification)
+- [x] RFC 0103 - Browser discovery now logs bounded Obscura page evidence and reports Google Scholar challenges honestly.
+- [x] RFC 0104 - Quick Find now merges concurrent browser and scholarly API results, preserving partial successes.
+- [x] RFC 0105 - Obscura setup now installs rendering-enabled stealth releases and launches them in stealth mode.
+- [x] RFC 0106 - Browser discovery now uses Brave Search by default and parses only primary web results.

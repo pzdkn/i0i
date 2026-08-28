@@ -89,7 +89,8 @@ impl DiscoveryProvider for ArxivProvider {
 
 /// Build arXiv query parameters from an app-level search request.
 fn arxiv_query_params(request: &DiscoverySearchRequest, limit: i32) -> Vec<(&'static str, String)> {
-    let search_query = embed_year_filter(request.query.trim(), request.year_from, request.year_to);
+    let query = format_search_query(request.query.trim());
+    let search_query = embed_year_filter(&query, request.year_from, request.year_to);
     // Structured-filter asymmetry (RFC 0037): arXiv supports author search but has
     // no venue concept, and its field filter is a category *code* (`cat:cs.LG`) that
     // our free-text `fields_of_study` cannot reliably express — so only authors are
@@ -104,6 +105,88 @@ fn arxiv_query_params(request: &DiscoverySearchRequest, limit: i32) -> Vec<(&'st
         ("sortBy", sort_by.to_string()),
         ("sortOrder", sort_order.to_string()),
     ]
+}
+
+/// Convert natural search text to arXiv's documented all-fields grammar.
+fn format_search_query(query: &str) -> String {
+    if has_arxiv_field(query) {
+        return query.to_string();
+    }
+    if looks_like_arxiv_id(query) {
+        return format!("id:{query}");
+    }
+
+    let terms = split_query_terms(query);
+    let all_fields = terms
+        .iter()
+        .map(|term| format!("all:\"{}\"", term.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    if terms.len() < 2 {
+        return all_fields;
+    }
+
+    let phrase = terms.join(" ").replace('"', "");
+    format!("(ti:\"{phrase}\" OR ({all_fields}))")
+}
+
+/// Recognize modern and legacy bare arXiv identifiers.
+fn looks_like_arxiv_id(query: &str) -> bool {
+    let id = query
+        .trim()
+        .trim_start_matches("arXiv:")
+        .split_once('v')
+        .map(|(base, _)| base)
+        .unwrap_or(query.trim());
+    if let Some((year_month, number)) = id.split_once('.') {
+        return year_month.len() == 4
+            && number.len() >= 4
+            && year_month
+                .chars()
+                .all(|character| character.is_ascii_digit())
+            && number.chars().all(|character| character.is_ascii_digit());
+    }
+    id.split_once('/').is_some_and(|(archive, number)| {
+        !archive.is_empty()
+            && archive
+                .chars()
+                .all(|character| character.is_ascii_alphabetic() || "-.".contains(character))
+            && number.len() == 7
+            && number.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+/// Return whether the caller already supplied an arXiv fielded query.
+fn has_arxiv_field(query: &str) -> bool {
+    const PREFIXES: [&str; 9] = [
+        "ti:", "au:", "abs:", "co:", "jr:", "cat:", "rn:", "id:", "all:",
+    ];
+    query.split_whitespace().any(|term| {
+        let term = term.trim_start_matches('(').to_ascii_lowercase();
+        PREFIXES.iter().any(|prefix| term.starts_with(prefix))
+    })
+}
+
+/// Split natural text on spaces while preserving quoted phrases as one term.
+fn split_query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in query.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            character if character.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    terms.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    terms
 }
 
 /// Embed the year range as a date filter inside the arXiv query string.
@@ -223,6 +306,22 @@ mod tests {
         assert_eq!(
             embed_year_filter("sparse autoencoder", None, None),
             "sparse autoencoder"
+        );
+    }
+
+    #[test]
+    fn natural_query_uses_all_fields_boolean_syntax() {
+        let mut request = base_request();
+        request.query = "low-rank adaptation".to_string();
+
+        let params = arxiv_query_params(&request, 25);
+        assert_eq!(
+            params[0],
+            (
+                "search_query",
+                "(ti:\"low-rank adaptation\" OR (all:\"low-rank\" AND all:\"adaptation\"))"
+                    .to_string()
+            )
         );
     }
 

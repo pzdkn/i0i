@@ -1,6 +1,6 @@
 use std::fs;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -404,18 +404,42 @@ fn candidate_config_paths(app: &AppHandle) -> Vec<PathBuf> {
 }
 
 fn candidate_obscura_paths(app: &AppHandle) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        paths.push(resource_dir.join("obscura").join("obscura"));
-        paths.push(resource_dir.join("resources/obscura/obscura"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        paths.push(cwd.join("resources/obscura/obscura"));
-        if let Some(repo_root) = cwd.parent() {
-            paths.push(repo_root.join("src-tauri/resources/obscura/obscura"));
+    let resource_dir = app.path().resource_dir().ok();
+    let current_dir = std::env::current_dir().ok();
+    obscura_path_candidates(
+        resource_dir.as_deref(),
+        current_dir.as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+/// Returns Obscura paths ordered for the current build context.
+fn obscura_path_candidates(
+    resource_dir: Option<&Path>,
+    current_dir: Option<&Path>,
+    prefer_repository_resource: bool,
+) -> Vec<PathBuf> {
+    let mut repository_paths = Vec::new();
+    if let Some(current_dir) = current_dir {
+        repository_paths.push(current_dir.join("resources/obscura/obscura"));
+        if let Some(repo_root) = current_dir.parent() {
+            repository_paths.push(repo_root.join("src-tauri/resources/obscura/obscura"));
         }
     }
-    paths
+
+    let mut packaged_paths = Vec::new();
+    if let Some(resource_dir) = resource_dir {
+        packaged_paths.push(resource_dir.join("obscura").join("obscura"));
+        packaged_paths.push(resource_dir.join("resources/obscura/obscura"));
+    }
+
+    if prefer_repository_resource {
+        repository_paths.extend(packaged_paths);
+        repository_paths
+    } else {
+        packaged_paths.extend(repository_paths);
+        packaged_paths
+    }
 }
 
 fn free_localhost_port() -> Result<u16, SourceAcquisitionError> {
@@ -496,6 +520,39 @@ mod tests {
                 if message.contains("Operation not permitted") => {}
             Err(error) => panic!("unexpected port allocation error: {error}"),
         }
+    }
+
+    #[test]
+    fn debug_build_prefers_repository_resource_over_staged_copy() {
+        let current_dir = PathBuf::from("/repo/src-tauri");
+        let resource_dir = PathBuf::from("/repo/src-tauri/target/debug/resources");
+
+        let paths = obscura_path_candidates(Some(&resource_dir), Some(&current_dir), true);
+
+        assert_eq!(
+            paths.first(),
+            Some(&PathBuf::from(
+                "/repo/src-tauri/resources/obscura/obscura"
+            ))
+        );
+        assert!(paths.contains(&PathBuf::from(
+            "/repo/src-tauri/target/debug/resources/obscura/obscura"
+        )));
+    }
+
+    #[test]
+    fn release_build_prefers_packaged_resource_over_repository_copy() {
+        let current_dir = PathBuf::from("/repo/src-tauri");
+        let resource_dir = PathBuf::from("/Applications/i0i.app/Contents/Resources");
+
+        let paths = obscura_path_candidates(Some(&resource_dir), Some(&current_dir), false);
+
+        assert_eq!(
+            paths.first(),
+            Some(&PathBuf::from(
+                "/Applications/i0i.app/Contents/Resources/obscura/obscura"
+            ))
+        );
     }
 
     #[tokio::test]

@@ -8,6 +8,23 @@ WORKER_TARGET="$TARGET_DIR/obscura-worker"
 
 mkdir -p "$TARGET_DIR"
 
+sign_macos_targets() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    return
+  fi
+
+  codesign --force --sign - --timestamp=none "$OBSCURA_TARGET"
+  if [[ -f "$WORKER_TARGET" ]]; then
+    codesign --force --sign - --timestamp=none "$WORKER_TARGET"
+  fi
+}
+
+verify_obscura() {
+  local version
+  version="$("$OBSCURA_TARGET" --version)"
+  echo "Verified Obscura: $version"
+}
+
 install_from_dir() {
   local source_dir="$1"
   if [[ ! -x "$source_dir/obscura" ]]; then
@@ -20,6 +37,8 @@ install_from_dir() {
     cp "$source_dir/obscura-worker" "$WORKER_TARGET"
     chmod 0755 "$WORKER_TARGET"
   fi
+  sign_macos_targets
+  verify_obscura
   echo "Installed Obscura:"
   echo "  $OBSCURA_TARGET"
   if [[ -f "$WORKER_TARGET" ]]; then
@@ -33,10 +52,10 @@ if [[ "${1:-}" != "" ]]; then
 fi
 
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64) archive="obscura-aarch64-macos.tar.gz" ;;
-  Darwin-x86_64) archive="obscura-x86_64-macos.tar.gz" ;;
-  Linux-aarch64) archive="obscura-aarch64-linux.tar.gz" ;;
-  Linux-x86_64) archive="obscura-x86_64-linux.tar.gz" ;;
+  Darwin-arm64) archive="obscura-aarch64-macos-stealth.tar.gz" ;;
+  Darwin-x86_64) archive="obscura-x86_64-macos-stealth.tar.gz" ;;
+  Linux-aarch64) archive="obscura-aarch64-linux-stealth.tar.gz" ;;
+  Linux-x86_64) archive="obscura-x86_64-linux-stealth.tar.gz" ;;
   *)
     echo "Unsupported platform: $(uname -s)-$(uname -m)" >&2
     echo "Pass an extracted Obscura directory explicitly:" >&2

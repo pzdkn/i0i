@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use futures_util::{stream, StreamExt};
 use regex::Regex;
@@ -21,10 +22,15 @@ use super::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
     CandidateMatch, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
 };
+use crate::services::source_acquisition::types::PageInspection;
 use crate::services::source_acquisition::SourceAcquisitionService;
 
-const DEFAULT_SEARCH_URL: &str = "https://scholar.google.com/scholar?q={query}&start={offset}";
+const DEFAULT_SEARCH_URL: &str = "https://search.brave.com/search?q={query}&source=web";
 const RESOLUTION_CONCURRENCY: usize = 4;
+// Diagnostic payloads stay short enough for routine development logs.
+const LOG_TITLE_LIMIT: usize = 160;
+const LOG_TEXT_PREVIEW_LIMIT: usize = 500;
+const LOG_LINK_HOST_LIMIT: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct BrowserDiscoveryConfig {
@@ -113,15 +119,46 @@ impl BrowserDiscoverySource {
         on_progress(BrowserDiscoveryProgress::SearchingWeb);
         let mut provisional = Vec::new();
         let mut page_errors = Vec::new();
+        let mut inspected_pages = 0;
+        let mut challenged_pages = 0;
 
         for page in 0..self.config.pages_per_query {
             let url = self.config.search_url(query, page)?;
+            let started = Instant::now();
             match self.browser.inspect_browser_page(&url).await {
                 Ok(inspection) => {
                     let html = inspection.snapshot.html.as_deref().unwrap_or_default();
-                    provisional.extend(parse_search_results(html, query, limit));
+                    let candidates = parse_search_results(html, query, limit);
+                    let challenged = is_search_challenge(
+                        &inspection.snapshot.final_url,
+                        inspection.snapshot.text.as_deref().unwrap_or_default(),
+                    );
+                    inspected_pages += 1;
+                    if challenged {
+                        challenged_pages += 1;
+                    }
+                    log_page_inspection(
+                        page,
+                        self.config.pages_per_query,
+                        &url,
+                        &inspection,
+                        candidates.len(),
+                        challenged,
+                        started.elapsed(),
+                    );
+                    provisional.extend(candidates);
                 }
-                Err(error) => page_errors.push(error.to_string()),
+                Err(error) => {
+                    let message = error.to_string();
+                    log_page_failure(
+                        page,
+                        self.config.pages_per_query,
+                        &url,
+                        &message,
+                        started.elapsed(),
+                    );
+                    page_errors.push(message);
+                }
             }
             if provisional.len() >= limit {
                 break;
@@ -131,11 +168,11 @@ impl BrowserDiscoverySource {
         provisional = crate::services::research::dedup::dedup(provisional);
         provisional.truncate(limit);
         if provisional.is_empty() {
-            return Err(DiscoveryError::new(if page_errors.is_empty() {
-                "Browser search returned no scholarly links".to_string()
-            } else {
-                format!("Browser search failed: {}", page_errors.join("; "))
-            }));
+            return Err(empty_search_error(
+                inspected_pages,
+                challenged_pages,
+                &page_errors,
+            ));
         }
 
         on_progress(BrowserDiscoveryProgress::Provisional(provisional.clone()));
@@ -216,6 +253,7 @@ fn exact_request(query: &str, quote: bool) -> DiscoverySearchRequest {
     }
 }
 
+/// Parses provisional scholarly candidates from one rendered result page.
 fn parse_search_results(html: &str, query: &str, limit: usize) -> Vec<PaperCandidate> {
     let document = Html::parse_document(html);
     let scholar_result = Selector::parse(".gs_ri").expect("valid selector");
@@ -247,6 +285,11 @@ fn parse_search_results(html: &str, query: &str, limit: usize) -> Vec<PaperCandi
         return results;
     }
 
+    results = parse_brave_results(&document, query, limit);
+    if !results.is_empty() {
+        return results;
+    }
+
     let anchors = Selector::parse("a[href]").expect("valid selector");
     for link in document.select(&anchors) {
         let Some(url) = link.value().attr("href").and_then(normalize_result_url) else {
@@ -261,6 +304,230 @@ fn parse_search_results(html: &str, query: &str, limit: usize) -> Vec<PaperCandi
         }
     }
     results
+}
+
+/// Parses Brave's server-rendered web-result rows without including page chrome.
+fn parse_brave_results(document: &Html, query: &str, limit: usize) -> Vec<PaperCandidate> {
+    let rows = Selector::parse("div.snippet[data-type=\"web\"]").expect("valid selector");
+    let anchors = Selector::parse("a[href]").expect("valid selector");
+    let titles = Selector::parse(".title").expect("valid selector");
+    let snippets = Selector::parse(".generic-snippet .content").expect("valid selector");
+    let mut results = Vec::new();
+
+    for row in document.select(&rows) {
+        let Some((link, title_node)) = row.select(&anchors).find_map(|link| {
+            let title = link.select(&titles).next()?;
+            Some((link, title))
+        }) else {
+            continue;
+        };
+        let Some(url) = link.value().attr("href").and_then(normalize_result_url) else {
+            continue;
+        };
+        let title = clean_title(&title_node.text().collect::<Vec<_>>().join(" "));
+        let snippet = row
+            .select(&snippets)
+            .next()
+            .map(|node| clean_text(&node.text().collect::<Vec<_>>().join(" ")));
+        if let Some(candidate) = provisional_candidate(title, url, snippet, query, results.len()) {
+            results.push(candidate);
+        }
+        if results.len() >= limit {
+            break;
+        }
+    }
+
+    results
+}
+
+/// Returns whether Google replaced the requested result page with a challenge.
+fn is_search_challenge(final_url: &str, visible_text: &str) -> bool {
+    let challenge_url = Url::parse(final_url).is_ok_and(|url| {
+        is_google_owned_host(url.host_str().unwrap_or_default())
+            && url.path().starts_with("/sorry/")
+    });
+    let challenge_text = visible_text
+        .to_ascii_lowercase()
+        .contains("our systems have detected unusual traffic");
+    challenge_url || challenge_text
+}
+
+/// Selects an honest error after every inspected page produced no candidate.
+fn empty_search_error(
+    inspected_pages: usize,
+    challenged_pages: usize,
+    page_errors: &[String],
+) -> DiscoveryError {
+    if inspected_pages > 0 && inspected_pages == challenged_pages {
+        return DiscoveryError::new(
+            "Browser search was challenged by Google Scholar; retry later or use another configured search entry point.",
+        );
+    }
+    if page_errors.is_empty() {
+        DiscoveryError::new("Browser search returned no scholarly links")
+    } else {
+        DiscoveryError::new(format!("Browser search failed: {}", page_errors.join("; ")))
+    }
+}
+
+/// Logs bounded summary and debug evidence for one successful inspection.
+fn log_page_inspection(
+    page: usize,
+    total_pages: usize,
+    requested_url: &str,
+    inspection: &PageInspection,
+    candidate_count: usize,
+    challenged: bool,
+    elapsed: Duration,
+) {
+    let html = inspection.snapshot.html.as_deref().unwrap_or_default();
+    let text = inspection.snapshot.text.as_deref().unwrap_or_default();
+    let (final_host, final_path) = sanitized_host_and_path(&inspection.snapshot.final_url);
+    let classification = if challenged {
+        "challenge"
+    } else if candidate_count == 0 {
+        "empty_result_page"
+    } else {
+        "result_page"
+    };
+    crate::shared::log::info(
+        "browser-discovery",
+        format!(
+            "page={}/{} requested_host={} final_host={} final_path={} classification={} title={:?} html_bytes={} text_bytes={} raw_links={} assets={} network_urls={} candidates={} elapsed_ms={}",
+            page + 1,
+            total_pages,
+            sanitized_host(requested_url),
+            final_host,
+            final_path,
+            classification,
+            sanitized_page_title(inspection.snapshot.title.as_deref().unwrap_or_default()),
+            html.len(),
+            text.len(),
+            inspection.links.len(),
+            inspection.assets.len(),
+            inspection.network_urls.len(),
+            candidate_count,
+            elapsed.as_millis(),
+        ),
+    );
+    if !crate::shared::log::enabled(crate::shared::log::Level::Debug) {
+        return;
+    }
+    let link_hosts = inspection
+        .links
+        .iter()
+        .filter_map(|link| Url::parse(link).ok())
+        .filter_map(|url| url.host_str().map(str::to_string))
+        .take(LOG_LINK_HOST_LIMIT)
+        .collect::<Vec<_>>();
+    crate::shared::log::debug(
+        "browser-discovery",
+        format!(
+            "classification={} text_preview={:?} link_hosts={:?}",
+            classification,
+            sanitized_text_preview(inspection.snapshot.text.as_deref().unwrap_or_default()),
+            link_hosts,
+        ),
+    );
+}
+
+/// Logs a sanitized warning when Obscura cannot inspect a result page.
+fn log_page_failure(
+    page: usize,
+    total_pages: usize,
+    requested_url: &str,
+    error: &str,
+    elapsed: Duration,
+) {
+    crate::shared::log::warn(
+        "browser-discovery",
+        format!(
+            "page={}/{} requested_host={} classification={} error={:?} elapsed_ms={}",
+            page + 1,
+            total_pages,
+            sanitized_host(requested_url),
+            "inspection_failed",
+            sanitized_log_text(error, LOG_TEXT_PREVIEW_LIMIT),
+            elapsed.as_millis(),
+        ),
+    );
+}
+
+/// Returns only the host portion of a URL for safe correlation.
+fn sanitized_host(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// Returns host and path without query parameters or fragments.
+fn sanitized_host_and_path(url: &str) -> (String, String) {
+    let Ok(url) = Url::parse(url) else {
+        return ("-".to_string(), "-".to_string());
+    };
+    (
+        url.host_str().unwrap_or("-").to_string(),
+        url.path().to_string(),
+    )
+}
+
+/// Bounds a page title and removes URL query parameters when it is URL-shaped.
+fn sanitized_page_title(title: &str) -> String {
+    let title = clean_text(title);
+    if let Ok(url) = Url::parse(&title) {
+        let host = url.host_str().unwrap_or("-");
+        return truncate_chars(&format!("{host}{}", url.path()), LOG_TITLE_LIMIT);
+    }
+    sanitized_log_text(&title, LOG_TITLE_LIMIT)
+}
+
+/// Returns a bounded page-text preview with network identifiers removed.
+fn sanitized_text_preview(text: &str) -> String {
+    sanitized_log_text(text, LOG_TEXT_PREVIEW_LIMIT)
+}
+
+/// Sanitizes arbitrary page-derived text before it reaches a log line.
+fn sanitized_log_text(text: &str, limit: usize) -> String {
+    let lower = text.to_ascii_lowercase();
+    let cutoff = ["ip address:", "client ip:", "remote address:"]
+        .into_iter()
+        .filter_map(|marker| lower.find(marker))
+        .min()
+        .unwrap_or(text.len());
+    let sanitized = text[..cutoff]
+        .split_whitespace()
+        .map(sanitize_log_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_chars(&sanitized, limit)
+}
+
+/// Replaces an HTTP URL token with its query-free host and path.
+fn sanitize_log_token(token: &str) -> String {
+    let trimmed = token.trim_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '"'
+        )
+    });
+    if let Ok(url) = Url::parse(trimmed) {
+        if matches!(url.scheme(), "http" | "https") {
+            return format!("{}{}", url.host_str().unwrap_or("-"), url.path());
+        }
+    }
+    token.to_string()
+}
+
+/// Truncates Unicode text to a maximum character count including an ellipsis.
+fn truncate_chars(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    if limit <= 3 {
+        return ".".repeat(limit);
+    }
+    format!("{}...", value.chars().take(limit - 3).collect::<String>())
 }
 
 fn provisional_candidate(
@@ -383,6 +650,12 @@ fn looks_like_external_result(url: &str) -> bool {
         && !host.ends_with("google.com")
         && !host.ends_with("googleusercontent.com")
         && !host.ends_with("gstatic.com")
+        && host != "search.brave.com"
+}
+
+/// Returns whether a host is Google itself or one of its subdomains.
+fn is_google_owned_host(host: &str) -> bool {
+    host == "google.com" || host.ends_with(".google.com")
 }
 
 fn extract_doi(url: &str) -> Option<String> {
@@ -468,13 +741,56 @@ fn apply_config(config: &mut BrowserDiscoveryConfig, contents: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use serde::Deserialize;
+    use std::sync::Arc;
+
+    use crate::services::source_acquisition::types::{
+        AcquisitionMethod, AcquisitionResult, BrowserEndpoint, BrowserPageSnapshot, BrowserRuntime,
+        FetchResponse, HttpFetcher, SourceAcquisitionConfig, SourceAcquisitionError,
+    };
 
     #[derive(Deserialize)]
     struct CorpusCase {
         goal: String,
         expected_title: String,
         html: String,
+    }
+
+    struct UnusedHttp;
+
+    #[async_trait]
+    impl HttpFetcher for UnusedHttp {
+        async fn fetch(&self, _url: &str) -> AcquisitionResult<FetchResponse> {
+            Err(SourceAcquisitionError::Http(
+                "HTTP is not used by browser discovery".to_string(),
+            ))
+        }
+    }
+
+    struct ChallengeBrowser {
+        inspection: PageInspection,
+    }
+
+    #[async_trait]
+    impl BrowserRuntime for ChallengeBrowser {
+        async fn ensure_ready(&self) -> AcquisitionResult<BrowserEndpoint> {
+            Ok(BrowserEndpoint {
+                port: 9222,
+                url: "http://127.0.0.1:9222".to_string(),
+                websocket_url: Some("ws://127.0.0.1:9222/devtools/browser".to_string()),
+            })
+        }
+
+        async fn fetch_original(&self, _url: &str) -> AcquisitionResult<FetchResponse> {
+            Err(SourceAcquisitionError::Browser(
+                "original fetch is not used by browser discovery".to_string(),
+            ))
+        }
+
+        async fn inspect_page(&self, _url: &str) -> AcquisitionResult<PageInspection> {
+            Ok(self.inspection.clone())
+        }
     }
 
     #[test]
@@ -496,6 +812,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_only_primary_web_results_from_brave() {
+        let html = include_str!("../../../tests/fixtures/browser_discovery_brave.html");
+        let candidates = parse_search_results(html, "lowrank adaptation", 10);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].arxiv_id.as_deref(), Some("2106.09685"));
+        assert_eq!(
+            candidates[0].title,
+            "[2106.09685] LoRA: Low-Rank Adaptation of Large Language Models"
+        );
+        assert_eq!(
+            candidates[0].abstract_text.as_deref(),
+            Some("We propose Low-Rank Adaptation, or LoRA, for efficient fine-tuning.")
+        );
+        assert_eq!(candidates[1].arxiv_id.as_deref(), Some("2104.14294"));
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.source_provider == "web"));
+    }
+
+    #[test]
     fn exact_title_verification_ignores_case_and_punctuation() {
         let provisional = provisional_candidate(
             "Attention Is All You Need".to_string(),
@@ -511,11 +848,132 @@ mod tests {
     }
 
     #[test]
-    fn config_builds_bounded_paginated_search_urls() {
+    fn config_builds_default_brave_search_urls() {
         let config = BrowserDiscoveryConfig::default();
         let url = config.search_url("graph neural networks", 1).unwrap();
-        assert!(url.contains("graph+neural+networks"));
-        assert!(url.contains("start=10"));
+        assert_eq!(
+            url,
+            "https://search.brave.com/search?q=graph+neural+networks&source=web"
+        );
+    }
+
+    #[test]
+    fn classifies_recorded_google_challenge() {
+        let html = include_str!("../../../tests/fixtures/browser_discovery_challenge.html");
+        let text = Html::parse_document(html)
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let candidates = parse_search_results(html, "attention is all you need", 10);
+
+        assert!(candidates.is_empty());
+        assert!(is_search_challenge(
+            "https://www.google.com/sorry/index?continue=private&token=secret",
+            &text,
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_a_challenge_returned_by_the_browser() {
+        let html = include_str!("../../../tests/fixtures/browser_discovery_challenge.html");
+        let text = Html::parse_document(html)
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let inspection = PageInspection {
+            snapshot: BrowserPageSnapshot {
+                url: "https://scholar.google.com/scholar".to_string(),
+                final_url: "https://www.google.com/sorry/index?continue=private&token=secret"
+                    .to_string(),
+                title: Some(
+                    "https://scholar.google.com/scholar?q=attention+is+all+you+need&start=0"
+                        .to_string(),
+                ),
+                content_type: Some("text/html".to_string()),
+                html: Some(html.to_string()),
+                text: Some(text),
+            },
+            links: vec![
+                "https://www.google.com/sorry/index#".to_string(),
+                "https://www.google.com/policies/terms/".to_string(),
+                "https://support.google.com/websearch/answer/86640".to_string(),
+            ],
+            assets: Vec::new(),
+            network_urls: Vec::new(),
+        };
+        let service = SourceAcquisitionService::new(
+            SourceAcquisitionConfig::default(),
+            Arc::new(UnusedHttp),
+            Arc::new(ChallengeBrowser { inspection }),
+            AcquisitionMethod::ObscuraBrowserStealth,
+        );
+        let source = BrowserDiscoverySource::new(
+            service,
+            OpenAlexProvider::from_app_config().expect("OpenAlex test config"),
+            ArxivProvider::from_app_config().expect("arXiv test config"),
+            BrowserDiscoveryConfig::default(),
+        );
+
+        let error = source
+            .discover("attention is all you need", 10, &|_| {})
+            .await
+            .expect_err("challenge page must not become an empty result");
+
+        assert_eq!(
+            error.to_string(),
+            "Browser search was challenged by Google Scholar; retry later or use another configured search entry point."
+        );
+    }
+
+    #[test]
+    fn sanitizes_bounded_challenge_evidence() {
+        let html = include_str!("../../../tests/fixtures/browser_discovery_challenge.html");
+        let text = Html::parse_document(html)
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let preview = sanitized_text_preview(&text);
+        assert!(preview.contains("unusual traffic"));
+        assert!(preview.chars().count() <= 500);
+        for sensitive in ["2001:db8::1", "192.0.2.1", "?q=", "continue=", "token="] {
+            assert!(!preview.contains(sensitive));
+        }
+        assert_eq!(
+            sanitized_page_title(
+                "https://scholar.google.com/scholar?q=attention+is+all+you+need&start=0"
+            ),
+            "scholar.google.com/scholar"
+        );
+        assert_eq!(
+            sanitized_host_and_path(
+                "https://www.google.com/sorry/index?continue=private&token=secret"
+            ),
+            ("www.google.com".to_string(), "/sorry/index".to_string())
+        );
+
+        let long_preview = sanitized_text_preview(&"x".repeat(600));
+        assert_eq!(long_preview.chars().count(), 500);
+        assert!(long_preview.ends_with("..."));
+    }
+
+    #[test]
+    fn selects_distinct_empty_search_errors() {
+        assert_eq!(
+            empty_search_error(1, 1, &[]).to_string(),
+            "Browser search was challenged by Google Scholar; retry later or use another configured search entry point."
+        );
+        assert_eq!(
+            empty_search_error(1, 0, &[]).to_string(),
+            "Browser search returned no scholarly links"
+        );
+        assert_eq!(
+            empty_search_error(0, 0, &["CDP connection closed".to_string()]).to_string(),
+            "Browser search failed: CDP connection closed"
+        );
     }
 
     #[test]

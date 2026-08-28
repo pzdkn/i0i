@@ -87,7 +87,7 @@
     setDiscoverSelectedCandidate,
   } from "$lib/state/library-cache.svelte";
   import { depthStrategy, isTerminalStatus, type SearchCandidatesPreview, type SearchUpdated } from "$lib/domain/research";
-  import type { BrowserRuntimeStatus } from "$lib/domain/discover";
+  import { sanitizeProviders, type BrowserRuntimeStatus } from "$lib/domain/discover";
 
   // RFC 0087 R3: the status bar used to read a Rust command that returned the
   // literals 234 papers / 12 unread, fetched once on mount. It is derived from
@@ -567,7 +567,7 @@
       resultLimit: Number(workspace.resultLimit),
       sortBy: workspace.sortBy,
       provider: workspace.provider,
-      providers: [],
+      providers: sanitizeProviders(workspace.providers),
       openAccess: workspace.openAccess,
       onlyViewable: workspace.onlyViewable,
       venues: selectedVenues(workspace),
