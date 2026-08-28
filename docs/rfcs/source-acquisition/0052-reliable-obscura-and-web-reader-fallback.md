@@ -1,11 +1,26 @@
 # RFC 0052: Reliable Obscura Sessions And Web Reader Fallback
 
-- Status: Open
+- Status: Superseded
 - Date: 2026-07-18
 - Area: Source acquisition / Reader
 - Builds on: RFC 0041, RFC 0042, RFC 0051
 - Extended by: RFC 0097 (research-connected chat), RFC 0098 (browser-first
   scholarly discovery)
+- Superseded by: RFC 0056, RFC 0065, RFC 0100, RFC 0102, RFC 0103, RFC 0105,
+  and RFC 0106
+
+## Supersession Note
+
+Superseded on 2026-08-28. Its managed Obscura session, lifecycle, stealth
+packaging, and diagnostics were delivered by RFCs 0100–0106. Its HTML
+acquisition, durable snapshots, Reader rendering, annotations, chat, and
+external-source handoff were delivered by RFCs 0056 and 0065.
+
+The original umbrella RFC is no longer an active implementation unit. Any
+remaining ideas—structured acquisition traces, deterministic Reader challenge
+classification, broader OpenAlex `locations[]` coverage, automatic HTML
+fallback, and a protected-PDF cookie integration test—require separate focused
+RFCs before implementation.
 
 ## Summary
 
