@@ -8,7 +8,8 @@ use tauri::{Emitter, Manager};
 
 use crate::domain::library::{
     DocumentSource, LibrarySnapshot, LocalPdfImport, LocalPdfImportResult, MetadataCandidate,
-    PaperDraft, PaperMetadataUpdate, VaultDraft, VaultRenameDraft,
+    PaperDraft, PaperMetadataUpdate, ProjectDraft, ProjectRenameDraft, VaultDraft,
+    VaultRenameDraft,
 };
 use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
@@ -244,6 +245,30 @@ pub fn create_vault(
     draft: VaultDraft,
 ) -> Result<LibrarySnapshot, String> {
     store.create_vault(&draft)
+}
+
+#[tauri::command]
+pub fn create_project(
+    store: tauri::State<'_, LibraryStore>,
+    draft: ProjectDraft,
+) -> Result<LibrarySnapshot, String> {
+    store.create_project(&draft)
+}
+
+#[tauri::command]
+pub fn rename_project(
+    store: tauri::State<'_, LibraryStore>,
+    draft: ProjectRenameDraft,
+) -> Result<LibrarySnapshot, String> {
+    store.rename_project(&draft)
+}
+
+#[tauri::command]
+pub fn delete_project(
+    store: tauri::State<'_, LibraryStore>,
+    project_id: String,
+) -> Result<LibrarySnapshot, String> {
+    store.delete_project(&project_id)
 }
 
 #[tauri::command]

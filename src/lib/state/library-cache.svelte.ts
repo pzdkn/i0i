@@ -1,10 +1,11 @@
 import type { Paper } from "$lib/domain/paper";
 import { providerDisplayName, sanitizeProviders, type DiscoverCandidate, type DiscoverRunProgress, type DiscoverWorkspace, type DiscoveryProgress, type DiscoveryProviderChoice, type DiscoverySearchResponse } from "$lib/domain/discover";
-import type { LibrarySnapshot, PaperDraft, VaultWorkspace } from "$lib/domain/library";
+import type { LibrarySnapshot, PaperDraft, ProjectWorkspace, VaultWorkspace } from "$lib/domain/library";
 import type { ResearchPaper, SearchCandidate, SearchUpdated } from "$lib/domain/research";
 import { citeKey, refSlug, type RefIndex, type RefPaper } from "$lib/features/reader/paper-refs";
 
 type LibraryState = {
+  projects: ProjectWorkspace[];
   vaults: VaultWorkspace[];
   discoverWorkspaces: DiscoverWorkspace[];
 };
@@ -26,6 +27,7 @@ const discoverDefaults: { resultLimit: 10 | 25 | 50; onlyViewable: boolean; expa
 const initialDiscoverWorkspaces = [makeDiscoverWorkspace()];
 
 const library = $state<LibraryState>({
+  projects: [],
   vaults: [],
   discoverWorkspaces: initialDiscoverWorkspaces,
 });
@@ -204,6 +206,10 @@ function candidateToPaper(candidateId: string): Paper | undefined {
 
 export function getVaultWorkspaces() {
   return library.vaults;
+}
+
+export function getProjectWorkspaces() {
+  return library.projects;
 }
 
 export function getVaultWorkspace(vaultId: string) {
@@ -680,5 +686,15 @@ export function paperDraftFromDiscoverCandidate(candidateId: string): PaperDraft
 
 export function hydrateLibrary(snapshot: LibrarySnapshot) {
   library.vaults = snapshot.vaults.map((vault) => makeVaultWorkspace(snapshot, vault.id));
+  library.projects = snapshot.projects.map((project) => {
+    const vault = snapshot.vaults.find((candidate) => candidate.projectId === project.id);
+    if (!vault) {
+      throw new Error(`Project ${project.id} has no Vault`);
+    }
+    return {
+      ...project,
+      vault: makeVaultWorkspace(snapshot, vault.id),
+    };
+  });
   markDiscoverOwnership();
 }

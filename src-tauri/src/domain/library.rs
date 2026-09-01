@@ -1,9 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+/// A goal-directed workspace that owns exactly one Vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub title: String,
+    pub goal: Option<String>,
+}
+
+/// User input for atomically creating a Project and its Vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDraft {
+    pub title: String,
+    pub goal: Option<String>,
+}
+
+/// User input for changing Project metadata without renaming its Vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRenameDraft {
+    pub id: String,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Vault {
     pub id: String,
+    pub project_id: String,
     pub title: String,
     pub path: String,
 }
@@ -293,6 +319,7 @@ pub struct DocumentAsset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibrarySnapshot {
+    pub projects: Vec<Project>,
     pub vaults: Vec<Vault>,
     pub papers: Vec<Paper>,
     pub vault_papers: Vec<VaultPaper>,

@@ -1,53 +1,53 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { VaultWorkspace } from "$lib/domain/library";
+  import type { ProjectWorkspace } from "$lib/domain/library";
 
   let {
-    activeVaultId,
-    vaults,
-    onOpenVault,
-    onCreateVault,
-    onRenameVault,
-    onRemoveVault,
+    activeProjectId,
+    projects,
+    onOpenProject,
+    onCreateProject,
+    onRenameProject,
+    onRemoveProject,
   }: {
-    activeVaultId: string;
-    vaults: VaultWorkspace[];
-    onOpenVault: (vaultId: string) => void;
-    onCreateVault: (path: string) => Promise<void>;
-    onRenameVault: (vaultId: string, path: string) => Promise<void>;
-    onRemoveVault: (vaultId: string) => Promise<void>;
+    activeProjectId: string;
+    projects: ProjectWorkspace[];
+    onOpenProject: (projectId: string) => void;
+    onCreateProject: (title: string) => Promise<void>;
+    onRenameProject: (projectId: string, title: string) => Promise<void>;
+    onRemoveProject: (projectId: string) => Promise<void>;
   } = $props();
 
   let filterText = $state("");
   let createText = $state("");
   let isCreating = $state(false);
   let createInput = $state<HTMLInputElement | null>(null);
-  let contextMenu = $state<{ x: number; y: number; vaultId?: string } | null>(null);
-  let renamingVaultId = $state("");
+  let contextMenu = $state<{ x: number; y: number; projectId?: string } | null>(null);
+  let renamingProjectId = $state("");
   let renameText = $state("");
   let renameInput = $state<HTMLInputElement | null>(null);
-  const visibleVaults = $derived(
-    vaults.filter((vault) => {
+  const visibleProjects = $derived(
+    projects.filter((project) => {
       const query = filterText.trim().toLowerCase();
       if (!query) {
         return true;
       }
 
       return (
-        vault.id.toLowerCase().includes(query) ||
-        vault.title.toLowerCase().includes(query) ||
-        vault.path.toLowerCase().includes(query)
+        project.id.toLowerCase().includes(query) ||
+        project.title.toLowerCase().includes(query) ||
+        project.vault.path.toLowerCase().includes(query)
       );
     }),
   );
 
   async function submitCreate() {
-    const path = createText.trim();
-    if (!path) {
+    const title = createText.trim();
+    if (!title) {
       return;
     }
 
-    await onCreateVault(path);
+    await onCreateProject(title);
     createText = "";
     isCreating = false;
   }
@@ -59,13 +59,13 @@
     createInput?.focus();
   }
 
-  function showContextMenu(event: MouseEvent, vaultId?: string) {
+  function showContextMenu(event: MouseEvent, projectId?: string) {
     event.preventDefault();
     event.stopPropagation();
     contextMenu = {
       x: event.clientX,
       y: event.clientY,
-      vaultId,
+      projectId,
     };
   }
 
@@ -73,33 +73,33 @@
     contextMenu = null;
   }
 
-  async function startRename(vault: VaultWorkspace) {
+  async function startRename(project: ProjectWorkspace) {
     closeContextMenu();
-    renamingVaultId = vault.id;
-    renameText = vault.path;
+    renamingProjectId = project.id;
+    renameText = project.title;
     await tick();
     renameInput?.focus();
     renameInput?.select();
   }
 
   function cancelRename() {
-    renamingVaultId = "";
+    renamingProjectId = "";
     renameText = "";
   }
 
-  async function submitRename(vaultId: string) {
-    const path = renameText.trim();
-    if (!path) {
+  async function submitRename(projectId: string) {
+    const title = renameText.trim();
+    if (!title) {
       return;
     }
 
-    await onRenameVault(vaultId, path);
+    await onRenameProject(projectId, title);
     cancelRename();
   }
 
-  async function removeVault(vaultId: string) {
+  async function removeProject(projectId: string) {
     closeContextMenu();
-    await onRemoveVault(vaultId);
+    await onRemoveProject(projectId);
   }
 
   function handleCreateKeydown(event: KeyboardEvent) {
@@ -115,7 +115,7 @@
     }
   }
 
-  function handleRenameKeydown(event: KeyboardEvent, vaultId: string) {
+  function handleRenameKeydown(event: KeyboardEvent, projectId: string) {
     if (event.key === "Escape") {
       cancelRename();
       return;
@@ -123,7 +123,7 @@
 
     if (event.key === "Enter") {
       event.preventDefault();
-      void submitRename(vaultId);
+      void submitRename(projectId);
     }
   }
 
@@ -145,15 +145,15 @@
 
   <label class="filter row">
     <span>/</span>
-    <input bind:value={filterText} aria-label="Filter vault" placeholder="filter vault..." />
+    <input bind:value={filterText} aria-label="Filter projects" placeholder="filter projects..." />
     <span class="key">/</span>
   </label>
 
   <div class="tree">
     <div class="section section-row row" role="presentation" oncontextmenu={(event) => showContextMenu(event)}>
-      <span class="label">Vaults</span>
+      <span class="label">Projects</span>
       <div class="flex1"></div>
-      <button class="section-action" type="button" title="Create Vault" onclick={() => void startCreate()}>+</button>
+      <button class="section-action" type="button" title="Create Project" onclick={() => void startCreate()}>+</button>
     </div>
 
     {#if isCreating}
@@ -162,43 +162,43 @@
         <input
           bind:this={createInput}
           bind:value={createText}
-          aria-label="New Vault path"
+          aria-label="New Project title"
           onkeydown={handleCreateKeydown}
-          placeholder="new vault..."
+          placeholder="new project..."
         />
       </div>
     {/if}
 
-    {#if visibleVaults.length}
-      {#each visibleVaults as vault}
-        {#if renamingVaultId === vault.id}
+    {#if visibleProjects.length}
+      {#each visibleProjects as project}
+        {#if renamingProjectId === project.id}
           <div class="tree-row rename-item">
             <span class="glyph">=</span>
             <input
               bind:this={renameInput}
               bind:value={renameText}
-              aria-label={`Rename ${vault.path}`}
-              onkeydown={(event) => handleRenameKeydown(event, vault.id)}
+              aria-label={`Rename ${project.title}`}
+              onkeydown={(event) => handleRenameKeydown(event, project.id)}
             />
           </div>
         {:else}
           <button
-            class:active={activeVaultId === vault.id}
+            class:active={activeProjectId === project.id}
             class="tree-row folder"
             type="button"
-            onclick={() => onOpenVault(vault.id)}
-            oncontextmenu={(event) => showContextMenu(event, vault.id)}
-            title={vault.path}
+            onclick={() => onOpenProject(project.id)}
+            oncontextmenu={(event) => showContextMenu(event, project.id)}
+            title={`${project.title} · ${project.vault.path}`}
           >
             <span class="glyph">#</span>
             <span class="folder-dot"></span>
-            <span class="truncate">{vault.path}</span>
-            <span class="count">{vault.papers.length}</span>
+            <span class="truncate">{project.title}</span>
+            <span class="count">{project.vault.papers.length}</span>
           </button>
         {/if}
       {/each}
     {:else}
-      <div class="empty-row" role="presentation" oncontextmenu={(event) => showContextMenu(event)}>No Vaults</div>
+      <div class="empty-row" role="presentation" oncontextmenu={(event) => showContextMenu(event)}>No Projects</div>
     {/if}
   </div>
 
@@ -211,13 +211,13 @@
       onkeydown={(event) => event.stopPropagation()}
       tabindex="-1"
     >
-      <button role="menuitem" type="button" onclick={() => void startCreate()}>Create vault</button>
-      {#if contextMenu.vaultId}
-        {@const vault = vaults.find((candidate) => candidate.id === contextMenu?.vaultId)}
-        {#if vault}
-          <button role="menuitem" type="button" onclick={() => void startRename(vault)}>Rename vault</button>
-          <button role="menuitem" class="danger" type="button" onclick={() => void removeVault(vault.id)}>
-            Remove vault
+      <button role="menuitem" type="button" onclick={() => void startCreate()}>Create project</button>
+      {#if contextMenu.projectId}
+        {@const project = projects.find((candidate) => candidate.id === contextMenu?.projectId)}
+        {#if project}
+          <button role="menuitem" type="button" onclick={() => void startRename(project)}>Rename project</button>
+          <button role="menuitem" class="danger" type="button" onclick={() => void removeProject(project.id)}>
+            Remove project
           </button>
         {/if}
       {/if}

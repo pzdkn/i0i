@@ -2,7 +2,7 @@
   import { Settings } from "@lucide/svelte";
 
   let {
-    active = "V",
+    active = "P",
     onSelectMode = () => {},
     onOpenSettings = () => {},
     settingsAttention = false,
@@ -14,12 +14,12 @@
   } = $props();
 
   // RFC 0086 R3.1: GRAPH and ASK are gone. A graph is a view of the collection
-  // and belongs in VAULT; asking already happens from the reader and, per
+  // and belongs in PROJECTS; asking already happens from the reader and, per
   // RFC 0087, from the vault inspector. Neither had a destination, and a mode
   // is a place you go. STUDY stays because RFC 0093 gives it one.
   // R3.3: the letter under each label is now the shortcut it always looked like.
   const modes = [
-    { key: "V", label: "VAULT", reason: "" },
+    { key: "P", label: "PROJECTS", reason: "" },
     { key: "F", label: "FIND", reason: "" },
     { key: "R", label: "READ", reason: "" },
     // R3.4: disabled with its reason, not inert. It comes alive with RFC 0093.

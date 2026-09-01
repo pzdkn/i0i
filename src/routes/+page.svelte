@@ -27,15 +27,15 @@
     addPaperToVaults,
     applyPaperMetadataCandidate,
     autofillPaperMetadata,
-    createVault,
+    createProject,
     getLibrary,
     importLocalPdfs,
     addHtmlUrlToVault,
     probeDiscoveryCandidatePdf,
-    removeVault,
+    removeProject,
     removePaperFromLibrary as removePaperFromLibraryCommand,
     removePaperFromVault,
-    renameVault,
+    renameProject,
     updatePaperMetadata,
   } from "$lib/bridge/library";
   import type {
@@ -63,6 +63,7 @@
     getDiscoverWorkspaces,
     getPaperById,
     getPaperTitle,
+    getProjectWorkspaces,
     getVaultWorkspace,
     getVaultWorkspaces,
     hydrateLibrary,
@@ -138,6 +139,10 @@
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
   const vaultWorkspaces = $derived(getVaultWorkspaces());
+  const projectWorkspaces = $derived(getProjectWorkspaces());
+  const activeProjectId = $derived(
+    projectWorkspaces.find((project) => project.vault.id === activeVaultId)?.id ?? "",
+  );
   const discoverWorkspaces = $derived(getDiscoverWorkspaces());
   const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "discover-1"));
   const activePaper = $derived.by<Paper | null>(() => {
@@ -167,14 +172,16 @@
     return isPaperInLibrary(activeTab.paperId ?? activeTab.readerCandidate.id) ? undefined : activeTab.readerCandidate;
   });
   const currentPath = $derived(activeTab?.title ?? "no workspace");
-  const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "V");
+  const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "P");
   const isReaderFocusMode = $derived(readerLayoutMode === "focus" && activeTab?.kind === "reader" && Boolean(activePaper));
 
   function makeVaultTab(vault: Pick<Vault, "id" | "path">): WorkspaceTab {
+    const project = getProjectWorkspaces().find((candidate) => candidate.vault.id === vault.id);
     return {
-      id: `vault:${vault.id}`,
+      id: project ? `project:${project.id}` : `vault:${vault.id}`,
       kind: "vault",
-      title: vault.path,
+      title: project?.title ?? vault.path,
+      projectId: project?.id,
       vaultId: vault.id,
     };
   }
@@ -420,7 +427,7 @@
       return;
     }
     const mode = event.key.toUpperCase();
-    if (mode === "V" || mode === "F" || mode === "R") {
+    if (mode === "P" || mode === "F" || mode === "R") {
       event.preventDefault();
       handleModeSelect(mode);
     }
@@ -877,34 +884,50 @@
     clearMetadataAutofillState(paperId);
   }
 
-  async function createVaultFromExplorer(path: string) {
-    try {
-      const snapshot = await createVault(path);
-      hydrateLibrary(snapshot);
-    } catch (error) {
-      bridgeError = String(error);
+  function openProject(projectId: string) {
+    const project = getProjectWorkspaces().find((candidate) => candidate.id === projectId);
+    if (project) {
+      openVault(project.vault.id);
     }
   }
 
-  async function renameVaultFromExplorer(vaultId: string, path: string) {
+  async function createProjectFromExplorer(title: string) {
     try {
-      const snapshot = await renameVault(vaultId, path);
+      const snapshot = await createProject(title);
       hydrateLibrary(snapshot);
-
-      const renamedVault = snapshot.vaults.find((vault) => vault.id === vaultId);
-      if (renamedVault) {
-        tabs = tabs.map((tab) => (tab.vaultId === vaultId ? { ...tab, title: renamedVault.path } : tab));
+      const project = snapshot.projects.find((candidate) => candidate.title === title.trim());
+      if (project) {
+        openProject(project.id);
       }
     } catch (error) {
       bridgeError = String(error);
     }
   }
 
-  async function removeVaultFromExplorer(vaultId: string) {
+  async function renameProjectFromExplorer(projectId: string, title: string) {
     try {
-      const snapshot = await removeVault(vaultId);
+      const snapshot = await renameProject(projectId, title);
       hydrateLibrary(snapshot);
-      reconcileDeletedVault(snapshot, vaultId);
+      const renamedProject = snapshot.projects.find((project) => project.id === projectId);
+      if (renamedProject) {
+        tabs = tabs.map((tab) =>
+          tab.projectId === projectId ? { ...tab, title: renamedProject.title } : tab,
+        );
+      }
+    } catch (error) {
+      bridgeError = String(error);
+    }
+  }
+
+  async function removeProjectFromExplorer(projectId: string) {
+    try {
+      const project = getProjectWorkspaces().find((candidate) => candidate.id === projectId);
+      if (!project) {
+        return;
+      }
+      const snapshot = await removeProject(projectId);
+      hydrateLibrary(snapshot);
+      reconcileDeletedVault(snapshot, project.vault.id);
     } catch (error) {
       bridgeError = String(error);
     }
@@ -1006,7 +1029,7 @@
   }
 
   function handleModeSelect(mode: string) {
-    if (mode === "V") {
+    if (mode === "P") {
       openVault(activeVaultId);
       return;
     }
@@ -1062,12 +1085,12 @@
       {#snippet pane(id: string)}
         {#if id === "explorer"}
           <VaultExplorer
-            {activeVaultId}
-            vaults={vaultWorkspaces}
-            onOpenVault={openVault}
-            onCreateVault={createVaultFromExplorer}
-            onRenameVault={renameVaultFromExplorer}
-            onRemoveVault={removeVaultFromExplorer}
+            {activeProjectId}
+            projects={projectWorkspaces}
+            onOpenProject={openProject}
+            onCreateProject={createProjectFromExplorer}
+            onRenameProject={renameProjectFromExplorer}
+            onRemoveProject={removeProjectFromExplorer}
           />
         {:else}
           <section class="workspace col">
@@ -1124,7 +1147,7 @@
             {:else}
               <div class="empty-workspace col">
                 <div class="label hot">No workspace open</div>
-                <h1>Open a vault folder from the Explorer.</h1>
+                <h1>Open a Project from the Explorer.</h1>
                 <p>The shell is still active; the center workspace is empty.</p>
               </div>
             {/if}

@@ -9,7 +9,7 @@
   import { RevealZone } from "$lib/components/reveal.svelte";
 
   let {
-    activeMode = "V",
+    activeMode = "P",
     currentPath = "/transformers/attention",
     vaultStatus = null,
     bridgeError = "",

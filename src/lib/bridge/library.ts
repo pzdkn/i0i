@@ -7,6 +7,8 @@ import type {
   MetadataCandidate,
   PaperMetadataUpdate,
   PaperDraft,
+  ProjectDraft,
+  ProjectRenameDraft,
   VaultDraft,
   VaultRenameDraft,
 } from "$lib/domain/library";
@@ -95,6 +97,20 @@ export async function createVault(path: string): Promise<LibrarySnapshot> {
   return invoke<LibrarySnapshot>("create_vault", {
     draft,
   });
+}
+
+export async function createProject(title: string, goal?: string): Promise<LibrarySnapshot> {
+  const draft: ProjectDraft = { title, goal };
+  return invoke<LibrarySnapshot>("create_project", { draft });
+}
+
+export async function renameProject(id: string, title: string): Promise<LibrarySnapshot> {
+  const draft: ProjectRenameDraft = { id, title };
+  return invoke<LibrarySnapshot>("rename_project", { draft });
+}
+
+export async function removeProject(projectId: string): Promise<LibrarySnapshot> {
+  return invoke<LibrarySnapshot>("delete_project", { projectId });
 }
 
 export async function renameVault(id: string, path: string): Promise<LibrarySnapshot> {

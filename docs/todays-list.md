@@ -1,6 +1,6 @@
 # Today's RFC List
 
-Updated: 2026-09-01
+Updated: 2026-09-02
 
 This is the working index for active RFCs and older documents reviewed on
 2026-08-24.
@@ -42,20 +42,24 @@ This is the working index for active RFCs and older documents reviewed on
 Implementation is landed for these RFCs. Any remaining manual or live
 verification is noted below and remains reflected in each RFC's formal status.
 
-1. [RFC 0100: Eager Obscura startup and discovery gate](rfcs/source-acquisition/0100-eager-obscura-startup-and-discovery-gate.md)
+1. [RFC 0109: Project and Vault ownership migration](rfcs/projects/0109-project-vault-ownership-migration.md)
+   — Projects now atomically own one Vault, existing Vaults migrate without
+   identity or membership changes, and the Explorer uses Project lifecycle
+   actions.
+2. [RFC 0100: Eager Obscura startup and discovery gate](rfcs/source-acquisition/0100-eager-obscura-startup-and-discovery-gate.md)
    — implementation and automated lifecycle checks pass; manual verification
    of the Starting, Failed, Retry, and Ready UI states remains.
-2. [RFC 0101: Honest chat web-search routing](rfcs/chat/0101-honest-chat-web-search-routing.md)
+3. [RFC 0101: Honest chat web-search routing](rfcs/chat/0101-honest-chat-web-search-routing.md)
    — deterministic routing and typed lookup outcomes are implemented; one live
    successful lookup and one forced browser-failure answer check remain.
-3. [RFC 0096: Fluid PDF highlight rendering](rfcs/reader/0096-fluid-pdf-highlight-rendering.md)
+4. [RFC 0096: Fluid PDF highlight rendering](rfcs/reader/0096-fluid-pdf-highlight-rendering.md)
    — implementation is landed; manual PDF visual checks remain.
-4. [RFC 0097: Research-connected chat with epistemic boundaries](rfcs/chat/0097-research-connected-chat-with-epistemic-boundaries.md)
+5. [RFC 0097: Research-connected chat with epistemic boundaries](rfcs/chat/0097-research-connected-chat-with-epistemic-boundaries.md)
    — production paths are landed; the live prompt-quality comparison remains.
-5. [RFC 0098: Browser-first scholarly discovery](rfcs/discovery/0098-browser-first-scholarly-discovery.md)
+6. [RFC 0098: Browser-first scholarly discovery](rfcs/discovery/0098-browser-first-scholarly-discovery.md)
    — production paths are landed; the fixed-corpus live migration benchmark
    remains.
-6. [RFC 0099: Reliable math in chat and notes](rfcs/chat/0099-reliable-math-in-chat-and-notes.md)
+7. [RFC 0099: Reliable math in chat and notes](rfcs/chat/0099-reliable-math-in-chat-and-notes.md)
    — implementation is landed; packaged-app offline visual verification
    remains.
 

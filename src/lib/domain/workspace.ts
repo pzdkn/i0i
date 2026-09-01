@@ -6,6 +6,7 @@ export type WorkspaceTab = {
   id: string;
   kind: WorkspaceKind;
   title: string;
+  projectId?: string;
   vaultId?: string;
   paperId?: string;
   readerCandidate?: DiscoveryReaderCandidate;

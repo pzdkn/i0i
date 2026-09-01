@@ -17,8 +17,8 @@ use crate::domain::discovery::PaperCandidate;
 use crate::domain::library::{
     CiteRecord, DocumentAsset, DocumentBlock, DocumentChunk, DocumentExtraction, DocumentPage,
     DocumentSource, DocumentSpan, EmbeddingCoverage, ExtractionStructure, LibrarySnapshot, Paper,
-    PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate, PaperSourceDraft, Vault, VaultDraft,
-    VaultPaper, VaultRenameDraft,
+    PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate, PaperSourceDraft, Project,
+    ProjectDraft, ProjectRenameDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
 };
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, Search, SearchCandidate, SearchDraft, SearchRun,
@@ -94,6 +94,7 @@ impl LibraryStore {
     pub fn init(&self) -> StoreResult<()> {
         let mut conn = self.open_connection()?;
         self.create_schema(&conn)?;
+        migrate_vaults_to_projects(&mut conn)?;
         // Legacy chat first (it guards on "no threads yet"), then notes — which
         // may reuse the whole-paper threads the chat migration just created.
         migrate_chat_messages_to_threads(&mut conn)?;
@@ -1425,27 +1426,86 @@ impl LibraryStore {
     pub fn create_vault(&self, draft: &VaultDraft) -> StoreResult<LibrarySnapshot> {
         let normalized = normalize_vault_path(&draft.path)?;
         let title = vault_title_from_path(&normalized)?;
-        let id = vault_id_from_path(&normalized)?;
-        let conn = self.open_connection()?;
+        self.create_project_with_vault(&ProjectDraft { title, goal: None }, Some(&normalized))
+            .map_err(|error| {
+                if error.starts_with("Project already exists:") {
+                    format!("Vault path already exists: {normalized}")
+                } else {
+                    error
+                }
+            })
+    }
 
-        conn.execute(
-            "
-            insert into vaults (id, title, path, created_at, updated_at)
-            values (?1, ?2, ?3, datetime('now'), datetime('now'))
-            ",
-            params![id, title, normalized],
+    /// Atomically creates a Project and its one owned Vault.
+    pub fn create_project(&self, draft: &ProjectDraft) -> StoreResult<LibrarySnapshot> {
+        self.create_project_with_vault(draft, None)
+    }
+
+    fn create_project_with_vault(
+        &self,
+        draft: &ProjectDraft,
+        requested_path: Option<&str>,
+    ) -> StoreResult<LibrarySnapshot> {
+        let title = normalize_project_title(&draft.title)?;
+        let normalized = match requested_path {
+            Some(path) => normalize_vault_path(path)?,
+            None => normalize_vault_path(&title)?,
+        };
+        let vault_title = vault_title_from_path(&normalized)?;
+        let vault_id = vault_id_from_path(&normalized)?;
+        let project_id = project_id_for_vault(&vault_id);
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+
+        tx.execute(
+            "insert into projects (id, title, goal, created_at, updated_at)
+             values (?1, ?2, ?3, datetime('now'), datetime('now'))",
+            params![project_id, title, draft.goal],
         )
-        .map_err(|error| {
-            let message = error.to_string();
-            if message.contains("UNIQUE constraint failed: vaults.path") {
-                format!("Vault path already exists: {normalized}")
-            } else if message.contains("UNIQUE constraint failed: vaults.id") {
-                format!("Vault id already exists: {id}")
-            } else {
-                message
-            }
-        })?;
+        .map_err(|error| project_create_error(error, &title, &normalized))?;
+        tx.execute(
+            "insert into vaults (id, project_id, title, path, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))",
+            params![vault_id, project_id, vault_title, normalized],
+        )
+        .map_err(|error| project_create_error(error, &title, &normalized))?;
 
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_library()
+    }
+
+    /// Renames only the Project; its bibliography path remains stable.
+    pub fn rename_project(&self, draft: &ProjectRenameDraft) -> StoreResult<LibrarySnapshot> {
+        let title = normalize_project_title(&draft.title)?;
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "update projects set title = ?1, updated_at = datetime('now') where id = ?2",
+                params![title, draft.id],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!("Project not found: {}", draft.id));
+        }
+        self.get_library()
+    }
+
+    /// Deletes a Project, its Vault, and Papers with no remaining membership.
+    pub fn delete_project(&self, project_id: &str) -> StoreResult<LibrarySnapshot> {
+        if project_id.trim().is_empty() {
+            return Err("Project id cannot be empty".to_string());
+        }
+
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let deleted = tx
+            .execute("delete from projects where id = ?1", params![project_id])
+            .map_err(|error| error.to_string())?;
+        if deleted == 0 {
+            return Err(format!("Project not found: {project_id}"));
+        }
+        delete_unowned_papers(&tx)?;
+        tx.commit().map_err(|error| error.to_string())?;
         self.get_library()
     }
 
@@ -1483,32 +1543,17 @@ impl LibraryStore {
             return Err("Vault id cannot be empty".to_string());
         }
 
-        let mut conn = self.open_connection()?;
-        let tx = conn.transaction().map_err(|error| error.to_string())?;
-        let deleted = tx
-            .execute("delete from vaults where id = ?1", params![vault_id])
-            .map_err(|error| error.to_string())?;
-
-        if deleted == 0 {
-            return Err(format!("Vault not found: {vault_id}"));
-        }
-
-        // Deleting a Vault cascades its membership rows. Papers are shared
-        // entities, so remove only the ones that lost their final membership.
-        tx.execute(
-            "
-            delete from papers
-            where not exists (
-              select 1 from vault_papers
-              where vault_papers.paper_id = papers.id
+        let conn = self.open_connection()?;
+        let project_id = conn
+            .query_row(
+                "select project_id from vaults where id = ?1",
+                params![vault_id],
+                |row| row.get::<_, String>(0),
             )
-            ",
-            [],
-        )
-        .map_err(|error| error.to_string())?;
-
-        tx.commit().map_err(|error| error.to_string())?;
-        self.get_library()
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Vault not found: {vault_id}"))?;
+        self.delete_project(&project_id)
     }
 
     pub fn remove_paper_from_vault(
@@ -2538,12 +2583,22 @@ impl LibraryStore {
     fn create_schema(&self, conn: &Connection) -> StoreResult<()> {
         conn.execute_batch(
             "
+            create table if not exists projects (
+              id text primary key,
+              title text not null,
+              goal text,
+              created_at text not null,
+              updated_at text not null
+            );
+
             create table if not exists vaults (
               id text primary key,
+              project_id text not null unique,
               title text not null,
               path text not null unique,
               created_at text not null,
-              updated_at text not null
+              updated_at text not null,
+              foreign key (project_id) references projects(id) on delete cascade
             );
 
             create table if not exists papers (
@@ -3026,6 +3081,7 @@ impl LibraryStore {
         create_vector_index(conn)?;
 
         add_column_if_missing(conn, "papers", "active_source_id", "text")?;
+        add_column_if_missing(conn, "vaults", "project_id", "text")?;
         add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
         add_column_if_missing(conn, "document_sources", "landing_url", "text")?;
         add_column_if_missing(conn, "document_sources", "final_url", "text")?;
@@ -3061,12 +3117,19 @@ impl LibraryStore {
         let tx = conn.transaction().map_err(|error| error.to_string())?;
 
         for vault in default_vaults() {
+            let project_id = project_id_for_vault(vault.id);
+            tx.execute(
+                "insert into projects (id, title, goal, created_at, updated_at)
+                 values (?1, ?2, null, datetime('now'), datetime('now'))",
+                params![project_id, vault.title],
+            )
+            .map_err(|error| error.to_string())?;
             tx.execute(
                 "
-                insert into vaults (id, title, path, created_at, updated_at)
-                values (?1, ?2, ?3, datetime('now'), datetime('now'))
+                insert into vaults (id, project_id, title, path, created_at, updated_at)
+                values (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))
                 ",
-                params![vault.id, vault.title, vault.path],
+                params![vault.id, project_id, vault.title, vault.path],
             )
             .map_err(|error| error.to_string())?;
         }
@@ -3114,6 +3177,7 @@ impl LibraryStore {
 
     fn read_library(&self, conn: &Connection) -> StoreResult<LibrarySnapshot> {
         Ok(LibrarySnapshot {
+            projects: read_projects(conn)?,
             vaults: read_vaults(conn)?,
             papers: read_papers(conn)?,
             vault_papers: read_vault_papers(conn)?,
@@ -3125,17 +3189,34 @@ impl LibraryStore {
     }
 }
 
+fn read_projects(conn: &Connection) -> StoreResult<Vec<Project>> {
+    let mut stmt = conn
+        .prepare("select id, title, goal from projects order by title, id")
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                goal: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
 fn read_vaults(conn: &Connection) -> StoreResult<Vec<Vault>> {
     let mut stmt = conn
-        .prepare("select id, title, path from vaults order by path")
+        .prepare("select id, project_id, title, path from vaults order by path")
         .map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map([], |row| {
             Ok(Vault {
                 id: row.get(0)?,
-                title: row.get(1)?,
-                path: row.get(2)?,
+                project_id: row.get(1)?,
+                title: row.get(2)?,
+                path: row.get(3)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -5922,6 +6003,112 @@ fn timestamped_id(prefix: &str) -> StoreResult<String> {
     Ok(format!("{prefix}_{nanos}"))
 }
 
+/// Backfills the Project boundary for libraries created before RFC 0109.
+fn migrate_vaults_to_projects(conn: &mut Connection) -> StoreResult<()> {
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let legacy_vaults = {
+        let mut statement = tx
+            .prepare(
+                "select id, title from vaults
+                 where project_id is null or trim(project_id) = '' order by id",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+    };
+
+    for (vault_id, title) in legacy_vaults {
+        let project_id = project_id_for_vault(&vault_id);
+        tx.execute(
+            "insert into projects (id, title, goal, created_at, updated_at)
+             values (?1, ?2, null, datetime('now'), datetime('now'))
+             on conflict(id) do nothing",
+            params![project_id, title],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update vaults set project_id = ?1 where id = ?2",
+            params![project_id, vault_id],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())?;
+
+    conn.execute_batch(
+        "
+        create unique index if not exists idx_vaults_project_id on vaults(project_id);
+
+        create trigger if not exists vaults_require_project_insert
+        before insert on vaults
+        when new.project_id is null
+          or trim(new.project_id) = ''
+          or not exists (select 1 from projects where id = new.project_id)
+        begin
+          select raise(abort, 'Vault must belong to an existing Project');
+        end;
+
+        create trigger if not exists vaults_require_project_update
+        before update of project_id on vaults
+        when new.project_id is null
+          or trim(new.project_id) = ''
+          or not exists (select 1 from projects where id = new.project_id)
+        begin
+          select raise(abort, 'Vault must belong to an existing Project');
+        end;
+
+        create trigger if not exists projects_delete_owned_vault
+        after delete on projects
+        begin
+          delete from vaults where project_id = old.id;
+        end;
+        ",
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn normalize_project_title(input: &str) -> StoreResult<String> {
+    let title = input.trim();
+    if title.is_empty() {
+        return Err("Project title cannot be empty".to_string());
+    }
+    Ok(title.to_string())
+}
+
+fn project_id_for_vault(vault_id: &str) -> String {
+    format!("project:{vault_id}")
+}
+
+fn project_create_error(error: rusqlite::Error, title: &str, path: &str) -> String {
+    let message = error.to_string();
+    if message.contains("UNIQUE constraint failed: vaults.path") {
+        format!("Project bibliography path already exists: {path}")
+    } else if message.contains("UNIQUE constraint failed: vaults.id")
+        || message.contains("UNIQUE constraint failed: projects.id")
+    {
+        format!("Project already exists: {title}")
+    } else {
+        message
+    }
+}
+
+fn delete_unowned_papers(conn: &Connection) -> StoreResult<()> {
+    conn.execute(
+        "delete from papers
+         where not exists (
+           select 1 from vault_papers where vault_papers.paper_id = papers.id
+         )",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn normalize_vault_path(input: &str) -> StoreResult<String> {
     let mut parts = Vec::new();
 
@@ -6267,6 +6454,13 @@ mod tests {
         snapshot.vaults.iter().any(|vault| vault.id == vault_id)
     }
 
+    fn has_project(snapshot: &LibrarySnapshot, project_id: &str) -> bool {
+        snapshot
+            .projects
+            .iter()
+            .any(|project| project.id == project_id)
+    }
+
     fn paper<'a>(snapshot: &'a LibrarySnapshot, paper_id: &str) -> &'a Paper {
         snapshot
             .papers
@@ -6345,6 +6539,7 @@ mod tests {
         let db = test_db()?;
         let snapshot = db.store.get_library()?;
 
+        assert_eq!(snapshot.projects.len(), default_vaults().len());
         assert_eq!(snapshot.vaults.len(), default_vaults().len());
         assert_eq!(snapshot.papers.len(), default_papers().len());
         assert_eq!(snapshot.vault_papers.len(), default_memberships().len());
@@ -6353,6 +6548,35 @@ mod tests {
         assert!(snapshot.document_pages.is_empty());
         assert!(snapshot.document_assets.is_empty());
         assert!(has_vault(&snapshot, "attention"));
+        assert!(has_project(&snapshot, "project:attention"));
+        assert_eq!(
+            snapshot
+                .vaults
+                .iter()
+                .find(|vault| vault.id == "attention")
+                .map(|vault| vault.project_id.as_str()),
+            Some("project:attention")
+        );
+        for project in &snapshot.projects {
+            assert_eq!(
+                snapshot
+                    .vaults
+                    .iter()
+                    .filter(|vault| vault.project_id == project.id)
+                    .count(),
+                1,
+                "every Project should own exactly one Vault"
+            );
+        }
+        for vault in &snapshot.vaults {
+            assert!(
+                snapshot
+                    .projects
+                    .iter()
+                    .any(|project| project.id == vault.project_id),
+                "every Vault should belong to a returned Project"
+            );
+        }
         assert!(has_paper(&snapshot, "vaswani2017"));
         assert!(has_membership(&snapshot, "attention", "vaswani2017"));
         assert!(paper(&snapshot, "vaswani2017").active_source_id.is_none());
@@ -6360,6 +6584,152 @@ mod tests {
             .active_extraction_id
             .is_none());
 
+        Ok(())
+    }
+
+    #[test]
+    fn project_creation_is_atomic_and_owns_one_vault() -> StoreResult<()> {
+        let db = test_db()?;
+        let before = db.store.get_library()?;
+        let snapshot = db.store.create_project(&ProjectDraft {
+            title: "  LoRA Interpretability  ".to_string(),
+            goal: Some("Explain low-rank updates".to_string()),
+        })?;
+
+        assert_eq!(snapshot.projects.len(), before.projects.len() + 1);
+        assert_eq!(snapshot.vaults.len(), before.vaults.len() + 1);
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|project| project.id == "project:lora-interpretability")
+            .expect("created Project should exist");
+        let owned: Vec<&Vault> = snapshot
+            .vaults
+            .iter()
+            .filter(|vault| vault.project_id == project.id)
+            .collect();
+        assert_eq!(project.title, "LoRA Interpretability");
+        assert_eq!(project.goal.as_deref(), Some("Explain low-rank updates"));
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].path, "/LoRA Interpretability");
+
+        let error = db
+            .store
+            .create_project(&ProjectDraft {
+                title: "LoRA Interpretability".to_string(),
+                goal: None,
+            })
+            .expect_err("duplicate Project should fail atomically");
+        let after_duplicate = db.store.get_library()?;
+        assert!(error.contains("Project already exists"));
+        assert_eq!(after_duplicate.projects.len(), snapshot.projects.len());
+        assert_eq!(after_duplicate.vaults.len(), snapshot.vaults.len());
+        Ok(())
+    }
+
+    #[test]
+    fn renaming_project_keeps_vault_identity_and_path() -> StoreResult<()> {
+        let db = test_db()?;
+        let before = db.store.get_library()?;
+        let vault = before
+            .vaults
+            .iter()
+            .find(|vault| vault.project_id == "project:attention")
+            .expect("seed Project should own a Vault")
+            .clone();
+        let snapshot = db.store.rename_project(&ProjectRenameDraft {
+            id: "project:attention".to_string(),
+            title: "Mechanistic Attention".to_string(),
+        })?;
+        let renamed = snapshot
+            .projects
+            .iter()
+            .find(|project| project.id == "project:attention")
+            .expect("renamed Project should keep its id");
+        let after_vault = snapshot
+            .vaults
+            .iter()
+            .find(|candidate| candidate.id == vault.id)
+            .expect("owned Vault should remain");
+
+        assert_eq!(renamed.title, "Mechanistic Attention");
+        assert_eq!(after_vault.path, vault.path);
+        assert_eq!(after_vault.title, vault.title);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_project_removes_vault_and_preserves_shared_paper() -> StoreResult<()> {
+        let db = test_db()?;
+        let snapshot = db.store.delete_project("project:self-supervised")?;
+
+        assert!(!has_project(&snapshot, "project:self-supervised"));
+        assert!(!has_vault(&snapshot, "self-supervised"));
+        assert!(has_paper(&snapshot, "caron2021"));
+        assert!(has_membership(&snapshot, "attention", "caron2021"));
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_vault_migration_is_idempotent_and_preserves_identity() -> StoreResult<()> {
+        let unique_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "i0i-project-migration-{}-{unique_id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let path = dir.join("library.sqlite");
+        {
+            let conn = Connection::open(&path).map_err(|error| error.to_string())?;
+            conn.execute_batch(
+                "create table vaults (
+                   id text primary key, title text not null, path text not null unique,
+                   created_at text not null, updated_at text not null
+                 );
+                 insert into vaults values (
+                   'legacy-vault', 'Legacy Research', '/legacy/research',
+                   datetime('now'), datetime('now')
+                 );
+                 create table papers (
+                   id text primary key, title text not null, authors_json text not null,
+                   venue text not null, year integer not null, citations integer not null default 0,
+                   tags_json text not null, note_count integer not null default 0,
+                   annotation_count integer not null default 0, status text not null,
+                   abstract text, created_at text not null, updated_at text not null
+                 );
+                 insert into papers values (
+                   'legacy-paper', 'Legacy Paper', '[]', 'TEST', 2020, 0, '[]', 0, 0,
+                   'UNREAD', null, datetime('now'), datetime('now')
+                 );
+                 create table vault_papers (
+                   vault_id text not null, paper_id text not null, added_at text not null,
+                   primary key (vault_id, paper_id),
+                   foreign key (vault_id) references vaults(id) on delete cascade,
+                   foreign key (paper_id) references papers(id) on delete cascade
+                 );
+                 insert into vault_papers values ('legacy-vault', 'legacy-paper', datetime('now'));",
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        let store = LibraryStore::for_test(path);
+        store.init()?;
+        store.init()?;
+        let snapshot = store.get_library()?;
+        assert_eq!(snapshot.projects.len(), 1);
+        assert_eq!(snapshot.vaults.len(), 1);
+        assert_eq!(snapshot.projects[0].id, "project:legacy-vault");
+        assert_eq!(snapshot.projects[0].title, "Legacy Research");
+        assert_eq!(snapshot.vaults[0].id, "legacy-vault");
+        assert_eq!(snapshot.vaults[0].path, "/legacy/research");
+        assert_eq!(snapshot.vaults[0].project_id, snapshot.projects[0].id);
+        assert!(has_paper(&snapshot, "legacy-paper"));
+        assert!(has_membership(&snapshot, "legacy-vault", "legacy-paper"));
+
+        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 
@@ -8092,7 +8462,7 @@ mod tests {
         // one — the whole reason paper_id is a partition key.
         let scoped = db
             .store
-                .semantic_chunk_ranking(&["far-paper".to_string()], &on_axis, 10)?;
+            .semantic_chunk_ranking(&["far-paper".to_string()], &on_axis, 10)?;
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].0, far_chunk.id);
         Ok(())
@@ -8113,7 +8483,7 @@ mod tests {
 
         let ranked =
             db.store
-            .semantic_chunk_ranking(&["reembed-paper".to_string()], &vector, 10)?;
+                .semantic_chunk_ranking(&["reembed-paper".to_string()], &vector, 10)?;
         assert_eq!(
             ranked.len(),
             1,
@@ -9184,11 +9554,9 @@ mod tests {
 
         db.store
             .save_vault_suggestion_options("attention", &options)?;
-        let run = db.store.create_vault_suggestion_run_with_options(
-            "attention",
-            &options,
-            &paths,
-        )?;
+        let run =
+            db.store
+                .create_vault_suggestion_run_with_options("attention", &options, &paths)?;
 
         assert_eq!(db.store.get_vault_suggestion_options("attention")?, options);
         assert_eq!(run.options, options);

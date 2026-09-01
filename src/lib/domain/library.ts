@@ -1,7 +1,24 @@
 import type { Paper } from "$lib/domain/paper";
 
+export type Project = {
+  id: string;
+  title: string;
+  goal: string | null;
+};
+
+export type ProjectDraft = {
+  title: string;
+  goal?: string;
+};
+
+export type ProjectRenameDraft = {
+  id: string;
+  title: string;
+};
+
 export type Vault = {
   id: string;
+  projectId: string;
   title: string;
   path: string;
 };
@@ -186,6 +203,7 @@ export type MetadataAutofillProgress = {
 };
 
 export type LibrarySnapshot = {
+  projects: Project[];
   vaults: Vault[];
   papers: Paper[];
   vaultPapers: VaultPaper[];
@@ -214,4 +232,11 @@ export type VaultWorkspace = {
   tabs: Array<{ label: string; count?: number }>;
   chips: string[];
   papers: Paper[];
+};
+
+export type ProjectWorkspace = {
+  id: string;
+  title: string;
+  goal: string | null;
+  vault: VaultWorkspace;
 };
