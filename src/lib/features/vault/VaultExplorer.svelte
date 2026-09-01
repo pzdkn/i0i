@@ -4,15 +4,19 @@
 
   let {
     activeProjectId,
+    activeProjectView,
     projects,
     onOpenProject,
+    onOpenProjectDocument,
     onCreateProject,
     onRenameProject,
     onRemoveProject,
   }: {
     activeProjectId: string;
+    activeProjectView: "vault" | "documents";
     projects: ProjectWorkspace[];
-    onOpenProject: (projectId: string) => void;
+    onOpenProject: (projectId: string, view: "vault" | "documents") => void;
+    onOpenProjectDocument: (projectId: string, documentId: string) => void;
     onCreateProject: (title: string) => Promise<void>;
     onRenameProject: (projectId: string, title: string) => Promise<void>;
     onRemoveProject: (projectId: string) => Promise<void>;
@@ -186,7 +190,7 @@
             class:active={activeProjectId === project.id}
             class="tree-row folder"
             type="button"
-            onclick={() => onOpenProject(project.id)}
+            onclick={() => onOpenProject(project.id, "vault")}
             oncontextmenu={(event) => showContextMenu(event, project.id)}
             title={`${project.title} · ${project.vault.path}`}
           >
@@ -195,6 +199,43 @@
             <span class="truncate">{project.title}</span>
             <span class="count">{project.vault.papers.length}</span>
           </button>
+          {#if activeProjectId === project.id}
+            <div class="project-children">
+              <button
+                class:active-child={activeProjectView === "vault"}
+                class="tree-row child"
+                type="button"
+                onclick={() => onOpenProject(project.id, "vault")}
+              >
+                <span class="glyph">#</span>
+                <span class="truncate">Vault</span>
+                <span class="count">{project.vault.papers.length}</span>
+              </button>
+              <button
+                class:active-child={activeProjectView === "documents"}
+                class="tree-row child"
+                type="button"
+                onclick={() => onOpenProject(project.id, "documents")}
+              >
+                <span class="glyph">=</span>
+                <span class="truncate">Documents</span>
+                <span class="count">{project.documents.length}</span>
+              </button>
+              {#if activeProjectView === "documents"}
+                {#each project.documents as document}
+                  <button
+                    class="tree-row document-child"
+                    type="button"
+                    onclick={() => onOpenProjectDocument(project.id, document.id)}
+                    title={document.title}
+                  >
+                    <span class="glyph">.</span>
+                    <span class="truncate">{document.title}</span>
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          {/if}
         {/if}
       {/each}
     {:else}
@@ -326,6 +367,20 @@
     font-family: inherit;
     text-align: left;
     cursor: pointer;
+  }
+
+  .child {
+    padding-left: 30px;
+  }
+
+  .document-child {
+    padding-left: 48px;
+    color: var(--fg-3);
+  }
+
+  .active-child {
+    color: var(--amber);
+    background: rgba(242, 169, 59, 0.05);
   }
 
   .tree-row.active {

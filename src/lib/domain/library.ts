@@ -16,6 +16,29 @@ export type ProjectRenameDraft = {
   title: string;
 };
 
+export type ProjectDocumentSummary = {
+  id: string;
+  projectId: string;
+  title: string;
+  format: "markdown";
+  harnessWritable: boolean;
+  updatedAt: string;
+};
+
+export type ProjectDocument = ProjectDocumentSummary & {
+  content: string;
+  createdFromRunId: string | null;
+  createdFromStateRevision: number | null;
+  createdAt: string;
+};
+
+export type ProjectDocumentUpdate = {
+  id: string;
+  title: string;
+  content: string;
+  harnessWritable: boolean;
+};
+
 export type Vault = {
   id: string;
   projectId: string;
@@ -204,6 +227,7 @@ export type MetadataAutofillProgress = {
 
 export type LibrarySnapshot = {
   projects: Project[];
+  projectDocuments: ProjectDocumentSummary[];
   vaults: Vault[];
   papers: Paper[];
   vaultPapers: VaultPaper[];
@@ -239,4 +263,5 @@ export type ProjectWorkspace = {
   title: string;
   goal: string | null;
   vault: VaultWorkspace;
+  documents: ProjectDocumentSummary[];
 };

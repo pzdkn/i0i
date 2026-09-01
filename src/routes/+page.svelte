@@ -55,6 +55,7 @@
   import ReaderView from "$lib/features/reader/ReaderView.svelte";
   import VaultExplorer from "$lib/features/vault/VaultExplorer.svelte";
   import VaultHome from "$lib/features/vault/VaultHome.svelte";
+  import ProjectDocuments from "$lib/features/project/ProjectDocuments.svelte";
   import {
     getAllPapers,
     getCandidateVaultTargets,
@@ -128,6 +129,8 @@
     }
   }
   let activeVaultId = $state("");
+  let selectedProjectDocumentId = $state("");
+  let projectDocumentDirty = $state(false);
   let selectedPaperId = $state("");
   let selectedReaderPaper = $state<Paper | null>(null);
   let autofillingMetadataPaperIds = $state<string[]>([]);
@@ -143,6 +146,10 @@
   const activeProjectId = $derived(
     projectWorkspaces.find((project) => project.vault.id === activeVaultId)?.id ?? "",
   );
+  const activeProjectWorkspace = $derived(
+    projectWorkspaces.find((project) => project.id === activeProjectId),
+  );
+  const activeProjectView = $derived(activeTab?.projectView ?? "vault");
   const discoverWorkspaces = $derived(getDiscoverWorkspaces());
   const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "discover-1"));
   const activePaper = $derived.by<Paper | null>(() => {
@@ -175,13 +182,17 @@
   const activeMode = $derived(activeTab?.kind === "reader" ? "R" : activeTab?.kind === "discover" ? "F" : "P");
   const isReaderFocusMode = $derived(readerLayoutMode === "focus" && activeTab?.kind === "reader" && Boolean(activePaper));
 
-  function makeVaultTab(vault: Pick<Vault, "id" | "path">): WorkspaceTab {
+  function makeVaultTab(
+    vault: Pick<Vault, "id" | "path">,
+    projectView: "vault" | "documents" = "vault",
+  ): WorkspaceTab {
     const project = getProjectWorkspaces().find((candidate) => candidate.vault.id === vault.id);
     return {
       id: project ? `project:${project.id}` : `vault:${vault.id}`,
       kind: "vault",
       title: project?.title ?? vault.path,
       projectId: project?.id,
+      projectView,
       vaultId: vault.id,
     };
   }
@@ -345,7 +356,13 @@
       return;
     }
 
-    const vaultTab = makeVaultTab(workspace);
+    const project = getProjectWorkspaces().find((candidate) => candidate.vault.id === workspace.id);
+    if (project) {
+      openProject(project.id, "vault");
+      return;
+    }
+
+    const vaultTab = makeVaultTab(workspace, "vault");
 
     activeVaultId = workspace.id;
     tabs = [vaultTab, ...tabs.filter((tab) => tab.kind !== "vault")];
@@ -884,11 +901,34 @@
     clearMetadataAutofillState(paperId);
   }
 
-  function openProject(projectId: string) {
+  function confirmDocumentSwitch(): boolean {
+    if (!projectDocumentDirty) return true;
+    if (!window.confirm("Discard unsaved document changes?")) return false;
+    projectDocumentDirty = false;
+    return true;
+  }
+
+  function openProject(projectId: string, view: "vault" | "documents") {
+    if (!confirmDocumentSwitch()) return;
     const project = getProjectWorkspaces().find((candidate) => candidate.id === projectId);
     if (project) {
-      openVault(project.vault.id);
+      const projectTab = makeVaultTab(project.vault, view);
+      activeVaultId = project.vault.id;
+      tabs = [projectTab, ...tabs.filter((tab) => tab.kind !== "vault")];
+      activeTabId = projectTab.id;
+      if (
+        view === "documents" &&
+        !project.documents.some((document) => document.id === selectedProjectDocumentId)
+      ) {
+        selectedProjectDocumentId = project.documents[0]?.id ?? "";
+      }
     }
+  }
+
+  function openProjectDocument(projectId: string, documentId: string) {
+    if (documentId !== selectedProjectDocumentId && !confirmDocumentSwitch()) return;
+    selectedProjectDocumentId = documentId;
+    openProject(projectId, "documents");
   }
 
   async function createProjectFromExplorer(title: string) {
@@ -897,7 +937,7 @@
       hydrateLibrary(snapshot);
       const project = snapshot.projects.find((candidate) => candidate.title === title.trim());
       if (project) {
-        openProject(project.id);
+        openProject(project.id, "vault");
       }
     } catch (error) {
       bridgeError = String(error);
@@ -1086,8 +1126,10 @@
         {#if id === "explorer"}
           <VaultExplorer
             {activeProjectId}
+            {activeProjectView}
             projects={projectWorkspaces}
             onOpenProject={openProject}
+            onOpenProjectDocument={openProjectDocument}
             onCreateProject={createProjectFromExplorer}
             onRenameProject={renameProjectFromExplorer}
             onRemoveProject={removeProjectFromExplorer}
@@ -1127,6 +1169,14 @@
                 {getCandidateVaultTargets}
                 {browserStatus}
                 onRetryBrowser={() => void retryBrowser()}
+              />
+            {:else if activeTab?.kind === "vault" && activeProjectView === "documents" && activeProjectWorkspace}
+              <ProjectDocuments
+                project={activeProjectWorkspace}
+                selectedDocumentId={selectedProjectDocumentId}
+                onSelectDocument={(documentId) => openProjectDocument(activeProjectWorkspace.id, documentId)}
+                onLibraryChanged={hydrateLibrary}
+                onDirtyChange={(dirty) => (projectDocumentDirty = dirty)}
               />
             {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
               <VaultHome

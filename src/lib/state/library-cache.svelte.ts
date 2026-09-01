@@ -694,6 +694,7 @@ export function hydrateLibrary(snapshot: LibrarySnapshot) {
     return {
       ...project,
       vault: makeVaultWorkspace(snapshot, vault.id),
+      documents: snapshot.projectDocuments.filter((document) => document.projectId === project.id),
     };
   });
   markDiscoverOwnership();

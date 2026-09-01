@@ -25,6 +25,54 @@ pub struct ProjectRenameDraft {
     pub title: String,
 }
 
+/// Navigation metadata for a Project document; content is loaded on demand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDocumentSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub format: String,
+    pub harness_writable: bool,
+    pub updated_at: String,
+}
+
+/// A Markdown artifact authored by a researcher or, when allowed, the Harness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDocument {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub format: String,
+    pub content: String,
+    pub harness_writable: bool,
+    pub created_from_run_id: Option<String>,
+    pub created_from_state_revision: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// User-authored document creation input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDocumentDraft {
+    pub project_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub content: String,
+}
+
+/// Complete editable state for one Project document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDocumentUpdate {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub harness_writable: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Vault {
@@ -320,6 +368,7 @@ pub struct DocumentAsset {
 #[serde(rename_all = "camelCase")]
 pub struct LibrarySnapshot {
     pub projects: Vec<Project>,
+    pub project_documents: Vec<ProjectDocumentSummary>,
     pub vaults: Vec<Vault>,
     pub papers: Vec<Paper>,
     pub vault_papers: Vec<VaultPaper>,

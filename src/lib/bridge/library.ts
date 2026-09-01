@@ -8,6 +8,8 @@ import type {
   PaperMetadataUpdate,
   PaperDraft,
   ProjectDraft,
+  ProjectDocument,
+  ProjectDocumentUpdate,
   ProjectRenameDraft,
   VaultDraft,
   VaultRenameDraft,
@@ -111,6 +113,28 @@ export async function renameProject(id: string, title: string): Promise<LibraryS
 
 export async function removeProject(projectId: string): Promise<LibrarySnapshot> {
   return invoke<LibrarySnapshot>("delete_project", { projectId });
+}
+
+export async function createProjectDocument(
+  projectId: string,
+  title: string,
+  content = "",
+): Promise<ProjectDocument> {
+  return invoke<ProjectDocument>("create_project_document", {
+    draft: { projectId, title, content },
+  });
+}
+
+export async function getProjectDocument(documentId: string): Promise<ProjectDocument> {
+  return invoke<ProjectDocument>("get_project_document", { documentId });
+}
+
+export async function updateProjectDocument(update: ProjectDocumentUpdate): Promise<ProjectDocument> {
+  return invoke<ProjectDocument>("update_project_document", { update });
+}
+
+export async function deleteProjectDocument(documentId: string): Promise<void> {
+  return invoke<void>("delete_project_document", { documentId });
 }
 
 export async function renameVault(id: string, path: string): Promise<LibrarySnapshot> {

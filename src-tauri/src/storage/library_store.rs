@@ -18,6 +18,7 @@ use crate::domain::library::{
     CiteRecord, DocumentAsset, DocumentBlock, DocumentChunk, DocumentExtraction, DocumentPage,
     DocumentSource, DocumentSpan, EmbeddingCoverage, ExtractionStructure, LibrarySnapshot, Paper,
     PaperDraft, PaperMetadataEnrichment, PaperMetadataUpdate, PaperSourceDraft, Project,
+    ProjectDocument, ProjectDocumentDraft, ProjectDocumentSummary, ProjectDocumentUpdate,
     ProjectDraft, ProjectRenameDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
 };
 use crate::domain::research::{
@@ -1509,6 +1510,78 @@ impl LibraryStore {
         self.get_library()
     }
 
+    /// Creates a Markdown document inside an existing Project.
+    pub fn create_project_document(
+        &self,
+        draft: &ProjectDocumentDraft,
+    ) -> StoreResult<ProjectDocument> {
+        let title = normalize_document_title(&draft.title)?;
+        let id = timestamped_id("project_document")?;
+        let conn = self.open_connection()?;
+        let inserted = conn
+            .execute(
+                "insert into project_documents (
+                   id, project_id, title, format, content, harness_writable,
+                   created_from_run_id, created_from_state_revision, created_at, updated_at
+                 )
+                 select ?1, id, ?3, 'markdown', ?4, 0, null, null,
+                        datetime('now'), datetime('now')
+                 from projects where id = ?2",
+                params![id, draft.project_id, title, draft.content],
+            )
+            .map_err(|error| error.to_string())?;
+        if inserted == 0 {
+            return Err(format!("Project not found: {}", draft.project_id));
+        }
+        read_project_document(&conn, &id)?
+            .ok_or_else(|| format!("Project document disappeared after creation: {id}"))
+    }
+
+    /// Loads one Project document including its Markdown content.
+    pub fn get_project_document(&self, document_id: &str) -> StoreResult<ProjectDocument> {
+        let conn = self.open_connection()?;
+        read_project_document(&conn, document_id)?
+            .ok_or_else(|| format!("Project document not found: {document_id}"))
+    }
+
+    /// Replaces the editable fields of one Project document.
+    pub fn update_project_document(
+        &self,
+        update: &ProjectDocumentUpdate,
+    ) -> StoreResult<ProjectDocument> {
+        let title = normalize_document_title(&update.title)?;
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "update project_documents
+                 set title = ?1, content = ?2, harness_writable = ?3,
+                     updated_at = datetime('now')
+                 where id = ?4",
+                params![title, update.content, update.harness_writable, update.id],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!("Project document not found: {}", update.id));
+        }
+        read_project_document(&conn, &update.id)?
+            .ok_or_else(|| format!("Project document disappeared after update: {}", update.id))
+    }
+
+    /// Deletes one Project document without affecting its Project.
+    pub fn delete_project_document(&self, document_id: &str) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let deleted = conn
+            .execute(
+                "delete from project_documents where id = ?1",
+                params![document_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if deleted == 0 {
+            return Err(format!("Project document not found: {document_id}"));
+        }
+        Ok(())
+    }
+
     pub fn rename_vault(&self, draft: &VaultRenameDraft) -> StoreResult<LibrarySnapshot> {
         let normalized = normalize_vault_path(&draft.path)?;
         let title = vault_title_from_path(&normalized)?;
@@ -2591,6 +2664,23 @@ impl LibraryStore {
               updated_at text not null
             );
 
+            create table if not exists project_documents (
+              id text primary key,
+              project_id text not null,
+              title text not null,
+              format text not null check (format = 'markdown'),
+              content text not null,
+              harness_writable integer not null default 0,
+              created_from_run_id text,
+              created_from_state_revision integer,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create index if not exists idx_project_documents_project
+              on project_documents(project_id, updated_at desc);
+
             create table if not exists vaults (
               id text primary key,
               project_id text not null unique,
@@ -3178,6 +3268,7 @@ impl LibraryStore {
     fn read_library(&self, conn: &Connection) -> StoreResult<LibrarySnapshot> {
         Ok(LibrarySnapshot {
             projects: read_projects(conn)?,
+            project_documents: read_project_document_summaries(conn)?,
             vaults: read_vaults(conn)?,
             papers: read_papers(conn)?,
             vault_papers: read_vault_papers(conn)?,
@@ -3203,6 +3294,58 @@ fn read_projects(conn: &Connection) -> StoreResult<Vec<Project>> {
         })
         .map_err(|error| error.to_string())?;
     collect_rows(rows)
+}
+
+fn read_project_document_summaries(
+    conn: &Connection,
+) -> StoreResult<Vec<ProjectDocumentSummary>> {
+    let mut statement = conn
+        .prepare(
+            "select id, project_id, title, format, harness_writable, updated_at
+             from project_documents order by updated_at desc, title, id",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(ProjectDocumentSummary {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                title: row.get(2)?,
+                format: row.get(3)?,
+                harness_writable: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn read_project_document(
+    conn: &Connection,
+    document_id: &str,
+) -> StoreResult<Option<ProjectDocument>> {
+    conn.query_row(
+        "select id, project_id, title, format, content, harness_writable,
+                created_from_run_id, created_from_state_revision, created_at, updated_at
+         from project_documents where id = ?1",
+        params![document_id],
+        |row| {
+            Ok(ProjectDocument {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                title: row.get(2)?,
+                format: row.get(3)?,
+                content: row.get(4)?,
+                harness_writable: row.get(5)?,
+                created_from_run_id: row.get(6)?,
+                created_from_state_revision: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| error.to_string())
 }
 
 fn read_vaults(conn: &Connection) -> StoreResult<Vec<Vault>> {
@@ -6080,6 +6223,14 @@ fn normalize_project_title(input: &str) -> StoreResult<String> {
     Ok(title.to_string())
 }
 
+fn normalize_document_title(input: &str) -> StoreResult<String> {
+    let title = input.trim();
+    if title.is_empty() {
+        return Err("Project document title cannot be empty".to_string());
+    }
+    Ok(title.to_string())
+}
+
 fn project_id_for_vault(vault_id: &str) -> String {
     format!("project:{vault_id}")
 }
@@ -6540,6 +6691,7 @@ mod tests {
         let snapshot = db.store.get_library()?;
 
         assert_eq!(snapshot.projects.len(), default_vaults().len());
+        assert!(snapshot.project_documents.is_empty());
         assert_eq!(snapshot.vaults.len(), default_vaults().len());
         assert_eq!(snapshot.papers.len(), default_papers().len());
         assert_eq!(snapshot.vault_papers.len(), default_memberships().len());
@@ -6624,6 +6776,71 @@ mod tests {
         assert!(error.contains("Project already exists"));
         assert_eq!(after_duplicate.projects.len(), snapshot.projects.len());
         assert_eq!(after_duplicate.vaults.len(), snapshot.vaults.len());
+        Ok(())
+    }
+
+    #[test]
+    fn project_document_crud_persists_markdown_and_write_permission() -> StoreResult<()> {
+        let db = test_db()?;
+        let created = db.store.create_project_document(&ProjectDocumentDraft {
+            project_id: "project:attention".to_string(),
+            title: "  Related work.md  ".to_string(),
+            content: "# Related work\n\nInitial synthesis.".to_string(),
+        })?;
+        assert_eq!(created.title, "Related work.md");
+        assert_eq!(created.format, "markdown");
+        assert!(!created.harness_writable);
+
+        let updated = db
+            .store
+            .update_project_document(&ProjectDocumentUpdate {
+                id: created.id.clone(),
+                title: "LoRA related work.md".to_string(),
+                content: "# LoRA\n\nRevised synthesis.".to_string(),
+                harness_writable: true,
+            })?;
+        assert_eq!(updated.title, "LoRA related work.md");
+        assert_eq!(updated.content, "# LoRA\n\nRevised synthesis.");
+        assert!(updated.harness_writable);
+
+        let reopened_store = LibraryStore::for_test(db.dir.join("library.sqlite"));
+        let reopened = reopened_store.get_project_document(&created.id)?;
+        assert_eq!(reopened.content, updated.content);
+        assert!(reopened.harness_writable);
+        let snapshot = reopened_store.get_library()?;
+        let summary = snapshot
+            .project_documents
+            .iter()
+            .find(|summary| summary.id == created.id)
+            .expect("document summary should be in the library snapshot");
+        assert_eq!(summary.title, updated.title);
+        assert!(summary.harness_writable);
+
+        reopened_store.delete_project_document(&created.id)?;
+        assert!(reopened_store.get_project_document(&created.id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn project_document_requires_an_existing_project_and_cascades_on_delete() -> StoreResult<()> {
+        let db = test_db()?;
+        let error = db
+            .store
+            .create_project_document(&ProjectDocumentDraft {
+                project_id: "project:missing".to_string(),
+                title: "Orphan.md".to_string(),
+                content: String::new(),
+            })
+            .expect_err("document must not be created outside a Project");
+        assert_eq!(error, "Project not found: project:missing");
+
+        let document = db.store.create_project_document(&ProjectDocumentDraft {
+            project_id: "project:attention".to_string(),
+            title: "Meeting notes.md".to_string(),
+            content: "Working context, not evidence.".to_string(),
+        })?;
+        db.store.delete_project("project:attention")?;
+        assert!(db.store.get_project_document(&document.id).is_err());
         Ok(())
     }
 

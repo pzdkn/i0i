@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0110 - Projects now contain durable Markdown documents with an editor and explicit Harness write consent.
 - [x] RFC 0109 - Projects now atomically own one Vault, and existing Vaults migrate without changing identity or Paper membership.
 - [x] RFC 0070 - Vault papers can now be exported as a BibTeX (`.bib`) file for LaTeX.
 - [x] RFC 0071 - The reader now has a Zotero-style tool panel and a collapsible Info/Notes/Chat sidebar.

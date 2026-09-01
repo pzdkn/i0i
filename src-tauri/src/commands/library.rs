@@ -8,8 +8,8 @@ use tauri::{Emitter, Manager};
 
 use crate::domain::library::{
     DocumentSource, LibrarySnapshot, LocalPdfImport, LocalPdfImportResult, MetadataCandidate,
-    PaperDraft, PaperMetadataUpdate, ProjectDraft, ProjectRenameDraft, VaultDraft,
-    VaultRenameDraft,
+    PaperDraft, PaperMetadataUpdate, ProjectDocument, ProjectDocumentDraft,
+    ProjectDocumentUpdate, ProjectDraft, ProjectRenameDraft, VaultDraft, VaultRenameDraft,
 };
 use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
@@ -269,6 +269,38 @@ pub fn delete_project(
     project_id: String,
 ) -> Result<LibrarySnapshot, String> {
     store.delete_project(&project_id)
+}
+
+#[tauri::command]
+pub fn create_project_document(
+    store: tauri::State<'_, LibraryStore>,
+    draft: ProjectDocumentDraft,
+) -> Result<ProjectDocument, String> {
+    store.create_project_document(&draft)
+}
+
+#[tauri::command]
+pub fn get_project_document(
+    store: tauri::State<'_, LibraryStore>,
+    document_id: String,
+) -> Result<ProjectDocument, String> {
+    store.get_project_document(&document_id)
+}
+
+#[tauri::command]
+pub fn update_project_document(
+    store: tauri::State<'_, LibraryStore>,
+    update: ProjectDocumentUpdate,
+) -> Result<ProjectDocument, String> {
+    store.update_project_document(&update)
+}
+
+#[tauri::command]
+pub fn delete_project_document(
+    store: tauri::State<'_, LibraryStore>,
+    document_id: String,
+) -> Result<(), String> {
+    store.delete_project_document(&document_id)
 }
 
 #[tauri::command]
