@@ -1,6 +1,6 @@
 # Today's RFC List
 
-Updated: 2026-08-28
+Updated: 2026-09-01
 
 This is the working index for active RFCs and older documents reviewed on
 2026-08-24.
@@ -14,23 +14,27 @@ This is the working index for active RFCs and older documents reviewed on
 
 ## Open
 
-1. [RFC 0107: Relevant research history for paper chats](rfcs/chat/0107-relevant-research-history-for-paper-chats.md)
+1. [RFC 0108: Project-scoped autonomous research harness](rfcs/projects/0108-project-scoped-autonomous-research-harness.md)
+   — establish Projects with one Vault, ordinary Project documents, and a
+   project-scoped Harness with typed Research State, Runs, and Activity; delivery
+   is split into focused follow-up RFCs.
+2. [RFC 0107: Relevant research history for paper chats](rfcs/chat/0107-relevant-research-history-for-paper-chats.md)
    — search same-paper notes and earlier conversations into each chat's bounded,
    inspectable context.
-2. [RFC 0087: Dead paths in vault surfaces](rfcs/frontend-and-mocking/0087-dead-paths-in-the-vault-surfaces.md)
+3. [RFC 0087: Dead paths in vault surfaces](rfcs/frontend-and-mocking/0087-dead-paths-in-the-vault-surfaces.md)
    — implement **Ask this vault**; the other sections have landed.
-3. [RFC 0088: Deep Research harness](rfcs/discovery/0088-deep-research-harness.md)
+4. [RFC 0088: Deep Research harness](rfcs/discovery/0088-deep-research-harness.md)
    — finish evaluation fixtures and decide which remaining harness tasks still
    justify implementation; browser candidate generation moves to RFC 0098.
 
 ## Defered
-4. [RFC 0089: Paper quiz](rfcs/study/0089-paper-quiz.md)
+5. [RFC 0089: Paper quiz](rfcs/study/0089-paper-quiz.md)
    — add paper-grounded quiz generation, grading, and quiz sessions.
-5. [RFC 0090: Paper references in notes](rfcs/reader/0090-paper-references-in-notes.md)
+6. [RFC 0090: Paper references in notes](rfcs/reader/0090-paper-references-in-notes.md)
    — finish the `[@` paper autocomplete interaction.
-6. [RFC 0092: Weekly digest](rfcs/study/0092-weekly-digest.md)
+7. [RFC 0092: Weekly digest](rfcs/study/0092-weekly-digest.md)
    — summarize the user's actual reading, notes, questions, and quiz activity.
-7. [RFC 0093: Study mode](rfcs/study/0093-study-mode.md)
+8. [RFC 0093: Study mode](rfcs/study/0093-study-mode.md)
    — define and implement the home for quizzes, digests, and learning history.
 
 ## Finished
