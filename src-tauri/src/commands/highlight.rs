@@ -14,7 +14,14 @@ pub async fn create_highlight(
     label: Option<String>,
 ) -> Result<Highlight, String> {
     service
-        .create_highlight(&paper_id, locator, &excerpt, color, label, HighlightAuthor::User)
+        .create_highlight(
+            &paper_id,
+            locator,
+            &excerpt,
+            color,
+            label,
+            HighlightAuthor::User,
+        )
         .await
 }
 

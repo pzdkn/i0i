@@ -136,7 +136,8 @@ pub fn query_budget_for_round(round: u32, base: u32) -> u32 {
 pub const BASE_QUERIES_PER_ROUND: u32 = 5;
 
 /// Running tally of what a run has consumed so far.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BudgetUsage {
     pub iterations: u32,
     pub provider_queries: u32,

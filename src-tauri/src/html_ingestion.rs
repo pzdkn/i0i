@@ -221,9 +221,10 @@ fn reference_labels(raw_html: &str) -> HashMap<String, String> {
 /// The numbered prefix of a caption — `"Figure 2: Stylized…"` → `"Figure 2"`.
 /// Captions without one (a bare description) give no usable reference label.
 fn caption_label(caption_text: &str) -> Option<String> {
-    let pattern =
-        Regex::new(r"^(Figure|Fig\.?|Table|Listing|Algorithm|Equation|Appendix)\s+([A-Za-z]?[\d.]+)")
-            .ok()?;
+    let pattern = Regex::new(
+        r"^(Figure|Fig\.?|Table|Listing|Algorithm|Equation|Appendix)\s+([A-Za-z]?[\d.]+)",
+    )
+    .ok()?;
     let captures = pattern.captures(caption_text)?;
     Some(format!(
         "{} {}",

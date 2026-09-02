@@ -36,7 +36,14 @@ impl HighlightService {
         author: HighlightAuthor,
     ) -> Result<Highlight, String> {
         self.store
-            .insert_highlight(paper_id, &locator, excerpt, color, label.as_deref(), &author)
+            .insert_highlight(
+                paper_id,
+                &locator,
+                excerpt,
+                color,
+                label.as_deref(),
+                &author,
+            )
             .map_err(|e| e.to_string())
     }
 
@@ -71,7 +78,9 @@ impl HighlightService {
     }
 
     pub async fn list(&self, paper_id: &str) -> Result<Vec<Highlight>, String> {
-        self.store.list_highlights(paper_id).map_err(|e| e.to_string())
+        self.store
+            .list_highlights(paper_id)
+            .map_err(|e| e.to_string())
     }
 
     /// List only the agent-authored highlights for a paper.
@@ -120,7 +129,14 @@ mod tests {
             y: 0.125,
         };
         let created = svc
-            .create_highlight(&paper, pdf_point.clone(), "", None, None, HighlightAuthor::User)
+            .create_highlight(
+                &paper,
+                pdf_point.clone(),
+                "",
+                None,
+                None,
+                HighlightAuthor::User,
+            )
             .await
             .expect("sticky created");
         assert_eq!(created.locator, pdf_point);
@@ -130,7 +146,14 @@ mod tests {
             offset: 4096,
         };
         let created = svc
-            .create_highlight(&paper, text_point.clone(), "", None, None, HighlightAuthor::User)
+            .create_highlight(
+                &paper,
+                text_point.clone(),
+                "",
+                None,
+                None,
+                HighlightAuthor::User,
+            )
             .await
             .expect("html sticky created");
         assert_eq!(created.locator, text_point);
@@ -207,6 +230,9 @@ mod tests {
 
         let agent_only = svc.list_agent(&paper).await.unwrap();
         assert_eq!(agent_only.len(), 1);
-        assert!(matches!(agent_only[0].author, HighlightAuthor::Agent { .. }));
+        assert!(matches!(
+            agent_only[0].author,
+            HighlightAuthor::Agent { .. }
+        ));
     }
 }

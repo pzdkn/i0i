@@ -430,9 +430,9 @@ impl PdfiumBasicAdapter {
                 height: f64::from(page_height),
             });
 
-            let text = page
-                .text()
-                .map_err(|error| format!("Pdfium could not read page {page_index} text: {error}"))?;
+            let text = page.text().map_err(|error| {
+                format!("Pdfium could not read page {page_index} text: {error}")
+            })?;
             let fragments = page_fragments(&text);
             let laid_out = group_page(&fragments, page_width, page_height);
 
@@ -445,8 +445,7 @@ impl PdfiumBasicAdapter {
                     source_offset += BLOCK_JOIN_CHARS;
                 }
 
-                let block_id =
-                    format!("{}:block:{page_index}:{block_index}", extraction.id);
+                let block_id = format!("{}:block:{page_index}:{block_index}", extraction.id);
                 let block_start = source_offset;
                 source_offset += layout.text.chars().count() as i64;
 

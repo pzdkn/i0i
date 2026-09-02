@@ -531,9 +531,7 @@ mod tests {
 
         assert_eq!(
             paths.first(),
-            Some(&PathBuf::from(
-                "/repo/src-tauri/resources/obscura/obscura"
-            ))
+            Some(&PathBuf::from("/repo/src-tauri/resources/obscura/obscura"))
         );
         assert!(paths.contains(&PathBuf::from(
             "/repo/src-tauri/target/debug/resources/obscura/obscura"

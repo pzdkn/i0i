@@ -1005,7 +1005,13 @@ mod tests {
     fn semantic_floor_drops_below_threshold_and_keeps_alignment() {
         // Six candidates so the min-keep guard (5) doesn't force-keep the loser.
         let candidates: Vec<PaperCandidate> = (0..6)
-            .map(|i| candidate(&format!("Paper {i}"), Some(&format!("10.1/{i}")), "openalex"))
+            .map(|i| {
+                candidate(
+                    &format!("Paper {i}"),
+                    Some(&format!("10.1/{i}")),
+                    "openalex",
+                )
+            })
             .collect();
         // Indices 0..5 clear the floor; index 5 is off-topic.
         let scores = vec![0.9, 0.8, 0.7, 0.6, 0.5, 0.10];
@@ -1020,7 +1026,13 @@ mod tests {
     fn semantic_floor_never_empties_below_min_keep() {
         // All below the floor: the guard keeps the top SEMANTIC_MIN_KEEP by score.
         let candidates: Vec<PaperCandidate> = (0..8)
-            .map(|i| candidate(&format!("Paper {i}"), Some(&format!("10.1/{i}")), "openalex"))
+            .map(|i| {
+                candidate(
+                    &format!("Paper {i}"),
+                    Some(&format!("10.1/{i}")),
+                    "openalex",
+                )
+            })
             .collect();
         let scores = vec![0.01, 0.02, 0.29, 0.28, 0.05, 0.10, 0.15, 0.20];
         let (kept, kept_scores) = apply_semantic_floor(candidates, scores);

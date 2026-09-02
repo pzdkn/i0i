@@ -225,9 +225,15 @@ pub fn get_reranker_status(
 
 /// Only allow writes to the known setting namespaces.
 fn is_allowed_key(key: &str) -> bool {
-    ["secret.", "model.", "search.", "acquisition.", "suggestions."]
-        .iter()
-        .any(|prefix| key.starts_with(prefix))
+    [
+        "secret.",
+        "model.",
+        "search.",
+        "acquisition.",
+        "suggestions.",
+    ]
+    .iter()
+    .any(|prefix| key.starts_with(prefix))
 }
 
 #[cfg(test)]

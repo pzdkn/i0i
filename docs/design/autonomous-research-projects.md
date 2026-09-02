@@ -657,23 +657,34 @@ checkpoint does not create a new Project or Vault.
 - A completed Run is a checkpoint.
 - Project forking and branching are outside the current design.
 
-## Open design questions
+## Resolved implementation decisions
 
-These decisions belong to focused follow-up RFCs:
+The focused delivery RFCs resolved the original open questions:
 
-1. Whether Markdown Documents are database-backed, filesystem-backed, or use a
-   database index over files.
-2. How scheduled Runs execute when the desktop app is closed.
-3. Which Research State changes Automatic mode may apply without review.
-4. How evidence locators reuse the existing extraction, chunk, and annotation
-   structures.
-5. How much of the Harness panel remains visible while reading a Paper versus
-   editing a Project document.
-6. How Research State revisions are stored efficiently without adopting full
-   event sourcing.
+1. Markdown Documents are database-backed ordinary Project artifacts.
+2. Schedules are local and execute only while i0i is open; startup performs at
+   most one bounded catch-up.
+3. Runs publish typed revisions through validated Research State mutations;
+   arbitrary authored documents are never silently overwritten.
+4. Evidence links snapshot canonical Paper/extraction/chunk provenance and the
+   cited excerpt so they remain auditable after rechunking.
+5. Research owns the full Details/Activity/Settings Harness inspector;
+   Documents and Reader keep their task-specific inspectors and navigation can
+   return to source Research State.
+6. Research State uses immutable numbered revisions plus a current head rather
+   than full event sourcing.
+7. Every new Run orients query planning from its immutable Research State,
+   previous next direction, and bounded operational observations; qualitative
+   context is explicitly labelled as non-evidence.
+8. Operational reflection is a validated part of production reconciliation,
+   so recurring live observations can create conservative review proposals.
+9. Search completion enters an active reconciliation phase; a Run becomes a
+   terminal checkpoint only after State, usage, and reflection reach the safe
+   boundary.
 
-## Delivery boundary
+## Delivery status
 
-This document is the design north star, not an instruction to implement the
-whole system at once. RFC 0108 records the decision and orders the required
-focused implementation RFCs.
+RFC 0108 and focused RFCs 0109–0122 implement this design. Automated Rust,
+frontend state, type-checking, and production-build verification passed on
+2026-09-02. The sandbox denied localhost binding during the final Tauri visual
+check, so screenshots must be captured in an ordinary desktop environment.

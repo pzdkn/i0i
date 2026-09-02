@@ -102,7 +102,9 @@ pub enum EmptyScope {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum SemanticStatus {
-    Ran { coverage: EmbeddingCoverage },
+    Ran {
+        coverage: EmbeddingCoverage,
+    },
     /// sqlite-vec or the embedding model is unavailable.
     Unavailable,
     NotRequested,
@@ -338,8 +340,16 @@ mod tests {
         let store = LibraryStore::for_test(dir.join("library.sqlite"));
         store.init().unwrap();
 
-        add_paper(&store, "attention-paper", "The attention mechanism scales well.");
-        add_paper(&store, "cooking-paper", "Braising requires low sustained heat.");
+        add_paper(
+            &store,
+            "attention-paper",
+            "The attention mechanism scales well.",
+        );
+        add_paper(
+            &store,
+            "cooking-paper",
+            "Braising requires low sustained heat.",
+        );
 
         Fixture { store, _dir: dir }
     }
@@ -412,7 +422,11 @@ mod tests {
                 })
                 .expect("ready extraction");
             for chunk in store.chunks_for_extraction(&extraction.id).unwrap() {
-                let axis = if chunk.text.contains("attention") { 0 } else { 1 };
+                let axis = if chunk.text.contains("attention") {
+                    0
+                } else {
+                    1
+                };
                 store
                     .save_chunk_embedding(
                         &chunk.id,
@@ -477,7 +491,14 @@ mod tests {
         for field in ["score", "chunk", "lexical", "semantic"] {
             assert!(hit.get(field).is_some(), "hit is missing {field}");
         }
-        for field in ["paperId", "pageStart", "pageEnd", "headingPath", "text", "blockIds"] {
+        for field in [
+            "paperId",
+            "pageStart",
+            "pageEnd",
+            "headingPath",
+            "text",
+            "blockIds",
+        ] {
             assert!(
                 hit["chunk"].get(field).is_some(),
                 "chunk is missing {field} — src/lib/domain/library.ts reads it"
@@ -516,7 +537,10 @@ mod tests {
         // The UI explains a hit from these, which is why they are not collapsed
         // into the single fused score.
         assert!(top.lexical.is_some(), "lexical matched 'attention'");
-        assert!(top.semantic.is_some(), "semantic matched the attention axis");
+        assert!(
+            top.semantic.is_some(),
+            "semantic matched the attention axis"
+        );
     }
 
     #[tokio::test]
@@ -553,7 +577,10 @@ mod tests {
 
         let response = service.search(req).await.expect("must not error");
         assert!(response.hits.is_empty());
-        assert_eq!(response.scope.empty_reason, Some(EmptyScope::NoIntersection));
+        assert_eq!(
+            response.scope.empty_reason,
+            Some(EmptyScope::NoIntersection)
+        );
     }
 
     #[tokio::test]

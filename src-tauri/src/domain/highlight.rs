@@ -141,7 +141,10 @@ mod tests {
 
     #[test]
     fn color_serdes_as_lowercase_name() {
-        assert_eq!(serde_json::to_string(&HighlightColor::Yellow).unwrap(), "\"yellow\"");
+        assert_eq!(
+            serde_json::to_string(&HighlightColor::Yellow).unwrap(),
+            "\"yellow\""
+        );
         assert_eq!(
             serde_json::from_str::<HighlightColor>("\"red\"").unwrap(),
             HighlightColor::Red

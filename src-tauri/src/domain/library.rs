@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::research_document::ProjectDocumentCitation;
+
 /// A goal-directed workspace that owns exactly one Vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +36,7 @@ pub struct ProjectDocumentSummary {
     pub title: String,
     pub format: String,
     pub harness_writable: bool,
+    pub content_revision: i64,
     pub updated_at: String,
 }
 
@@ -47,8 +50,12 @@ pub struct ProjectDocument {
     pub format: String,
     pub content: String,
     pub harness_writable: bool,
+    pub content_revision: i64,
     pub created_from_run_id: Option<String>,
     pub created_from_state_revision: Option<i64>,
+    pub generation_id: Option<String>,
+    pub output_shape: Option<String>,
+    pub citations: Vec<ProjectDocumentCitation>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -80,6 +87,7 @@ pub struct Vault {
     pub project_id: String,
     pub title: String,
     pub path: String,
+    pub membership_revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

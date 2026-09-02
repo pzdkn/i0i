@@ -14,12 +14,14 @@
     onSelectDocument,
     onLibraryChanged,
     onDirtyChange,
+    onViewResearchState,
   }: {
     project: ProjectWorkspace;
     selectedDocumentId: string;
     onSelectDocument: (documentId: string) => void;
     onLibraryChanged: (snapshot: LibrarySnapshot) => void;
     onDirtyChange: (dirty: boolean) => void;
+    onViewResearchState?: (revision: number) => void;
   } = $props();
 
   let document = $state<ProjectDocument | null>(null);
@@ -157,6 +159,23 @@
     {#if loading}
       <div class="empty-state">Loading document…</div>
     {:else if document}
+      {#if document.generationId && document.createdFromStateRevision !== null}
+        <aside class="origin-banner hair-b">
+          <div><strong>Generated from Research State revision {document.createdFromStateRevision}</strong><span>{document.outputShape?.replaceAll("_", " ")} · {document.citations.length} local citations · provenance retained after edits</span></div>
+          <button type="button" onclick={() => onViewResearchState?.(document?.createdFromStateRevision ?? 0)}>View source state</button>
+        </aside>
+        {#if document.citations.length}
+          <details class="citation-provenance hair-b">
+            <summary>Local citation provenance · {document.citations.length}</summary>
+            {#each document.citations as citation}
+              <article>
+                <strong>[{citation.citationKey}] {citation.titleSnapshot}</strong>
+                <span>{citation.authorsSnapshot.join(", ")} · {citation.yearSnapshot || "year unknown"} · {citation.evidenceLinkIds.length} evidence links · Paper {citation.paperId}</span>
+              </article>
+            {/each}
+          </details>
+        {/if}
+      {/if}
       <header class="editor-header row hair-b">
         <input bind:value={draftTitle} aria-label="Document title" />
         <span class:visible={dirty} class="dirty">unsaved</span>
@@ -198,6 +217,49 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  .origin-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px;
+    background: color-mix(in srgb, var(--amber) 8%, var(--bg-1));
+  }
+
+  .origin-banner div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .origin-banner span {
+    color: var(--fg-3);
+    font-size: 10px;
+    text-transform: capitalize;
+  }
+
+  .citation-provenance {
+    padding: 8px 12px;
+    background: var(--bg-1);
+  }
+
+  .citation-provenance article {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 7px 0;
+    color: var(--fg-2);
+  }
+
+  .citation-provenance article + article {
+    border-top: 1px solid var(--border-1);
+  }
+
+  .citation-provenance span {
+    color: var(--fg-3);
+    font-size: 10px;
   }
 
   header {

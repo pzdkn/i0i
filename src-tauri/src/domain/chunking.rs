@@ -239,8 +239,16 @@ impl ChunkBuilder {
             chunk_index,
             chunker: CHUNKER.to_string(),
             chunk_version: CHUNK_VERSION,
-            page_start: pieces.iter().map(|(block, _)| block.page_index).min().unwrap_or(0),
-            page_end: pieces.iter().map(|(block, _)| block.page_index).max().unwrap_or(0),
+            page_start: pieces
+                .iter()
+                .map(|(block, _)| block.page_index)
+                .min()
+                .unwrap_or(0),
+            page_end: pieces
+                .iter()
+                .map(|(block, _)| block.page_index)
+                .max()
+                .unwrap_or(0),
             heading_path: self.pending_heading.clone(),
             token_estimate: estimate_tokens(&text) as i32,
             text,

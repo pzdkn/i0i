@@ -113,36 +113,37 @@ impl ChunkEmbeddingWorker {
         };
 
         for _ in 0..MAX_BATCHES_PER_SWEEP {
-            let pending = match self
-                .store
-                .chunks_missing_embedding(MODEL_NAME, MODEL_VERSION, BATCH_SIZE)
-            {
-                Ok(pending) => pending,
-                Err(error) => {
-                    eprintln!("[embedding] could not read pending chunks: {error}");
-                    return outcome;
-                }
-            };
+            let pending =
+                match self
+                    .store
+                    .chunks_missing_embedding(MODEL_NAME, MODEL_VERSION, BATCH_SIZE)
+                {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        eprintln!("[embedding] could not read pending chunks: {error}");
+                        return outcome;
+                    }
+                };
             if pending.is_empty() {
                 break;
             }
 
             let texts: Vec<String> = pending.iter().map(|chunk| chunk.text.clone()).collect();
             let embedder = embedder.clone();
-            let embeddings =
-                match tokio::task::spawn_blocking(move || embedder.embed(&texts)).await {
-                    Ok(Ok(embeddings)) => embeddings,
-                    Ok(Err(error)) => {
-                        eprintln!("[embedding] batch failed, retrying next sweep: {error}");
-                        outcome.failed += pending.len();
-                        return outcome;
-                    }
-                    Err(error) => {
-                        eprintln!("[embedding] embed task panicked: {error}");
-                        outcome.failed += pending.len();
-                        return outcome;
-                    }
-                };
+            let embeddings = match tokio::task::spawn_blocking(move || embedder.embed(&texts)).await
+            {
+                Ok(Ok(embeddings)) => embeddings,
+                Ok(Err(error)) => {
+                    eprintln!("[embedding] batch failed, retrying next sweep: {error}");
+                    outcome.failed += pending.len();
+                    return outcome;
+                }
+                Err(error) => {
+                    eprintln!("[embedding] embed task panicked: {error}");
+                    outcome.failed += pending.len();
+                    return outcome;
+                }
+            };
 
             // A shape mismatch means we cannot trust which vector belongs to
             // which chunk. Writing them anyway would corrupt retrieval in a way
@@ -335,7 +336,8 @@ mod tests {
     #[tokio::test]
     async fn a_sweep_embeds_every_pending_chunk() {
         let (store, _dir) = store_with_chunks("sweep-paper");
-        let worker = ChunkEmbeddingWorker::new(store.clone(), Some(Arc::new(StubEmbedder::working())));
+        let worker =
+            ChunkEmbeddingWorker::new(store.clone(), Some(Arc::new(StubEmbedder::working())));
 
         let total = store
             .embedding_coverage("sweep-paper", MODEL_NAME, MODEL_VERSION)
@@ -388,9 +390,10 @@ mod tests {
             .expect("coverage");
         assert_eq!(coverage.embedded, 0);
 
-        let recovered = ChunkEmbeddingWorker::new(store.clone(), Some(Arc::new(StubEmbedder::working())))
-            .sweep()
-            .await;
+        let recovered =
+            ChunkEmbeddingWorker::new(store.clone(), Some(Arc::new(StubEmbedder::working())))
+                .sweep()
+                .await;
         assert_eq!(recovered.embedded, coverage.chunks as usize);
     }
 

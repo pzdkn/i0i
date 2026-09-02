@@ -92,7 +92,7 @@ impl BrowserCandidateSource {
         let limit = constraints.target_count.clamp(1, PER_QUERY_LIMIT) as usize;
         let candidates = self
             .source
-            .discover(&query.text, limit, &|progress| {
+            .discover_with_resolvers(&query.text, limit, &constraints.providers, &|progress| {
                 let progress = match progress {
                     BrowserDiscoveryProgress::SearchingWeb => SourceProgress::SearchingWeb,
                     BrowserDiscoveryProgress::Provisional(candidates) => {

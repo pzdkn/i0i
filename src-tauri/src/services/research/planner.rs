@@ -10,6 +10,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use crate::domain::discovery::{DiscoveryProviderChoice, PaperCandidate};
+use crate::domain::reconciliation::RunReconciliationPlan;
 use crate::domain::research::{RankedCandidate, SearchConstraints};
 use crate::domain::vault_suggestion::VaultSuggestionQueryPath;
 use crate::services::llm::{self, CompletionRequest, WireMessage};
@@ -94,6 +95,7 @@ pub struct Reflection {
 
 /// Room for a JSON object holding a handful of queries, and no more.
 const PLANNER_MAX_TOKENS: u32 = 1_024;
+const RECONCILIATION_MAX_TOKENS: u32 = 8_192;
 
 #[async_trait]
 pub trait Planner: Send + Sync {
@@ -238,6 +240,15 @@ impl OpenRouterPlanner {
     }
 
     async fn send(&self, system: &str, user: &str) -> Result<String, ResearchError> {
+        self.send_bounded(system, user, PLANNER_MAX_TOKENS).await
+    }
+
+    async fn send_bounded(
+        &self,
+        system: &str,
+        user: &str,
+        maximum_tokens: u32,
+    ) -> Result<String, ResearchError> {
         let request = CompletionRequest {
             model: self.model.clone(),
             messages: vec![
@@ -248,7 +259,7 @@ impl OpenRouterPlanner {
             // A planner reply is a small JSON object of queries. Unset,
             // OpenRouter reserves the model's full completion ceiling and can
             // 402 a request that would have cost a fraction of a cent.
-            max_tokens: Some(PLANNER_MAX_TOKENS),
+            max_tokens: Some(maximum_tokens),
             response_format: None,
             tools: None,
             tool_choice: None,
@@ -270,6 +281,26 @@ impl OpenRouterPlanner {
         let parsed: SuggestionQueriesResponse = serde_json::from_value(value)
             .map_err(|error| ResearchError::new(format!("suggestion query shape: {error}")))?;
         normalize_suggestion_queries(parsed.queries, count)
+    }
+
+    /// Produces a typed Project change plan from an immutable bounded Run packet.
+    pub async fn reconcile(
+        &self,
+        prompt: &str,
+        validation_error: Option<&str>,
+    ) -> Result<RunReconciliationPlan, ResearchError> {
+        let user = match validation_error {
+            Some(error) => format!(
+                "{prompt}\n\nThe previous plan failed validation: {error}. Correct the plan and return one JSON object only."
+            ),
+            None => prompt.to_string(),
+        };
+        let raw = self
+            .send_bounded(RECONCILIATION_SYSTEM, &user, RECONCILIATION_MAX_TOKENS)
+            .await?;
+        let value = extract_json_object(&raw)?;
+        serde_json::from_value(value)
+            .map_err(|error| ResearchError::new(format!("reconciliation shape: {error}")))
     }
 }
 
@@ -295,6 +326,28 @@ const RANK_SYSTEM: &str = "You rank candidate papers by fit to the goal. You are
 numbered list; reply with a single JSON object {\"ranked\":[{\"index\":N,\"score\":0..1,\
 \"rationale\":\"one line\"}]} referencing only the given indices, best first. Never invent \
 papers. No prose.";
+
+const RECONCILIATION_SYSTEM: &str = "You reconcile one bounded scholarly search into a typed \
+research plan. Use every supplied candidateId exactly once in candidateDecisions. Each decision \
+has decision accept|reject, a concise reason, relevanceConfidence 0..1, and withinScope. Never \
+accept an out-of-scope candidate. Proposed entries have a unique handle, kind \
+finding|question|gap|hypothesis|experiment_idea, epistemicStatus \
+source_supported|agent_synthesis|speculative, text, evidence, and relations. Evidence may appear \
+only on source_supported findings, references an accepted candidateId, and its excerpt must be an \
+exact substring of that candidate's supplied abstract. Agent synthesis must derive_from another \
+existing entry id or proposed handle. Gaps must explicitly say they are inferred from this bounded \
+search. Hypotheses and experiment ideas are speculative. Relationships use derived_from or \
+motivated_by. Return a single JSON object with candidateDecisions, entries, and nextDirection. \
+Also return operationalReflection with summary, optional nextDirection, and observations derived \
+only from the supplied Run telemetry and candidate decisions. Each observation has kind \
+query_quality|irrelevant_result_class|source_failure|terminology|coverage_bias|relevance_error|scope_drift|wasted_work, \
+signature, severity 0..1, confidence 0..1, description, proposalEligible, and optional target plus \
+proposedValue. Allowed targets are preferred_concepts or excluded_concepts with \
+{\"kind\":\"concepts\",\"items\":[...]}, or metadata_resolvers with \
+{\"kind\":\"metadata_resolvers\",\"items\":[\"open_alex\",\"arxiv\"]}. Omit target and \
+proposedValue unless proposing an exact reviewable change. Never propose goal, policy, schedule, \
+budget, autonomy, stop, or document-permission changes. Never invent handles, papers, quotations, \
+telemetry, or researcher context. No prose.";
 
 #[async_trait]
 impl Planner for OpenRouterPlanner {

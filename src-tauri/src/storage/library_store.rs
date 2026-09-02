@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
@@ -14,6 +15,18 @@ use crate::domain::chat::{
 use crate::domain::chunking::{chunk_blocks, CHUNK_VERSION};
 use crate::domain::context::{ContextItem, ContextItemDraft, ContextKey, PageRects};
 use crate::domain::discovery::PaperCandidate;
+use crate::domain::harness::{
+    next_schedule_occurrence, render_harness_search_goal, DueHarnessClaim,
+    EffectiveInstructionStack, EffectiveRunContext, HarnessAutonomy, HarnessConfiguration,
+    HarnessConfigurationVersion, HarnessEvent, HarnessRun, HarnessRunTrigger, HarnessSnapshot,
+    HarnessUsage, ResearchCheckpoint, ResearchHarness, RunContextEntry, RunContextObservation,
+    HARNESS_POLICY_SUMMARY, HARNESS_POLICY_VERSION,
+};
+use crate::domain::harness_improvement::{
+    HarnessImprovement, HarnessImprovementStatus, HarnessImprovementTarget,
+    HarnessImprovementValue, HarnessObservation, HarnessObservationDraft, HarnessObservationKind,
+    HarnessReflection, HarnessReflectionDraft, PROPOSAL_POLICY_VERSION, REFLECTION_POLICY_VERSION,
+};
 use crate::domain::library::{
     CiteRecord, DocumentAsset, DocumentBlock, DocumentChunk, DocumentExtraction, DocumentPage,
     DocumentSource, DocumentSpan, EmbeddingCoverage, ExtractionStructure, LibrarySnapshot, Paper,
@@ -21,15 +34,31 @@ use crate::domain::library::{
     ProjectDocument, ProjectDocumentDraft, ProjectDocumentSummary, ProjectDocumentUpdate,
     ProjectDraft, ProjectRenameDraft, Vault, VaultDraft, VaultPaper, VaultRenameDraft,
 };
+use crate::domain::reconciliation::{
+    CandidateDecisionKind, HarnessChangeSet, HarnessChangeSetStatus, ReconciliationTelemetry,
+    RunReconciliationPlan,
+};
 use crate::domain::research::{
     candidate_dedup_key, RankedCandidate, Search, SearchCandidate, SearchDraft, SearchRun,
     SearchRunStatus,
+};
+use crate::domain::research_document::{
+    CreateFromResearchRequest, ProjectDocumentCitation, ResearchDocumentGeneration,
+    ResearchDocumentShape, DOCUMENT_GENERATION_POLICY_VERSION,
+};
+use crate::domain::research_state::{
+    EntryLifecycle, EntryRelation, EntryRelationDraft, EntryRelationKind, EpistemicStatus,
+    EvidenceLinkDraft, ResearchContextKind, ResearchContextLink, ResearchContextLinkDraft,
+    ResearchEntryDetail, ResearchEntryDraft, ResearchEntryKind, ResearchEntrySummary,
+    ResearchEntryUpdate, ResearchEntryVersion, ResearchEvidenceCandidate, ResearchEvidenceLink,
+    ResearchStateMutation, ResearchStateRevision, ResearchStateSnapshot,
 };
 use crate::domain::vault_suggestion::{
     VaultSuggestion, VaultSuggestionOptions, VaultSuggestionQueryPath, VaultSuggestionRun,
     VaultSuggestionSnapshot,
 };
 use crate::pdf_layout::NormRect;
+use crate::services::research::reconciliation::{ordered_entries, validate_reconciliation_plan};
 
 type StoreResult<T> = Result<T, String>;
 
@@ -96,6 +125,9 @@ impl LibraryStore {
         let mut conn = self.open_connection()?;
         self.create_schema(&conn)?;
         migrate_vaults_to_projects(&mut conn)?;
+        migrate_projects_to_harnesses(&mut conn)?;
+        migrate_harness_authority_and_versions(&mut conn)?;
+        migrate_projects_to_research_state(&mut conn)?;
         // Legacy chat first (it guards on "no threads yet"), then notes — which
         // may reuse the whole-paper threads the chat migration just created.
         migrate_chat_messages_to_threads(&mut conn)?;
@@ -1464,6 +1496,8 @@ impl LibraryStore {
             params![project_id, title, draft.goal],
         )
         .map_err(|error| project_create_error(error, &title, &normalized))?;
+        insert_default_harness(&tx, &project_id)?;
+        insert_initial_research_state(&tx, &project_id)?;
         tx.execute(
             "insert into vaults (id, project_id, title, path, created_at, updated_at)
              values (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))",
@@ -1580,6 +1614,2271 @@ impl LibraryStore {
             return Err(format!("Project document not found: {document_id}"));
         }
         Ok(())
+    }
+
+    /// Queues a generation against one exact Research State revision.
+    pub fn create_research_document_generation(
+        &self,
+        request: &CreateFromResearchRequest,
+        retry_of_id: Option<&str>,
+    ) -> StoreResult<ResearchDocumentGeneration> {
+        validate_generation_request(self, request)?;
+        let mut selected = request.selected_entry_ids.clone();
+        selected.sort();
+        selected.dedup();
+        let fingerprint_source = serde_json::to_string(&(
+            request.project_id.as_str(),
+            request.state_revision,
+            &selected,
+            request.shape.as_str(),
+            request.title.trim(),
+            request.custom_instruction.as_deref().map(str::trim),
+            request.include_non_active,
+        ))
+        .map_err(|error| error.to_string())?;
+        let fingerprint = short_sha256(&fingerprint_source);
+        let id = timestamped_id("research_document_generation")?;
+        let conn = self.open_connection()?;
+        conn.execute(
+            "insert into research_document_generations
+             (id, project_id, status, shape, title, custom_instruction,
+              state_revision, selected_entry_ids_json, include_non_active,
+              originating_run_id, policy_version, model_identifier, retry_of_id,
+              request_fingerprint, created_at)
+             values (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                     'deterministic-template-v1', ?11, ?12, datetime('now'))",
+            params![
+                id,
+                request.project_id,
+                request.shape.as_str(),
+                request.title.trim(),
+                request.custom_instruction.as_deref().map(str::trim),
+                request.state_revision,
+                serde_json::to_string(&selected).map_err(|error| error.to_string())?,
+                request.include_non_active,
+                request.originating_run_id,
+                DOCUMENT_GENERATION_POLICY_VERSION,
+                retry_of_id,
+                fingerprint
+            ],
+        )
+        .map_err(|error| {
+            if error.to_string().contains("request_fingerprint") {
+                "An identical research document generation is already active".to_string()
+            } else {
+                error.to_string()
+            }
+        })?;
+        read_research_document_generation(&conn, &id)
+    }
+
+    /// Loads one generation attempt by its durable id.
+    pub fn get_research_document_generation(
+        &self,
+        generation_id: &str,
+    ) -> StoreResult<ResearchDocumentGeneration> {
+        let conn = self.open_connection()?;
+        read_research_document_generation(&conn, generation_id)
+    }
+
+    /// Cancels a queued job immediately or flags a generating job to stop.
+    pub fn cancel_research_document_generation(
+        &self,
+        generation_id: &str,
+    ) -> StoreResult<ResearchDocumentGeneration> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update research_document_generations
+             set cancellation_requested = 1,
+                 status = case when status = 'queued' then 'cancelled' else status end,
+                 finished_at = case when status = 'queued' then datetime('now') else finished_at end
+             where id = ?1 and status in ('queued', 'generating')",
+            params![generation_id],
+        )
+        .map_err(|error| error.to_string())?;
+        read_research_document_generation(&conn, generation_id)
+    }
+
+    /// Creates a new immutable attempt from a failed or cancelled request.
+    pub fn retry_research_document_generation(
+        &self,
+        generation_id: &str,
+    ) -> StoreResult<ResearchDocumentGeneration> {
+        let prior = self.get_research_document_generation(generation_id)?;
+        if !matches!(prior.status.as_str(), "failed" | "cancelled") {
+            return Err("Only failed or cancelled generation may be retried".to_string());
+        }
+        self.create_research_document_generation(
+            &CreateFromResearchRequest {
+                project_id: prior.project_id,
+                state_revision: prior.state_revision,
+                selected_entry_ids: prior.selected_entry_ids,
+                shape: prior.shape,
+                title: prior.title,
+                custom_instruction: prior.custom_instruction,
+                originating_run_id: prior.originating_run_id,
+                include_non_active: prior.include_non_active,
+            },
+            Some(generation_id),
+        )
+    }
+
+    /// Renders, validates, and atomically creates the ordinary Markdown document.
+    pub fn execute_research_document_generation(
+        &self,
+        generation_id: &str,
+    ) -> StoreResult<ResearchDocumentGeneration> {
+        let generation = self.get_research_document_generation(generation_id)?;
+        if generation.status == "cancelled" || generation.cancellation_requested {
+            return Ok(generation);
+        }
+        if generation.status != "queued" {
+            return Err("Research document generation is not queued".to_string());
+        }
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "update research_document_generations set status = 'generating',
+             started_at = datetime('now') where id = ?1 and status = 'queued'",
+            params![generation_id],
+        )
+        .map_err(|error| error.to_string())?;
+        let cancellation_requested: bool = tx
+            .query_row(
+                "select cancellation_requested from research_document_generations where id = ?1",
+                params![generation_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if cancellation_requested {
+            tx.execute(
+                "update research_document_generations set status = 'cancelled',
+                 finished_at = datetime('now') where id = ?1",
+                params![generation_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+            return self.get_research_document_generation(generation_id);
+        }
+
+        let mut entries = Vec::new();
+        for entry_id in &generation.selected_entry_ids {
+            let detail = read_research_entry_detail_from_conn(
+                &tx,
+                entry_id,
+                Some(generation.state_revision),
+            )?;
+            if detail.entry.project_id != generation.project_id {
+                return Err("Selected Research Entry crossed the Project boundary".to_string());
+            }
+            if detail.entry.lifecycle != EntryLifecycle::Active && !generation.include_non_active {
+                continue;
+            }
+            entries.push(detail);
+        }
+        if entries.is_empty() {
+            return Err("No eligible Research Entries remain for generation".to_string());
+        }
+        let (content, citations) = render_research_document(&tx, &generation, &entries)?;
+        validate_generated_document(&content, &entries, &citations)?;
+        let document_id = timestamped_id("project_document")?;
+        tx.execute(
+            "insert into project_documents
+             (id, project_id, title, format, content, harness_writable,
+              created_from_run_id, created_from_state_revision, generation_id,
+              output_shape, created_at, updated_at)
+             values (?1, ?2, ?3, 'markdown', ?4, 0, ?5, ?6, ?7, ?8,
+                     datetime('now'), datetime('now'))",
+            params![
+                document_id,
+                generation.project_id,
+                generation.title,
+                content,
+                generation.originating_run_id,
+                generation.state_revision,
+                generation.id,
+                generation.shape.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        for citation in &citations {
+            tx.execute(
+                "insert into project_document_citations
+                 (document_id, citation_key, paper_id, evidence_link_ids_json,
+                  title_snapshot, authors_snapshot_json, year_snapshot, created_at)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+                params![
+                    document_id,
+                    citation.citation_key,
+                    citation.paper_id,
+                    serde_json::to_string(&citation.evidence_link_ids)
+                        .map_err(|error| error.to_string())?,
+                    citation.title_snapshot,
+                    serde_json::to_string(&citation.authors_snapshot)
+                        .map_err(|error| error.to_string())?,
+                    citation.year_snapshot
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.execute(
+            "update research_document_generations set status = 'ready',
+             resulting_document_id = ?2, input_entry_count = ?3, citation_count = ?4,
+             finished_at = datetime('now') where id = ?1",
+            params![
+                generation_id,
+                document_id,
+                entries.len() as i64,
+                citations.len() as i64
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_control_event(
+            &tx,
+            &generation.project_id,
+            "research_document_created",
+            &format!(
+                "Created {} from Research State revision {} using {} entries",
+                generation.shape.as_str(),
+                generation.state_revision,
+                entries.len()
+            ),
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_research_document_generation(generation_id)
+    }
+
+    /// Records a bounded caller-visible failure on an unfinished attempt.
+    pub fn fail_research_document_generation(
+        &self,
+        generation_id: &str,
+        error: &str,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update research_document_generations set status = 'failed', error = ?2,
+             finished_at = datetime('now') where id = ?1 and status in ('queued','generating')",
+            params![generation_id, error.chars().take(1_000).collect::<String>()],
+        )
+        .map_err(|cause| cause.to_string())?;
+        Ok(())
+    }
+
+    /// Loads current Harness configuration together with Run and Activity history.
+    pub fn get_harness_snapshot(&self, project_id: &str) -> StoreResult<HarnessSnapshot> {
+        let conn = self.open_connection()?;
+        let harness = read_research_harness(&conn, project_id)?
+            .ok_or_else(|| format!("Research Harness not found for Project: {project_id}"))?;
+        Ok(HarnessSnapshot {
+            harness,
+            runs: read_harness_runs(&conn, project_id)?,
+            events: read_harness_events_for_project(&conn, project_id)?,
+        })
+    }
+
+    /// Lists immutable Harness configuration versions newest first.
+    pub fn list_harness_configuration_versions(
+        &self,
+        project_id: &str,
+    ) -> StoreResult<Vec<HarnessConfigurationVersion>> {
+        let conn = self.open_connection()?;
+        read_harness_configuration_versions(&conn, project_id)
+    }
+
+    /// Loads the immutable effective instruction stack captured for one Run.
+    pub fn get_harness_run_instructions(
+        &self,
+        run_id: &str,
+    ) -> StoreResult<EffectiveInstructionStack> {
+        let conn = self.open_connection()?;
+        read_harness_run(&conn, run_id).map(|run| run.effective_instructions)
+    }
+
+    /// Loads the immutable audit checkpoint assembled from persisted Run records.
+    pub fn get_research_checkpoint(&self, run_id: &str) -> StoreResult<ResearchCheckpoint> {
+        let conn = self.open_connection()?;
+        read_research_checkpoint(&conn, run_id)
+    }
+
+    /// Lists persisted Run checkpoints newest first for one Project.
+    pub fn list_research_checkpoints(
+        &self,
+        project_id: &str,
+    ) -> StoreResult<Vec<ResearchCheckpoint>> {
+        let conn = self.open_connection()?;
+        let runs = read_harness_runs(&conn, project_id)?;
+        runs.iter()
+            .map(|run| read_research_checkpoint(&conn, &run.id))
+            .collect()
+    }
+
+    /// Restores Research State by appending a new revision; no history is rewound.
+    pub fn restore_research_checkpoint(
+        &self,
+        project_id: &str,
+        run_id: &str,
+        expected_current_revision: i64,
+    ) -> StoreResult<ResearchStateSnapshot> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let run = read_harness_run(&tx, run_id)?;
+        if run.project_id != project_id {
+            return Err("Research checkpoint does not belong to the active Project".to_string());
+        }
+        if !matches!(run.status.as_str(), "ready" | "failed" | "cancelled") {
+            return Err("Only a terminal Research Run checkpoint may be restored".to_string());
+        }
+        let target_revision = run.resulting_state_revision.ok_or_else(|| {
+            "This Research Run has no resulting Research State revision to restore".to_string()
+        })?;
+        require_current_state_revision(&tx, &run.project_id, expected_current_revision)?;
+        let target = read_research_state(&tx, &run.project_id, Some(target_revision))?;
+        let current = read_research_state(&tx, &run.project_id, Some(expected_current_revision))?;
+        let target_active: std::collections::HashSet<String> = target
+            .entries
+            .iter()
+            .filter(|entry| entry.lifecycle == EntryLifecycle::Active)
+            .map(|entry| entry.id.clone())
+            .collect();
+        let next_revision = expected_current_revision + 1;
+        insert_state_revision(
+            &tx,
+            &run.project_id,
+            next_revision,
+            None,
+            &format!("Restored Research State from checkpoint {run_id}"),
+        )?;
+
+        for entry in target
+            .entries
+            .iter()
+            .filter(|entry| entry.lifecycle == EntryLifecycle::Active)
+        {
+            let detail =
+                read_research_entry_detail_from_conn(&tx, &entry.id, Some(target_revision))?;
+            let draft = research_entry_draft_from_detail(
+                &detail,
+                &format!("Restored from checkpoint {run_id}"),
+            );
+            validate_research_entry_draft(&tx, &run.project_id, &draft)?;
+            insert_research_entry_version(
+                &tx,
+                &entry.id,
+                &run.project_id,
+                next_revision,
+                EntryLifecycle::Active,
+                None,
+                &draft,
+            )?;
+            tx.execute(
+                "update research_entries set kind = ?2, epistemic_status = ?3, text = ?4,
+                 lifecycle = 'active', last_revision = ?5, updated_at = datetime('now')
+                 where id = ?1 and project_id = ?6",
+                params![
+                    entry.id,
+                    entry.kind.as_str(),
+                    entry.epistemic_status.as_str(),
+                    entry.text,
+                    next_revision,
+                    run.project_id
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        let superseded_ids: Vec<String> = current
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.lifecycle == EntryLifecycle::Active && !target_active.contains(&entry.id)
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        for entry_id in &superseded_ids {
+            let detail = read_research_entry_detail_from_conn(
+                &tx,
+                entry_id,
+                Some(expected_current_revision),
+            )?;
+            let draft = research_entry_draft_from_detail(
+                &detail,
+                &format!("Superseded by checkpoint restoration {run_id}"),
+            );
+            validate_research_entry_draft(&tx, &run.project_id, &draft)?;
+            insert_research_entry_version(
+                &tx,
+                entry_id,
+                &run.project_id,
+                next_revision,
+                EntryLifecycle::Superseded,
+                None,
+                &draft,
+            )?;
+            tx.execute(
+                "update research_entries set lifecycle = 'superseded', last_revision = ?2,
+                 updated_at = datetime('now') where id = ?1 and project_id = ?3",
+                params![entry_id, next_revision, run.project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        set_current_state_revision(&tx, &run.project_id, next_revision)?;
+        append_structured_harness_event(
+            &tx,
+            run_id,
+            "checkpoint_restored",
+            &format!("Restored Research State as revision {next_revision}"),
+            Some(serde_json::json!({
+                "checkpointStateRevision": target_revision,
+                "previousCurrentRevision": expected_current_revision,
+                "resultingRevision": next_revision,
+                "supersededEntryIds": superseded_ids,
+            })),
+            Some("restoration"),
+            None,
+            None,
+            "researcher",
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_research_state(&run.project_id, None)
+    }
+
+    /// Finds the Project Harness Run linked to a concrete Deep Research Run.
+    pub fn get_harness_run_for_search_run(
+        &self,
+        search_run_id: &str,
+    ) -> StoreResult<Option<HarnessRun>> {
+        let conn = self.open_connection()?;
+        let harness_run_id: Option<String> = conn
+            .query_row(
+                "select id from harness_runs where search_run_id = ?1",
+                params![search_run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        harness_run_id
+            .map(|id| read_harness_run(&conn, &id))
+            .transpose()
+    }
+
+    /// Records bounded structured progress when a Search Run belongs to a Harness Run.
+    pub fn record_harness_search_progress(
+        &self,
+        search_run_id: &str,
+        kind: &str,
+        summary: &str,
+        detail: Option<serde_json::Value>,
+        phase: Option<&str>,
+        progress_current: Option<i64>,
+        progress_total: Option<i64>,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let harness_run_id = conn
+            .query_row(
+                "select id from harness_runs where search_run_id = ?1",
+                params![search_run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(harness_run_id) = harness_run_id {
+            append_structured_harness_event(
+                &conn,
+                &harness_run_id,
+                kind,
+                summary,
+                detail,
+                phase,
+                progress_current,
+                progress_total,
+                "harness",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Lists only candidates first produced by this Harness Run's linked search Run.
+    pub fn harness_reconciliation_candidates(
+        &self,
+        run_id: &str,
+    ) -> StoreResult<Vec<SearchCandidate>> {
+        let conn = self.open_connection()?;
+        let run = read_harness_run(&conn, run_id)?;
+        let search_run_id = run
+            .search_run_id
+            .as_deref()
+            .ok_or_else(|| "Research Run has no linked search Run".to_string())?;
+        let candidates = self.list_search_candidates(&run.search_id)?;
+        Ok(candidates
+            .into_iter()
+            .filter(|candidate| candidate.first_seen_run_id == search_run_id)
+            .collect())
+    }
+
+    /// Returns bounded persisted telemetry for operational reflection.
+    pub fn harness_reconciliation_telemetry(
+        &self,
+        run_id: &str,
+    ) -> StoreResult<ReconciliationTelemetry> {
+        let conn = self.open_connection()?;
+        let run = read_harness_run(&conn, run_id)?;
+        let search_run_id = run
+            .search_run_id
+            .as_deref()
+            .ok_or_else(|| "Research Run has no linked Search Run".to_string())?;
+        let query_expansions: Option<String> = conn
+            .query_row(
+                "select query_expansions from search_runs where id = ?1",
+                params![search_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let executed_queries = query_expansions
+            .as_deref()
+            .map(serde_json::from_str::<Vec<String>>)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default()
+            .into_iter()
+            .take(50)
+            .map(|query| query.chars().take(500).collect())
+            .collect();
+        let (provider_completions, provider_failures): (u32, u32) = conn
+            .query_row(
+                "select
+                   sum(case when kind = 'provider_query_completed' then 1 else 0 end),
+                   sum(case when kind = 'provider_query_failed' then 1 else 0 end)
+                 from harness_events where run_id = ?1",
+                params![run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<u32>>(0)?.unwrap_or(0),
+                        row.get::<_, Option<u32>>(1)?.unwrap_or(0),
+                    ))
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(ReconciliationTelemetry {
+            executed_queries,
+            provider_completions,
+            provider_failures,
+            provider_queries: run.provider_query_count,
+            llm_calls: run.llm_call_count,
+            iterations: run.iteration_count,
+            inspected_candidates: run.inspected_candidate_count,
+            stop_reason: run.stop_reason,
+        })
+    }
+
+    /// Persists one validated immutable reconciliation plan for a ready Run.
+    pub fn create_harness_change_set(
+        &self,
+        run_id: &str,
+        plan: &RunReconciliationPlan,
+    ) -> StoreResult<HarnessChangeSet> {
+        let candidates = self.harness_reconciliation_candidates(run_id)?;
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let run = read_harness_run(&tx, run_id)?;
+        if !matches!(run.status.as_str(), "reconciling" | "ready") {
+            return Err(
+                "Only a reconciling or ready Research Run may create a Change Set".to_string(),
+            );
+        }
+        validate_reconciliation_plan(plan, &run.effective_instructions, &candidates)?;
+        let id = timestamped_id("harness_change_set")?;
+        tx.execute(
+            "insert into harness_change_sets (
+               id, run_id, project_id, starting_state_revision, status, plan_json,
+               considered_candidates_json, created_at
+             ) values (?1, ?2, ?3, ?4, 'proposed', ?5, ?6, datetime('now'))",
+            params![
+                id,
+                run.id,
+                run.project_id,
+                run.starting_state_revision,
+                serde_json::to_string(plan).map_err(|error| error.to_string())?,
+                serde_json::to_string(&candidates).map_err(|error| error.to_string())?
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(
+            &tx,
+            run_id,
+            "change_set_proposed",
+            &format!(
+                "Prepared {} candidate decisions and {} Research State entries",
+                plan.candidate_decisions.len(),
+                plan.entries.len()
+            ),
+        )?;
+        for decision in &plan.candidate_decisions {
+            append_structured_harness_event(
+                &tx,
+                run_id,
+                "candidate_decided",
+                &format!("Candidate {}", decision.decision.as_str()),
+                Some(serde_json::json!({
+                    "candidateId": decision.candidate_id,
+                    "decision": decision.decision.as_str(),
+                    "reason": decision.reason,
+                    "relevanceConfidence": decision.relevance_confidence,
+                    "withinScope": decision.within_scope,
+                })),
+                Some("reconciliation"),
+                None,
+                None,
+                "harness",
+            )?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_harness_change_set(run_id)
+    }
+
+    /// Records an explicit terminal reconciliation failure without Project mutation.
+    pub fn fail_harness_reconciliation(
+        &self,
+        run_id: &str,
+        error: &str,
+    ) -> StoreResult<HarnessChangeSet> {
+        let candidates = self.harness_reconciliation_candidates(run_id)?;
+        let conn = self.open_connection()?;
+        let run = read_harness_run(&conn, run_id)?;
+        let id = timestamped_id("harness_change_set")?;
+        conn.execute(
+            "insert into harness_change_sets (
+               id, run_id, project_id, starting_state_revision, status, plan_json,
+               considered_candidates_json, error, created_at, decided_at
+             ) values (?1, ?2, ?3, ?4, 'failed', null, ?5, ?6, datetime('now'), datetime('now'))",
+            params![
+                id,
+                run.id,
+                run.project_id,
+                run.starting_state_revision,
+                serde_json::to_string(&candidates).map_err(|value| value.to_string())?,
+                error.chars().take(2_000).collect::<String>()
+            ],
+        )
+        .map_err(|value| value.to_string())?;
+        append_harness_event(
+            &conn,
+            run_id,
+            "reconciliation_failed",
+            "Research reconciliation failed validation; no Project changes were made",
+        )?;
+        self.get_harness_change_set(run_id)
+    }
+
+    /// Loads the Change Set associated one-to-one with a Harness Run.
+    pub fn get_harness_change_set(&self, run_id: &str) -> StoreResult<HarnessChangeSet> {
+        let conn = self.open_connection()?;
+        read_harness_change_set_by_run(&conn, run_id)
+    }
+
+    /// Rejects a proposed Change Set while retaining its full plan and candidates.
+    pub fn reject_harness_change_set(
+        &self,
+        id: &str,
+        reason: &str,
+    ) -> StoreResult<HarnessChangeSet> {
+        if reason.trim().is_empty() || reason.trim().chars().count() > 1_000 {
+            return Err(
+                "Change Set rejection requires a reason of at most 1000 characters".to_string(),
+            );
+        }
+        let conn = self.open_connection()?;
+        let current = read_harness_change_set(&conn, id)?;
+        if current.status != HarnessChangeSetStatus::Proposed {
+            return Err("Only a proposed Change Set may be rejected".to_string());
+        }
+        conn.execute(
+            "update harness_change_sets set status = 'rejected', decision_reason = ?2,
+             decided_at = datetime('now') where id = ?1 and status = 'proposed'",
+            params![id, reason.trim()],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(
+            &conn,
+            &current.run_id,
+            "change_set_rejected",
+            "Researcher rejected the proposed Project changes",
+        )?;
+        read_harness_change_set(&conn, id)
+    }
+
+    /// Revalidates and replaces the bounded plan while it still awaits review.
+    pub fn edit_harness_change_set(
+        &self,
+        id: &str,
+        plan: &RunReconciliationPlan,
+    ) -> StoreResult<HarnessChangeSet> {
+        let conn = self.open_connection()?;
+        let current = read_harness_change_set(&conn, id)?;
+        if current.status != HarnessChangeSetStatus::Proposed {
+            return Err("Only a proposed Change Set may be edited".to_string());
+        }
+        let run = read_harness_run(&conn, &current.run_id)?;
+        validate_reconciliation_plan(
+            plan,
+            &run.effective_instructions,
+            &current.considered_candidates,
+        )?;
+        conn.execute(
+            "update harness_change_sets set plan_json = ?2 where id = ?1",
+            params![
+                id,
+                serde_json::to_string(plan).map_err(|error| error.to_string())?
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(
+            &conn,
+            &current.run_id,
+            "change_set_edited",
+            "Researcher edited and revalidated the proposed Project changes",
+        )?;
+        read_harness_change_set(&conn, id)
+    }
+
+    /// Atomically applies one validated Change Set within its snapshotted authority.
+    pub fn apply_harness_change_set(&self, id: &str) -> StoreResult<HarnessChangeSet> {
+        match self.apply_harness_change_set_transaction(id) {
+            Ok(change_set) => Ok(change_set),
+            Err(error) => {
+                let conn = self.open_connection()?;
+                if let Ok(current) = read_harness_change_set(&conn, id) {
+                    if current.status == HarnessChangeSetStatus::Proposed {
+                        conn.execute(
+                            "update harness_change_sets set status = 'failed', error = ?2,
+                             decided_at = datetime('now') where id = ?1 and status = 'proposed'",
+                            params![id, error.chars().take(2_000).collect::<String>()],
+                        )
+                        .map_err(|value| value.to_string())?;
+                        append_harness_event(
+                            &conn,
+                            &current.run_id,
+                            "change_set_failed",
+                            "Project changes failed validation or persistence and were rolled back",
+                        )?;
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_harness_change_set_transaction(&self, id: &str) -> StoreResult<HarnessChangeSet> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let current = read_harness_change_set(&tx, id)?;
+        if current.status != HarnessChangeSetStatus::Proposed {
+            return Err("Only a proposed Change Set may be applied".to_string());
+        }
+        let plan = current
+            .plan
+            .as_ref()
+            .ok_or_else(|| "A failed Change Set has no applicable plan".to_string())?;
+        let run = read_harness_run(&tx, &current.run_id)?;
+        if !matches!(run.status.as_str(), "reconciling" | "ready") {
+            return Err(
+                "Only a reconciling or ready Research Run may apply Project changes".to_string(),
+            );
+        }
+        validate_reconciliation_plan(
+            plan,
+            &run.effective_instructions,
+            &current.considered_candidates,
+        )?;
+        let state_revision: i64 = tx
+            .query_row(
+                "select current_revision from research_state_heads where project_id = ?1",
+                params![current.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if state_revision != current.starting_state_revision {
+            tx.execute(
+                "update harness_change_sets set status = 'superseded',
+                 decision_reason = 'Research State changed after planning', decided_at = datetime('now')
+                 where id = ?1",
+                params![id],
+            )
+            .map_err(|error| error.to_string())?;
+            append_harness_event(
+                &tx,
+                &current.run_id,
+                "change_set_superseded",
+                "Research State changed after planning; no Project changes were made",
+            )?;
+            tx.commit().map_err(|error| error.to_string())?;
+            return self.get_harness_change_set(&current.run_id);
+        }
+
+        let accepted_ids: std::collections::HashSet<&str> = plan
+            .candidate_decisions
+            .iter()
+            .filter(|decision| decision.decision == CandidateDecisionKind::Accept)
+            .map(|decision| decision.candidate_id.as_str())
+            .collect();
+        let accepted_paper_ids: Vec<String> = current
+            .considered_candidates
+            .iter()
+            .filter(|candidate| accepted_ids.contains(candidate.id.as_str()))
+            .map(|candidate| candidate.candidate.id.clone())
+            .collect();
+        if !run.configuration_snapshot.may_add_papers {
+            let adds_new_paper = current
+                .considered_candidates
+                .iter()
+                .filter(|candidate| accepted_ids.contains(candidate.id.as_str()))
+                .any(|candidate| {
+                    !run.effective_instructions
+                        .run_context
+                        .vault_paper_ids
+                        .contains(&candidate.candidate.id)
+                });
+            if adds_new_paper {
+                return Err(
+                    "This Run was not authorized to add Papers to the Project Vault".to_string(),
+                );
+            }
+        }
+        let vault_id: String = tx
+            .query_row(
+                "select id from vaults where project_id = ?1",
+                params![current.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut abstract_chunks = HashMap::new();
+        for candidate in current
+            .considered_candidates
+            .iter()
+            .filter(|candidate| accepted_ids.contains(candidate.id.as_str()))
+        {
+            upsert_reconciliation_paper(&tx, &vault_id, candidate)?;
+            if candidate.candidate.abstract_text.is_some() {
+                let chunk_id = materialize_metadata_abstract(&tx, candidate)?;
+                abstract_chunks.insert(candidate.id.as_str(), chunk_id);
+            }
+            tx.execute(
+                "update search_candidates set saved = 1 where id = ?1",
+                params![candidate.id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        let next_revision = state_revision + 1;
+        insert_state_revision(
+            &tx,
+            &current.project_id,
+            next_revision,
+            Some(&current.run_id),
+            "Research Run reconciliation applied",
+        )?;
+        let mut entry_ids = HashMap::new();
+        for entry in &plan.entries {
+            entry_ids.insert(entry.handle.as_str(), timestamped_id("research_entry")?);
+        }
+        let existing_ids: std::collections::HashSet<&str> = run
+            .effective_instructions
+            .run_context
+            .active_entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        for entry in ordered_entries(plan, &existing_ids)? {
+            let evidence = entry
+                .evidence
+                .iter()
+                .map(|evidence| {
+                    let candidate = current
+                        .considered_candidates
+                        .iter()
+                        .find(|candidate| candidate.id == evidence.candidate_id)
+                        .expect("validated evidence candidate");
+                    let chunk_id = find_inspected_evidence_chunk(
+                        &tx,
+                        &candidate.candidate.id,
+                        &evidence.excerpt,
+                    )?
+                    .or_else(|| abstract_chunks.get(evidence.candidate_id.as_str()).cloned())
+                    .ok_or_else(|| {
+                        format!(
+                            "No inspected evidence contains the planned excerpt: {}",
+                            evidence.candidate_id
+                        )
+                    })?;
+                    Ok(EvidenceLinkDraft {
+                        chunk_id,
+                        excerpt: Some(evidence.excerpt.clone()),
+                        support_note: evidence.support_note.clone(),
+                    })
+                })
+                .collect::<StoreResult<Vec<_>>>()?;
+            let relations = entry
+                .relations
+                .iter()
+                .map(|relation| EntryRelationDraft {
+                    target_entry_id: entry_ids
+                        .get(relation.target.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| relation.target.clone()),
+                    kind: relation.kind,
+                })
+                .collect();
+            let draft = ResearchEntryDraft {
+                kind: entry.kind,
+                epistemic_status: entry.epistemic_status,
+                text: entry.text.clone(),
+                evidence,
+                relations,
+                context: Vec::new(),
+                reason: Some("Research Run reconciliation".to_string()),
+            };
+            validate_research_entry_draft(&tx, &current.project_id, &draft)?;
+            let entry_id = &entry_ids[entry.handle.as_str()];
+            insert_new_research_entry(
+                &tx,
+                entry_id,
+                &current.project_id,
+                next_revision,
+                Some(&current.run_id),
+                &draft,
+            )?;
+            append_harness_event(
+                &tx,
+                &current.run_id,
+                "research_entry_added",
+                &format!("Added {} to Research State", entry.kind.as_str()),
+            )?;
+        }
+        set_current_state_revision(&tx, &current.project_id, next_revision)?;
+        let resulting_vault_revision: i64 = tx
+            .query_row(
+                "select membership_revision from vaults where project_id = ?1",
+                params![current.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !accepted_paper_ids.is_empty() {
+            append_structured_harness_event(
+                &tx,
+                &current.run_id,
+                "vault_membership_changed",
+                &format!(
+                    "Accepted {} Papers into the Project Vault",
+                    accepted_paper_ids.len()
+                ),
+                Some(serde_json::json!({
+                    "paperIds": accepted_paper_ids,
+                    "vaultRevision": resulting_vault_revision,
+                })),
+                Some("reconciliation"),
+                None,
+                None,
+                "harness",
+            )?;
+        }
+        tx.execute(
+            "update harness_runs set resulting_state_revision = ?2,
+             resulting_vault_revision = ?3 where id = ?1",
+            params![current.run_id, next_revision, resulting_vault_revision],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update harness_reflections set next_direction = ?2 where run_id = ?1",
+            params![current.run_id, plan.next_direction.trim()],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update harness_change_sets set status = 'applied', resulting_state_revision = ?2,
+             decided_at = datetime('now') where id = ?1",
+            params![id, next_revision],
+        )
+        .map_err(|error| error.to_string())?;
+        append_structured_harness_event(
+            &tx,
+            &current.run_id,
+            "change_set_applied",
+            &format!(
+                "Applied {} Papers and {} Research State entries as revision {next_revision}",
+                accepted_ids.len(),
+                plan.entries.len()
+            ),
+            Some(serde_json::json!({
+                "changeSetId": id,
+                "resultingStateRevision": next_revision,
+                "resultingVaultRevision": resulting_vault_revision,
+                "acceptedCandidateCount": accepted_ids.len(),
+                "researchEntryCount": plan.entries.len(),
+            })),
+            Some("reconciliation"),
+            None,
+            None,
+            "harness",
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_harness_change_set(&current.run_id)
+    }
+
+    /// Saves researcher-owned settings as the next configuration version.
+    pub fn save_harness_configuration(
+        &self,
+        project_id: &str,
+        configuration: &HarnessConfiguration,
+    ) -> StoreResult<HarnessSnapshot> {
+        self.save_harness_configuration_at(project_id, configuration, Utc::now())
+    }
+
+    /// Saves settings against an explicit clock for schedule tests.
+    pub fn save_harness_configuration_at(
+        &self,
+        project_id: &str,
+        configuration: &HarnessConfiguration,
+        now: DateTime<Utc>,
+    ) -> StoreResult<HarnessSnapshot> {
+        validate_harness_configuration(configuration)?;
+        let json = serde_json::to_string(configuration).map_err(|error| error.to_string())?;
+        let next_run_at = if configuration.schedule.enabled {
+            Some(next_schedule_occurrence(&configuration.schedule, now)?.to_rfc3339())
+        } else {
+            None
+        };
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        validate_harness_authority(&tx, project_id, configuration)?;
+        let current_version: i64 = tx
+            .query_row(
+                "select configuration_version from research_harnesses where project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| format!("Research Harness not found for Project: {project_id}"))?;
+        let next_version = current_version + 1;
+        let updated = tx
+            .execute(
+                "update research_harnesses
+                 set configuration_json = ?2,
+                     configuration_version = ?5,
+                     status = case
+                       when ?3 then case when status in ('inactive', 'stopped') then 'idle' else status end
+                       when status = 'inactive' then 'idle'
+                       else status end,
+                     schedule_enabled = ?3,
+                     next_run_at = ?4,
+                     terminal_stop_reason = case when ?3 then null else terminal_stop_reason end,
+                     updated_at = datetime('now')
+                 where project_id = ?1",
+                params![
+                    project_id,
+                    json,
+                    configuration.schedule.enabled,
+                    next_run_at,
+                    next_version
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!(
+                "Research Harness not found for Project: {project_id}"
+            ));
+        }
+        insert_harness_configuration_version(
+            &tx,
+            project_id,
+            next_version,
+            configuration,
+            "researcher",
+            None,
+            "Researcher saved Harness Settings",
+        )?;
+        append_harness_control_event(
+            &tx,
+            project_id,
+            "harness_configuration_saved",
+            &format!("Saved Harness configuration v{next_version}"),
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_harness_snapshot(project_id)
+    }
+
+    /// Prevents future scheduled claims while allowing an active Run to finish.
+    pub fn pause_research_harness(&self, project_id: &str) -> StoreResult<HarnessSnapshot> {
+        self.set_harness_requested_status(
+            project_id,
+            "paused",
+            "harness_paused",
+            "Research Harness paused",
+        )
+    }
+
+    /// Reactivates a Harness and computes its next future scheduled occurrence.
+    pub fn resume_research_harness(&self, project_id: &str) -> StoreResult<HarnessSnapshot> {
+        let snapshot = self.get_harness_snapshot(project_id)?;
+        let next_run_at = if snapshot.harness.configuration.schedule.enabled {
+            Some(
+                next_schedule_occurrence(&snapshot.harness.configuration.schedule, Utc::now())?
+                    .to_rfc3339(),
+            )
+        } else {
+            None
+        };
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update research_harnesses
+             set status = case when status = 'running' then status else 'idle' end,
+                 requested_post_run_status = 'idle', terminal_stop_reason = null,
+                 schedule_enabled = ?2, next_run_at = ?3, updated_at = datetime('now')
+             where project_id = ?1",
+            params![
+                project_id,
+                snapshot.harness.configuration.schedule.enabled,
+                next_run_at
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_control_event(
+            &conn,
+            project_id,
+            "harness_resumed",
+            "Research Harness resumed",
+        )?;
+        self.get_harness_snapshot(project_id)
+    }
+
+    /// Stops future claims and requests cancellation of any active Run.
+    pub fn stop_research_harness(&self, project_id: &str) -> StoreResult<HarnessSnapshot> {
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "update research_harnesses
+                 set status = case when status = 'running' then status else 'stopped' end,
+                     requested_post_run_status = 'stopped', schedule_enabled = 0,
+                     next_run_at = null, terminal_stop_reason = 'stopped_by_user',
+                     updated_at = datetime('now') where project_id = ?1",
+                params![project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!(
+                "Research Harness not found for Project: {project_id}"
+            ));
+        }
+        append_harness_control_event(
+            &conn,
+            project_id,
+            "harness_stopped",
+            "Research Harness stopped by user",
+        )?;
+        self.get_harness_snapshot(project_id)
+    }
+
+    /// Enforces terminal Project limits before either manual or scheduled starts.
+    pub fn ensure_harness_can_start(&self, project_id: &str) -> StoreResult<()> {
+        let snapshot = self.get_harness_snapshot(project_id)?;
+        if snapshot.harness.status == "stopped" {
+            return Err(format!(
+                "Research Harness is stopped: {}",
+                snapshot
+                    .harness
+                    .terminal_stop_reason
+                    .as_deref()
+                    .unwrap_or("resume required")
+            ));
+        }
+        let conn = self.open_connection()?;
+        if let Some(reason) = terminal_stop_reason(
+            &conn,
+            project_id,
+            &snapshot.harness.configuration,
+            Utc::now(),
+        )? {
+            conn.execute(
+                "update research_harnesses set status = 'stopped', schedule_enabled = 0,
+                 next_run_at = null, requested_post_run_status = 'stopped',
+                 terminal_stop_reason = ?2, updated_at = datetime('now') where project_id = ?1",
+                params![project_id, reason],
+            )
+            .map_err(|error| error.to_string())?;
+            append_harness_control_event(&conn, project_id, "harness_stopped", &reason)?;
+            return Err(format!("Research Harness stopped: {reason}"));
+        }
+        Ok(())
+    }
+
+    fn set_harness_requested_status(
+        &self,
+        project_id: &str,
+        status: &str,
+        event_kind: &str,
+        summary: &str,
+    ) -> StoreResult<HarnessSnapshot> {
+        let conn = self.open_connection()?;
+        let updated = conn
+            .execute(
+                "update research_harnesses
+                 set status = case when status = 'running' then status else ?2 end,
+                     requested_post_run_status = ?2, updated_at = datetime('now')
+                 where project_id = ?1",
+                params![project_id, status],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!(
+                "Research Harness not found for Project: {project_id}"
+            ));
+        }
+        append_harness_control_event(&conn, project_id, event_kind, summary)?;
+        self.get_harness_snapshot(project_id)
+    }
+
+    /// Claims at most one due schedule and advances it beyond `now`.
+    pub fn claim_due_harness(
+        &self,
+        now: DateTime<Utc>,
+        startup: bool,
+    ) -> StoreResult<Option<DueHarnessClaim>> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let candidate: Option<(String, String, String)> = tx
+            .query_row(
+                "select project_id, next_run_at, configuration_json
+                 from research_harnesses
+                 where schedule_enabled = 1 and next_run_at <= ?1 and status = 'idle'
+                   and not exists (
+                     select 1 from harness_runs r where r.project_id = research_harnesses.project_id
+                       and r.status in ('queued','planning','searching','assessing','ranking','reconciling')
+                   )
+                 order by next_run_at, project_id limit 1",
+                params![now.to_rfc3339()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some((project_id, scheduled_for, configuration_json)) = candidate else {
+            return Ok(None);
+        };
+        let configuration: HarnessConfiguration =
+            serde_json::from_str(&configuration_json).map_err(|error| error.to_string())?;
+        if let Some(reason) = terminal_stop_reason(&tx, &project_id, &configuration, now)? {
+            tx.execute(
+                "update research_harnesses set status = 'stopped', schedule_enabled = 0,
+                 next_run_at = null, requested_post_run_status = 'stopped',
+                 terminal_stop_reason = ?2, updated_at = datetime('now') where project_id = ?1",
+                params![project_id, reason],
+            )
+            .map_err(|error| error.to_string())?;
+            append_harness_control_event(&tx, &project_id, "harness_stopped", &reason)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(None);
+        }
+        let next = next_schedule_occurrence(&configuration.schedule, now)?.to_rfc3339();
+        tx.execute(
+            "update research_harnesses set next_run_at = ?2, last_scheduled_for = ?3,
+             updated_at = datetime('now') where project_id = ?1 and next_run_at = ?3",
+            params![project_id, next, scheduled_for],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_control_event(
+            &tx,
+            &project_id,
+            if startup {
+                "startup_catch_up_claimed"
+            } else {
+                "scheduled_run_claimed"
+            },
+            &format!("Claimed occurrence {scheduled_for}; next occurrence {next}"),
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(Some(DueHarnessClaim {
+            project_id,
+            scheduled_for,
+            trigger: if startup {
+                HarnessRunTrigger::StartupCatchUp
+            } else {
+                HarnessRunTrigger::Scheduled
+            },
+        }))
+    }
+
+    /// Fails interrupted Harness Runs and restores their requested lifecycle state.
+    pub fn recover_interrupted_harness_runs(&self) -> StoreResult<usize> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let run_ids = {
+            let mut statement = tx
+                .prepare(
+                    "select id from harness_runs where status in
+                     ('queued','planning','searching','assessing','ranking') order by id",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?
+        };
+        let reconciling_runs = {
+            let mut statement = tx
+                .prepare(
+                    "select id, search_run_id from harness_runs
+                     where status = 'reconciling' and search_run_id is not null order by id",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?
+        };
+        for run_id in &run_ids {
+            tx.execute(
+                "update harness_runs set status = 'failed', stop_reason = 'application_restarted',
+                 finished_at = datetime('now') where id = ?1",
+                params![run_id],
+            )
+            .map_err(|error| error.to_string())?;
+            append_harness_event(
+                &tx,
+                run_id,
+                "failed",
+                "Application restarted before Run completion",
+            )?;
+        }
+        tx.execute(
+            "update research_harnesses set status = requested_post_run_status,
+             updated_at = datetime('now') where status = 'running'
+             and not exists (
+               select 1 from harness_runs run where run.project_id = research_harnesses.project_id
+               and run.status = 'reconciling'
+             )",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        for (run_id, search_run_id) in &reconciling_runs {
+            let conn = self.open_connection()?;
+            append_harness_event(
+                &conn,
+                run_id,
+                "reconciliation_recovered",
+                "Application restarted after search; finalizing the completed safe boundary",
+            )?;
+            if let Err(error) = self.record_automatic_harness_reflection(run_id) {
+                self.record_harness_reflection_failure(run_id, &error)?;
+            }
+            self.finalize_harness_run(search_run_id)?;
+        }
+        Ok(run_ids.len() + reconciling_runs.len())
+    }
+
+    /// Persists one immutable operational reflection and detects recurrence.
+    pub fn persist_harness_reflection(
+        &self,
+        run_id: &str,
+        draft: &HarnessReflectionDraft,
+    ) -> StoreResult<HarnessReflection> {
+        validate_reflection_draft(draft)?;
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let (project_id, status, configuration_version): (String, String, i64) = tx
+            .query_row(
+                "select project_id, status, configuration_version from harness_runs where id = ?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if !matches!(status.as_str(), "reconciling" | "ready") {
+            return Err(
+                "Only a reconciling or completed Research Run may record a reflection".to_string(),
+            );
+        }
+        let reflection_id = format!("{run_id}:reflection");
+        tx.execute(
+            "insert into harness_reflections
+             (id, run_id, project_id, policy_version, configuration_version,
+              summary, next_direction, metrics_json, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))",
+            params![
+                reflection_id,
+                run_id,
+                project_id,
+                REFLECTION_POLICY_VERSION,
+                configuration_version,
+                draft.summary.trim(),
+                draft.next_direction.as_deref().map(str::trim),
+                draft.metrics_json
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        for (index, observation) in draft.observations.iter().enumerate() {
+            let observation_id = format!("{reflection_id}:observation:{index}");
+            tx.execute(
+                "insert into harness_observations
+                 (id, reflection_id, run_id, project_id, kind, signature, severity,
+                  confidence, description, metrics_json, target, proposed_value_json,
+                  proposal_eligible, created_at)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'))",
+                params![
+                    observation_id,
+                    reflection_id,
+                    run_id,
+                    project_id,
+                    observation.kind.as_str(),
+                    normalize_signature(&observation.signature),
+                    observation.severity,
+                    observation.confidence,
+                    observation.description.trim(),
+                    observation.metrics_json,
+                    observation.target.map(HarnessImprovementTarget::as_str),
+                    observation
+                        .proposed_value
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
+                    observation.proposal_eligible
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+            if observation.proposal_eligible {
+                detect_harness_improvement(
+                    &tx,
+                    &project_id,
+                    &normalize_signature(&observation.signature),
+                    observation.target.expect("validated eligible target"),
+                )?;
+            }
+            append_structured_harness_event(
+                &tx,
+                run_id,
+                "operational_observation",
+                &observation
+                    .description
+                    .trim()
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                Some(serde_json::json!({
+                    "observationId": observation_id,
+                    "kind": observation.kind.as_str(),
+                    "signature": normalize_signature(&observation.signature),
+                    "severity": observation.severity,
+                    "confidence": observation.confidence,
+                    "target": observation.target.map(HarnessImprovementTarget::as_str),
+                    "proposalEligible": observation.proposal_eligible,
+                })),
+                Some("reflection"),
+                None,
+                None,
+                "harness",
+            )?;
+        }
+        append_structured_harness_event(
+            &tx,
+            run_id,
+            "harness_reflection_recorded",
+            &draft.summary.trim().chars().take(500).collect::<String>(),
+            Some(serde_json::json!({
+                "reflectionId": reflection_id.clone(),
+                "observationCount": draft.observations.len(),
+                "nextDirection": draft.next_direction.as_deref(),
+            })),
+            Some("reflection"),
+            None,
+            None,
+            "harness",
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_harness_reflection(&conn, &reflection_id)
+    }
+
+    /// Builds a bounded reflection solely from persisted Run telemetry.
+    pub fn record_automatic_harness_reflection(&self, harness_run_id: &str) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let (status, stop_reason, search_run_id): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "select status, stop_reason, search_run_id from harness_runs where id = ?1",
+                params![harness_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if !matches!(status.as_str(), "reconciling" | "ready") {
+            return Ok(());
+        }
+        let reflection_exists: bool = conn
+            .query_row(
+                "select exists(select 1 from harness_reflections where run_id = ?1)",
+                params![harness_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if reflection_exists {
+            return Ok(());
+        }
+        let search_run_id =
+            search_run_id.ok_or_else(|| "Completed Harness Run has no Search Run".to_string())?;
+        let (added_count, iteration, provider_set, query_expansions): (
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "select added_count, iteration, provider_set, query_expansions
+                 from search_runs where id = ?1",
+                params![search_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let plan = conn
+            .query_row(
+                "select plan_json from harness_change_sets where run_id = ?1",
+                params![harness_run_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .flatten()
+            .map(|json| serde_json::from_str::<RunReconciliationPlan>(&json))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let accepted_count = plan
+            .as_ref()
+            .map(|plan| {
+                plan.candidate_decisions
+                    .iter()
+                    .filter(|decision| decision.decision == CandidateDecisionKind::Accept)
+                    .count()
+            })
+            .unwrap_or(0);
+        let rejected_count = plan
+            .as_ref()
+            .map(|plan| {
+                plan.candidate_decisions
+                    .iter()
+                    .filter(|decision| decision.decision == CandidateDecisionKind::Reject)
+                    .count()
+            })
+            .unwrap_or(0);
+        let metrics = serde_json::json!({
+            "addedCount": added_count,
+            "acceptedCandidateCount": accepted_count,
+            "rejectedCandidateCount": rejected_count,
+            "iterations": iteration,
+            "providerSet": provider_set,
+            "queryExpansions": query_expansions,
+            "stopReason": stop_reason,
+        });
+        let planned_reflection = plan
+            .as_ref()
+            .and_then(|plan| plan.operational_reflection.as_ref());
+        let observations = match planned_reflection {
+            Some(reflection) => reflection
+                .observations
+                .iter()
+                .map(|observation| HarnessObservationDraft {
+                    kind: observation.kind,
+                    signature: observation.signature.clone(),
+                    severity: observation.severity,
+                    confidence: observation.confidence,
+                    description: observation.description.clone(),
+                    metrics_json: metrics.to_string(),
+                    target: observation.target,
+                    proposed_value: observation.proposed_value.clone(),
+                    proposal_eligible: observation.proposal_eligible,
+                })
+                .collect(),
+            None if accepted_count == 0 => vec![HarnessObservationDraft {
+                kind: HarnessObservationKind::WastedWork,
+                signature: "completed-run-no-meaningful-additions".to_string(),
+                severity: 0.5,
+                confidence: 1.0,
+                description:
+                    "The completed Run added no accepted Papers or Research State changes."
+                        .to_string(),
+                metrics_json: metrics.to_string(),
+                target: None,
+                proposed_value: None,
+                proposal_eligible: false,
+            }],
+            None => Vec::new(),
+        };
+        let summary = planned_reflection
+            .map(|reflection| reflection.summary.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "Run completed after {iteration} iteration(s) with {accepted_count} accepted and {rejected_count} rejected candidate(s)."
+                )
+            });
+        let next_direction = planned_reflection
+            .and_then(|reflection| reflection.next_direction.clone())
+            .or_else(|| plan.as_ref().map(|plan| plan.next_direction.clone()));
+        drop(conn);
+        self.persist_harness_reflection(
+            harness_run_id,
+            &HarnessReflectionDraft {
+                summary,
+                next_direction,
+                metrics_json: metrics.to_string(),
+                observations,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub fn record_harness_reflection_failure(
+        &self,
+        harness_run_id: &str,
+        error: &str,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        append_harness_event(
+            &conn,
+            harness_run_id,
+            "harness_reflection_failed",
+            &format!(
+                "Operational reflection failed: {}",
+                error.chars().take(300).collect::<String>()
+            ),
+        )
+    }
+
+    pub fn list_harness_improvements(
+        &self,
+        project_id: &str,
+        status: Option<HarnessImprovementStatus>,
+    ) -> StoreResult<Vec<HarnessImprovement>> {
+        let conn = self.open_connection()?;
+        read_harness_improvements(&conn, project_id, status)
+    }
+
+    pub fn get_harness_improvement(&self, id: &str) -> StoreResult<HarnessImprovement> {
+        let conn = self.open_connection()?;
+        read_harness_improvement(&conn, id)
+    }
+
+    pub fn edit_harness_improvement(
+        &self,
+        id: &str,
+        proposed_value: &HarnessImprovementValue,
+    ) -> StoreResult<HarnessImprovement> {
+        let current = self.get_harness_improvement(id)?;
+        if current.status != HarnessImprovementStatus::Proposed {
+            return Err("Only a proposed Harness improvement may be edited".to_string());
+        }
+        let normalized = normalize_improvement_value(current.target, proposed_value)?;
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update harness_improvements set proposed_value_json = ?2,
+             expected_effect = ?3 where id = ?1 and status = 'proposed'",
+            params![
+                id,
+                serde_json::to_string(&normalized).map_err(|error| error.to_string())?,
+                improvement_preview(current.target, &normalized)
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_control_event(
+            &conn,
+            &current.project_id,
+            "harness_improvement_edited",
+            &format!("Edited Harness improvement {id}"),
+        )?;
+        self.get_harness_improvement(id)
+    }
+
+    pub fn accept_harness_improvement(&self, id: &str) -> StoreResult<HarnessImprovement> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let improvement = read_harness_improvement(&tx, id)?;
+        if improvement.status != HarnessImprovementStatus::Proposed {
+            return Err("Only a proposed Harness improvement may be accepted".to_string());
+        }
+        let mut harness = read_research_harness(&tx, &improvement.project_id)?
+            .ok_or_else(|| "Research Harness not found".to_string())?;
+        if harness.configuration_version != improvement.base_configuration_version
+            || configuration_value(&harness.configuration, improvement.target)
+                != improvement.before_value
+        {
+            tx.execute(
+                "update harness_improvements set status = 'superseded', decision_actor = 'system',
+                 decision_reason = 'configuration_changed', decided_at = datetime('now') where id = ?1",
+                params![id],
+            )
+            .map_err(|error| error.to_string())?;
+            append_harness_control_event(
+                &tx,
+                &improvement.project_id,
+                "harness_improvement_superseded",
+                &format!("Improvement {id} was superseded by a configuration change"),
+            )?;
+            tx.commit().map_err(|error| error.to_string())?;
+            return self.get_harness_improvement(id);
+        }
+        apply_improvement_value(
+            &mut harness.configuration,
+            improvement.target,
+            &improvement.proposed_value,
+        )?;
+        let json =
+            serde_json::to_string(&harness.configuration).map_err(|error| error.to_string())?;
+        let next_version = harness.configuration_version + 1;
+        tx.execute(
+            "update research_harnesses set configuration_json = ?2,
+             configuration_version = ?3, updated_at = datetime('now') where project_id = ?1",
+            params![improvement.project_id, json, next_version],
+        )
+        .map_err(|error| error.to_string())?;
+        insert_harness_configuration_version(
+            &tx,
+            &improvement.project_id,
+            next_version,
+            &harness.configuration,
+            "improvement",
+            Some(id),
+            "Accepted Harness improvement",
+        )?;
+        tx.execute(
+            "update harness_improvements set status = 'accepted', decision_actor = 'researcher',
+             resulting_configuration_version = ?2, decided_at = datetime('now') where id = ?1",
+            params![id, next_version],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_control_event(
+            &tx,
+            &improvement.project_id,
+            "harness_improvement_accepted",
+            &format!("Accepted improvement {id} as configuration v{next_version}"),
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_harness_improvement(id)
+    }
+
+    pub fn reject_harness_improvement(
+        &self,
+        id: &str,
+        reason: Option<&str>,
+    ) -> StoreResult<HarnessImprovement> {
+        let current = self.get_harness_improvement(id)?;
+        if current.status != HarnessImprovementStatus::Proposed {
+            return Err("Only a proposed Harness improvement may be rejected".to_string());
+        }
+        let conn = self.open_connection()?;
+        conn.execute(
+            "update harness_improvements set status = 'rejected', decision_actor = 'researcher',
+             decision_reason = ?2, decided_at = datetime('now') where id = ?1",
+            params![id, reason.map(str::trim).filter(|value| !value.is_empty())],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_control_event(
+            &conn,
+            &current.project_id,
+            "harness_improvement_rejected",
+            &format!("Rejected Harness improvement {id}"),
+        )?;
+        self.get_harness_improvement(id)
+    }
+
+    /// Creates an immutable Harness Run before its Deep Research execution.
+    pub fn create_harness_run(&self, project_id: &str, search_id: &str) -> StoreResult<HarnessRun> {
+        self.create_harness_run_with_trigger(project_id, search_id, HarnessRunTrigger::Manual, None)
+    }
+
+    /// Creates an immutable Run for a manual or claimed scheduled trigger.
+    pub fn create_harness_run_with_trigger(
+        &self,
+        project_id: &str,
+        search_id: &str,
+        trigger: HarnessRunTrigger,
+        scheduled_for: Option<&str>,
+    ) -> StoreResult<HarnessRun> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let harness = read_research_harness(&tx, project_id)?
+            .ok_or_else(|| format!("Research Harness not found for Project: {project_id}"))?;
+        validate_harness_configuration(&harness.configuration)?;
+        validate_harness_authority(&tx, project_id, &harness.configuration)?;
+        let id = timestamped_id("harness_run")?;
+        let snapshot =
+            serde_json::to_string(&harness.configuration).map_err(|error| error.to_string())?;
+        let starting_state_revision: i64 = tx
+            .query_row(
+                "select current_revision from research_state_heads where project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let starting_vault_revision: i64 = tx
+            .query_row(
+                "select membership_revision from vaults where project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let effective_instructions = build_effective_instruction_stack(
+            &tx,
+            project_id,
+            starting_state_revision,
+            &harness.configuration,
+        )?;
+        let oriented_search_goal = render_harness_search_goal(&effective_instructions)?;
+        let effective_instructions_json =
+            serde_json::to_string(&effective_instructions).map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into harness_runs (
+               id, project_id, status, configuration_snapshot_json,
+               configuration_version, policy_version, effective_instruction_stack_json,
+               search_id, starting_state_revision, starting_vault_revision,
+               trigger, scheduled_for, started_at
+             ) values (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))",
+            params![
+                id,
+                project_id,
+                snapshot,
+                harness.configuration_version,
+                HARNESS_POLICY_VERSION,
+                effective_instructions_json,
+                search_id,
+                starting_state_revision,
+                starting_vault_revision,
+                trigger.as_str(),
+                scheduled_for
+            ],
+        )
+        .map_err(|error| {
+            if error.to_string().contains("harness_runs.project_id") {
+                "A Research Run is already active for this Project".to_string()
+            } else {
+                error.to_string()
+            }
+        })?;
+        let oriented = tx
+            .execute(
+                "update searches set goal = ?2, updated_at = datetime('now') where id = ?1",
+                params![search_id, oriented_search_goal],
+            )
+            .map_err(|error| error.to_string())?;
+        if oriented != 1 {
+            return Err(format!("Research search not found: {search_id}"));
+        }
+        tx.execute(
+            "update research_harnesses set status = 'running', updated_at = datetime('now')
+             where project_id = ?1",
+            params![project_id],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(
+            &tx,
+            &id,
+            "run_started",
+            &format!("{} Research Run queued", trigger.as_str().replace('_', " ")),
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_harness_run(&conn, &id)
+    }
+
+    /// Attaches the concrete Deep Research Run and catches up its current status.
+    pub fn attach_harness_search_run(
+        &self,
+        harness_run_id: &str,
+        search_run_id: &str,
+    ) -> StoreResult<HarnessRun> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let search_run = read_search_run(&tx, search_run_id)?;
+        let linked_status = if search_run.status == "ready" {
+            "reconciling"
+        } else {
+            &search_run.status
+        };
+        let linked_finished_at = if search_run.status == "ready" {
+            None
+        } else {
+            search_run.finished_at.as_deref()
+        };
+        let updated = tx
+            .execute(
+                "update harness_runs
+                 set search_run_id = ?2, status = ?3, stop_reason = ?4, summary = ?5,
+                     finished_at = ?6
+                 where id = ?1",
+                params![
+                    harness_run_id,
+                    search_run_id,
+                    linked_status,
+                    search_run.stop_reason,
+                    search_run.error,
+                    linked_finished_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated == 0 {
+            return Err(format!("Harness Run not found: {harness_run_id}"));
+        }
+        append_harness_event(
+            &tx,
+            harness_run_id,
+            "search_linked",
+            "Bounded scholarly search started",
+        )?;
+        if search_run.status != "queued" {
+            append_harness_event(
+                &tx,
+                harness_run_id,
+                linked_status,
+                if search_run.status == "ready" {
+                    "Reconciling candidate decisions, Research State, and reflection"
+                } else {
+                    search_run
+                        .error
+                        .as_deref()
+                        .or(search_run.stop_reason.as_deref())
+                        .unwrap_or(&search_run.status)
+                },
+            )?;
+        }
+        if matches!(search_run.status.as_str(), "failed" | "cancelled") {
+            let project_id: String = tx
+                .query_row(
+                    "select project_id from harness_runs where id = ?1",
+                    params![harness_run_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            tx.execute(
+                "update research_harnesses set status = requested_post_run_status, updated_at = datetime('now')
+                 where project_id = ?1",
+                params![project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_harness_run(&conn, harness_run_id)
+    }
+
+    /// Marks a Harness Run failed when its delegated search cannot be started.
+    pub fn fail_harness_run(&self, harness_run_id: &str, error: &str) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|cause| cause.to_string())?;
+        let project_id: String = tx
+            .query_row(
+                "select project_id from harness_runs where id = ?1",
+                params![harness_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|cause| cause.to_string())?;
+        tx.execute(
+            "update harness_runs
+             set status = 'failed', summary = ?2, finished_at = datetime('now')
+             where id = ?1",
+            params![harness_run_id, error],
+        )
+        .map_err(|cause| cause.to_string())?;
+        tx.execute(
+            "update research_harnesses set status = requested_post_run_status,
+             updated_at = datetime('now') where project_id = ?1",
+            params![project_id],
+        )
+        .map_err(|cause| cause.to_string())?;
+        append_harness_event(&tx, harness_run_id, "failed", error)?;
+        tx.commit().map_err(|cause| cause.to_string())
+    }
+
+    /// Loads one current or historical Research State revision.
+    pub fn get_research_state(
+        &self,
+        project_id: &str,
+        revision: Option<i64>,
+    ) -> StoreResult<ResearchStateSnapshot> {
+        let conn = self.open_connection()?;
+        read_research_state(&conn, project_id, revision)
+    }
+
+    /// Loads one Research Entry with provenance and immutable history.
+    pub fn get_research_entry(
+        &self,
+        entry_id: &str,
+        revision: Option<i64>,
+    ) -> StoreResult<ResearchEntryDetail> {
+        let conn = self.open_connection()?;
+        read_research_entry_detail(&conn, entry_id, revision)
+    }
+
+    /// Lists bounded canonical chunks available as evidence in one Project.
+    pub fn list_research_evidence_candidates(
+        &self,
+        project_id: &str,
+        query: Option<&str>,
+    ) -> StoreResult<Vec<ResearchEvidenceCandidate>> {
+        let conn = self.open_connection()?;
+        let query = query.map(str::trim).filter(|value| !value.is_empty());
+        let pattern = query.map(|value| format!("%{value}%"));
+        let mut statement = conn
+            .prepare(
+                "select c.id, c.paper_id, p.title, c.page_start, c.page_end,
+                        c.heading_path, c.text
+                 from document_chunks c
+                 join papers p on p.id = c.paper_id
+                 join vault_papers vp on vp.paper_id = c.paper_id
+                 join vaults v on v.id = vp.vault_id
+                 where v.project_id = ?1 and (?2 is null or c.text like ?2 or p.title like ?2)
+                 order by p.title, c.chunk_index limit 100",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![project_id, pattern], |row| {
+                Ok(ResearchEvidenceCandidate {
+                    chunk_id: row.get(0)?,
+                    paper_id: row.get(1)?,
+                    paper_title: row.get(2)?,
+                    page_start: row.get(3)?,
+                    page_end: row.get(4)?,
+                    heading_path: row.get(5)?,
+                    text: row.get(6)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
+    /// Creates one manual Research Entry as the next State revision.
+    pub fn create_research_entry(
+        &self,
+        project_id: &str,
+        expected_revision: i64,
+        draft: &ResearchEntryDraft,
+    ) -> StoreResult<ResearchStateMutation> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        require_current_state_revision(&tx, project_id, expected_revision)?;
+        let next_revision = expected_revision + 1;
+        let entry_id = timestamped_id("research_entry")?;
+        validate_research_entry_draft(&tx, project_id, draft)?;
+        insert_state_revision(
+            &tx,
+            project_id,
+            next_revision,
+            None,
+            manual_reason(draft.reason.as_deref()),
+        )?;
+        insert_new_research_entry(&tx, &entry_id, project_id, next_revision, None, draft)?;
+        set_current_state_revision(&tx, project_id, next_revision)?;
+        tx.commit().map_err(|error| error.to_string())?;
+
+        let state = self.get_research_state(project_id, None)?;
+        let entry = self.get_research_entry(&entry_id, None)?;
+        Ok(ResearchStateMutation { state, entry })
+    }
+
+    /// Revises one entry without changing its semantic kind or stable id.
+    pub fn revise_research_entry(
+        &self,
+        expected_revision: i64,
+        update: &ResearchEntryUpdate,
+    ) -> StoreResult<ResearchStateMutation> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let current = read_current_research_entry(&tx, &update.id)?;
+        require_current_state_revision(&tx, &current.project_id, expected_revision)?;
+        let draft = ResearchEntryDraft {
+            kind: current.kind,
+            epistemic_status: update.epistemic_status,
+            text: update.text.clone(),
+            evidence: update.evidence.clone(),
+            relations: update.relations.clone(),
+            context: update.context.clone(),
+            reason: update.reason.clone(),
+        };
+        validate_research_entry_draft(&tx, &current.project_id, &draft)?;
+        let next_revision = expected_revision + 1;
+        insert_state_revision(
+            &tx,
+            &current.project_id,
+            next_revision,
+            None,
+            manual_reason(update.reason.as_deref()),
+        )?;
+        insert_research_entry_version(
+            &tx,
+            &update.id,
+            &current.project_id,
+            next_revision,
+            current.lifecycle,
+            None,
+            &draft,
+        )?;
+        tx.execute(
+            "update research_entries
+             set epistemic_status = ?2, text = ?3, last_revision = ?4,
+                 updated_at = datetime('now') where id = ?1",
+            params![
+                update.id,
+                update.epistemic_status.as_str(),
+                update.text.trim(),
+                next_revision
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        set_current_state_revision(&tx, &current.project_id, next_revision)?;
+        tx.commit().map_err(|error| error.to_string())?;
+
+        let state = self.get_research_state(&current.project_id, None)?;
+        let entry = self.get_research_entry(&update.id, None)?;
+        Ok(ResearchStateMutation { state, entry })
+    }
+
+    /// Appends a contested or superseded lifecycle revision.
+    pub fn set_research_entry_lifecycle(
+        &self,
+        entry_id: &str,
+        expected_revision: i64,
+        lifecycle: EntryLifecycle,
+        reason: &str,
+    ) -> StoreResult<ResearchStateMutation> {
+        if lifecycle == EntryLifecycle::Active {
+            return Err("Lifecycle review may only contest or supersede an entry".to_string());
+        }
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err("A lifecycle change requires a reason".to_string());
+        }
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let current = read_current_research_entry(&tx, entry_id)?;
+        require_current_state_revision(&tx, &current.project_id, expected_revision)?;
+        let previous =
+            read_research_entry_detail_from_conn(&tx, entry_id, Some(expected_revision))?;
+        let draft = ResearchEntryDraft {
+            kind: current.kind,
+            epistemic_status: current.epistemic_status,
+            text: current.text.clone(),
+            evidence: previous
+                .evidence
+                .iter()
+                .map(|link| EvidenceLinkDraft {
+                    chunk_id: link.chunk_id.clone(),
+                    excerpt: Some(link.excerpt.clone()),
+                    support_note: link.support_note.clone(),
+                })
+                .collect(),
+            relations: previous
+                .relations
+                .iter()
+                .map(|link| EntryRelationDraft {
+                    target_entry_id: link.target_entry_id.clone(),
+                    kind: link.kind,
+                })
+                .collect(),
+            context: previous
+                .context
+                .iter()
+                .map(|link| ResearchContextLinkDraft {
+                    kind: link.kind,
+                    context_id: link.context_id.clone(),
+                    label: link.label.clone(),
+                })
+                .collect(),
+            reason: Some(reason.to_string()),
+        };
+        let next_revision = expected_revision + 1;
+        insert_state_revision(&tx, &current.project_id, next_revision, None, reason)?;
+        insert_research_entry_version(
+            &tx,
+            entry_id,
+            &current.project_id,
+            next_revision,
+            lifecycle,
+            None,
+            &draft,
+        )?;
+        tx.execute(
+            "update research_entries
+             set lifecycle = ?2, last_revision = ?3, updated_at = datetime('now')
+             where id = ?1",
+            params![entry_id, lifecycle.as_str(), next_revision],
+        )
+        .map_err(|error| error.to_string())?;
+        set_current_state_revision(&tx, &current.project_id, next_revision)?;
+        tx.commit().map_err(|error| error.to_string())?;
+
+        let state = self.get_research_state(&current.project_id, None)?;
+        let entry = self.get_research_entry(entry_id, None)?;
+        Ok(ResearchStateMutation { state, entry })
+    }
+
+    /// Publishes one completed Run's prepared entries as one atomic State revision.
+    pub fn publish_harness_run_research_state(
+        &self,
+        run_id: &str,
+        expected_revision: i64,
+        drafts: &[ResearchEntryDraft],
+    ) -> StoreResult<ResearchStateSnapshot> {
+        if drafts.is_empty() {
+            return Err("A Research State publication must contain an entry".to_string());
+        }
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let (project_id, status): (String, String) = tx
+            .query_row(
+                "select project_id, status from harness_runs where id = ?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if !matches!(status.as_str(), "reconciling" | "ready") {
+            return Err(
+                "Only a reconciling or successfully completed Research Run may publish State"
+                    .to_string(),
+            );
+        }
+        require_current_state_revision(&tx, &project_id, expected_revision)?;
+        for draft in drafts {
+            validate_research_entry_draft(&tx, &project_id, draft)?;
+        }
+        let next_revision = expected_revision + 1;
+        insert_state_revision(
+            &tx,
+            &project_id,
+            next_revision,
+            Some(run_id),
+            "Research Run published State",
+        )?;
+        for draft in drafts {
+            let entry_id = timestamped_id("research_entry")?;
+            insert_new_research_entry(
+                &tx,
+                &entry_id,
+                &project_id,
+                next_revision,
+                Some(run_id),
+                draft,
+            )?;
+            append_harness_event(
+                &tx,
+                run_id,
+                "research_entry_added",
+                &format!("Added {} to Research State", draft.kind.as_str()),
+            )?;
+        }
+        set_current_state_revision(&tx, &project_id, next_revision)?;
+        tx.execute(
+            "update harness_runs set resulting_state_revision = ?2 where id = ?1",
+            params![run_id, next_revision],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(
+            &tx,
+            run_id,
+            "research_state_published",
+            &format!("Research State advanced to revision {next_revision}"),
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_research_state(&project_id, None)
     }
 
     pub fn rename_vault(&self, draft: &VaultRenameDraft) -> StoreResult<LibrarySnapshot> {
@@ -1705,7 +4004,7 @@ impl LibraryStore {
             "delete from highlights where paper_id = ?1",
             params![paper_id],
         )
-            .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?;
 
         tx.commit().map_err(|error| error.to_string())?;
         self.get_library()
@@ -1995,7 +4294,7 @@ impl LibraryStore {
         self.persist_anchored_turn_with_creation(
             scope_kind, scope_id, anchor, question, answer, false,
         )
-            .map(|write| write.view)
+        .map(|write| write.view)
     }
 
     pub fn persist_anchored_turn_with_creation(
@@ -2671,8 +4970,11 @@ impl LibraryStore {
               format text not null check (format = 'markdown'),
               content text not null,
               harness_writable integer not null default 0,
+              content_revision integer not null default 1,
               created_from_run_id text,
               created_from_state_revision integer,
+              generation_id text,
+              output_shape text,
               created_at text not null,
               updated_at text not null,
               foreign key (project_id) references projects(id) on delete cascade
@@ -2681,11 +4983,351 @@ impl LibraryStore {
             create index if not exists idx_project_documents_project
               on project_documents(project_id, updated_at desc);
 
+            create table if not exists research_document_generations (
+              id text primary key,
+              project_id text not null,
+              status text not null,
+              shape text not null,
+              title text not null,
+              custom_instruction text,
+              state_revision integer not null,
+              selected_entry_ids_json text not null,
+              include_non_active integer not null,
+              originating_run_id text,
+              policy_version text not null,
+              model_identifier text not null,
+              resulting_document_id text,
+              retry_of_id text,
+              request_fingerprint text not null,
+              error text,
+              cancellation_requested integer not null default 0,
+              input_entry_count integer not null default 0,
+              citation_count integer not null default 0,
+              created_at text not null,
+              started_at text,
+              finished_at text,
+              foreign key (project_id) references projects(id) on delete cascade,
+              foreign key (originating_run_id) references harness_runs(id) on delete set null,
+              foreign key (resulting_document_id) references project_documents(id) on delete set null,
+              foreign key (retry_of_id) references research_document_generations(id) on delete set null
+            );
+
+            create unique index if not exists idx_research_document_generation_active
+              on research_document_generations(project_id, request_fingerprint)
+              where status in ('queued', 'generating');
+
+            create table if not exists project_document_citations (
+              document_id text not null,
+              citation_key text not null,
+              paper_id text not null,
+              evidence_link_ids_json text not null,
+              title_snapshot text not null,
+              authors_snapshot_json text not null,
+              year_snapshot integer not null,
+              created_at text not null,
+              primary key (document_id, citation_key),
+              foreign key (document_id) references project_documents(id) on delete cascade,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create table if not exists research_harnesses (
+              project_id text primary key,
+              status text not null,
+              configuration_json text not null,
+              configuration_version integer not null,
+              schedule_enabled integer not null default 0,
+              next_run_at text,
+              last_scheduled_for text,
+              requested_post_run_status text not null default 'idle',
+              completed_cycle_count integer not null default 0,
+              consecutive_unproductive_runs integer not null default 0,
+              terminal_stop_reason text,
+              updated_at text not null,
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create table if not exists harness_configuration_versions (
+              project_id text not null,
+              version integer not null,
+              configuration_json text not null,
+              actor text not null,
+              source_improvement_id text,
+              reason text not null,
+              created_at text not null,
+              primary key (project_id, version),
+              foreign key (project_id) references projects(id) on delete cascade,
+              foreign key (source_improvement_id) references harness_improvements(id) on delete set null
+            );
+
+            create table if not exists harness_runs (
+              id text primary key,
+              project_id text not null,
+              status text not null,
+              configuration_snapshot_json text not null,
+              configuration_version integer not null,
+              policy_version text not null,
+              effective_instruction_stack_json text,
+              search_id text not null,
+              search_run_id text unique,
+              stop_reason text,
+              summary text,
+              starting_state_revision integer not null default 0,
+              resulting_state_revision integer,
+              starting_vault_revision integer not null default 0,
+              resulting_vault_revision integer,
+              provider_query_count integer not null default 0,
+              llm_call_count integer not null default 0,
+              iteration_count integer not null default 0,
+              inspected_candidate_count integer not null default 0,
+              trigger text not null default 'manual',
+              scheduled_for text,
+              started_at text not null,
+              finished_at text,
+              foreign key (project_id) references projects(id) on delete cascade,
+              foreign key (search_id) references searches(id) on delete cascade,
+              foreign key (search_run_id) references search_runs(id) on delete cascade
+            );
+
+            create unique index if not exists idx_harness_runs_one_active
+              on harness_runs(project_id)
+              where status in ('queued', 'planning', 'searching', 'assessing', 'ranking', 'reconciling');
+
+            create table if not exists harness_change_sets (
+              id text primary key,
+              run_id text not null unique,
+              project_id text not null,
+              starting_state_revision integer not null,
+              status text not null,
+              plan_json text,
+              considered_candidates_json text not null,
+              error text,
+              decision_reason text,
+              resulting_state_revision integer,
+              created_at text not null,
+              decided_at text,
+              foreign key (run_id) references harness_runs(id) on delete cascade,
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create index if not exists idx_harness_change_sets_project
+              on harness_change_sets(project_id, created_at desc);
+
+            create table if not exists harness_events (
+              id text primary key,
+              run_id text not null,
+              sequence integer not null,
+              kind text not null,
+              summary text not null,
+              detail_json text,
+              phase text,
+              progress_current integer,
+              progress_total integer,
+              actor text not null default 'system',
+              occurred_at text not null,
+              unique (run_id, sequence),
+              foreign key (run_id) references harness_runs(id) on delete cascade
+            );
+
+            create index if not exists idx_harness_events_run
+              on harness_events(run_id, sequence);
+
+            create table if not exists harness_control_events (
+              id text primary key,
+              project_id text not null,
+              sequence integer not null,
+              kind text not null,
+              summary text not null,
+              occurred_at text not null,
+              unique (project_id, sequence),
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create table if not exists harness_reflections (
+              id text primary key,
+              run_id text not null unique,
+              project_id text not null,
+              policy_version text not null,
+              configuration_version integer not null,
+              summary text not null,
+              next_direction text,
+              metrics_json text not null,
+              created_at text not null,
+              foreign key (run_id) references harness_runs(id) on delete cascade,
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create table if not exists harness_observations (
+              id text primary key,
+              reflection_id text not null,
+              run_id text not null,
+              project_id text not null,
+              kind text not null,
+              signature text not null,
+              severity real not null,
+              confidence real not null,
+              description text not null,
+              metrics_json text not null,
+              target text,
+              proposed_value_json text,
+              proposal_eligible integer not null,
+              created_at text not null,
+              foreign key (reflection_id) references harness_reflections(id) on delete cascade,
+              foreign key (run_id) references harness_runs(id) on delete cascade,
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create index if not exists idx_harness_observations_recurrence
+              on harness_observations(project_id, signature, target, created_at desc);
+
+            create table if not exists harness_improvements (
+              id text primary key,
+              project_id text not null,
+              status text not null,
+              target text not null,
+              base_configuration_version integer not null,
+              before_value_json text not null,
+              proposed_value_json text not null,
+              rationale text not null,
+              expected_effect text not null,
+              policy_version text not null,
+              fingerprint text not null unique,
+              decision_actor text,
+              decision_reason text,
+              resulting_configuration_version integer,
+              created_at text not null,
+              decided_at text,
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create table if not exists harness_improvement_observations (
+              improvement_id text not null,
+              observation_id text not null,
+              primary key (improvement_id, observation_id),
+              foreign key (improvement_id) references harness_improvements(id) on delete cascade,
+              foreign key (observation_id) references harness_observations(id) on delete cascade
+            );
+
+            create table if not exists harness_improvement_runs (
+              improvement_id text not null,
+              run_id text not null,
+              primary key (improvement_id, run_id),
+              foreign key (improvement_id) references harness_improvements(id) on delete cascade,
+              foreign key (run_id) references harness_runs(id) on delete cascade
+            );
+
+            create table if not exists research_state_heads (
+              project_id text primary key,
+              current_revision integer not null default 0,
+              foreign key (project_id) references projects(id) on delete cascade
+            );
+
+            create table if not exists research_state_revisions (
+              project_id text not null,
+              revision integer not null,
+              run_id text,
+              reason text not null,
+              created_at text not null,
+              primary key (project_id, revision),
+              foreign key (project_id) references projects(id) on delete cascade,
+              foreign key (run_id) references harness_runs(id) on delete set null
+            );
+
+            create table if not exists research_entries (
+              id text primary key,
+              project_id text not null,
+              kind text not null,
+              epistemic_status text not null,
+              text text not null,
+              lifecycle text not null,
+              first_revision integer not null,
+              last_revision integer not null,
+              origin_run_id text,
+              created_at text not null,
+              updated_at text not null,
+              foreign key (project_id) references projects(id) on delete cascade,
+              foreign key (origin_run_id) references harness_runs(id) on delete set null
+            );
+
+            create index if not exists idx_research_entries_project
+              on research_entries(project_id, last_revision desc, id);
+
+            create table if not exists research_entry_revisions (
+              entry_id text not null,
+              project_id text not null,
+              state_revision integer not null,
+              kind text not null,
+              epistemic_status text not null,
+              text text not null,
+              lifecycle text not null,
+              origin_run_id text,
+              reason text not null,
+              created_at text not null,
+              primary key (entry_id, state_revision),
+              foreign key (entry_id) references research_entries(id) on delete cascade,
+              foreign key (project_id, state_revision)
+                references research_state_revisions(project_id, revision) on delete cascade,
+              foreign key (origin_run_id) references harness_runs(id) on delete set null
+            );
+
+            create index if not exists idx_research_entry_revisions_project
+              on research_entry_revisions(project_id, state_revision, entry_id);
+
+            create table if not exists research_evidence_links (
+              id text primary key,
+              entry_id text not null,
+              state_revision integer not null,
+              paper_id text not null,
+              source_id text not null,
+              extraction_id text not null,
+              chunk_id text not null,
+              excerpt text not null,
+              source_start integer not null,
+              source_end integer not null,
+              page_start integer not null,
+              page_end integer not null,
+              support_note text,
+              foreign key (entry_id, state_revision)
+                references research_entry_revisions(entry_id, state_revision) on delete cascade,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create index if not exists idx_research_evidence_entry
+              on research_evidence_links(entry_id, state_revision);
+
+            create table if not exists research_entry_relations (
+              id text primary key,
+              entry_id text not null,
+              state_revision integer not null,
+              target_entry_id text not null,
+              kind text not null,
+              foreign key (entry_id, state_revision)
+                references research_entry_revisions(entry_id, state_revision) on delete cascade,
+              foreign key (target_entry_id) references research_entries(id) on delete cascade
+            );
+
+            create index if not exists idx_research_relations_entry
+              on research_entry_relations(entry_id, state_revision);
+
+            create table if not exists research_context_links (
+              id text primary key,
+              entry_id text not null,
+              state_revision integer not null,
+              kind text not null,
+              context_id text not null,
+              label text not null,
+              foreign key (entry_id, state_revision)
+                references research_entry_revisions(entry_id, state_revision) on delete cascade
+            );
+
+            create index if not exists idx_research_context_entry
+              on research_context_links(entry_id, state_revision);
+
             create table if not exists vaults (
               id text primary key,
               project_id text not null unique,
               title text not null,
               path text not null unique,
+              membership_revision integer not null default 0,
               created_at text not null,
               updated_at text not null,
               foreign key (project_id) references projects(id) on delete cascade
@@ -3062,6 +5704,9 @@ impl LibraryStore {
               iteration integer not null default 0,
               added_count integer not null default 0,
               total_count integer not null default 0,
+              provider_query_count integer not null default 0,
+              llm_call_count integer not null default 0,
+              inspected_candidate_count integer not null default 0,
               started_at text,
               finished_at text,
               error text,
@@ -3172,6 +5817,18 @@ impl LibraryStore {
 
         add_column_if_missing(conn, "papers", "active_source_id", "text")?;
         add_column_if_missing(conn, "vaults", "project_id", "text")?;
+        add_column_if_missing(
+            conn,
+            "vaults",
+            "membership_revision",
+            "integer not null default 0",
+        )?;
+        add_column_if_missing(
+            conn,
+            "project_documents",
+            "content_revision",
+            "integer not null default 1",
+        )?;
         add_column_if_missing(conn, "papers", "active_extraction_id", "text")?;
         add_column_if_missing(conn, "document_sources", "landing_url", "text")?;
         add_column_if_missing(conn, "document_sources", "final_url", "text")?;
@@ -3179,6 +5836,94 @@ impl LibraryStore {
         add_column_if_missing(conn, "search_runs", "mode", "text not null default 'deep'")?;
         add_column_if_missing(conn, "search_runs", "provider_set", "text")?;
         add_column_if_missing(conn, "search_runs", "query_expansions", "text")?;
+        add_column_if_missing(
+            conn,
+            "harness_runs",
+            "starting_state_revision",
+            "integer not null default 0",
+        )?;
+        conn.execute(
+            "update vaults set membership_revision = (
+               select count(*) from vault_papers where vault_id = vaults.id
+             ) where membership_revision = 0",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+        add_column_if_missing(
+            conn,
+            "harness_runs",
+            "effective_instruction_stack_json",
+            "text",
+        )?;
+        add_column_if_missing(conn, "harness_runs", "resulting_state_revision", "integer")?;
+        add_column_if_missing(
+            conn,
+            "research_harnesses",
+            "schedule_enabled",
+            "integer not null default 0",
+        )?;
+        add_column_if_missing(conn, "research_harnesses", "next_run_at", "text")?;
+        add_column_if_missing(conn, "research_harnesses", "last_scheduled_for", "text")?;
+        add_column_if_missing(
+            conn,
+            "research_harnesses",
+            "requested_post_run_status",
+            "text not null default 'idle'",
+        )?;
+        add_column_if_missing(
+            conn,
+            "research_harnesses",
+            "completed_cycle_count",
+            "integer not null default 0",
+        )?;
+        add_column_if_missing(
+            conn,
+            "research_harnesses",
+            "consecutive_unproductive_runs",
+            "integer not null default 0",
+        )?;
+        add_column_if_missing(conn, "research_harnesses", "terminal_stop_reason", "text")?;
+        add_column_if_missing(
+            conn,
+            "harness_runs",
+            "trigger",
+            "text not null default 'manual'",
+        )?;
+        add_column_if_missing(conn, "harness_runs", "scheduled_for", "text")?;
+        add_column_if_missing(
+            conn,
+            "harness_runs",
+            "starting_vault_revision",
+            "integer not null default 0",
+        )?;
+        add_column_if_missing(conn, "harness_runs", "resulting_vault_revision", "integer")?;
+        for column in [
+            "provider_query_count",
+            "llm_call_count",
+            "iteration_count",
+            "inspected_candidate_count",
+        ] {
+            add_column_if_missing(conn, "harness_runs", column, "integer not null default 0")?;
+        }
+        for column in [
+            "provider_query_count",
+            "llm_call_count",
+            "inspected_candidate_count",
+        ] {
+            add_column_if_missing(conn, "search_runs", column, "integer not null default 0")?;
+        }
+        add_column_if_missing(conn, "harness_events", "detail_json", "text")?;
+        add_column_if_missing(conn, "harness_events", "phase", "text")?;
+        add_column_if_missing(conn, "harness_events", "progress_current", "integer")?;
+        add_column_if_missing(conn, "harness_events", "progress_total", "integer")?;
+        add_column_if_missing(
+            conn,
+            "harness_events",
+            "actor",
+            "text not null default 'system'",
+        )?;
+        add_column_if_missing(conn, "project_documents", "generation_id", "text")?;
+        add_column_if_missing(conn, "project_documents", "output_shape", "text")?;
         add_column_if_missing(conn, "search_candidates", "rank_signals_json", "text")?;
         add_column_if_missing(conn, "search_candidates", "provider_hits_json", "text")?;
         add_column_if_missing(
@@ -3192,7 +5937,33 @@ impl LibraryStore {
             "vault_suggestion_runs",
             "query_paths_json",
             "text not null default '[]'",
+        )?;
+        conn.execute_batch(
+            "drop index if exists idx_harness_runs_one_active;
+             create unique index idx_harness_runs_one_active on harness_runs(project_id)
+               where status in ('queued', 'planning', 'searching', 'assessing', 'ranking', 'reconciling');
+             create unique index if not exists idx_harness_runs_scheduled_occurrence
+               on harness_runs(project_id, scheduled_for) where scheduled_for is not null;
+             create index if not exists idx_research_harnesses_due
+               on research_harnesses(schedule_enabled, next_run_at, project_id);
+             create trigger if not exists trg_vault_papers_revision_insert
+             after insert on vault_papers begin
+               update vaults set membership_revision = membership_revision + 1,
+                 updated_at = datetime('now') where id = new.vault_id;
+             end;
+             create trigger if not exists trg_vault_papers_revision_delete
+             after delete on vault_papers begin
+               update vaults set membership_revision = membership_revision + 1,
+                 updated_at = datetime('now') where id = old.vault_id;
+             end;
+             create trigger if not exists trg_project_document_content_revision
+             after update of content on project_documents
+             when old.content <> new.content begin
+               update project_documents set content_revision = old.content_revision + 1
+                 where id = new.id;
+             end;",
         )
+        .map_err(|error| error.to_string())
     }
 
     fn is_library_empty(&self, conn: &Connection) -> StoreResult<bool> {
@@ -3214,6 +5985,8 @@ impl LibraryStore {
                 params![project_id, vault.title],
             )
             .map_err(|error| error.to_string())?;
+            insert_default_harness(&tx, &project_id)?;
+            insert_initial_research_state(&tx, &project_id)?;
             tx.execute(
                 "
                 insert into vaults (id, project_id, title, path, created_at, updated_at)
@@ -3296,12 +6069,10 @@ fn read_projects(conn: &Connection) -> StoreResult<Vec<Project>> {
     collect_rows(rows)
 }
 
-fn read_project_document_summaries(
-    conn: &Connection,
-) -> StoreResult<Vec<ProjectDocumentSummary>> {
+fn read_project_document_summaries(conn: &Connection) -> StoreResult<Vec<ProjectDocumentSummary>> {
     let mut statement = conn
         .prepare(
-            "select id, project_id, title, format, harness_writable, updated_at
+            "select id, project_id, title, format, harness_writable, content_revision, updated_at
              from project_documents order by updated_at desc, title, id",
         )
         .map_err(|error| error.to_string())?;
@@ -3313,7 +6084,8 @@ fn read_project_document_summaries(
                 title: row.get(2)?,
                 format: row.get(3)?,
                 harness_writable: row.get(4)?,
-                updated_at: row.get(5)?,
+                content_revision: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -3326,7 +6098,8 @@ fn read_project_document(
 ) -> StoreResult<Option<ProjectDocument>> {
     conn.query_row(
         "select id, project_id, title, format, content, harness_writable,
-                created_from_run_id, created_from_state_revision, created_at, updated_at
+                created_from_run_id, created_from_state_revision, generation_id,
+                output_shape, content_revision, created_at, updated_at
          from project_documents where id = ?1",
         params![document_id],
         |row| {
@@ -3339,8 +6112,488 @@ fn read_project_document(
                 harness_writable: row.get(5)?,
                 created_from_run_id: row.get(6)?,
                 created_from_state_revision: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                generation_id: row.get(8)?,
+                output_shape: row.get(9)?,
+                content_revision: row.get(10)?,
+                citations: Vec::new(),
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+    .and_then(|document| {
+        document
+            .map(|mut document| {
+                document.citations = read_project_document_citations(conn, &document.id)?;
+                Ok(document)
+            })
+            .transpose()
+    })
+}
+
+fn read_project_document_citations(
+    conn: &Connection,
+    document_id: &str,
+) -> StoreResult<Vec<ProjectDocumentCitation>> {
+    let mut statement = conn
+        .prepare(
+            "select document_id, citation_key, paper_id, evidence_link_ids_json,
+             title_snapshot, authors_snapshot_json, year_snapshot, created_at
+             from project_document_citations where document_id = ?1 order by citation_key",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![document_id], |row| {
+            let evidence: String = row.get(3)?;
+            let authors: String = row.get(5)?;
+            Ok(ProjectDocumentCitation {
+                document_id: row.get(0)?,
+                citation_key: row.get(1)?,
+                paper_id: row.get(2)?,
+                evidence_link_ids: parse_json_column(3, &evidence)?,
+                title_snapshot: row.get(4)?,
+                authors_snapshot: parse_json_column(5, &authors)?,
+                year_snapshot: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn read_research_document_generation(
+    conn: &Connection,
+    id: &str,
+) -> StoreResult<ResearchDocumentGeneration> {
+    conn.query_row(
+        "select id, project_id, status, shape, title, custom_instruction,
+         state_revision, selected_entry_ids_json, include_non_active,
+         originating_run_id, policy_version, model_identifier,
+         resulting_document_id, retry_of_id, error, cancellation_requested,
+         input_entry_count, citation_count, created_at, started_at, finished_at
+         from research_document_generations where id = ?1",
+        params![id],
+        |row| {
+            let shape: String = row.get(3)?;
+            let selected: String = row.get(7)?;
+            Ok(ResearchDocumentGeneration {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                status: row.get(2)?,
+                shape: parse_sql_enum(3, &shape, ResearchDocumentShape::parse)?,
+                title: row.get(4)?,
+                custom_instruction: row.get(5)?,
+                state_revision: row.get(6)?,
+                selected_entry_ids: parse_json_column(7, &selected)?,
+                include_non_active: row.get(8)?,
+                originating_run_id: row.get(9)?,
+                policy_version: row.get(10)?,
+                model_identifier: row.get(11)?,
+                resulting_document_id: row.get(12)?,
+                retry_of_id: row.get(13)?,
+                error: row.get(14)?,
+                cancellation_requested: row.get(15)?,
+                input_entry_count: row.get(16)?,
+                citation_count: row.get(17)?,
+                created_at: row.get(18)?,
+                started_at: row.get(19)?,
+                finished_at: row.get(20)?,
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn validate_generation_request(
+    store: &LibraryStore,
+    request: &CreateFromResearchRequest,
+) -> StoreResult<()> {
+    if request.title.trim().is_empty() {
+        return Err("Generated document title cannot be empty".to_string());
+    }
+    if request.selected_entry_ids.is_empty() {
+        return Err("Select at least one Research Entry".to_string());
+    }
+    if request.selected_entry_ids.len() > 100 {
+        return Err("A generation may include at most 100 Research Entries".to_string());
+    }
+    if request
+        .custom_instruction
+        .as_deref()
+        .is_some_and(|value| value.chars().count() > 1_000)
+    {
+        return Err("Custom document direction exceeds 1000 characters".to_string());
+    }
+    let state = store.get_research_state(&request.project_id, Some(request.state_revision))?;
+    for entry_id in &request.selected_entry_ids {
+        if !state.entries.iter().any(|entry| entry.id == *entry_id) {
+            return Err(format!(
+                "Research Entry is not visible in pinned revision {}: {entry_id}",
+                request.state_revision
+            ));
+        }
+    }
+    if let Some(run_id) = request.originating_run_id.as_deref() {
+        let conn = store.open_connection()?;
+        let valid: bool = conn
+            .query_row(
+                "select exists(select 1 from harness_runs where id = ?1 and project_id = ?2
+                 and status = 'ready')",
+                params![run_id, request.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !valid {
+            return Err("Originating Run must be completed inside this Project".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn shape_outline(shape: ResearchDocumentShape) -> &'static [&'static str] {
+    match shape {
+        ResearchDocumentShape::Survey => &[
+            "Scope and bounded corpus",
+            "Established findings",
+            "Themes and disagreements",
+            "Open questions and qualified gaps",
+            "Hypotheses and future work",
+        ],
+        ResearchDocumentShape::RelatedWork => &[
+            "Thematic synthesis",
+            "Method and evidence contrasts",
+            "Limitations of the bounded set",
+        ],
+        ResearchDocumentShape::ResearchGapAnalysis => &[
+            "Coverage statement",
+            "Supported background",
+            "Qualified gaps",
+            "Competing explanations and unanswered questions",
+            "Candidate next searches",
+        ],
+        ResearchDocumentShape::HypothesisReport => &[
+            "Motivating findings",
+            "Speculative hypotheses",
+            "Supporting and opposing premises",
+            "Falsifiable predictions",
+        ],
+        ResearchDocumentShape::ExperimentPlan => &[
+            "Research question and hypothesis",
+            "Proposed intervention or measurement",
+            "Variables, controls, and expected observations",
+            "Risks and alternative explanations",
+            "Evidence motivating the design",
+        ],
+        ResearchDocumentShape::Custom => &["Purpose", "Research synthesis"],
+    }
+}
+
+fn render_research_document(
+    conn: &Connection,
+    generation: &ResearchDocumentGeneration,
+    entries: &[ResearchEntryDetail],
+) -> StoreResult<(String, Vec<ProjectDocumentCitation>)> {
+    let mut paper_evidence: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in entries {
+        for evidence in &entry.evidence {
+            paper_evidence
+                .entry(evidence.paper_id.clone())
+                .or_default()
+                .push(evidence.id.clone());
+        }
+    }
+    let mut citations = Vec::new();
+    let mut keys: HashMap<String, String> = HashMap::new();
+    let mut used_keys = std::collections::HashSet::new();
+    let mut paper_ids = paper_evidence.keys().cloned().collect::<Vec<_>>();
+    paper_ids.sort();
+    for paper_id in paper_ids {
+        let paper = read_paper(conn, &paper_id)?
+            .ok_or_else(|| format!("Citation Paper no longer resolves: {paper_id}"))?;
+        let base = citation_key_base(&paper);
+        let mut key = base.clone();
+        let mut suffix = 2;
+        while !used_keys.insert(key.clone()) {
+            key = format!("{base}{suffix}");
+            suffix += 1;
+        }
+        keys.insert(paper_id.clone(), key.clone());
+        let mut evidence_link_ids = paper_evidence.remove(&paper_id).unwrap_or_default();
+        evidence_link_ids.sort();
+        evidence_link_ids.dedup();
+        citations.push(ProjectDocumentCitation {
+            document_id: String::new(),
+            citation_key: key,
+            paper_id,
+            evidence_link_ids,
+            title_snapshot: paper.title,
+            authors_snapshot: paper.authors,
+            year_snapshot: paper.year,
+            created_at: String::new(),
+        });
+    }
+
+    let mut content = format!(
+        "# {}\n\n> Generated from Research State revision {} using {} explicitly selected entries. Generated prose is an authored Project document, not Research State or source evidence.\n\n",
+        generation.title,
+        generation.state_revision,
+        entries.len()
+    );
+    if let Some(direction) = generation.custom_instruction.as_deref() {
+        content.push_str(&format!(
+            "**Researcher direction:** {}\n\n",
+            direction.trim()
+        ));
+    }
+    let mut rendered_entry_ids = std::collections::HashSet::new();
+    for heading in shape_outline(generation.shape) {
+        content.push_str(&format!("## {heading}\n\n"));
+        let matching = entries
+            .iter()
+            .filter(|detail| entry_matches_heading(detail, heading));
+        let mut count = 0;
+        for detail in matching {
+            count += 1;
+            rendered_entry_ids.insert(detail.entry.id.as_str());
+            content.push_str(&render_research_entry_bullet(detail, entries, &keys));
+        }
+        if count == 0 {
+            content.push_str("- No selected entries belong to this section.\n");
+        }
+        content.push('\n');
+    }
+    let additional = entries
+        .iter()
+        .filter(|entry| !rendered_entry_ids.contains(entry.entry.id.as_str()))
+        .collect::<Vec<_>>();
+    if !additional.is_empty() {
+        content.push_str("## Additional selected material\n\n");
+        for detail in additional {
+            content.push_str(&render_research_entry_bullet(detail, entries, &keys));
+        }
+        content.push('\n');
+    }
+    if entries.iter().any(|entry| !entry.context.is_empty()) {
+        content.push_str("## Researcher working context (not evidence)\n\n");
+        for entry in entries.iter().filter(|entry| !entry.context.is_empty()) {
+            content.push_str(&format!("- {}\n", entry.entry.text));
+        }
+        content.push('\n');
+    }
+    content.push_str("## References\n\n");
+    for citation in &citations {
+        content.push_str(&format!(
+            "- [@{}] {} ({}). *{}*.\n",
+            citation.citation_key,
+            citation.authors_snapshot.join(", "),
+            citation.year_snapshot,
+            citation.title_snapshot
+        ));
+    }
+    Ok((content, citations))
+}
+
+fn render_research_entry_bullet(
+    detail: &ResearchEntryDetail,
+    entries: &[ResearchEntryDetail],
+    citation_keys: &HashMap<String, String>,
+) -> String {
+    let citation_evidence = if detail.entry.epistemic_status == EpistemicStatus::SourceSupported {
+        detail.evidence.iter().collect::<Vec<_>>()
+    } else if detail.entry.epistemic_status == EpistemicStatus::AgentSynthesis {
+        detail
+            .relations
+            .iter()
+            .filter_map(|relation| {
+                entries
+                    .iter()
+                    .find(|candidate| candidate.entry.id == relation.target_entry_id)
+            })
+            .flat_map(|premise| premise.evidence.iter())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let handles = citation_evidence
+        .into_iter()
+        .filter_map(|evidence| citation_keys.get(&evidence.paper_id))
+        .map(|key| format!("[@{key}]"))
+        .collect::<Vec<_>>();
+    let citation_text = if handles.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", handles.join(" "))
+    };
+    format!(
+        "- **{}:** {}{}\n",
+        entry_qualifier(detail),
+        detail.entry.text,
+        citation_text
+    )
+}
+
+fn entry_matches_heading(entry: &ResearchEntryDetail, heading: &str) -> bool {
+    let heading = heading.to_lowercase();
+    match entry.entry.kind {
+        ResearchEntryKind::Finding => {
+            heading.contains("finding")
+                || heading.contains("background")
+                || heading.contains("synthesis")
+                || heading.contains("evidence")
+                || heading.contains("theme")
+        }
+        ResearchEntryKind::Question => {
+            heading.contains("question")
+                || heading.contains("research question")
+                || heading.contains("search")
+        }
+        ResearchEntryKind::Gap => {
+            heading.contains("gap") || heading.contains("limitation") || heading.contains("search")
+        }
+        ResearchEntryKind::Hypothesis => {
+            heading.contains("hypothes")
+                || heading.contains("prediction")
+                || heading.contains("explanation")
+        }
+        ResearchEntryKind::ExperimentIdea => {
+            heading.contains("experiment")
+                || heading.contains("intervention")
+                || heading.contains("variable")
+                || heading.contains("risk")
+                || heading.contains("future work")
+        }
+    }
+}
+
+fn entry_qualifier(entry: &ResearchEntryDetail) -> String {
+    let lifecycle = if entry.entry.lifecycle == EntryLifecycle::Active {
+        String::new()
+    } else {
+        format!("{} ", entry.entry.lifecycle.as_str())
+    };
+    let epistemic = match entry.entry.epistemic_status {
+        EpistemicStatus::SourceSupported => "source-supported finding",
+        EpistemicStatus::AgentSynthesis => "analysis",
+        EpistemicStatus::ResearcherContext => "researcher context",
+        EpistemicStatus::Speculative => match entry.entry.kind {
+            ResearchEntryKind::Gap => "qualified gap in this bounded review",
+            ResearchEntryKind::Hypothesis => "speculative hypothesis",
+            ResearchEntryKind::ExperimentIdea => "proposed experiment",
+            _ => "speculative entry",
+        },
+    };
+    format!("{lifecycle}{epistemic}")
+}
+
+fn citation_key_base(paper: &Paper) -> String {
+    let author = paper
+        .authors
+        .first()
+        .and_then(|value| value.split_whitespace().last())
+        .unwrap_or("paper");
+    let raw = format!("{author}{}", paper.year).to_lowercase();
+    let key: String = raw
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect();
+    if key.is_empty() {
+        "paper".to_string()
+    } else {
+        key
+    }
+}
+
+fn validate_generated_document(
+    content: &str,
+    entries: &[ResearchEntryDetail],
+    citations: &[ProjectDocumentCitation],
+) -> StoreResult<()> {
+    if content.chars().count() > 100_000 {
+        return Err("Generated document exceeds the 100000-character budget".to_string());
+    }
+    let allowed = citations
+        .iter()
+        .map(|citation| citation.citation_key.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let citation_pattern =
+        regex::Regex::new(r"\[@([A-Za-z0-9_-]+)\]").map_err(|error| error.to_string())?;
+    for captures in citation_pattern.captures_iter(content) {
+        if !allowed.contains(&captures[1]) {
+            return Err(format!(
+                "Generated document used unknown citation handle: {}",
+                &captures[1]
+            ));
+        }
+    }
+    for entry in entries.iter().filter(|entry| {
+        entry.entry.epistemic_status == EpistemicStatus::SourceSupported
+            && entry.entry.kind == ResearchEntryKind::Finding
+    }) {
+        if entry.evidence.is_empty() {
+            return Err(format!(
+                "Source-supported Finding lacks evidence: {}",
+                entry.entry.id
+            ));
+        }
+        let represented = entry.evidence.iter().any(|evidence| {
+            citations.iter().any(|citation| {
+                citation.paper_id == evidence.paper_id
+                    && citation.evidence_link_ids.contains(&evidence.id)
+            })
+        });
+        if !represented {
+            return Err(format!(
+                "Source-supported Finding lacks a resolvable citation: {}",
+                entry.entry.id
+            ));
+        }
+    }
+    for entry in entries {
+        let qualifier = entry_qualifier(entry);
+        if !content.contains(&format!("**{qualifier}:**")) {
+            return Err(format!(
+                "Generated document omitted epistemic qualification for entry: {}",
+                entry.entry.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_research_harness(
+    conn: &Connection,
+    project_id: &str,
+) -> StoreResult<Option<ResearchHarness>> {
+    conn.query_row(
+        "select project_id, status, configuration_json, configuration_version,
+                next_run_at, last_scheduled_for, requested_post_run_status,
+                completed_cycle_count, consecutive_unproductive_runs,
+                terminal_stop_reason, updated_at
+         from research_harnesses where project_id = ?1",
+        params![project_id],
+        |row| {
+            let configuration_json: String = row.get(2)?;
+            let configuration = serde_json::from_str(&configuration_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    configuration_json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(ResearchHarness {
+                project_id: row.get(0)?,
+                status: row.get(1)?,
+                configuration,
+                configuration_version: row.get(3)?,
+                next_run_at: row.get(4)?,
+                last_scheduled_for: row.get(5)?,
+                requested_post_run_status: row.get(6)?,
+                completed_cycle_count: row.get(7)?,
+                consecutive_unproductive_runs: row.get(8)?,
+                terminal_stop_reason: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         },
     )
@@ -3348,9 +6601,685 @@ fn read_project_document(
     .map_err(|error| error.to_string())
 }
 
+fn read_harness_run(conn: &Connection, run_id: &str) -> StoreResult<HarnessRun> {
+    conn.query_row(
+        "select id, project_id, status, configuration_snapshot_json,
+                configuration_version, policy_version, effective_instruction_stack_json,
+                search_id, search_run_id,
+                stop_reason, summary, starting_state_revision,
+                resulting_state_revision, starting_vault_revision, resulting_vault_revision,
+                provider_query_count, llm_call_count, iteration_count, inspected_candidate_count,
+                trigger, scheduled_for, started_at, finished_at
+         from harness_runs where id = ?1",
+        params![run_id],
+        harness_run_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<ResearchCheckpoint> {
+    let run = read_harness_run(conn, run_id)?;
+    let change_set = conn
+        .query_row(
+            &format!(
+                "select {HARNESS_CHANGE_SET_COLUMNS} from harness_change_sets where run_id = ?1"
+            ),
+            params![run_id],
+            harness_change_set_from_row,
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let plan = change_set
+        .as_ref()
+        .and_then(|change_set| change_set.plan.as_ref());
+    let accepted_candidate_count = plan
+        .map(|plan| {
+            plan.candidate_decisions
+                .iter()
+                .filter(|decision| decision.decision == CandidateDecisionKind::Accept)
+                .count() as i64
+        })
+        .unwrap_or(0);
+    let rejected_candidate_count = plan
+        .map(|plan| {
+            plan.candidate_decisions
+                .iter()
+                .filter(|decision| decision.decision == CandidateDecisionKind::Reject)
+                .count() as i64
+        })
+        .unwrap_or(0);
+    let added_paper_ids = match (&change_set, plan) {
+        (Some(change_set), Some(plan)) if change_set.status == HarnessChangeSetStatus::Applied => {
+            plan.candidate_decisions
+                .iter()
+                .filter(|decision| decision.decision == CandidateDecisionKind::Accept)
+                .filter_map(|decision| {
+                    change_set
+                        .considered_candidates
+                        .iter()
+                        .find(|candidate| candidate.id == decision.candidate_id)
+                })
+                .map(|candidate| candidate.candidate.id.clone())
+                .filter(|paper_id| {
+                    !run.effective_instructions
+                        .run_context
+                        .vault_paper_ids
+                        .contains(paper_id)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let reflection = conn
+        .query_row(
+            "select id, next_direction from harness_reflections where run_id = ?1",
+            params![run_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let terminal = matches!(run.status.as_str(), "ready" | "failed" | "cancelled");
+    let complete = terminal
+        && matches!(
+            run.stop_reason.as_deref(),
+            Some("target_reached" | "coverage_sufficient" | "converged")
+        );
+    let reflection_id = reflection.as_ref().map(|(id, _)| id.clone());
+    let next_direction = reflection
+        .as_ref()
+        .and_then(|(_, next_direction)| next_direction.clone())
+        .or_else(|| plan.map(|plan| plan.next_direction.clone()));
+    Ok(ResearchCheckpoint {
+        run_id: run.id,
+        project_id: run.project_id,
+        status: run.status,
+        starting_state_revision: run.starting_state_revision,
+        resulting_state_revision: run.resulting_state_revision,
+        starting_vault_revision: run.starting_vault_revision,
+        resulting_vault_revision: run.resulting_vault_revision,
+        applied_change_set_id: change_set.as_ref().and_then(|change_set| {
+            (change_set.status == HarnessChangeSetStatus::Applied).then(|| change_set.id.clone())
+        }),
+        accepted_candidate_count,
+        rejected_candidate_count,
+        added_paper_ids,
+        affected_documents: Vec::new(),
+        usage: HarnessUsage {
+            provider_queries: run.provider_query_count,
+            llm_calls: run.llm_call_count,
+            iterations: run.iteration_count,
+            inspected_candidates: run.inspected_candidate_count,
+        },
+        stop_reason: run.stop_reason.clone(),
+        complete,
+        converged: run.stop_reason.as_deref() == Some("converged"),
+        reflection_id,
+        next_direction,
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+        restore_available: terminal && run.resulting_state_revision.is_some(),
+    })
+}
+
+const HARNESS_CHANGE_SET_COLUMNS: &str =
+    "id, run_id, project_id, starting_state_revision, status, plan_json,
+     considered_candidates_json, error, decision_reason, resulting_state_revision,
+     created_at, decided_at";
+
+fn read_harness_change_set_by_run(
+    conn: &Connection,
+    run_id: &str,
+) -> StoreResult<HarnessChangeSet> {
+    conn.query_row(
+        &format!("select {HARNESS_CHANGE_SET_COLUMNS} from harness_change_sets where run_id = ?1"),
+        params![run_id],
+        harness_change_set_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn read_harness_change_set(conn: &Connection, id: &str) -> StoreResult<HarnessChangeSet> {
+    conn.query_row(
+        &format!("select {HARNESS_CHANGE_SET_COLUMNS} from harness_change_sets where id = ?1"),
+        params![id],
+        harness_change_set_from_row,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn harness_change_set_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HarnessChangeSet> {
+    let status: String = row.get(4)?;
+    let plan_json: Option<String> = row.get(5)?;
+    let candidates_json: String = row.get(6)?;
+    let plan = plan_json
+        .map(|json| deserialize_sql_json(5, &json))
+        .transpose()?;
+    let considered_candidates = deserialize_sql_json(6, &candidates_json)?;
+    Ok(HarnessChangeSet {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        project_id: row.get(2)?,
+        starting_state_revision: row.get(3)?,
+        status: parse_sql_enum(4, &status, HarnessChangeSetStatus::parse)?,
+        plan,
+        considered_candidates,
+        error: row.get(7)?,
+        decision_reason: row.get(8)?,
+        resulting_state_revision: row.get(9)?,
+        created_at: row.get(10)?,
+        decided_at: row.get(11)?,
+    })
+}
+
+fn deserialize_sql_json<T: serde::de::DeserializeOwned>(
+    column: usize,
+    json: &str,
+) -> rusqlite::Result<T> {
+    serde_json::from_str(json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+fn insert_harness_configuration_version(
+    conn: &Connection,
+    project_id: &str,
+    version: i64,
+    configuration: &HarnessConfiguration,
+    actor: &str,
+    source_improvement_id: Option<&str>,
+    reason: &str,
+) -> StoreResult<()> {
+    let json = serde_json::to_string(configuration).map_err(|error| error.to_string())?;
+    conn.execute(
+        "insert into harness_configuration_versions
+         (project_id, version, configuration_json, actor, source_improvement_id, reason, created_at)
+         values (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+        params![
+            project_id,
+            version,
+            json,
+            actor,
+            source_improvement_id,
+            reason
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn read_harness_configuration_versions(
+    conn: &Connection,
+    project_id: &str,
+) -> StoreResult<Vec<HarnessConfigurationVersion>> {
+    let mut statement = conn
+        .prepare(
+            "select project_id, version, configuration_json, actor,
+                    source_improvement_id, reason, created_at
+             from harness_configuration_versions where project_id = ?1
+             order by version desc",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![project_id], |row| {
+            let json: String = row.get(2)?;
+            let configuration = serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(HarnessConfigurationVersion {
+                project_id: row.get(0)?,
+                version: row.get(1)?,
+                configuration,
+                actor: row.get(3)?,
+                source_improvement_id: row.get(4)?,
+                reason: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn build_effective_instruction_stack(
+    conn: &Connection,
+    project_id: &str,
+    starting_state_revision: i64,
+    configuration: &HarnessConfiguration,
+) -> StoreResult<EffectiveInstructionStack> {
+    let mut entries_statement = conn
+        .prepare(
+            "select id, kind, epistemic_status, text, lifecycle
+             from research_entries where project_id = ?1 and lifecycle = 'active'
+             order by last_revision desc, id limit 100",
+        )
+        .map_err(|error| error.to_string())?;
+    let entry_rows = entries_statement
+        .query_map(params![project_id], |row| {
+            Ok(RunContextEntry {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                epistemic_status: row.get(2)?,
+                text: row.get(3)?,
+                lifecycle: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let active_entries = collect_rows(entry_rows)?;
+
+    let (vault_id, vault_paper_count, vault_membership_rowid): (String, i64, i64) = conn
+        .query_row(
+            "select v.id, count(vp.paper_id), coalesce(max(vp.rowid), 0)
+             from vaults v left join vault_papers vp on vp.vault_id = v.id
+             where v.project_id = ?1 group by v.id",
+            params![project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let vault_revision = format!("{vault_paper_count}:{vault_membership_rowid}");
+    let mut papers_statement = conn
+        .prepare(
+            "select vp.paper_id from vault_papers vp
+             join vaults v on v.id = vp.vault_id
+             where v.project_id = ?1 order by vp.paper_id limit 500",
+        )
+        .map_err(|error| error.to_string())?;
+    let paper_rows = papers_statement
+        .query_map(params![project_id], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let vault_paper_ids = collect_rows(paper_rows)?;
+    let prior_next_direction = conn
+        .query_row(
+            "select reflection.next_direction
+             from harness_reflections reflection
+             join harness_runs run on run.id = reflection.run_id
+             where run.project_id = ?1 and reflection.next_direction is not null
+             order by reflection.created_at desc limit 1",
+            params![project_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .flatten();
+    let mut observations_statement = conn
+        .prepare(
+            "select observation.kind, observation.description
+             from harness_observations observation
+             join harness_runs run on run.id = observation.run_id
+             where observation.project_id = ?1 and run.status = 'ready'
+             order by observation.created_at desc, observation.id desc limit 20",
+        )
+        .map_err(|error| error.to_string())?;
+    let observation_rows = observations_statement
+        .query_map(params![project_id], |row| {
+            Ok(RunContextObservation {
+                kind: row.get(0)?,
+                description: row.get(1)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let prior_observations = collect_rows(observation_rows)?;
+    let strategy = configuration.depth.budget();
+    let maximum_provider_queries = configuration
+        .stop_conditions
+        .maximum_provider_queries
+        .unwrap_or(strategy.max_provider_queries)
+        .min(strategy.max_provider_queries);
+    let maximum_llm_calls = configuration
+        .stop_conditions
+        .maximum_llm_calls
+        .unwrap_or(strategy.max_llm_calls)
+        .min(strategy.max_llm_calls);
+    Ok(EffectiveInstructionStack {
+        product_policy_version: HARNESS_POLICY_VERSION.to_string(),
+        product_policy_summary: HARNESS_POLICY_SUMMARY.to_string(),
+        project_research_instructions: configuration.research_instructions.clone(),
+        structured_settings: configuration.clone(),
+        run_context: EffectiveRunContext {
+            starting_state_revision,
+            active_entries,
+            vault_id,
+            vault_revision,
+            vault_paper_ids,
+            prior_next_direction,
+            prior_observations,
+            maximum_provider_queries,
+            maximum_llm_calls,
+            paper_budget: configuration.paper_budget,
+        },
+    })
+}
+
+fn legacy_effective_instruction_stack(
+    configuration: &HarnessConfiguration,
+    starting_state_revision: i64,
+) -> EffectiveInstructionStack {
+    let strategy = configuration.depth.budget();
+    EffectiveInstructionStack {
+        product_policy_version: HARNESS_POLICY_VERSION.to_string(),
+        product_policy_summary: HARNESS_POLICY_SUMMARY.to_string(),
+        project_research_instructions: configuration.research_instructions.clone(),
+        structured_settings: configuration.clone(),
+        run_context: EffectiveRunContext {
+            starting_state_revision,
+            active_entries: Vec::new(),
+            vault_id: String::new(),
+            vault_revision: "legacy".to_string(),
+            vault_paper_ids: Vec::new(),
+            prior_next_direction: None,
+            prior_observations: Vec::new(),
+            maximum_provider_queries: configuration
+                .stop_conditions
+                .maximum_provider_queries
+                .unwrap_or(strategy.max_provider_queries)
+                .min(strategy.max_provider_queries),
+            maximum_llm_calls: configuration
+                .stop_conditions
+                .maximum_llm_calls
+                .unwrap_or(strategy.max_llm_calls)
+                .min(strategy.max_llm_calls),
+            paper_budget: configuration.paper_budget,
+        },
+    }
+}
+
+fn read_harness_runs(conn: &Connection, project_id: &str) -> StoreResult<Vec<HarnessRun>> {
+    let mut statement = conn
+        .prepare(
+            "select id, project_id, status, configuration_snapshot_json,
+                    configuration_version, policy_version, effective_instruction_stack_json,
+                    search_id, search_run_id,
+                    stop_reason, summary, starting_state_revision,
+                    resulting_state_revision, starting_vault_revision, resulting_vault_revision,
+                    provider_query_count, llm_call_count, iteration_count, inspected_candidate_count,
+                    trigger, scheduled_for, started_at, finished_at
+             from harness_runs where project_id = ?1 order by started_at desc, id desc",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![project_id], harness_run_from_row)
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn harness_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HarnessRun> {
+    let snapshot_json: String = row.get(3)?;
+    let configuration_snapshot = serde_json::from_str(&snapshot_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            snapshot_json.len(),
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
+    let starting_state_revision: i64 = row.get(11)?;
+    let effective_json: Option<String> = row.get(6)?;
+    let effective_instructions = effective_json
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            legacy_effective_instruction_stack(&configuration_snapshot, starting_state_revision)
+        });
+    let trigger: String = row.get(19)?;
+    Ok(HarnessRun {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        status: row.get(2)?,
+        configuration_snapshot,
+        configuration_version: row.get(4)?,
+        policy_version: row.get(5)?,
+        effective_instructions,
+        search_id: row.get(7)?,
+        search_run_id: row.get(8)?,
+        stop_reason: row.get(9)?,
+        summary: row.get(10)?,
+        starting_state_revision,
+        resulting_state_revision: row.get(12)?,
+        starting_vault_revision: row.get(13)?,
+        resulting_vault_revision: row.get(14)?,
+        provider_query_count: row.get(15)?,
+        llm_call_count: row.get(16)?,
+        iteration_count: row.get(17)?,
+        inspected_candidate_count: row.get(18)?,
+        trigger: parse_sql_enum(19, &trigger, HarnessRunTrigger::parse)?,
+        scheduled_for: row.get(20)?,
+        started_at: row.get(21)?,
+        finished_at: row.get(22)?,
+    })
+}
+
+fn read_harness_events_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> StoreResult<Vec<HarnessEvent>> {
+    let mut statement = conn
+        .prepare(
+            "select id, run_id, sequence, kind, summary, detail_json, phase,
+                    progress_current, progress_total, actor, occurred_at from (
+               select e.id, e.run_id, e.sequence, e.kind, e.summary, e.detail_json, e.phase,
+                      e.progress_current, e.progress_total, e.actor, e.occurred_at
+               from harness_events e join harness_runs r on r.id = e.run_id
+               where r.project_id = ?1
+               union all
+               select e.id, '', e.sequence, e.kind, e.summary, null, null, null, null,
+                      case when e.kind = 'scheduled_run_claimed' then 'scheduler'
+                           when e.kind like '%failed' then 'system' else 'researcher' end,
+                      e.occurred_at
+               from harness_control_events e where e.project_id = ?1
+             ) order by occurred_at desc, id desc",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![project_id], |row| {
+            Ok(HarnessEvent {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                sequence: row.get(2)?,
+                kind: row.get(3)?,
+                summary: row.get(4)?,
+                detail: row
+                    .get::<_, Option<String>>(5)?
+                    .map(|json| deserialize_sql_json(5, &json))
+                    .transpose()?,
+                phase: row.get(6)?,
+                progress_current: row.get(7)?,
+                progress_total: row.get(8)?,
+                actor: row.get(9)?,
+                occurred_at: row.get(10)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn read_harness_reflection(conn: &Connection, id: &str) -> StoreResult<HarnessReflection> {
+    conn.query_row(
+        "select id, run_id, project_id, policy_version, configuration_version,
+         summary, next_direction, metrics_json, created_at from harness_reflections where id = ?1",
+        params![id],
+        |row| {
+            Ok(HarnessReflection {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                project_id: row.get(2)?,
+                policy_version: row.get(3)?,
+                configuration_version: row.get(4)?,
+                summary: row.get(5)?,
+                next_direction: row.get(6)?,
+                metrics_json: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn read_harness_improvements(
+    conn: &Connection,
+    project_id: &str,
+    status: Option<HarnessImprovementStatus>,
+) -> StoreResult<Vec<HarnessImprovement>> {
+    let mut statement = conn
+        .prepare(
+            "select id from harness_improvements where project_id = ?1
+             and (?2 is null or status = ?2) order by created_at desc, id desc",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(
+            params![project_id, status.map(HarnessImprovementStatus::as_str)],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let ids = collect_rows(rows)?;
+    ids.iter()
+        .map(|id| read_harness_improvement(conn, id))
+        .collect()
+}
+
+fn read_harness_improvement(conn: &Connection, id: &str) -> StoreResult<HarnessImprovement> {
+    let mut improvement = conn
+        .query_row(
+            "select id, project_id, status, target, base_configuration_version,
+             before_value_json, proposed_value_json, rationale, expected_effect,
+             policy_version, decision_actor, decision_reason,
+             resulting_configuration_version, created_at, decided_at
+             from harness_improvements where id = ?1",
+            params![id],
+            |row| {
+                let status: String = row.get(2)?;
+                let target: String = row.get(3)?;
+                let before: String = row.get(5)?;
+                let proposed: String = row.get(6)?;
+                Ok(HarnessImprovement {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    status: parse_sql_enum(2, &status, HarnessImprovementStatus::parse)?,
+                    target: parse_sql_enum(3, &target, HarnessImprovementTarget::parse)?,
+                    base_configuration_version: row.get(4)?,
+                    before_value: parse_json_column(5, &before)?,
+                    proposed_value: parse_json_column(6, &proposed)?,
+                    rationale: row.get(7)?,
+                    expected_effect: row.get(8)?,
+                    policy_version: row.get(9)?,
+                    decision_actor: row.get(10)?,
+                    decision_reason: row.get(11)?,
+                    resulting_configuration_version: row.get(12)?,
+                    run_ids: Vec::new(),
+                    observation_ids: Vec::new(),
+                    observations: Vec::new(),
+                    created_at: row.get(13)?,
+                    decided_at: row.get(14)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    improvement.run_ids = read_string_column(
+        conn,
+        "select run_id from harness_improvement_runs where improvement_id = ?1 order by run_id",
+        id,
+    )?;
+    improvement.observation_ids = read_string_column(
+        conn,
+        "select observation_id from harness_improvement_observations where improvement_id = ?1 order by observation_id",
+        id,
+    )?;
+    improvement.observations = read_harness_observations(conn, id)?;
+    Ok(improvement)
+}
+
+fn read_harness_observations(
+    conn: &Connection,
+    improvement_id: &str,
+) -> StoreResult<Vec<HarnessObservation>> {
+    let mut statement = conn
+        .prepare(
+            "select o.id, o.reflection_id, o.run_id, o.project_id, o.kind,
+             o.signature, o.severity, o.confidence, o.description, o.metrics_json,
+             o.target, o.proposed_value_json, o.proposal_eligible, o.created_at
+             from harness_observations o
+             join harness_improvement_observations link on link.observation_id = o.id
+             where link.improvement_id = ?1 order by o.created_at, o.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![improvement_id], |row| {
+            let kind: String = row.get(4)?;
+            let target: Option<String> = row.get(10)?;
+            let proposed_json: Option<String> = row.get(11)?;
+            Ok(HarnessObservation {
+                id: row.get(0)?,
+                reflection_id: row.get(1)?,
+                run_id: row.get(2)?,
+                project_id: row.get(3)?,
+                kind: parse_sql_enum(4, &kind, HarnessObservationKind::parse)?,
+                signature: row.get(5)?,
+                severity: row.get(6)?,
+                confidence: row.get(7)?,
+                description: row.get(8)?,
+                metrics_json: row.get(9)?,
+                target: target
+                    .as_deref()
+                    .map(HarnessImprovementTarget::parse)
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            10,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                        )
+                    })?,
+                proposed_value: proposed_json
+                    .as_deref()
+                    .map(|json| parse_json_column(11, json))
+                    .transpose()?,
+                proposal_eligible: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn read_string_column(conn: &Connection, sql: &str, id: &str) -> StoreResult<Vec<String>> {
+    let mut statement = conn.prepare(sql).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn parse_json_column<T: serde::de::DeserializeOwned>(
+    column: usize,
+    json: &str,
+) -> rusqlite::Result<T> {
+    serde_json::from_str(json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 fn read_vaults(conn: &Connection) -> StoreResult<Vec<Vault>> {
     let mut stmt = conn
-        .prepare("select id, project_id, title, path from vaults order by path")
+        .prepare(
+            "select id, project_id, title, path, membership_revision from vaults order by path",
+        )
         .map_err(|error| error.to_string())?;
 
     let rows = stmt
@@ -3360,6 +7289,7 @@ fn read_vaults(conn: &Connection) -> StoreResult<Vec<Vault>> {
                 project_id: row.get(1)?,
                 title: row.get(2)?,
                 path: row.get(3)?,
+                membership_revision: row.get(4)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -4316,6 +8246,104 @@ impl LibraryStore {
         read_search_run(&conn, id)
     }
 
+    /// Persists actual bounded-loop usage on the Search Run and linked Harness Run.
+    pub fn set_search_run_usage(
+        &self,
+        run_id: &str,
+        provider_queries: u32,
+        llm_calls: u32,
+        iterations: u32,
+        inspected_candidates: u32,
+    ) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "update search_runs set provider_query_count = ?2, llm_call_count = ?3,
+             inspected_candidate_count = ?4 where id = ?1",
+            params![run_id, provider_queries, llm_calls, inspected_candidates],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update harness_runs set provider_query_count = ?2, llm_call_count = ?3,
+             iteration_count = ?4, inspected_candidate_count = ?5
+             where search_run_id = ?1",
+            params![
+                run_id,
+                provider_queries,
+                llm_calls,
+                iterations,
+                inspected_candidates
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(harness_run_id) = tx
+            .query_row(
+                "select id from harness_runs where search_run_id = ?1",
+                params![run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+        {
+            append_structured_harness_event(
+                &tx,
+                &harness_run_id,
+                "usage_recorded",
+                "Recorded actual bounded research usage",
+                Some(serde_json::json!({
+                    "providerQueries": provider_queries,
+                    "llmCalls": llm_calls,
+                    "iterations": iterations,
+                    "inspectedCandidates": inspected_candidates,
+                })),
+                Some("complete"),
+                None,
+                None,
+                "system",
+            )?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// Adds post-search reconciliation calls to both ledgers.
+    pub fn add_search_run_llm_calls(&self, run_id: &str, calls: u32) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "update search_runs set llm_call_count = llm_call_count + ?2 where id = ?1",
+            params![run_id, calls],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update harness_runs set llm_call_count = llm_call_count + ?2
+             where search_run_id = ?1",
+            params![run_id, calls],
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some((harness_run_id, total_calls)) = tx
+            .query_row(
+                "select id, llm_call_count from harness_runs where search_run_id = ?1",
+                params![run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+        {
+            append_structured_harness_event(
+                &tx,
+                &harness_run_id,
+                "reconciliation_usage_recorded",
+                "Recorded reconciliation model calls",
+                Some(serde_json::json!({ "llmCalls": calls, "totalLlmCalls": total_calls })),
+                Some("reconciliation"),
+                None,
+                None,
+                "system",
+            )?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+
     /// Update a run's progress/status. `finished` stamps `finished_at`.
     pub fn set_search_run_status(
         &self,
@@ -4326,13 +8354,14 @@ impl LibraryStore {
         error: Option<&str>,
         finished: bool,
     ) -> StoreResult<()> {
-        let conn = self.open_connection()?;
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
         let finished_sql = if finished {
             "datetime('now')"
         } else {
             "finished_at"
         };
-        conn.execute(
+        tx.execute(
             &format!(
                 "update search_runs
                    set status = ?2, iteration = ?3, stop_reason = ?4, error = ?5,
@@ -4342,7 +8371,198 @@ impl LibraryStore {
             params![run_id, status.as_str(), iteration, stop_reason, error],
         )
         .map_err(|e| e.to_string())?;
+
+        let linked_harness_run = tx
+            .query_row(
+                "select id, project_id from harness_runs where search_run_id = ?1",
+                params![run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((harness_run_id, project_id)) = linked_harness_run {
+            let awaiting_reconciliation = finished && status == SearchRunStatus::Ready;
+            let terminal = finished && !awaiting_reconciliation;
+            let harness_status = if awaiting_reconciliation {
+                "reconciling"
+            } else {
+                status.as_str()
+            };
+            let resulting_vault_revision = if terminal {
+                Some(
+                    tx.query_row(
+                        "select membership_revision from vaults where project_id = ?1",
+                        params![project_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            };
+            let harness_finished_sql = if terminal {
+                "datetime('now')"
+            } else {
+                "finished_at"
+            };
+            tx.execute(
+                &format!(
+                    "update harness_runs
+                     set status = ?2, stop_reason = ?3, summary = ?4,
+                         resulting_state_revision = case when ?5 is not null
+                           then coalesce(resulting_state_revision, starting_state_revision)
+                           else resulting_state_revision end,
+                         resulting_vault_revision = coalesce(?5, resulting_vault_revision),
+                         finished_at = {harness_finished_sql}
+                     where id = ?1"
+                ),
+                params![
+                    harness_run_id,
+                    harness_status,
+                    stop_reason,
+                    error,
+                    resulting_vault_revision
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+            append_harness_event(
+                &tx,
+                &harness_run_id,
+                harness_status,
+                if awaiting_reconciliation {
+                    "Reconciling candidate decisions, Research State, and reflection"
+                } else if error.is_some() {
+                    "Research Run failed"
+                } else {
+                    stop_reason.unwrap_or(status.as_str())
+                },
+            )?;
+            if terminal {
+                append_structured_harness_event(
+                    &tx,
+                    &harness_run_id,
+                    "stop_decided",
+                    &format!(
+                        "Research Run stopped: {}",
+                        stop_reason.unwrap_or(status.as_str()).replace('_', " ")
+                    ),
+                    Some(serde_json::json!({
+                        "status": status.as_str(),
+                        "stopReason": stop_reason,
+                        "complete": matches!(stop_reason, Some("target_reached" | "coverage_sufficient" | "converged")),
+                        "converged": stop_reason == Some("converged"),
+                    })),
+                    Some("complete"),
+                    None,
+                    None,
+                    "system",
+                )?;
+                let added_count: i64 = tx
+                    .query_row(
+                        "select added_count from search_runs where id = ?1",
+                        params![run_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let state_changed: bool = tx
+                    .query_row(
+                        "select resulting_state_revision > starting_state_revision
+                         from harness_runs where id = ?1",
+                        params![harness_run_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                settle_harness_after_run(
+                    &tx,
+                    &project_id,
+                    &harness_run_id,
+                    added_count > 0 || state_changed,
+                )?;
+            }
+        }
+        tx.commit().map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Completes a linked Harness Run after reconciliation and reflection settle.
+    pub fn finalize_harness_run(&self, search_run_id: &str) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let (search_status, stop_reason, added_count): (String, Option<String>, i64) = tx
+            .query_row(
+                "select status, stop_reason, added_count from search_runs where id = ?1",
+                params![search_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if search_status != "ready" {
+            return Err("Only a ready Search Run may finalize its Research Run".to_string());
+        }
+        let (harness_run_id, project_id, status): (String, String, String) = tx
+            .query_row(
+                "select id, project_id, status from harness_runs where search_run_id = ?1",
+                params![search_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if status != "reconciling" {
+            return Err("Research Run is not awaiting finalization".to_string());
+        }
+        let resulting_vault_revision: i64 = tx
+            .query_row(
+                "select membership_revision from vaults where project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update harness_runs set status = 'ready',
+             resulting_state_revision = coalesce(resulting_state_revision, starting_state_revision),
+             resulting_vault_revision = coalesce(resulting_vault_revision, ?2),
+             finished_at = datetime('now') where id = ?1 and status = 'reconciling'",
+            params![harness_run_id, resulting_vault_revision],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(
+            &tx,
+            &harness_run_id,
+            "ready",
+            stop_reason.as_deref().unwrap_or("ready"),
+        )?;
+        append_structured_harness_event(
+            &tx,
+            &harness_run_id,
+            "stop_decided",
+            &format!(
+                "Research Run stopped: {}",
+                stop_reason.as_deref().unwrap_or("ready").replace('_', " ")
+            ),
+            Some(serde_json::json!({
+                "status": "ready",
+                "stopReason": stop_reason,
+                "complete": matches!(stop_reason.as_deref(), Some("target_reached" | "coverage_sufficient" | "converged")),
+                "converged": stop_reason.as_deref() == Some("converged"),
+            })),
+            Some("complete"),
+            None,
+            None,
+            "system",
+        )?;
+        let state_changed: bool = tx
+            .query_row(
+                "select resulting_state_revision > starting_state_revision
+                 from harness_runs where id = ?1",
+                params![harness_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        settle_harness_after_run(
+            &tx,
+            &project_id,
+            &harness_run_id,
+            added_count > 0 || state_changed,
+        )?;
+        tx.commit().map_err(|error| error.to_string())
     }
 
     /// Persist the concrete query strings Scout attempted for this run.
@@ -4983,7 +9203,8 @@ fn read_search_run(conn: &Connection, id: &str) -> StoreResult<SearchRun> {
     conn.query_row(
         "select id, search_id, mode, provider_set, query_expansions, status,
                 stop_reason, iteration, added_count, total_count, started_at,
-                finished_at, error, created_at
+                finished_at, error, created_at, provider_query_count, llm_call_count,
+                inspected_candidate_count
          from search_runs where id = ?1",
         params![id],
         search_run_from_row,
@@ -5007,6 +9228,9 @@ fn search_run_from_row(row: &rusqlite::Row) -> rusqlite::Result<SearchRun> {
         finished_at: row.get(11)?,
         error: row.get(12)?,
         created_at: row.get(13)?,
+        provider_query_count: row.get(14)?,
+        llm_call_count: row.get(15)?,
+        inspected_candidate_count: row.get(16)?,
     })
 }
 
@@ -5794,6 +10018,160 @@ fn realign_chunk_fts_rowids(conn: &Connection) -> StoreResult<()> {
     Ok(())
 }
 
+fn upsert_reconciliation_paper(
+    conn: &Connection,
+    vault_id: &str,
+    candidate: &SearchCandidate,
+) -> StoreResult<()> {
+    let paper = &candidate.candidate;
+    conn.execute(
+        "insert into papers (
+           id, title, authors_json, venue, year, citations, tags_json,
+           note_count, annotation_count, status, abstract, created_at, updated_at
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, '[]', 0, 0, 'UNREAD', ?7,
+                   datetime('now'), datetime('now'))
+         on conflict(id) do update set
+           title = excluded.title, authors_json = excluded.authors_json,
+           venue = excluded.venue, year = excluded.year, citations = excluded.citations,
+           abstract = coalesce(papers.abstract, excluded.abstract), updated_at = datetime('now')",
+        params![
+            paper.id,
+            paper.title,
+            serde_json::to_string(&paper.authors).map_err(|error| error.to_string())?,
+            paper.venue.as_deref().unwrap_or("Unknown"),
+            paper.year.unwrap_or(0),
+            paper.citation_count.unwrap_or(0),
+            paper.abstract_text
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "insert into vault_papers (vault_id, paper_id, added_at)
+         values (?1, ?2, datetime('now')) on conflict(vault_id, paper_id) do nothing",
+        params![vault_id, paper.id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Stores provider abstract text as an immutable, visibly typed extraction.
+fn materialize_metadata_abstract(
+    conn: &Connection,
+    candidate: &SearchCandidate,
+) -> StoreResult<String> {
+    let paper = &candidate.candidate;
+    let abstract_text = paper
+        .abstract_text
+        .as_deref()
+        .ok_or_else(|| format!("Candidate has no abstract: {}", candidate.id))?;
+    let digest = format!("{:x}", Sha256::digest(abstract_text.as_bytes()));
+    let suffix = &digest[..16];
+    let source_id = format!("metadata_abstract:{}:{suffix}", paper.id);
+    let extraction_id = format!("metadata_abstract_extraction:{}:{suffix}", paper.id);
+    let page_id = format!("metadata_abstract_page:{}:{suffix}", paper.id);
+    let block_id = format!("metadata_abstract_block:{}:{suffix}", paper.id);
+    let chunk_id = format!("metadata_abstract_chunk:{}:{suffix}", paper.id);
+    conn.execute(
+        "insert into document_sources (
+           id, paper_id, source_kind, source_url, landing_url, final_url,
+           acquisition_method, local_path, status, error, created_at, updated_at
+         ) values (?1, ?2, 'metadata_abstract', ?3, ?4, ?3, 'provider_metadata',
+                   null, 'cached', null, datetime('now'), datetime('now'))
+         on conflict(id) do nothing",
+        params![source_id, paper.id, paper.external_url, paper.external_url],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "insert into document_extractions (
+           id, paper_id, source_id, extractor, extractor_version,
+           annotation_source_id, status, error, created_at, updated_at
+         ) values (?1, ?2, ?3, 'metadata_abstract', '1', ?3, 'ready', null,
+                   datetime('now'), datetime('now'))
+         on conflict(id) do nothing",
+        params![extraction_id, paper.id, source_id],
+    )
+    .map_err(|error| error.to_string())?;
+    let exists: bool = conn
+        .query_row(
+            "select exists(select 1 from document_chunks where id = ?1)",
+            params![chunk_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !exists {
+        let text_length = abstract_text.chars().count() as i64;
+        conn.execute(
+            "insert into document_pages
+             (id, paper_id, source_id, extraction_id, page_index, width, height)
+             values (?1, ?2, ?3, ?4, 0, 1, 1)",
+            params![page_id, paper.id, source_id, extraction_id],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "insert into document_blocks (
+               id, paper_id, source_id, extraction_id, page_index, block_index,
+               reading_order, kind, text, asset_id, source_start, source_end, bbox_json
+             ) values (?1, ?2, ?3, ?4, 0, 0, 0, 'abstract', ?5, null, 0, ?6, null)",
+            params![
+                block_id,
+                paper.id,
+                source_id,
+                extraction_id,
+                abstract_text,
+                text_length
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        insert_chunks(
+            conn,
+            &[DocumentChunk {
+                id: chunk_id.clone(),
+                paper_id: paper.id.clone(),
+                source_id: source_id.clone(),
+                extraction_id: extraction_id.clone(),
+                chunk_index: 0,
+                chunker: "metadata_abstract".to_string(),
+                chunk_version: 1,
+                page_start: 0,
+                page_end: 0,
+                heading_path: Some("Provider abstract".to_string()),
+                text: abstract_text.to_string(),
+                token_estimate: ((text_length + 3) / 4) as i32,
+                source_start: 0,
+                source_end: text_length,
+                block_ids: vec![block_id],
+            }],
+        )?;
+    }
+    conn.execute(
+        "update papers set active_source_id = coalesce(active_source_id, ?2),
+         active_extraction_id = coalesce(active_extraction_id, ?3), updated_at = datetime('now')
+         where id = ?1",
+        params![paper.id, source_id, extraction_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(chunk_id)
+}
+
+fn find_inspected_evidence_chunk(
+    conn: &Connection,
+    paper_id: &str,
+    excerpt: &str,
+) -> StoreResult<Option<String>> {
+    conn.query_row(
+        "select c.id from document_chunks c
+         join document_extractions e on e.id = c.extraction_id and e.status = 'ready'
+         join document_sources s on s.id = c.source_id
+         where c.paper_id = ?1 and instr(c.text, ?2) > 0
+         order by case when s.source_kind = 'metadata_abstract' then 1 else 0 end, c.chunk_index
+         limit 1",
+        params![paper_id, excerpt],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+}
+
 /// Write chunks, their block provenance, and their FTS rows.
 ///
 /// All three in one place because they are one fact recorded three ways —
@@ -6215,6 +10593,158 @@ fn migrate_vaults_to_projects(conn: &mut Connection) -> StoreResult<()> {
     Ok(())
 }
 
+fn insert_default_harness(conn: &Connection, project_id: &str) -> StoreResult<()> {
+    let configuration = serde_json::to_string(&HarnessConfiguration::default())
+        .map_err(|error| error.to_string())?;
+    conn.execute(
+        "insert into research_harnesses (
+           project_id, status, configuration_json, configuration_version, updated_at
+         ) values (?1, 'inactive', ?2, 1, datetime('now'))
+         on conflict(project_id) do nothing",
+        params![project_id, configuration],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "insert into harness_configuration_versions
+         (project_id, version, configuration_json, actor, reason, created_at)
+         select project_id, configuration_version, configuration_json, 'migration',
+                'Initial Harness configuration', datetime('now')
+         from research_harnesses where project_id = ?1
+         on conflict(project_id, version) do nothing",
+        params![project_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn migrate_projects_to_harnesses(conn: &mut Connection) -> StoreResult<()> {
+    let project_ids = {
+        let mut statement = conn
+            .prepare("select id from projects order by id")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+    };
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    for project_id in project_ids {
+        insert_default_harness(&tx, &project_id)?;
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn migrate_harness_authority_and_versions(conn: &mut Connection) -> StoreResult<()> {
+    let rows = {
+        let mut statement = conn
+            .prepare(
+                "select project_id, configuration_version, configuration_json
+                 from research_harnesses order by project_id",
+            )
+            .map_err(|error| error.to_string())?;
+        let mapped = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        mapped
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+    };
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    for (project_id, version, raw) in rows {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| "Harness configuration must be a JSON object".to_string())?;
+        let legacy = !object.contains_key("autonomy");
+        if legacy {
+            object.insert(
+                "autonomy".to_string(),
+                serde_json::Value::String("manual".to_string()),
+            );
+            if let Some(schedule) = object
+                .get_mut("schedule")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                schedule.insert("enabled".to_string(), serde_json::Value::Bool(false));
+            }
+        }
+        object
+            .entry("scope")
+            .or_insert_with(|| serde_json::Value::String(String::new()));
+        object
+            .entry("exclusions")
+            .or_insert_with(|| serde_json::Value::String(String::new()));
+        object
+            .entry("mayAddPapers")
+            .or_insert(serde_json::Value::Bool(false));
+        object
+            .entry("writableDocumentIds")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        let normalized = serde_json::to_string(&value).map_err(|error| error.to_string())?;
+        tx.execute(
+            "update research_harnesses
+             set configuration_json = ?2,
+                 schedule_enabled = case when ?3 then 0 else schedule_enabled end,
+                 next_run_at = case when ?3 then null else next_run_at end
+             where project_id = ?1",
+            params![project_id, normalized, legacy],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into harness_configuration_versions
+             (project_id, version, configuration_json, actor, reason, created_at)
+             values (?1, ?2, ?3, 'migration', 'Migrated Harness configuration', datetime('now'))
+             on conflict(project_id, version) do nothing",
+            params![project_id, version, normalized],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn insert_initial_research_state(conn: &Connection, project_id: &str) -> StoreResult<()> {
+    conn.execute(
+        "insert into research_state_heads (project_id, current_revision)
+         values (?1, 0) on conflict(project_id) do nothing",
+        params![project_id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "insert into research_state_revisions (project_id, revision, run_id, reason, created_at)
+         values (?1, 0, null, 'Initial empty Research State', datetime('now'))
+         on conflict(project_id, revision) do nothing",
+        params![project_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn migrate_projects_to_research_state(conn: &mut Connection) -> StoreResult<()> {
+    let project_ids = {
+        let mut statement = conn
+            .prepare("select id from projects order by id")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+    };
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    for project_id in project_ids {
+        insert_initial_research_state(&tx, &project_id)?;
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
 fn normalize_project_title(input: &str) -> StoreResult<String> {
     let title = input.trim();
     if title.is_empty() {
@@ -6229,6 +10759,1416 @@ fn normalize_document_title(input: &str) -> StoreResult<String> {
         return Err("Project document title cannot be empty".to_string());
     }
     Ok(title.to_string())
+}
+
+fn validate_harness_configuration(configuration: &HarnessConfiguration) -> StoreResult<()> {
+    if configuration.goal.trim().is_empty() {
+        return Err("Research goal cannot be empty".to_string());
+    }
+    for (name, value, limit) in [
+        ("research goal", configuration.goal.as_str(), 1_000),
+        (
+            "research instructions",
+            configuration.research_instructions.as_str(),
+            8_000,
+        ),
+        ("research scope", configuration.scope.as_str(), 2_000),
+        (
+            "research exclusions",
+            configuration.exclusions.as_str(),
+            2_000,
+        ),
+    ] {
+        if value.chars().count() > limit {
+            return Err(format!("Harness {name} exceeds {limit} characters"));
+        }
+    }
+    if configuration.paper_budget <= 0 {
+        return Err("Paper budget must be greater than zero".to_string());
+    }
+    if configuration.sources.is_empty() {
+        return Err("Choose at least one research source".to_string());
+    }
+    if !configuration
+        .sources
+        .iter()
+        .any(|source| source == "browser")
+    {
+        return Err("Browser discovery is required for Research Runs".to_string());
+    }
+    if configuration
+        .sources
+        .iter()
+        .any(|source| !matches!(source.as_str(), "browser" | "open_alex" | "arxiv"))
+    {
+        return Err("Research source is not supported".to_string());
+    }
+    if configuration.schedule.enabled {
+        if configuration.autonomy == HarnessAutonomy::Manual {
+            return Err("Manual autonomy cannot enable scheduled Runs".to_string());
+        }
+        next_schedule_occurrence(&configuration.schedule, Utc::now())?;
+    }
+    if configuration.writable_document_ids.len() > 50 {
+        return Err("Harness may select at most 50 writable documents".to_string());
+    }
+    let mut writable = configuration.writable_document_ids.clone();
+    writable.sort();
+    writable.dedup();
+    if writable.len() != configuration.writable_document_ids.len() {
+        return Err("Harness writable document ids must be distinct".to_string());
+    }
+    let limits = &configuration.stop_conditions;
+    for (name, value) in [
+        ("maximum cycles", limits.maximum_cycles),
+        (
+            "maximum unproductive Runs",
+            limits.maximum_unproductive_runs,
+        ),
+        ("maximum Run seconds", limits.maximum_run_seconds),
+    ] {
+        if value.is_some_and(|limit| limit <= 0) {
+            return Err(format!("Harness {name} must be greater than zero"));
+        }
+    }
+    if limits.maximum_llm_calls.is_some_and(|limit| limit < 4) {
+        return Err(
+            "Harness model call limit must be at least 4 to reserve bounded reconciliation"
+                .to_string(),
+        );
+    }
+    for (name, value) in [
+        ("provider query limit", limits.maximum_provider_queries),
+        ("model call limit", limits.maximum_llm_calls),
+    ] {
+        if value.is_some_and(|limit| limit == 0) {
+            return Err(format!("Harness {name} must be greater than zero"));
+        }
+    }
+    if let Some(end_at) = limits.end_at.as_deref() {
+        DateTime::parse_from_rfc3339(end_at)
+            .map_err(|_| "Harness end time must be RFC 3339".to_string())?;
+    }
+    Ok(())
+}
+
+fn validate_harness_authority(
+    conn: &Connection,
+    project_id: &str,
+    configuration: &HarnessConfiguration,
+) -> StoreResult<()> {
+    for document_id in &configuration.writable_document_ids {
+        let valid: bool = conn
+            .query_row(
+                "select exists(select 1 from project_documents where id = ?1 and project_id = ?2)",
+                params![document_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !valid {
+            return Err(format!(
+                "Writable document does not belong to this Project: {document_id}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn manual_reason(reason: Option<&str>) -> &str {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Manual Research State edit")
+}
+
+fn research_entry_draft_from_detail(
+    detail: &ResearchEntryDetail,
+    reason: &str,
+) -> ResearchEntryDraft {
+    ResearchEntryDraft {
+        kind: detail.entry.kind,
+        epistemic_status: detail.entry.epistemic_status,
+        text: detail.entry.text.clone(),
+        evidence: detail
+            .evidence
+            .iter()
+            .map(|link| EvidenceLinkDraft {
+                chunk_id: link.chunk_id.clone(),
+                excerpt: Some(link.excerpt.clone()),
+                support_note: link.support_note.clone(),
+            })
+            .collect(),
+        relations: detail
+            .relations
+            .iter()
+            .map(|relation| EntryRelationDraft {
+                target_entry_id: relation.target_entry_id.clone(),
+                kind: relation.kind,
+            })
+            .collect(),
+        context: detail
+            .context
+            .iter()
+            .map(|context| ResearchContextLinkDraft {
+                kind: context.kind,
+                context_id: context.context_id.clone(),
+                label: context.label.clone(),
+            })
+            .collect(),
+        reason: Some(reason.to_string()),
+    }
+}
+
+fn require_current_state_revision(
+    conn: &Connection,
+    project_id: &str,
+    expected_revision: i64,
+) -> StoreResult<()> {
+    let current: i64 = conn
+        .query_row(
+            "select current_revision from research_state_heads where project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                format!("Research State not found for Project: {project_id}")
+            } else {
+                error.to_string()
+            }
+        })?;
+    if current != expected_revision {
+        return Err(format!(
+            "Research State changed: expected revision {expected_revision}, current revision is {current}"
+        ));
+    }
+    Ok(())
+}
+
+fn insert_state_revision(
+    conn: &Connection,
+    project_id: &str,
+    revision: i64,
+    run_id: Option<&str>,
+    reason: &str,
+) -> StoreResult<()> {
+    conn.execute(
+        "insert into research_state_revisions
+           (project_id, revision, run_id, reason, created_at)
+         values (?1, ?2, ?3, ?4, datetime('now'))",
+        params![project_id, revision, run_id, reason.trim()],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn set_current_state_revision(
+    conn: &Connection,
+    project_id: &str,
+    revision: i64,
+) -> StoreResult<()> {
+    conn.execute(
+        "update research_state_heads set current_revision = ?2 where project_id = ?1",
+        params![project_id, revision],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn validate_research_entry_draft(
+    conn: &Connection,
+    project_id: &str,
+    draft: &ResearchEntryDraft,
+) -> StoreResult<()> {
+    if draft.text.trim().is_empty() {
+        return Err("Research Entry text cannot be empty".to_string());
+    }
+    if draft.text.chars().count() > 4_000 {
+        return Err("Research Entry text exceeds 4000 characters".to_string());
+    }
+    if draft.epistemic_status == EpistemicStatus::SourceSupported {
+        if draft.kind != ResearchEntryKind::Finding {
+            return Err("Only a Finding may be source-supported".to_string());
+        }
+        if draft.evidence.is_empty() {
+            return Err("A source-supported Finding requires source evidence".to_string());
+        }
+    } else if !draft.evidence.is_empty() {
+        return Err("Direct source evidence belongs only to source-supported Findings".to_string());
+    }
+    if draft.kind == ResearchEntryKind::Gap
+        && !matches!(
+            draft.epistemic_status,
+            EpistemicStatus::AgentSynthesis | EpistemicStatus::Speculative
+        )
+    {
+        return Err("A Gap must be agent synthesis or speculative".to_string());
+    }
+    if matches!(
+        draft.kind,
+        ResearchEntryKind::Hypothesis | ResearchEntryKind::ExperimentIdea
+    ) && draft.epistemic_status != EpistemicStatus::Speculative
+    {
+        return Err("Hypotheses and Experiment Ideas must be speculative".to_string());
+    }
+    if draft.epistemic_status == EpistemicStatus::AgentSynthesis
+        && !draft
+            .relations
+            .iter()
+            .any(|relation| relation.kind == EntryRelationKind::DerivedFrom)
+    {
+        return Err("Agent synthesis requires a derived-from Research Entry".to_string());
+    }
+
+    let mut chunks = std::collections::HashSet::new();
+    for evidence in &draft.evidence {
+        if !chunks.insert(evidence.chunk_id.trim()) {
+            return Err("A Research Entry cannot cite the same chunk twice".to_string());
+        }
+        let chunk = resolve_evidence_chunk(conn, project_id, evidence)?;
+        if let Some(excerpt) = evidence.excerpt.as_deref() {
+            if excerpt.trim().is_empty() || !chunk.text.contains(excerpt) {
+                return Err(format!(
+                    "Evidence excerpt is not an exact substring of chunk: {}",
+                    evidence.chunk_id
+                ));
+            }
+        }
+    }
+    for relation in &draft.relations {
+        let owner: Option<String> = conn
+            .query_row(
+                "select project_id from research_entries where id = ?1",
+                params![relation.target_entry_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if owner.as_deref() != Some(project_id) {
+            return Err(format!(
+                "Related Research Entry is not in this Project: {}",
+                relation.target_entry_id
+            ));
+        }
+    }
+    for context in &draft.context {
+        validate_research_context(conn, project_id, context)?;
+    }
+    Ok(())
+}
+
+fn validate_research_context(
+    conn: &Connection,
+    project_id: &str,
+    context: &ResearchContextLinkDraft,
+) -> StoreResult<()> {
+    if context.context_id.trim().is_empty() || context.label.trim().is_empty() {
+        return Err("Research context requires an id and label".to_string());
+    }
+    let valid = match context.kind {
+        ResearchContextKind::ProjectInstruction => context.context_id == project_id,
+        ResearchContextKind::ProjectDocument => conn
+            .query_row(
+                "select exists(
+                   select 1 from project_documents where id = ?1 and project_id = ?2
+                 )",
+                params![context.context_id, project_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?,
+        ResearchContextKind::ReaderNote => conn
+            .query_row(
+                "select exists(
+                   select 1 from highlights h
+                   join vault_papers vp on vp.paper_id = h.paper_id
+                   join vaults v on v.id = vp.vault_id
+                   where h.id = ?1 and h.note is not null and trim(h.note) <> ''
+                     and v.project_id = ?2
+                 )",
+                params![context.context_id, project_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?,
+        ResearchContextKind::ChatTurn => conn
+            .query_row(
+                "select exists(
+                   select 1 from chat_entries e
+                   join chat_threads t on t.id = e.thread_id
+                   where e.id = ?1 and (
+                     (t.scope_kind = 'paper' and exists(
+                       select 1 from vault_papers vp join vaults v on v.id = vp.vault_id
+                       where vp.paper_id = t.scope_id and v.project_id = ?2
+                     )) or
+                     (t.scope_kind = 'vault' and exists(
+                       select 1 from vaults v where v.id = t.scope_id and v.project_id = ?2
+                     )) or
+                     (t.scope_kind = 'project' and t.scope_id = ?2)
+                   )
+                 )",
+                params![context.context_id, project_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?,
+    };
+    if !valid {
+        return Err(format!(
+            "Research context does not resolve inside this Project: {}",
+            context.context_id
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_evidence_chunk(
+    conn: &Connection,
+    project_id: &str,
+    draft: &EvidenceLinkDraft,
+) -> StoreResult<DocumentChunk> {
+    let chunks = read_chunks(
+        conn,
+        "where c.id = ?1 and exists(
+           select 1 from vault_papers vp join vaults v on v.id = vp.vault_id
+           where vp.paper_id = c.paper_id and v.project_id = ?2
+         )",
+        params![draft.chunk_id.trim(), project_id],
+    )?;
+    chunks.into_iter().next().ok_or_else(|| {
+        format!(
+            "Evidence chunk does not resolve inside this Project Vault: {}",
+            draft.chunk_id
+        )
+    })
+}
+
+fn insert_new_research_entry(
+    conn: &Connection,
+    entry_id: &str,
+    project_id: &str,
+    revision: i64,
+    run_id: Option<&str>,
+    draft: &ResearchEntryDraft,
+) -> StoreResult<()> {
+    conn.execute(
+        "insert into research_entries (
+           id, project_id, kind, epistemic_status, text, lifecycle,
+           first_revision, last_revision, origin_run_id, created_at, updated_at
+         ) values (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, ?7, datetime('now'), datetime('now'))",
+        params![
+            entry_id,
+            project_id,
+            draft.kind.as_str(),
+            draft.epistemic_status.as_str(),
+            draft.text.trim(),
+            revision,
+            run_id
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    insert_research_entry_version(
+        conn,
+        entry_id,
+        project_id,
+        revision,
+        EntryLifecycle::Active,
+        run_id,
+        draft,
+    )
+}
+
+fn insert_research_entry_version(
+    conn: &Connection,
+    entry_id: &str,
+    project_id: &str,
+    revision: i64,
+    lifecycle: EntryLifecycle,
+    run_id: Option<&str>,
+    draft: &ResearchEntryDraft,
+) -> StoreResult<()> {
+    conn.execute(
+        "insert into research_entry_revisions (
+           entry_id, project_id, state_revision, kind, epistemic_status, text,
+           lifecycle, origin_run_id, reason, created_at
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))",
+        params![
+            entry_id,
+            project_id,
+            revision,
+            draft.kind.as_str(),
+            draft.epistemic_status.as_str(),
+            draft.text.trim(),
+            lifecycle.as_str(),
+            run_id,
+            manual_reason(draft.reason.as_deref())
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+
+    for (index, evidence) in draft.evidence.iter().enumerate() {
+        let chunk = resolve_evidence_chunk(conn, project_id, evidence)?;
+        let excerpt: String = evidence
+            .excerpt
+            .clone()
+            .unwrap_or_else(|| chunk.text.chars().take(2_000).collect());
+        let excerpt_byte_start = chunk.text.find(&excerpt).unwrap_or(0);
+        let excerpt_char_start = chunk.text[..excerpt_byte_start].chars().count() as i64;
+        let source_start = chunk.source_start + excerpt_char_start;
+        let source_end = source_start + excerpt.chars().count() as i64;
+        conn.execute(
+            "insert into research_evidence_links (
+               id, entry_id, state_revision, paper_id, source_id, extraction_id,
+               chunk_id, excerpt, source_start, source_end, page_start, page_end,
+               support_note
+             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                format!("{entry_id}:r{revision}:e{index}"),
+                entry_id,
+                revision,
+                chunk.paper_id,
+                chunk.source_id,
+                chunk.extraction_id,
+                chunk.id,
+                excerpt,
+                source_start,
+                source_end,
+                chunk.page_start,
+                chunk.page_end,
+                evidence.support_note.as_deref().map(str::trim)
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    for (index, relation) in draft.relations.iter().enumerate() {
+        conn.execute(
+            "insert into research_entry_relations (
+               id, entry_id, state_revision, target_entry_id, kind
+             ) values (?1, ?2, ?3, ?4, ?5)",
+            params![
+                format!("{entry_id}:r{revision}:relation:{index}"),
+                entry_id,
+                revision,
+                relation.target_entry_id,
+                relation.kind.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    for (index, context) in draft.context.iter().enumerate() {
+        conn.execute(
+            "insert into research_context_links (
+               id, entry_id, state_revision, kind, context_id, label
+             ) values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                format!("{entry_id}:r{revision}:context:{index}"),
+                entry_id,
+                revision,
+                context.kind.as_str(),
+                context.context_id.trim(),
+                context.label.trim()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn read_research_state(
+    conn: &Connection,
+    project_id: &str,
+    requested_revision: Option<i64>,
+) -> StoreResult<ResearchStateSnapshot> {
+    let current_revision: i64 = conn
+        .query_row(
+            "select current_revision from research_state_heads where project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                format!("Research State not found for Project: {project_id}")
+            } else {
+                error.to_string()
+            }
+        })?;
+    let revision = requested_revision.unwrap_or(current_revision);
+    let exists: bool = conn
+        .query_row(
+            "select exists(
+               select 1 from research_state_revisions where project_id = ?1 and revision = ?2
+             )",
+            params![project_id, revision],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !exists {
+        return Err(format!(
+            "Research State revision not found for Project {project_id}: {revision}"
+        ));
+    }
+
+    let mut revisions_statement = conn
+        .prepare(
+            "select project_id, revision, run_id, reason, created_at
+             from research_state_revisions where project_id = ?1
+             order by revision desc",
+        )
+        .map_err(|error| error.to_string())?;
+    let revision_rows = revisions_statement
+        .query_map(params![project_id], |row| {
+            Ok(ResearchStateRevision {
+                project_id: row.get(0)?,
+                revision: row.get(1)?,
+                run_id: row.get(2)?,
+                reason: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let revisions = collect_rows(revision_rows)?;
+    let entries = read_research_entry_summaries(conn, project_id, revision)?;
+    Ok(ResearchStateSnapshot {
+        project_id: project_id.to_string(),
+        revision,
+        current_revision,
+        revisions,
+        entries,
+    })
+}
+
+const RESEARCH_ENTRY_SUMMARY_COLUMNS: &str =
+    "e.id, e.project_id, r.kind, r.epistemic_status, r.text, r.lifecycle,
+     e.first_revision, r.state_revision, r.origin_run_id,
+     (select count(*) from research_evidence_links l
+      where l.entry_id = e.id and l.state_revision = r.state_revision),
+     (select count(*) from research_entry_relations l
+      where l.entry_id = e.id and l.state_revision = r.state_revision),
+     (select count(*) from research_context_links l
+      where l.entry_id = e.id and l.state_revision = r.state_revision),
+     e.created_at, r.created_at";
+
+fn read_research_entry_summaries(
+    conn: &Connection,
+    project_id: &str,
+    revision: i64,
+) -> StoreResult<Vec<ResearchEntrySummary>> {
+    let sql = format!(
+        "select {RESEARCH_ENTRY_SUMMARY_COLUMNS}
+         from research_entries e
+         join research_entry_revisions r on r.entry_id = e.id
+          and r.state_revision = (
+            select max(latest.state_revision) from research_entry_revisions latest
+            where latest.entry_id = e.id and latest.state_revision <= ?2
+          )
+         where e.project_id = ?1 and e.first_revision <= ?2
+         order by r.state_revision desc, e.id"
+    );
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(
+            params![project_id, revision],
+            research_entry_summary_from_row,
+        )
+        .map_err(|error| error.to_string())?;
+    collect_rows(rows)
+}
+
+fn read_current_research_entry(
+    conn: &Connection,
+    entry_id: &str,
+) -> StoreResult<ResearchEntrySummary> {
+    let revision: i64 = conn
+        .query_row(
+            "select h.current_revision from research_entries e
+             join research_state_heads h on h.project_id = e.project_id
+             where e.id = ?1",
+            params![entry_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    read_research_entry_summary_at(conn, entry_id, revision)
+}
+
+fn read_research_entry_summary_at(
+    conn: &Connection,
+    entry_id: &str,
+    revision: i64,
+) -> StoreResult<ResearchEntrySummary> {
+    let sql = format!(
+        "select {RESEARCH_ENTRY_SUMMARY_COLUMNS}
+         from research_entries e
+         join research_entry_revisions r on r.entry_id = e.id
+          and r.state_revision = (
+            select max(latest.state_revision) from research_entry_revisions latest
+            where latest.entry_id = e.id and latest.state_revision <= ?2
+          )
+         where e.id = ?1 and e.first_revision <= ?2"
+    );
+    conn.query_row(
+        &sql,
+        params![entry_id, revision],
+        research_entry_summary_from_row,
+    )
+    .map_err(|error| {
+        if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+            format!("Research Entry not found at revision {revision}: {entry_id}")
+        } else {
+            error.to_string()
+        }
+    })
+}
+
+fn research_entry_summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<ResearchEntrySummary> {
+    let kind: String = row.get(2)?;
+    let epistemic_status: String = row.get(3)?;
+    let lifecycle: String = row.get(5)?;
+    Ok(ResearchEntrySummary {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        kind: parse_sql_enum(2, &kind, ResearchEntryKind::parse)?,
+        epistemic_status: parse_sql_enum(3, &epistemic_status, EpistemicStatus::parse)?,
+        text: row.get(4)?,
+        lifecycle: parse_sql_enum(5, &lifecycle, EntryLifecycle::parse)?,
+        first_revision: row.get(6)?,
+        last_revision: row.get(7)?,
+        origin_run_id: row.get(8)?,
+        evidence_count: row.get(9)?,
+        relation_count: row.get(10)?,
+        context_count: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
+fn parse_sql_enum<T>(
+    column: usize,
+    value: &str,
+    parse: impl FnOnce(&str) -> Result<T, String>,
+) -> rusqlite::Result<T> {
+    parse(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        )
+    })
+}
+
+fn read_research_entry_detail(
+    conn: &Connection,
+    entry_id: &str,
+    requested_revision: Option<i64>,
+) -> StoreResult<ResearchEntryDetail> {
+    read_research_entry_detail_from_conn(conn, entry_id, requested_revision)
+}
+
+fn read_research_entry_detail_from_conn(
+    conn: &Connection,
+    entry_id: &str,
+    requested_revision: Option<i64>,
+) -> StoreResult<ResearchEntryDetail> {
+    let current = read_current_research_entry(conn, entry_id)?;
+    let revision = match requested_revision {
+        Some(revision) => revision,
+        None => conn
+            .query_row(
+                "select current_revision from research_state_heads where project_id = ?1",
+                params![current.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?,
+    };
+    let entry = read_research_entry_summary_at(conn, entry_id, revision)?;
+    let version = entry.last_revision;
+
+    let mut evidence_statement = conn
+        .prepare(
+            "select id, entry_id, state_revision, paper_id, source_id, extraction_id,
+                    chunk_id, excerpt, source_start, source_end, page_start, page_end,
+                    support_note
+             from research_evidence_links where entry_id = ?1 and state_revision = ?2
+             order by id",
+        )
+        .map_err(|error| error.to_string())?;
+    let evidence_rows = evidence_statement
+        .query_map(params![entry_id, version], |row| {
+            Ok(ResearchEvidenceLink {
+                id: row.get(0)?,
+                entry_id: row.get(1)?,
+                state_revision: row.get(2)?,
+                paper_id: row.get(3)?,
+                source_id: row.get(4)?,
+                extraction_id: row.get(5)?,
+                chunk_id: row.get(6)?,
+                excerpt: row.get(7)?,
+                source_start: row.get(8)?,
+                source_end: row.get(9)?,
+                page_start: row.get(10)?,
+                page_end: row.get(11)?,
+                support_note: row.get(12)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let evidence = collect_rows(evidence_rows)?;
+
+    let mut relation_statement = conn
+        .prepare(
+            "select id, entry_id, state_revision, target_entry_id, kind
+             from research_entry_relations where entry_id = ?1 and state_revision = ?2
+             order by id",
+        )
+        .map_err(|error| error.to_string())?;
+    let relation_rows = relation_statement
+        .query_map(params![entry_id, version], |row| {
+            let kind: String = row.get(4)?;
+            Ok(EntryRelation {
+                id: row.get(0)?,
+                entry_id: row.get(1)?,
+                state_revision: row.get(2)?,
+                target_entry_id: row.get(3)?,
+                kind: parse_sql_enum(4, &kind, EntryRelationKind::parse)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let relations = collect_rows(relation_rows)?;
+
+    let mut context_statement = conn
+        .prepare(
+            "select id, entry_id, state_revision, kind, context_id, label
+             from research_context_links where entry_id = ?1 and state_revision = ?2
+             order by id",
+        )
+        .map_err(|error| error.to_string())?;
+    let context_rows = context_statement
+        .query_map(params![entry_id, version], |row| {
+            let kind: String = row.get(3)?;
+            Ok(ResearchContextLink {
+                id: row.get(0)?,
+                entry_id: row.get(1)?,
+                state_revision: row.get(2)?,
+                kind: parse_sql_enum(3, &kind, ResearchContextKind::parse)?,
+                context_id: row.get(4)?,
+                label: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let context = collect_rows(context_rows)?;
+
+    let mut history_statement = conn
+        .prepare(
+            "select entry_id, state_revision, kind, epistemic_status, text, lifecycle,
+                    origin_run_id, reason, created_at
+             from research_entry_revisions
+             where entry_id = ?1 and state_revision <= ?2 order by state_revision desc",
+        )
+        .map_err(|error| error.to_string())?;
+    let history_rows = history_statement
+        .query_map(params![entry_id, revision], |row| {
+            let kind: String = row.get(2)?;
+            let status: String = row.get(3)?;
+            let lifecycle: String = row.get(5)?;
+            Ok(ResearchEntryVersion {
+                entry_id: row.get(0)?,
+                state_revision: row.get(1)?,
+                kind: parse_sql_enum(2, &kind, ResearchEntryKind::parse)?,
+                epistemic_status: parse_sql_enum(3, &status, EpistemicStatus::parse)?,
+                text: row.get(4)?,
+                lifecycle: parse_sql_enum(5, &lifecycle, EntryLifecycle::parse)?,
+                origin_run_id: row.get(6)?,
+                reason: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let history = collect_rows(history_rows)?;
+
+    Ok(ResearchEntryDetail {
+        entry,
+        evidence,
+        relations,
+        context,
+        history,
+    })
+}
+
+fn append_harness_event(
+    conn: &Connection,
+    run_id: &str,
+    kind: &str,
+    summary: &str,
+) -> StoreResult<()> {
+    let bounded_summary: String = summary.chars().take(500).collect();
+    append_structured_harness_event(
+        conn,
+        run_id,
+        kind,
+        &bounded_summary,
+        None,
+        None,
+        None,
+        None,
+        "harness",
+    )
+}
+
+/// Appends one bounded, typed Activity event in Run sequence order.
+fn append_structured_harness_event(
+    conn: &Connection,
+    run_id: &str,
+    kind: &str,
+    summary: &str,
+    detail: Option<serde_json::Value>,
+    phase: Option<&str>,
+    progress_current: Option<i64>,
+    progress_total: Option<i64>,
+    actor: &str,
+) -> StoreResult<()> {
+    if kind.is_empty() || kind.chars().count() > 80 {
+        return Err("Activity event kind must contain at most 80 characters".to_string());
+    }
+    if summary.is_empty() || summary.chars().count() > 500 {
+        return Err("Activity event summary must contain at most 500 characters".to_string());
+    }
+    if phase.is_some_and(|value| value.is_empty() || value.chars().count() > 80) {
+        return Err("Activity phase must contain at most 80 characters".to_string());
+    }
+    if !matches!(actor, "researcher" | "harness" | "scheduler" | "system") {
+        return Err(format!("Unknown Activity actor: {actor}"));
+    }
+    if progress_current.is_some_and(|value| value < 0)
+        || progress_total.is_some_and(|value| value < 0)
+        || matches!((progress_current, progress_total), (Some(current), Some(total)) if current > total)
+    {
+        return Err(
+            "Activity progress must be non-negative and current cannot exceed total".to_string(),
+        );
+    }
+    let detail_json = detail
+        .as_ref()
+        .map(|value| serde_json::to_string(&value).map_err(|error| error.to_string()))
+        .transpose()?;
+    if detail_json
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 4_000)
+    {
+        return Err("Activity detail must contain at most 4000 characters".to_string());
+    }
+    validate_harness_event_detail(kind, detail.as_ref())?;
+    let sequence: i64 = conn
+        .query_row(
+            "select coalesce(max(sequence), 0) + 1 from harness_events where run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let id = format!("{run_id}:event:{sequence}");
+    conn.execute(
+        "insert into harness_events (
+           id, run_id, sequence, kind, summary, detail_json, phase,
+           progress_current, progress_total, actor, occurred_at
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))",
+        params![
+            id,
+            run_id,
+            sequence,
+            kind,
+            summary,
+            detail_json,
+            phase,
+            progress_current,
+            progress_total,
+            actor
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Validates the schema of bounded structured detail for known Activity kinds.
+fn validate_harness_event_detail(
+    kind: &str,
+    detail: Option<&serde_json::Value>,
+) -> StoreResult<()> {
+    let Some(detail) = detail else {
+        return Ok(());
+    };
+    let fields: &[(&str, &str)] = match kind {
+        "iteration_planned" => &[("iteration", "integer")],
+        "provider_query_started" => &[("provider", "string"), ("query", "string")],
+        "provider_query_completed" => &[("provider", "string"), ("candidateCount", "integer")],
+        "provider_query_failed" => &[("provider", "string")],
+        "candidates_deduplicated" => &[("uniqueCandidates", "integer")],
+        "candidates_inspected" | "candidate_metadata_resolving" | "candidates_ranking" => {
+            &[("candidateCount", "integer")]
+        }
+        "candidate_decided" => &[
+            ("candidateId", "string"),
+            ("decision", "string"),
+            ("reason", "string"),
+            ("relevanceConfidence", "number"),
+            ("withinScope", "boolean"),
+        ],
+        "vault_membership_changed" => &[("paperIds", "string_array"), ("vaultRevision", "integer")],
+        "change_set_applied" => &[
+            ("changeSetId", "string"),
+            ("resultingStateRevision", "integer"),
+            ("resultingVaultRevision", "integer"),
+            ("acceptedCandidateCount", "integer"),
+            ("researchEntryCount", "integer"),
+        ],
+        "usage_recorded" => &[
+            ("providerQueries", "integer"),
+            ("llmCalls", "integer"),
+            ("iterations", "integer"),
+            ("inspectedCandidates", "integer"),
+        ],
+        "reconciliation_usage_recorded" => &[("llmCalls", "integer"), ("totalLlmCalls", "integer")],
+        "stop_decided" => &[
+            ("status", "string"),
+            ("stopReason", "nullable_string"),
+            ("complete", "boolean"),
+            ("converged", "boolean"),
+        ],
+        "checkpoint_restored" => &[
+            ("checkpointStateRevision", "integer"),
+            ("previousCurrentRevision", "integer"),
+            ("resultingRevision", "integer"),
+            ("supersededEntryIds", "string_array"),
+        ],
+        "operational_observation" => &[
+            ("observationId", "string"),
+            ("kind", "string"),
+            ("signature", "string"),
+            ("severity", "number"),
+            ("confidence", "number"),
+            ("target", "nullable_string"),
+            ("proposalEligible", "boolean"),
+        ],
+        "harness_reflection_recorded" => &[
+            ("reflectionId", "string"),
+            ("observationCount", "integer"),
+            ("nextDirection", "nullable_string"),
+        ],
+        _ => {
+            return Err(format!(
+                "Activity event kind does not define structured detail: {kind}"
+            ));
+        }
+    };
+    let object = detail
+        .as_object()
+        .ok_or_else(|| format!("Activity detail for {kind} must be an object"))?;
+    for (field, expected) in fields {
+        let value = object
+            .get(*field)
+            .ok_or_else(|| format!("Activity detail for {kind} is missing {field}"))?;
+        let valid = match *expected {
+            "string" => value.as_str().is_some_and(|text| !text.is_empty()),
+            "nullable_string" => value.is_null() || value.as_str().is_some(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.as_f64().is_some(),
+            "boolean" => value.as_bool().is_some(),
+            "string_array" => value.as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .all(|item| item.as_str().is_some_and(|text| !text.is_empty()))
+            }),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!(
+                "Activity detail field {field} for {kind} must be {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn append_harness_control_event(
+    conn: &Connection,
+    project_id: &str,
+    kind: &str,
+    summary: &str,
+) -> StoreResult<()> {
+    let sequence: i64 = conn
+        .query_row(
+            "select coalesce(max(sequence), 0) + 1 from harness_control_events where project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let id = format!("{project_id}:control:{sequence}");
+    conn.execute(
+        "insert into harness_control_events
+         (id, project_id, sequence, kind, summary, occurred_at)
+         values (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+        params![id, project_id, sequence, kind, summary],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn terminal_stop_reason(
+    conn: &Connection,
+    project_id: &str,
+    configuration: &HarnessConfiguration,
+    now: DateTime<Utc>,
+) -> StoreResult<Option<String>> {
+    let (cycles, unproductive): (i64, i64) = conn
+        .query_row(
+            "select completed_cycle_count, consecutive_unproductive_runs
+             from research_harnesses where project_id = ?1",
+            params![project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let limits = &configuration.stop_conditions;
+    if limits.maximum_cycles.is_some_and(|limit| cycles >= limit) {
+        return Ok(Some("maximum_cycles_reached".to_string()));
+    }
+    if limits
+        .maximum_unproductive_runs
+        .is_some_and(|limit| unproductive >= limit)
+    {
+        return Ok(Some("maximum_unproductive_runs_reached".to_string()));
+    }
+    if let Some(end_at) = limits.end_at.as_deref() {
+        let end = DateTime::parse_from_rfc3339(end_at)
+            .map_err(|_| "Harness end time must be RFC 3339".to_string())?
+            .with_timezone(&Utc);
+        if now >= end {
+            return Ok(Some("end_at_reached".to_string()));
+        }
+    }
+    if limits.stop_on_convergence {
+        let converged: bool = conn
+            .query_row(
+                "select exists(select 1 from harness_runs where project_id = ?1
+                 and status = 'ready' and stop_reason in ('converged','target_reached'))",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if converged {
+            return Ok(Some("convergence_reached".to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn settle_harness_after_run(
+    conn: &Connection,
+    project_id: &str,
+    run_id: &str,
+    productive: bool,
+) -> StoreResult<()> {
+    conn.execute(
+        "update research_harnesses
+         set status = requested_post_run_status,
+             completed_cycle_count = completed_cycle_count + 1,
+             consecutive_unproductive_runs = case when ?2 then 0
+               else consecutive_unproductive_runs + 1 end,
+             updated_at = datetime('now') where project_id = ?1",
+        params![project_id, productive],
+    )
+    .map_err(|error| error.to_string())?;
+    let configuration_json: String = conn
+        .query_row(
+            "select configuration_json from research_harnesses where project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let configuration: HarnessConfiguration =
+        serde_json::from_str(&configuration_json).map_err(|error| error.to_string())?;
+    if let Some(reason) = terminal_stop_reason(conn, project_id, &configuration, Utc::now())? {
+        conn.execute(
+            "update research_harnesses set status = 'stopped', schedule_enabled = 0,
+             next_run_at = null, requested_post_run_status = 'stopped',
+             terminal_stop_reason = ?2, updated_at = datetime('now') where project_id = ?1",
+            params![project_id, reason],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(conn, run_id, "harness_stopped", &reason)?;
+    }
+    Ok(())
+}
+
+fn validate_reflection_draft(draft: &HarnessReflectionDraft) -> StoreResult<()> {
+    if draft.summary.trim().is_empty() || draft.summary.chars().count() > 2_000 {
+        return Err("Harness reflection summary must contain 1 to 2000 characters".to_string());
+    }
+    if draft.observations.len() > 20 {
+        return Err("Harness reflection exceeds 20 observations".to_string());
+    }
+    serde_json::from_str::<serde_json::Value>(&draft.metrics_json)
+        .map_err(|_| "Harness reflection metrics must be valid JSON".to_string())?;
+    for observation in &draft.observations {
+        if normalize_signature(&observation.signature).is_empty()
+            || observation.description.trim().is_empty()
+            || observation.description.chars().count() > 1_000
+            || !(0.0..=1.0).contains(&observation.severity)
+            || !(0.0..=1.0).contains(&observation.confidence)
+        {
+            return Err("Harness observation is outside its bounded schema".to_string());
+        }
+        serde_json::from_str::<serde_json::Value>(&observation.metrics_json)
+            .map_err(|_| "Harness observation metrics must be valid JSON".to_string())?;
+        if observation.proposal_eligible {
+            let target = observation
+                .target
+                .ok_or_else(|| "Proposal-eligible observation requires a target".to_string())?;
+            let value = observation.proposed_value.as_ref().ok_or_else(|| {
+                "Proposal-eligible observation requires an exact proposed value".to_string()
+            })?;
+            normalize_improvement_value(target, value)?;
+        } else if observation.target.is_some() != observation.proposed_value.is_some() {
+            return Err("Observation target and proposed value must appear together".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn normalize_signature(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(120)
+        .collect()
+}
+
+fn normalize_concepts(values: &[String]) -> StoreResult<Vec<String>> {
+    let mut concepts = Vec::new();
+    for value in values {
+        let normalized = value.trim().to_lowercase();
+        if normalized.is_empty() || normalized.chars().count() > 80 {
+            return Err("Harness improvement concepts must contain 1 to 80 characters".to_string());
+        }
+        if !concepts.contains(&normalized) {
+            concepts.push(normalized);
+        }
+    }
+    if concepts.len() > 30 {
+        return Err("Harness improvement exceeds 30 concepts".to_string());
+    }
+    Ok(concepts)
+}
+
+fn normalize_improvement_value(
+    target: HarnessImprovementTarget,
+    value: &HarnessImprovementValue,
+) -> StoreResult<HarnessImprovementValue> {
+    match (target, value) {
+        (
+            HarnessImprovementTarget::PreferredConcepts
+            | HarnessImprovementTarget::ExcludedConcepts,
+            HarnessImprovementValue::Concepts(values),
+        ) => Ok(HarnessImprovementValue::Concepts(normalize_concepts(
+            values,
+        )?)),
+        (
+            HarnessImprovementTarget::MetadataResolvers,
+            HarnessImprovementValue::MetadataResolvers(values),
+        ) => {
+            let mut normalized = values
+                .iter()
+                .map(|value| value.trim().to_lowercase())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            normalized.sort();
+            normalized.dedup();
+            if normalized
+                .iter()
+                .any(|value| !matches!(value.as_str(), "open_alex" | "arxiv"))
+            {
+                return Err("Only OpenAlex and arXiv metadata resolvers may be changed".to_string());
+            }
+            Ok(HarnessImprovementValue::MetadataResolvers(normalized))
+        }
+        _ => Err("Harness improvement value does not match its allow-listed target".to_string()),
+    }
+}
+
+fn configuration_value(
+    configuration: &HarnessConfiguration,
+    target: HarnessImprovementTarget,
+) -> HarnessImprovementValue {
+    match target {
+        HarnessImprovementTarget::PreferredConcepts => {
+            HarnessImprovementValue::Concepts(configuration.preferred_concepts.clone())
+        }
+        HarnessImprovementTarget::ExcludedConcepts => {
+            HarnessImprovementValue::Concepts(configuration.excluded_concepts.clone())
+        }
+        HarnessImprovementTarget::MetadataResolvers => HarnessImprovementValue::MetadataResolvers(
+            configuration
+                .sources
+                .iter()
+                .filter(|source| matches!(source.as_str(), "open_alex" | "arxiv"))
+                .cloned()
+                .collect(),
+        ),
+    }
+}
+
+fn apply_improvement_value(
+    configuration: &mut HarnessConfiguration,
+    target: HarnessImprovementTarget,
+    value: &HarnessImprovementValue,
+) -> StoreResult<()> {
+    let normalized = normalize_improvement_value(target, value)?;
+    match (target, normalized) {
+        (
+            HarnessImprovementTarget::PreferredConcepts,
+            HarnessImprovementValue::Concepts(values),
+        ) => {
+            configuration.preferred_concepts = values;
+        }
+        (HarnessImprovementTarget::ExcludedConcepts, HarnessImprovementValue::Concepts(values)) => {
+            configuration.excluded_concepts = values;
+        }
+        (
+            HarnessImprovementTarget::MetadataResolvers,
+            HarnessImprovementValue::MetadataResolvers(values),
+        ) => {
+            configuration.sources = std::iter::once("browser".to_string())
+                .chain(values)
+                .collect();
+        }
+        _ => unreachable!("normalization checked target/value pairing"),
+    }
+    Ok(())
+}
+
+fn improvement_preview(
+    target: HarnessImprovementTarget,
+    value: &HarnessImprovementValue,
+) -> String {
+    let values = match value {
+        HarnessImprovementValue::Concepts(values)
+        | HarnessImprovementValue::MetadataResolvers(values) => values.join(", "),
+    };
+    match target {
+        HarnessImprovementTarget::PreferredConcepts => {
+            format!("Future queries will foreground: {values}")
+        }
+        HarnessImprovementTarget::ExcludedConcepts => {
+            format!("Future queries will avoid: {values}")
+        }
+        HarnessImprovementTarget::MetadataResolvers => {
+            format!("Browser results will resolve metadata with: {values}")
+        }
+    }
+}
+
+fn detect_harness_improvement(
+    conn: &Connection,
+    project_id: &str,
+    signature: &str,
+    target: HarnessImprovementTarget,
+) -> StoreResult<()> {
+    let mut statement = conn
+        .prepare(
+            "select o.id, o.run_id, o.description, o.proposed_value_json
+             from harness_observations o
+             where o.project_id = ?1 and o.signature = ?2 and o.target = ?3
+               and o.proposal_eligible = 1
+               and o.run_id in (
+                 select id from harness_runs where project_id = ?1 and status = 'ready'
+                 order by finished_at desc, id desc limit 10
+               )
+               and not exists (
+                 select 1 from harness_improvement_observations link
+                 where link.observation_id = o.id
+               )
+             order by o.created_at desc, o.id desc",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![project_id, signature, target.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let observations = collect_rows(rows)?;
+    let run_ids = observations
+        .iter()
+        .map(|item| item.1.clone())
+        .collect::<std::collections::HashSet<_>>();
+    if run_ids.len() < 3 {
+        return Ok(());
+    }
+    let proposed_json = &observations[0].3;
+    if observations.iter().any(|item| &item.3 != proposed_json) {
+        return Ok(());
+    }
+    let proposed: HarnessImprovementValue =
+        serde_json::from_str(proposed_json).map_err(|error| error.to_string())?;
+    let proposed = normalize_improvement_value(target, &proposed)?;
+    let harness = read_research_harness(conn, project_id)?
+        .ok_or_else(|| "Research Harness not found".to_string())?;
+    let before = configuration_value(&harness.configuration, target);
+    if before == proposed {
+        return Ok(());
+    }
+    let fingerprint_source = format!(
+        "{project_id}:{signature}:{}:{}:{}",
+        target.as_str(),
+        harness.configuration_version,
+        serde_json::to_string(&proposed).map_err(|error| error.to_string())?
+    );
+    let fingerprint = short_sha256(&fingerprint_source);
+    let id = format!("harness_improvement:{fingerprint}");
+    let inserted = conn
+        .execute(
+            "insert into harness_improvements
+             (id, project_id, status, target, base_configuration_version,
+              before_value_json, proposed_value_json, rationale, expected_effect,
+              policy_version, fingerprint, created_at)
+             values (?1, ?2, 'proposed', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+             on conflict(fingerprint) do nothing",
+            params![
+                id,
+                project_id,
+                target.as_str(),
+                harness.configuration_version,
+                serde_json::to_string(&before).map_err(|error| error.to_string())?,
+                serde_json::to_string(&proposed).map_err(|error| error.to_string())?,
+                observations[0].2,
+                improvement_preview(target, &proposed),
+                PROPOSAL_POLICY_VERSION,
+                fingerprint
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if inserted == 0 {
+        return Ok(());
+    }
+    for (observation_id, run_id, _, _) in &observations {
+        conn.execute(
+            "insert or ignore into harness_improvement_observations values (?1, ?2)",
+            params![id, observation_id],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "insert or ignore into harness_improvement_runs values (?1, ?2)",
+            params![id, run_id],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    append_harness_control_event(
+        conn,
+        project_id,
+        "harness_improvement_proposed",
+        &format!("Harness improvement {id} needs review"),
+    )
 }
 
 fn project_id_for_vault(vault_id: &str) -> String {
@@ -6544,6 +12484,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::domain::reconciliation::{
+        CandidateDecision, PlannedEvidence, PlannedHarnessObservation, PlannedHarnessReflection,
+        PlannedResearchEntry,
+    };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -6574,6 +12518,153 @@ mod tests {
         store.init()?;
 
         Ok(TestDb { store, dir })
+    }
+
+    fn seed_harness_improvement(db: &TestDb, signature: &str) -> StoreResult<String> {
+        for index in 0..3 {
+            let search = db.store.create_search(&sample_search_draft())?;
+            let run = db
+                .store
+                .create_harness_run("project:attention", &search.id)?;
+            let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+            conn.execute(
+                "update harness_runs set status = 'ready', finished_at = datetime('now') where id = ?1",
+                params![run.id],
+            )
+            .map_err(|error| error.to_string())?;
+            conn.execute(
+                "update research_harnesses set status = 'idle' where project_id = 'project:attention'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+            db.store.persist_harness_reflection(
+                &run.id,
+                &HarnessReflectionDraft {
+                    summary: format!("Operational reflection {index}"),
+                    next_direction: None,
+                    metrics_json: "{}".to_string(),
+                    observations: vec![HarnessObservationDraft {
+                        kind: HarnessObservationKind::Terminology,
+                        signature: signature.to_string(),
+                        severity: 0.5,
+                        confidence: 0.9,
+                        description: "Mechanistic terminology improved query precision."
+                            .to_string(),
+                        metrics_json: "{}".to_string(),
+                        target: Some(HarnessImprovementTarget::PreferredConcepts),
+                        proposed_value: Some(HarnessImprovementValue::Concepts(vec![
+                            "mechanistic".to_string(),
+                        ])),
+                        proposal_eligible: true,
+                    }],
+                },
+            )?;
+        }
+        db.store
+            .list_harness_improvements(
+                "project:attention",
+                Some(HarnessImprovementStatus::Proposed),
+            )?
+            .into_iter()
+            .next()
+            .map(|proposal| proposal.id)
+            .ok_or_else(|| "expected seeded Harness improvement".to_string())
+    }
+
+    fn ready_reconciliation_run(
+        db: &TestDb,
+        autonomy: HarnessAutonomy,
+        may_add_papers: bool,
+    ) -> StoreResult<(HarnessRun, SearchCandidate)> {
+        let configuration = HarnessConfiguration {
+            goal: "Improve LoRA interpretability".to_string(),
+            autonomy,
+            may_add_papers,
+            paper_budget: 2,
+            ..HarnessConfiguration::default()
+        };
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let search = db.store.create_search(&sample_search_draft())?;
+        let harness_run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        let search_run = db.store.create_search_run(&search.id, "project_harness")?;
+        db.store
+            .attach_harness_search_run(&harness_run.id, &search_run.id)?;
+        db.store
+            .append_new_candidates(&search.id, &search_run.id, &[ranked("LoRA", None, 1)])?;
+        db.store.set_search_run_status(
+            &search_run.id,
+            SearchRunStatus::Ready,
+            1,
+            Some("converged"),
+            None,
+            true,
+        )?;
+        db.store
+            .record_automatic_harness_reflection(&harness_run.id)?;
+        db.store.finalize_harness_run(&search_run.id)?;
+        let run = db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .runs
+            .into_iter()
+            .find(|run| run.id == harness_run.id)
+            .expect("ready Harness Run");
+        let candidate = db
+            .store
+            .harness_reconciliation_candidates(&run.id)?
+            .into_iter()
+            .next()
+            .expect("Run candidate");
+        Ok((run, candidate))
+    }
+
+    fn reconciliation_plan(
+        candidate_id: &str,
+        decision: CandidateDecisionKind,
+    ) -> RunReconciliationPlan {
+        let accepted = decision == CandidateDecisionKind::Accept;
+        RunReconciliationPlan {
+            candidate_decisions: vec![CandidateDecision {
+                candidate_id: candidate_id.to_string(),
+                decision,
+                reason: if accepted {
+                    "Mechanistically relevant".to_string()
+                } else {
+                    "Outside the current emphasis".to_string()
+                },
+                relevance_confidence: 0.9,
+                within_scope: accepted,
+            }],
+            entries: vec![if accepted {
+                PlannedResearchEntry {
+                    handle: "finding:1".to_string(),
+                    kind: ResearchEntryKind::Finding,
+                    epistemic_status: EpistemicStatus::SourceSupported,
+                    text: "The candidate reports an inspected result.".to_string(),
+                    evidence: vec![PlannedEvidence {
+                        candidate_id: candidate_id.to_string(),
+                        excerpt: "An abstract.".to_string(),
+                        support_note: Some("Provider abstract evidence".to_string()),
+                    }],
+                    relations: Vec::new(),
+                }
+            } else {
+                PlannedResearchEntry {
+                    handle: "gap:1".to_string(),
+                    kind: ResearchEntryKind::Gap,
+                    epistemic_status: EpistemicStatus::Speculative,
+                    text: "This bounded search did not resolve the mechanistic question."
+                        .to_string(),
+                    evidence: Vec::new(),
+                    relations: Vec::new(),
+                }
+            }],
+            next_direction: "Search for causal intervention studies".to_string(),
+            operational_reflection: None,
+        }
     }
 
     fn paper_draft(id: &str) -> PaperDraft {
@@ -6729,6 +12820,18 @@ mod tests {
                 "every Vault should belong to a returned Project"
             );
         }
+        for project in &snapshot.projects {
+            assert_eq!(
+                db.store
+                    .get_harness_snapshot(&project.id)?
+                    .harness
+                    .project_id,
+                project.id
+            );
+            let state = db.store.get_research_state(&project.id, None)?;
+            assert_eq!(state.revision, 0);
+            assert!(state.entries.is_empty());
+        }
         assert!(has_paper(&snapshot, "vaswani2017"));
         assert!(has_membership(&snapshot, "attention", "vaswani2017"));
         assert!(paper(&snapshot, "vaswani2017").active_source_id.is_none());
@@ -6790,18 +12893,18 @@ mod tests {
         assert_eq!(created.title, "Related work.md");
         assert_eq!(created.format, "markdown");
         assert!(!created.harness_writable);
+        assert_eq!(created.content_revision, 1);
 
-        let updated = db
-            .store
-            .update_project_document(&ProjectDocumentUpdate {
-                id: created.id.clone(),
-                title: "LoRA related work.md".to_string(),
-                content: "# LoRA\n\nRevised synthesis.".to_string(),
-                harness_writable: true,
-            })?;
+        let updated = db.store.update_project_document(&ProjectDocumentUpdate {
+            id: created.id.clone(),
+            title: "LoRA related work.md".to_string(),
+            content: "# LoRA\n\nRevised synthesis.".to_string(),
+            harness_writable: true,
+        })?;
         assert_eq!(updated.title, "LoRA related work.md");
         assert_eq!(updated.content, "# LoRA\n\nRevised synthesis.");
         assert!(updated.harness_writable);
+        assert_eq!(updated.content_revision, 2);
 
         let reopened_store = LibraryStore::for_test(db.dir.join("library.sqlite"));
         let reopened = reopened_store.get_project_document(&created.id)?;
@@ -6841,6 +12944,1819 @@ mod tests {
         })?;
         db.store.delete_project("project:attention")?;
         assert!(db.store.get_project_document(&document.id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn harness_configuration_versions_and_run_snapshots_are_immutable() -> StoreResult<()> {
+        let db = test_db()?;
+        let configuration = HarnessConfiguration {
+            goal: "Improve LoRA interpretability".to_string(),
+            research_instructions: "Prioritize mechanistic studies".to_string(),
+            scope: "Mechanistic explanations of low-rank adaptation".to_string(),
+            exclusions: "Application-only benchmarks".to_string(),
+            preferred_concepts: vec!["subspace".to_string()],
+            excluded_concepts: vec!["application-only".to_string()],
+            sources: vec![
+                "browser".to_string(),
+                "open_alex".to_string(),
+                "arxiv".to_string(),
+            ],
+            depth: Depth::Quick,
+            paper_budget: 6,
+            autonomy: HarnessAutonomy::Automatic,
+            may_add_papers: true,
+            ..HarnessConfiguration::default()
+        };
+        let saved = db
+            .store
+            .save_harness_configuration("project:attention", &configuration)?;
+        assert_eq!(saved.harness.configuration_version, 2);
+
+        let search = db.store.create_search(&sample_search_draft())?;
+        let run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        assert_eq!(run.configuration_snapshot, configuration);
+        assert_eq!(run.configuration_version, 2);
+        assert_eq!(run.policy_version, HARNESS_POLICY_VERSION);
+        assert_eq!(
+            run.effective_instructions.structured_settings,
+            configuration
+        );
+        assert_eq!(
+            run.effective_instructions.project_research_instructions,
+            "Prioritize mechanistic studies"
+        );
+        assert_eq!(run.effective_instructions.run_context.vault_id, "attention");
+        assert!(!run
+            .effective_instructions
+            .run_context
+            .vault_paper_ids
+            .is_empty());
+        assert_ne!(
+            run.effective_instructions.run_context.vault_revision,
+            "legacy"
+        );
+
+        let mut changed = configuration.clone();
+        changed.preferred_concepts.push("ablation".to_string());
+        let saved = db
+            .store
+            .save_harness_configuration("project:attention", &changed)?;
+        assert_eq!(saved.harness.configuration_version, 3);
+        assert_eq!(saved.runs[0].configuration_snapshot, configuration);
+        assert_eq!(
+            db.store.get_harness_run_instructions(&run.id)?,
+            run.effective_instructions
+        );
+        let versions = db
+            .store
+            .list_harness_configuration_versions("project:attention")?;
+        assert_eq!(
+            versions.iter().map(|item| item.version).collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+        assert_eq!(versions[1].configuration, configuration);
+
+        let second_search = db.store.create_search(&sample_search_draft())?;
+        let error = db
+            .store
+            .create_harness_run("project:attention", &second_search.id)
+            .expect_err("only one active Run may exist");
+        assert_eq!(error, "A Research Run is already active for this Project");
+        Ok(())
+    }
+
+    #[test]
+    fn harness_search_uses_immutable_project_scoped_orientation() -> StoreResult<()> {
+        let db = test_db()?;
+        db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::ResearcherContext,
+                text: "Reader note asks whether LoRA rank components specialize.".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: Some("Promoted working context".to_string()),
+            },
+        )?;
+        db.store.create_project(&ProjectDraft {
+            title: "Foreign project".to_string(),
+            goal: None,
+        })?;
+        db.store.create_research_entry(
+            "project:foreign-project",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::ResearcherContext,
+                text: "FOREIGN_CONTEXT_MUST_NOT_LEAK".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: None,
+            },
+        )?;
+
+        let (prior_run, _) =
+            ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
+        let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+        conn.execute(
+            "update harness_reflections set next_direction = ?2 where run_id = ?1",
+            params![prior_run.id, "Investigate component-level causal ablations"],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "insert into harness_observations
+             (id, reflection_id, run_id, project_id, kind, signature, severity,
+              confidence, description, metrics_json, proposal_eligible, created_at)
+             values (?1, ?2, ?3, 'project:attention', 'query_quality', 'narrow-terms',
+                     0.5, 0.9, 'Broad explanation queries favored application papers.',
+                     '{}', 0, datetime('now'))",
+            params![
+                format!("{}:orientation-observation", prior_run.id),
+                format!("{}:reflection", prior_run.id),
+                prior_run.id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+        let search = db.store.create_search(&sample_search_draft())?;
+        let run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        let oriented = db.store.get_search(&search.id)?.goal;
+        assert!(oriented.contains("Investigate component-level causal ablations"));
+        assert!(oriented.contains("Reader note asks whether LoRA rank components specialize."));
+        assert!(oriented.contains("Broad explanation queries favored application papers."));
+        assert!(oriented.contains("researcher_context"));
+        assert!(oriented.contains("may guide discovery but may not support factual claims"));
+        assert!(!oriented.contains("FOREIGN_CONTEXT_MUST_NOT_LEAK"));
+        assert!(run
+            .effective_instructions
+            .run_context
+            .prior_observations
+            .iter()
+            .any(|observation| observation.kind == "query_quality"));
+
+        conn.execute(
+            "update harness_reflections set next_direction = 'CHANGED_AFTER_RUN' where run_id = ?1",
+            params![prior_run.id],
+        )
+        .map_err(|error| error.to_string())?;
+        db.store.create_research_entry(
+            "project:attention",
+            1,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "ADDED_AFTER_RUN".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: None,
+            },
+        )?;
+        assert_eq!(db.store.get_search(&search.id)?.goal, oriented);
+        let persisted = db.store.get_harness_run_instructions(&run.id)?;
+        assert_eq!(persisted, run.effective_instructions);
+        assert!(!persisted
+            .run_context
+            .active_entries
+            .iter()
+            .any(|entry| entry.text == "ADDED_AFTER_RUN"));
+        assert_ne!(
+            persisted.run_context.prior_next_direction.as_deref(),
+            Some("CHANGED_AFTER_RUN")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_reconciliation_reflections_create_one_reviewable_improvement() -> StoreResult<()>
+    {
+        let db = test_db()?;
+        for _ in 0..3 {
+            let (run, candidate) =
+                ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
+            let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+            conn.execute(
+                "delete from harness_reflections where run_id = ?1",
+                params![run.id],
+            )
+            .map_err(|error| error.to_string())?;
+            let mut plan = reconciliation_plan(&candidate.id, CandidateDecisionKind::Reject);
+            plan.operational_reflection = Some(PlannedHarnessReflection {
+                summary: "Application-heavy queries reduced mechanistic precision.".to_string(),
+                next_direction: Some("Use mechanistic terminology next Run.".to_string()),
+                observations: vec![PlannedHarnessObservation {
+                    kind: HarnessObservationKind::QueryQuality,
+                    signature: "application-heavy-query-results".to_string(),
+                    severity: 0.6,
+                    confidence: 0.9,
+                    description:
+                        "Executed queries repeatedly favored application papers over mechanisms."
+                            .to_string(),
+                    target: Some(HarnessImprovementTarget::PreferredConcepts),
+                    proposed_value: Some(HarnessImprovementValue::Concepts(vec![
+                        "mechanistic".to_string(),
+                    ])),
+                    proposal_eligible: true,
+                }],
+            });
+            db.store.create_harness_change_set(&run.id, &plan)?;
+            db.store.record_automatic_harness_reflection(&run.id)?;
+            db.store.record_automatic_harness_reflection(&run.id)?;
+        }
+
+        let improvements = db.store.list_harness_improvements(
+            "project:attention",
+            Some(HarnessImprovementStatus::Proposed),
+        )?;
+        assert_eq!(improvements.len(), 1);
+        assert_eq!(improvements[0].run_ids.len(), 3);
+        assert_eq!(
+            improvements[0].proposed_value,
+            HarnessImprovementValue::Concepts(vec!["mechanistic".to_string()])
+        );
+        let snapshot = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| {
+                    event.kind == "operational_observation"
+                        && event.detail.as_ref().and_then(|detail| detail["kind"].as_str())
+                            == Some("query_quality")
+                })
+                .count(),
+            3
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_review_applies_paper_abstract_and_state_atomically() -> StoreResult<()> {
+        let db = test_db()?;
+        let (run, candidate) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, true)?;
+        let plan = reconciliation_plan(&candidate.id, CandidateDecisionKind::Accept);
+        let proposed = db.store.create_harness_change_set(&run.id, &plan)?;
+        assert_eq!(proposed.status, HarnessChangeSetStatus::Proposed);
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            0
+        );
+        assert!(!has_membership(
+            &db.store.get_library()?,
+            "attention",
+            &candidate.candidate.id
+        ));
+
+        let applied = db.store.apply_harness_change_set(&proposed.id)?;
+        assert_eq!(applied.status, HarnessChangeSetStatus::Applied);
+        assert_eq!(applied.resulting_state_revision, Some(1));
+        let library = db.store.get_library()?;
+        assert!(has_membership(
+            &library,
+            "attention",
+            &candidate.candidate.id
+        ));
+        assert!(library.document_sources.iter().any(|source| {
+            source.paper_id == candidate.candidate.id && source.source_kind == "metadata_abstract"
+        }));
+        let state = db.store.get_research_state("project:attention", None)?;
+        assert_eq!(state.revision, 1);
+        let finding = state
+            .entries
+            .iter()
+            .find(|entry| entry.kind == ResearchEntryKind::Finding)
+            .expect("applied Finding");
+        let detail = db.store.get_research_entry(&finding.id, None)?;
+        assert_eq!(detail.evidence[0].excerpt, "An abstract.");
+        assert!(detail.evidence[0]
+            .support_note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("abstract"));
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_captures_usage_decisions_and_monotonic_vault_revision() -> StoreResult<()> {
+        let db = test_db()?;
+        let (run, candidate) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, true)?;
+        let search_run_id = run.search_run_id.as_deref().expect("linked search Run");
+        db.store.set_search_run_usage(search_run_id, 3, 4, 1, 1)?;
+        db.store.add_search_run_llm_calls(search_run_id, 2)?;
+        let proposed = db.store.create_harness_change_set(
+            &run.id,
+            &reconciliation_plan(&candidate.id, CandidateDecisionKind::Accept),
+        )?;
+        db.store.apply_harness_change_set(&proposed.id)?;
+
+        let checkpoint = db.store.get_research_checkpoint(&run.id)?;
+        assert_eq!(checkpoint.resulting_state_revision, Some(1));
+        assert_eq!(checkpoint.applied_change_set_id, Some(proposed.id));
+        assert_eq!(checkpoint.accepted_candidate_count, 1);
+        assert_eq!(checkpoint.rejected_candidate_count, 0);
+        assert_eq!(checkpoint.added_paper_ids, vec![candidate.candidate.id]);
+        assert_eq!(checkpoint.usage.provider_queries, 3);
+        assert_eq!(checkpoint.usage.llm_calls, 6);
+        assert_eq!(checkpoint.usage.iterations, 1);
+        assert_eq!(checkpoint.usage.inspected_candidates, 1);
+        assert_eq!(
+            checkpoint.next_direction.as_deref(),
+            Some("Search for causal intervention studies")
+        );
+        assert!(checkpoint.complete);
+        assert!(checkpoint.converged);
+        assert!(checkpoint.restore_available);
+        assert!(checkpoint.resulting_vault_revision > Some(checkpoint.starting_vault_revision));
+        assert_eq!(
+            db.store.list_research_checkpoints("project:attention")?[0].run_id,
+            run.id
+        );
+        let reopened = LibraryStore::for_test(db.store.db_path.clone());
+        let persisted = reopened.get_research_checkpoint(&run.id)?;
+        assert_eq!(persisted.applied_change_set_id, checkpoint.applied_change_set_id);
+        assert_eq!(persisted.next_direction, checkpoint.next_direction);
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_restoration_appends_state_and_supersedes_later_entries() -> StoreResult<()> {
+        let db = test_db()?;
+        let (run, candidate) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, true)?;
+        let proposed = db.store.create_harness_change_set(
+            &run.id,
+            &reconciliation_plan(&candidate.id, CandidateDecisionKind::Accept),
+        )?;
+        db.store.apply_harness_change_set(&proposed.id)?;
+        let later = db.store.create_research_entry(
+            "project:attention",
+            1,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "What changed after the checkpoint?".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: Some("Later manual work".to_string()),
+            },
+        )?;
+        let later_id = later.entry.entry.id;
+
+        let restored = db
+            .store
+            .restore_research_checkpoint("project:attention", &run.id, 2)?;
+        assert_eq!(restored.revision, 3);
+        assert_eq!(restored.current_revision, 3);
+        assert_eq!(
+            restored
+                .entries
+                .iter()
+                .find(|entry| entry.id == later_id)
+                .expect("later entry retained in history")
+                .lifecycle,
+            EntryLifecycle::Superseded
+        );
+        assert!(restored.entries.iter().any(|entry| {
+            entry.kind == ResearchEntryKind::Finding && entry.lifecycle == EntryLifecycle::Active
+        }));
+        assert!(db
+            .store
+            .restore_research_checkpoint("project:attention", &run.id, 2)
+            .is_err());
+        let events = db.store.get_harness_snapshot("project:attention")?.events;
+        let restored_event = events
+            .iter()
+            .find(|event| event.kind == "checkpoint_restored")
+            .expect("restoration event");
+        assert_eq!(restored_event.actor, "researcher");
+        assert_eq!(
+            restored_event
+                .detail
+                .as_ref()
+                .and_then(|detail| detail["resultingRevision"].as_i64()),
+            Some(3)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_restoration_rejects_a_run_from_another_project() -> StoreResult<()> {
+        let db = test_db()?;
+        let (run, _) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
+        db.store.create_project(&ProjectDraft {
+            title: "Foreign project".to_string(),
+            goal: None,
+        })?;
+
+        let error = db
+            .store
+            .restore_research_checkpoint("project:foreign-project", &run.id, 0)
+            .expect_err("a foreign Run must not be restored through the active Project");
+        assert_eq!(
+            error,
+            "Research checkpoint does not belong to the active Project"
+        );
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .current_revision,
+            0
+        );
+        assert_eq!(
+            db.store
+                .get_research_state("project:foreign-project", None)?
+                .current_revision,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn structured_activity_rejects_unbounded_or_invalid_records() -> StoreResult<()> {
+        let db = test_db()?;
+        let (run, _) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
+        let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+        assert!(append_structured_harness_event(
+            &conn,
+            &run.id,
+            "query",
+            &"x".repeat(501),
+            None,
+            None,
+            None,
+            None,
+            "harness",
+        )
+        .is_err());
+        assert!(append_structured_harness_event(
+            &conn,
+            &run.id,
+            "query",
+            "Invalid progress",
+            None,
+            Some("searching"),
+            Some(2),
+            Some(1),
+            "harness",
+        )
+        .is_err());
+        assert!(append_structured_harness_event(
+            &conn,
+            &run.id,
+            "provider_query_completed",
+            "Malformed provider result",
+            Some(serde_json::json!({ "provider": "browser", "candidateCount": "many" })),
+            Some("searching"),
+            None,
+            None,
+            "harness",
+        )
+        .is_err());
+        assert!(append_structured_harness_event(
+            &conn,
+            &run.id,
+            "unregistered_detail_kind",
+            "Unknown structured payload",
+            Some(serde_json::json!({ "value": 1 })),
+            None,
+            None,
+            None,
+            "harness",
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn stale_or_rejected_reconciliation_never_mutates_project_knowledge() -> StoreResult<()> {
+        let db = test_db()?;
+        let (run, candidate) = ready_reconciliation_run(&db, HarnessAutonomy::Propose, false)?;
+        let plan = reconciliation_plan(&candidate.id, CandidateDecisionKind::Reject);
+        let proposed = db.store.create_harness_change_set(&run.id, &plan)?;
+        db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "Which intervention distinguishes competing mechanisms?".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: Some("Researcher update".to_string()),
+            },
+        )?;
+        let superseded = db.store.apply_harness_change_set(&proposed.id)?;
+        assert_eq!(superseded.status, HarnessChangeSetStatus::Superseded);
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            1
+        );
+
+        let db = test_db()?;
+        let (run, candidate) = ready_reconciliation_run(&db, HarnessAutonomy::Propose, false)?;
+        let plan = reconciliation_plan(&candidate.id, CandidateDecisionKind::Reject);
+        let proposed = db.store.create_harness_change_set(&run.id, &plan)?;
+        let rejected = db
+            .store
+            .reject_harness_change_set(&proposed.id, "The bounded gap is not useful")?;
+        assert_eq!(rejected.status, HarnessChangeSetStatus::Rejected);
+        assert_eq!(rejected.plan, Some(plan));
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_reconciliation_application_rolls_back_paper_and_state() -> StoreResult<()> {
+        let db = test_db()?;
+        let (run, candidate) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, true)?;
+        let plan = reconciliation_plan(&candidate.id, CandidateDecisionKind::Accept);
+        let proposed = db.store.create_harness_change_set(&run.id, &plan)?;
+        let mut invalid = plan;
+        invalid.entries[0].evidence[0].excerpt = "Invented unsupported quote".to_string();
+        let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+        conn.execute(
+            "update harness_change_sets set plan_json = ?2 where id = ?1",
+            params![
+                proposed.id,
+                serde_json::to_string(&invalid).map_err(|error| error.to_string())?
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        drop(conn);
+        assert!(db.store.apply_harness_change_set(&proposed.id).is_err());
+        let failed = db.store.get_harness_change_set(&run.id)?;
+        assert_eq!(failed.status, HarnessChangeSetStatus::Failed);
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            0
+        );
+        assert!(!has_membership(
+            &db.store.get_library()?,
+            "attention",
+            &candidate.candidate.id
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn harness_authority_is_conservative_and_project_bounded() -> StoreResult<()> {
+        let db = test_db()?;
+        let defaults = db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .harness
+            .configuration;
+        assert_eq!(defaults.autonomy, HarnessAutonomy::Manual);
+        assert!(!defaults.schedule.enabled);
+        assert!(!defaults.may_add_papers);
+        assert!(defaults.writable_document_ids.is_empty());
+
+        let mut manual_schedule = HarnessConfiguration {
+            goal: "Map mechanisms".to_string(),
+            ..HarnessConfiguration::default()
+        };
+        manual_schedule.schedule.enabled = true;
+        assert_eq!(
+            db.store
+                .save_harness_configuration("project:attention", &manual_schedule)
+                .expect_err("manual autonomy must not schedule"),
+            "Manual autonomy cannot enable scheduled Runs"
+        );
+
+        db.store.create_project(&ProjectDraft {
+            title: "Foreign project".to_string(),
+            goal: None,
+        })?;
+        let foreign = db.store.create_project_document(&ProjectDocumentDraft {
+            project_id: "project:foreign-project".to_string(),
+            title: "Foreign.md".to_string(),
+            content: String::new(),
+        })?;
+        let configuration = HarnessConfiguration {
+            goal: "Map mechanisms".to_string(),
+            writable_document_ids: vec![foreign.id.clone()],
+            ..HarnessConfiguration::default()
+        };
+        assert_eq!(
+            db.store
+                .save_harness_configuration("project:attention", &configuration)
+                .expect_err("foreign Documents must not grant authority"),
+            format!(
+                "Writable document does not belong to this Project: {}",
+                foreign.id
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_harness_authority_migrates_without_automatic_permissions() -> StoreResult<()> {
+        let db = test_db()?;
+        let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+        let raw: String = conn
+            .query_row(
+                "select configuration_json from research_harnesses where project_id = 'project:attention'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        let object = value.as_object_mut().expect("configuration object");
+        object.remove("autonomy");
+        object.remove("scope");
+        object.remove("exclusions");
+        object.remove("mayAddPapers");
+        object.remove("writableDocumentIds");
+        object
+            .get_mut("schedule")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("schedule object")
+            .insert("enabled".to_string(), serde_json::Value::Bool(true));
+        conn.execute(
+            "update research_harnesses set configuration_json = ?1, schedule_enabled = 1,
+             next_run_at = '2026-09-03T07:00:00+00:00' where project_id = 'project:attention'",
+            params![serde_json::to_string(&value).map_err(|error| error.to_string())?],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "delete from harness_configuration_versions where project_id = 'project:attention'",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+        drop(conn);
+
+        db.store.init()?;
+        let migrated = db.store.get_harness_snapshot("project:attention")?.harness;
+        assert_eq!(migrated.configuration.autonomy, HarnessAutonomy::Manual);
+        assert!(!migrated.configuration.schedule.enabled);
+        assert!(migrated.next_run_at.is_none());
+        assert!(!migrated.configuration.may_add_papers);
+        assert!(migrated.configuration.writable_document_ids.is_empty());
+        let versions = db
+            .store
+            .list_harness_configuration_versions("project:attention")?;
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].actor, "migration");
+        Ok(())
+    }
+
+    #[test]
+    fn harness_activity_mirrors_linked_search_lifecycle() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.goal = "Map LoRA mechanisms".to_string();
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let search = db.store.create_search(&sample_search_draft())?;
+        let harness_run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        let search_run = db.store.create_search_run(&search.id, "project_harness")?;
+        db.store
+            .attach_harness_search_run(&harness_run.id, &search_run.id)?;
+        db.store.set_search_run_status(
+            &search_run.id,
+            SearchRunStatus::Planning,
+            0,
+            None,
+            None,
+            false,
+        )?;
+        db.store.set_search_run_status(
+            &search_run.id,
+            SearchRunStatus::Ready,
+            1,
+            Some("target_reached"),
+            None,
+            true,
+        )?;
+        db.store
+            .record_automatic_harness_reflection(&harness_run.id)?;
+        db.store.finalize_harness_run(&search_run.id)?;
+
+        let snapshot = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(snapshot.harness.status, "idle");
+        assert_eq!(snapshot.runs[0].status, "ready");
+        assert_eq!(
+            snapshot.runs[0].stop_reason.as_deref(),
+            Some("target_reached")
+        );
+        let mut sequences: Vec<i64> = snapshot
+            .events
+            .iter()
+            .filter(|event| event.run_id == harness_run.id)
+            .map(|event| event.sequence)
+            .collect();
+        sequences.sort_unstable();
+        assert_eq!(
+            sequences,
+            (1..=sequences.len() as i64).collect::<Vec<_>>()
+        );
+        assert!(snapshot.events.iter().any(|event| event.kind == "planning"));
+        assert!(snapshot.events.iter().any(|event| event.kind == "ready"));
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == "stop_decided"));
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == "harness_reflection_recorded"));
+        Ok(())
+    }
+
+    #[test]
+    fn harness_run_finalizes_only_after_reconciliation_usage_and_reflection() -> StoreResult<()> {
+        let db = test_db()?;
+        let configuration = HarnessConfiguration {
+            goal: "Map LoRA mechanisms".to_string(),
+            paper_budget: 2,
+            ..HarnessConfiguration::default()
+        };
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let search = db.store.create_search(&sample_search_draft())?;
+        let harness_run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        let search_run = db.store.create_search_run(&search.id, "project_harness")?;
+        db.store
+            .attach_harness_search_run(&harness_run.id, &search_run.id)?;
+        db.store
+            .append_new_candidates(&search.id, &search_run.id, &[ranked("LoRA", None, 1)])?;
+        db.store.set_search_run_usage(&search_run.id, 2, 3, 1, 1)?;
+        db.store.set_search_run_status(
+            &search_run.id,
+            SearchRunStatus::Ready,
+            1,
+            Some("converged"),
+            None,
+            true,
+        )?;
+
+        let pending = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(pending.harness.status, "running");
+        assert_eq!(pending.runs[0].status, "reconciling");
+        assert!(!db
+            .store
+            .get_research_checkpoint(&harness_run.id)?
+            .restore_available);
+        let second_search = db.store.create_search(&sample_search_draft())?;
+        assert!(db
+            .store
+            .create_harness_run("project:attention", &second_search.id)
+            .expect_err("reconciling blocks a second Run")
+            .contains("already active"));
+
+        let candidate = db
+            .store
+            .harness_reconciliation_candidates(&harness_run.id)?
+            .into_iter()
+            .next()
+            .expect("candidate");
+        db.store.create_harness_change_set(
+            &harness_run.id,
+            &reconciliation_plan(&candidate.id, CandidateDecisionKind::Reject),
+        )?;
+        db.store.add_search_run_llm_calls(&search_run.id, 1)?;
+        db.store
+            .record_automatic_harness_reflection(&harness_run.id)?;
+        db.store.finalize_harness_run(&search_run.id)?;
+
+        let completed = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(completed.harness.status, "idle");
+        assert_eq!(completed.runs[0].status, "ready");
+        assert!(completed.runs[0].finished_at.is_some());
+        let mut events = completed
+            .events
+            .iter()
+            .filter(|event| event.run_id == harness_run.id)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sequence);
+        let sequence = |kind: &str| {
+            events
+                .iter()
+                .position(|event| event.kind == kind)
+                .expect("event kind")
+        };
+        assert!(sequence("change_set_proposed") < sequence("reconciliation_usage_recorded"));
+        assert!(
+            sequence("reconciliation_usage_recorded") < sequence("harness_reflection_recorded")
+        );
+        assert!(sequence("harness_reflection_recorded") < sequence("ready"));
+        assert!(sequence("ready") < sequence("stop_decided"));
+        Ok(())
+    }
+
+    #[test]
+    fn restart_recovery_finalizes_a_search_completed_reconciling_run() -> StoreResult<()> {
+        let db = test_db()?;
+        let configuration = HarnessConfiguration {
+            goal: "Map LoRA mechanisms".to_string(),
+            ..HarnessConfiguration::default()
+        };
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let search = db.store.create_search(&sample_search_draft())?;
+        let harness_run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        let search_run = db.store.create_search_run(&search.id, "project_harness")?;
+        db.store
+            .attach_harness_search_run(&harness_run.id, &search_run.id)?;
+        db.store.set_search_run_status(
+            &search_run.id,
+            SearchRunStatus::Ready,
+            1,
+            Some("converged"),
+            None,
+            true,
+        )?;
+
+        assert_eq!(db.store.recover_interrupted_harness_runs()?, 1);
+        let recovered = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(recovered.harness.status, "idle");
+        assert_eq!(recovered.runs[0].status, "ready");
+        assert!(recovered.runs[0].resulting_state_revision.is_some());
+        assert!(recovered.events.iter().any(|event| {
+            event.run_id == harness_run.id && event.kind == "reconciliation_recovered"
+        }));
+        assert!(db
+            .store
+            .get_research_checkpoint(&harness_run.id)?
+            .restore_available);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduled_harness_claims_one_occurrence_and_skips_missed_intervals() -> StoreResult<()> {
+        use chrono::TimeZone;
+
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.goal = "Map LoRA mechanisms".to_string();
+        configuration.autonomy = HarnessAutonomy::Propose;
+        configuration.schedule.enabled = true;
+        configuration.schedule.timezone = "Europe/Berlin".to_string();
+        configuration.schedule.local_time = "09:00".to_string();
+        let saved = db.store.save_harness_configuration_at(
+            "project:attention",
+            &configuration,
+            Utc.with_ymd_and_hms(2026, 9, 2, 6, 0, 0).unwrap(),
+        )?;
+        assert_eq!(
+            saved.harness.next_run_at.as_deref(),
+            Some("2026-09-02T07:00:00+00:00")
+        );
+
+        let claim = db
+            .store
+            .claim_due_harness(Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap(), true)?
+            .expect("one overdue schedule is claimed");
+        assert_eq!(claim.project_id, "project:attention");
+        assert_eq!(claim.trigger, HarnessRunTrigger::StartupCatchUp);
+        assert_eq!(claim.scheduled_for, "2026-09-02T07:00:00+00:00");
+        assert!(db
+            .store
+            .claim_due_harness(Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap(), true)?
+            .is_none());
+        assert_eq!(
+            db.store
+                .get_harness_snapshot("project:attention")?
+                .harness
+                .next_run_at
+                .as_deref(),
+            Some("2026-09-06T07:00:00+00:00")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pause_resume_stop_and_recovery_are_durable() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.goal = "Map LoRA mechanisms".to_string();
+        configuration.autonomy = HarnessAutonomy::Propose;
+        configuration.schedule.enabled = true;
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        assert_eq!(
+            db.store
+                .pause_research_harness("project:attention")?
+                .harness
+                .status,
+            "paused"
+        );
+        assert_eq!(
+            db.store
+                .resume_research_harness("project:attention")?
+                .harness
+                .status,
+            "idle"
+        );
+
+        let search = db.store.create_search(&sample_search_draft())?;
+        let run = db.store.create_harness_run_with_trigger(
+            "project:attention",
+            &search.id,
+            HarnessRunTrigger::Scheduled,
+            Some("2026-09-03T07:00:00+00:00"),
+        )?;
+        db.store.pause_research_harness("project:attention")?;
+        assert_eq!(db.store.recover_interrupted_harness_runs()?, 1);
+        let recovered = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(recovered.harness.status, "paused");
+        assert_eq!(recovered.runs[0].id, run.id);
+        assert_eq!(recovered.runs[0].status, "failed");
+        assert_eq!(
+            recovered.runs[0].stop_reason.as_deref(),
+            Some("application_restarted")
+        );
+        assert_eq!(
+            db.store
+                .stop_research_harness("project:attention")?
+                .harness
+                .status,
+            "stopped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn manual_runs_preserve_schedule_and_terminal_limits_stop_future_runs() -> StoreResult<()> {
+        use chrono::TimeZone;
+
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.goal = "Map LoRA mechanisms".to_string();
+        configuration.autonomy = HarnessAutonomy::Propose;
+        configuration.schedule.enabled = true;
+        configuration.stop_conditions.maximum_cycles = Some(1);
+        let scheduled = db.store.save_harness_configuration_at(
+            "project:attention",
+            &configuration,
+            Utc.with_ymd_and_hms(2026, 9, 2, 6, 0, 0).unwrap(),
+        )?;
+        let next_run_at = scheduled.harness.next_run_at.clone();
+        let search = db.store.create_search(&sample_search_draft())?;
+        let harness_run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        assert_eq!(
+            db.store
+                .get_harness_snapshot("project:attention")?
+                .harness
+                .next_run_at,
+            next_run_at
+        );
+        let search_run = db.store.create_search_run(&search.id, "project_harness")?;
+        db.store
+            .attach_harness_search_run(&harness_run.id, &search_run.id)?;
+        db.store.set_search_run_status(
+            &search_run.id,
+            SearchRunStatus::Ready,
+            1,
+            Some("coverage_sufficient"),
+            None,
+            true,
+        )?;
+        db.store
+            .record_automatic_harness_reflection(&harness_run.id)?;
+        db.store.finalize_harness_run(&search_run.id)?;
+        let stopped = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(stopped.harness.completed_cycle_count, 1);
+        assert_eq!(stopped.harness.status, "stopped");
+        assert_eq!(
+            stopped.harness.terminal_stop_reason.as_deref(),
+            Some("maximum_cycles_reached")
+        );
+        assert!(db
+            .store
+            .ensure_harness_can_start("project:attention")
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recurring_operational_observations_create_one_reviewable_improvement() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.goal = "Map LoRA mechanisms".to_string();
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let mut run_ids = Vec::new();
+        for index in 0..3 {
+            let search = db.store.create_search(&sample_search_draft())?;
+            let run = db
+                .store
+                .create_harness_run("project:attention", &search.id)?;
+            let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+            conn.execute(
+                "update harness_runs set status = 'ready', finished_at = datetime('now') where id = ?1",
+                params![run.id],
+            )
+            .map_err(|error| error.to_string())?;
+            conn.execute(
+                "update research_harnesses set status = 'idle' where project_id = 'project:attention'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+            db.store.persist_harness_reflection(
+                &run.id,
+                &HarnessReflectionDraft {
+                    summary: format!(
+                        "Run {} repeatedly found application-heavy results",
+                        index + 1
+                    ),
+                    next_direction: None,
+                    metrics_json: "{\"irrelevant\":4}".to_string(),
+                    observations: vec![HarnessObservationDraft {
+                        kind: HarnessObservationKind::CoverageBias,
+                        signature: "application-heavy-results".to_string(),
+                        severity: 0.7,
+                        confidence: 0.8,
+                        description: "Queries overrepresented application papers.".to_string(),
+                        metrics_json: "{\"irrelevant\":4}".to_string(),
+                        target: Some(HarnessImprovementTarget::PreferredConcepts),
+                        proposed_value: Some(HarnessImprovementValue::Concepts(vec![
+                            "mechanistic".to_string(),
+                            "subspace".to_string(),
+                        ])),
+                        proposal_eligible: true,
+                    }],
+                },
+            )?;
+            run_ids.push(run.id);
+        }
+
+        let proposals = db.store.list_harness_improvements(
+            "project:attention",
+            Some(HarnessImprovementStatus::Proposed),
+        )?;
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].run_ids.len(), 3);
+        assert_eq!(proposals[0].observation_ids.len(), 3);
+        assert_eq!(
+            proposals[0].target,
+            HarnessImprovementTarget::PreferredConcepts
+        );
+        assert!(proposals[0].expected_effect.contains("mechanistic"));
+
+        let edited = db.store.edit_harness_improvement(
+            &proposals[0].id,
+            &HarnessImprovementValue::Concepts(vec![
+                " Mechanistic ".to_string(),
+                "intrinsic dimension".to_string(),
+                "mechanistic".to_string(),
+            ]),
+        )?;
+        assert_eq!(
+            edited.proposed_value,
+            HarnessImprovementValue::Concepts(vec![
+                "mechanistic".to_string(),
+                "intrinsic dimension".to_string()
+            ])
+        );
+        let accepted = db.store.accept_harness_improvement(&proposals[0].id)?;
+        assert_eq!(accepted.status, HarnessImprovementStatus::Accepted);
+        let harness = db.store.get_harness_snapshot("project:attention")?.harness;
+        assert_eq!(
+            harness.configuration.preferred_concepts,
+            vec!["mechanistic", "intrinsic dimension"]
+        );
+        assert_eq!(
+            accepted.resulting_configuration_version,
+            Some(harness.configuration_version)
+        );
+        let versions = db
+            .store
+            .list_harness_configuration_versions("project:attention")?;
+        let improvement_version = versions
+            .iter()
+            .find(|version| version.version == harness.configuration_version)
+            .expect("accepted improvement records a version");
+        assert_eq!(improvement_version.actor, "improvement");
+        assert_eq!(
+            improvement_version.source_improvement_id.as_deref(),
+            Some(proposals[0].id.as_str())
+        );
+        for run_id in run_ids {
+            assert!(db
+                .store
+                .get_harness_snapshot("project:attention")?
+                .runs
+                .iter()
+                .find(|run| run.id == run_id)
+                .expect("contributing Run remains")
+                .configuration_snapshot
+                .preferred_concepts
+                .is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stale_harness_improvement_is_superseded_instead_of_rebased() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.goal = "Map LoRA mechanisms".to_string();
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let proposal_id = seed_harness_improvement(&db, "stale-proposal")?;
+        configuration.preferred_concepts = vec!["causal".to_string()];
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let superseded = db.store.accept_harness_improvement(&proposal_id)?;
+        assert_eq!(superseded.status, HarnessImprovementStatus::Superseded);
+        assert_eq!(
+            db.store
+                .get_harness_snapshot("project:attention")?
+                .harness
+                .configuration
+                .preferred_concepts,
+            vec!["causal"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_harness_improvement_retains_contributors_and_reason() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.goal = "Map LoRA mechanisms".to_string();
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let proposal_id = seed_harness_improvement(&db, "reject-proposal")?;
+        let rejected = db.store.reject_harness_improvement(
+            &proposal_id,
+            Some("Vocabulary is too narrow for this Project"),
+        )?;
+        assert_eq!(rejected.status, HarnessImprovementStatus::Rejected);
+        assert_eq!(rejected.run_ids.len(), 3);
+        assert_eq!(
+            rejected.decision_reason.as_deref(),
+            Some("Vocabulary is too narrow for this Project")
+        );
+        assert!(db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .harness
+            .configuration
+            .preferred_concepts
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn harness_improvement_allow_list_preserves_browser_and_rejects_mismatches() {
+        assert!(HarnessImprovementTarget::parse("goal").is_err());
+        assert!(normalize_improvement_value(
+            HarnessImprovementTarget::MetadataResolvers,
+            &HarnessImprovementValue::Concepts(vec!["unsafe".to_string()]),
+        )
+        .is_err());
+        let mut configuration = HarnessConfiguration::default();
+        apply_improvement_value(
+            &mut configuration,
+            HarnessImprovementTarget::MetadataResolvers,
+            &HarnessImprovementValue::MetadataResolvers(Vec::new()),
+        )
+        .expect("empty optional resolver set is valid");
+        assert_eq!(configuration.sources, vec!["browser"]);
+    }
+
+    #[test]
+    fn source_supported_state_requires_project_vault_evidence() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "research-state-paper",
+            &[(
+                "paragraph",
+                "Low-rank updates constrain adaptation to a learned subspace.",
+            )],
+        )?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let draft = ResearchEntryDraft {
+            kind: ResearchEntryKind::Finding,
+            epistemic_status: EpistemicStatus::SourceSupported,
+            text: "Low-rank updates constrain adaptation to a learned subspace.".to_string(),
+            evidence: vec![EvidenceLinkDraft {
+                chunk_id: chunk.id.clone(),
+                excerpt: None,
+                support_note: Some("Direct statement".to_string()),
+            }],
+            relations: Vec::new(),
+            context: Vec::new(),
+            reason: Some("Curated finding".to_string()),
+        };
+
+        let created = db
+            .store
+            .create_research_entry("project:attention", 0, &draft)?;
+        assert_eq!(created.state.revision, 1);
+        assert_eq!(created.entry.entry.evidence_count, 1);
+        assert_eq!(created.entry.evidence[0].paper_id, "research-state-paper");
+        assert_eq!(created.entry.evidence[0].chunk_id, chunk.id);
+        assert!(created.entry.evidence[0]
+            .excerpt
+            .contains("learned subspace"));
+
+        let missing = ResearchEntryDraft {
+            evidence: Vec::new(),
+            ..draft.clone()
+        };
+        assert_eq!(
+            db.store
+                .create_research_entry("project:attention", 1, &missing)
+                .expect_err("source-supported entry must cite evidence"),
+            "A source-supported Finding requires source evidence"
+        );
+        let wrong_project = db
+            .store
+            .create_research_entry("project:self-supervised", 0, &draft)
+            .expect_err("evidence cannot cross the Project boundary");
+        assert!(wrong_project.contains("does not resolve inside this Project Vault"));
+        assert_eq!(
+            db.store
+                .get_research_state("project:self-supervised", None)?
+                .revision,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn research_evidence_survives_chunk_regeneration() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "durable-evidence-paper",
+            &[(
+                "paragraph",
+                "The cited passage must remain auditable after rechunking.",
+            )],
+        )?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let created = db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Finding,
+                epistemic_status: EpistemicStatus::SourceSupported,
+                text: "The cited passage remains auditable.".to_string(),
+                evidence: vec![EvidenceLinkDraft {
+                    chunk_id: chunk.id,
+                    excerpt: None,
+                    support_note: None,
+                }],
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: None,
+            },
+        )?;
+
+        let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+        clear_extraction_chunks(&conn, &extraction.id)?;
+
+        let reloaded = db.store.get_research_entry(&created.entry.entry.id, None)?;
+        assert_eq!(reloaded.evidence.len(), 1);
+        assert!(reloaded.evidence[0]
+            .excerpt
+            .contains("remain auditable after rechunking"));
+        Ok(())
+    }
+
+    #[test]
+    fn research_state_rejects_invalid_kind_status_combinations() -> StoreResult<()> {
+        let db = test_db()?;
+        for (kind, status) in [
+            (ResearchEntryKind::Gap, EpistemicStatus::SourceSupported),
+            (
+                ResearchEntryKind::Hypothesis,
+                EpistemicStatus::AgentSynthesis,
+            ),
+            (
+                ResearchEntryKind::ExperimentIdea,
+                EpistemicStatus::ResearcherContext,
+            ),
+        ] {
+            let error = db
+                .store
+                .create_research_entry(
+                    "project:attention",
+                    0,
+                    &ResearchEntryDraft {
+                        kind,
+                        epistemic_status: status,
+                        text: "Invalid combination".to_string(),
+                        evidence: Vec::new(),
+                        relations: Vec::new(),
+                        context: Vec::new(),
+                        reason: None,
+                    },
+                )
+                .expect_err("invalid epistemic combination must not commit");
+            assert!(!error.is_empty());
+        }
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn research_context_never_satisfies_source_evidence() -> StoreResult<()> {
+        let db = test_db()?;
+        let document = db.store.create_project_document(&ProjectDocumentDraft {
+            project_id: "project:attention".to_string(),
+            title: "Working notes.md".to_string(),
+            content: "This is working context, not evidence.".to_string(),
+        })?;
+        let draft = ResearchEntryDraft {
+            kind: ResearchEntryKind::Finding,
+            epistemic_status: EpistemicStatus::SourceSupported,
+            text: "A working claim".to_string(),
+            evidence: Vec::new(),
+            relations: Vec::new(),
+            context: vec![ResearchContextLinkDraft {
+                kind: ResearchContextKind::ProjectDocument,
+                context_id: document.id,
+                label: "Working notes".to_string(),
+            }],
+            reason: None,
+        };
+        let error = db
+            .store
+            .create_research_entry("project:attention", 0, &draft)
+            .expect_err("context is qualitatively different from evidence");
+        assert_eq!(error, "A source-supported Finding requires source evidence");
+        Ok(())
+    }
+
+    #[test]
+    fn research_state_revisions_are_historical_and_optimistic() -> StoreResult<()> {
+        let db = test_db()?;
+        let premise = db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "Do rank components specialize?".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: None,
+            },
+        )?;
+        let premise_id = premise.entry.entry.id.clone();
+        let synthesis = db.store.create_research_entry(
+            "project:attention",
+            1,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Finding,
+                epistemic_status: EpistemicStatus::AgentSynthesis,
+                text: "Existing work leaves component specialization unresolved.".to_string(),
+                evidence: Vec::new(),
+                relations: vec![EntryRelationDraft {
+                    target_entry_id: premise_id.clone(),
+                    kind: EntryRelationKind::DerivedFrom,
+                }],
+                context: Vec::new(),
+                reason: Some("Synthesis from open question".to_string()),
+            },
+        )?;
+        let synthesis_id = synthesis.entry.entry.id.clone();
+        assert_eq!(synthesis.state.revision, 2);
+        assert_eq!(synthesis.entry.relations.len(), 1);
+
+        let revised = db.store.revise_research_entry(
+            2,
+            &ResearchEntryUpdate {
+                id: synthesis_id.clone(),
+                epistemic_status: EpistemicStatus::AgentSynthesis,
+                text: "The bounded review leaves component specialization unresolved.".to_string(),
+                evidence: Vec::new(),
+                relations: vec![EntryRelationDraft {
+                    target_entry_id: premise_id,
+                    kind: EntryRelationKind::DerivedFrom,
+                }],
+                context: Vec::new(),
+                reason: Some("Qualify bounded coverage".to_string()),
+            },
+        )?;
+        assert_eq!(revised.state.revision, 3);
+        assert_eq!(revised.entry.history.len(), 2);
+
+        let historical = db.store.get_research_state("project:attention", Some(2))?;
+        let old = historical
+            .entries
+            .iter()
+            .find(|entry| entry.id == synthesis_id)
+            .expect("entry existed at revision 2");
+        assert_eq!(
+            old.text,
+            "Existing work leaves component specialization unresolved."
+        );
+        let current = db.store.get_research_state("project:attention", None)?;
+        assert_eq!(current.revision, 3);
+        assert!(current
+            .entries
+            .iter()
+            .any(|entry| entry.text.starts_with("The bounded review")));
+
+        let stale = db
+            .store
+            .create_research_entry(
+                "project:attention",
+                2,
+                &ResearchEntryDraft {
+                    kind: ResearchEntryKind::Hypothesis,
+                    epistemic_status: EpistemicStatus::Speculative,
+                    text: "Components may specialize.".to_string(),
+                    evidence: Vec::new(),
+                    relations: Vec::new(),
+                    context: Vec::new(),
+                    reason: None,
+                },
+            )
+            .expect_err("stale edit must not overwrite revision 3");
+        assert!(stale.contains("expected revision 2, current revision is 3"));
+
+        let contested = db.store.set_research_entry_lifecycle(
+            &synthesis_id,
+            3,
+            EntryLifecycle::Contested,
+            "New evidence challenges the synthesis",
+        )?;
+        assert_eq!(contested.state.revision, 4);
+        assert_eq!(contested.entry.entry.lifecycle, EntryLifecycle::Contested);
+        assert_eq!(contested.entry.history.len(), 3);
+        assert_eq!(
+            db.store
+                .get_research_entry(&synthesis_id, Some(2))?
+                .entry
+                .lifecycle,
+            EntryLifecycle::Active
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_research_document_shape_creates_an_ordinary_markdown_document() -> StoreResult<()> {
+        let db = test_db()?;
+        let created = db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Hypothesis,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "Rank components may specialize into distinct functions.".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: Some("Candidate explanation".to_string()),
+            },
+        )?;
+        let entry_id = created.entry.entry.id;
+        for shape in [
+            ResearchDocumentShape::Survey,
+            ResearchDocumentShape::RelatedWork,
+            ResearchDocumentShape::ResearchGapAnalysis,
+            ResearchDocumentShape::HypothesisReport,
+            ResearchDocumentShape::ExperimentPlan,
+            ResearchDocumentShape::Custom,
+        ] {
+            let generation = db.store.create_research_document_generation(
+                &CreateFromResearchRequest {
+                    project_id: "project:attention".to_string(),
+                    state_revision: 1,
+                    selected_entry_ids: vec![entry_id.clone()],
+                    shape,
+                    title: format!("{} output", shape.as_str()),
+                    custom_instruction: None,
+                    originating_run_id: None,
+                    include_non_active: false,
+                },
+                None,
+            )?;
+            let ready = db
+                .store
+                .execute_research_document_generation(&generation.id)?;
+            assert_eq!(ready.status, "ready");
+            let document = db.store.get_project_document(
+                ready
+                    .resulting_document_id
+                    .as_deref()
+                    .expect("ready document id"),
+            )?;
+            assert_eq!(document.format, "markdown");
+            assert!(!document.harness_writable);
+            assert_eq!(document.created_from_state_revision, Some(1));
+            assert_eq!(document.output_shape.as_deref(), Some(shape.as_str()));
+            assert!(document
+                .content
+                .contains("Generated from Research State revision 1"));
+            for heading in shape_outline(shape) {
+                assert!(document.content.contains(&format!("## {heading}")));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generation_pins_revision_and_cancelled_jobs_create_no_document() -> StoreResult<()> {
+        let db = test_db()?;
+        let first = db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "Which rank components carry interpretable functions?".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: None,
+            },
+        )?;
+        let request = CreateFromResearchRequest {
+            project_id: "project:attention".to_string(),
+            state_revision: 1,
+            selected_entry_ids: vec![first.entry.entry.id],
+            shape: ResearchDocumentShape::Survey,
+            title: "Pinned survey".to_string(),
+            custom_instruction: None,
+            originating_run_id: None,
+            include_non_active: false,
+        };
+        let pinned = db
+            .store
+            .create_research_document_generation(&request, None)?;
+        db.store.create_research_entry(
+            "project:attention",
+            1,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Gap,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "A later gap must not enter the pinned request.".to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: None,
+            },
+        )?;
+        let ready = db.store.execute_research_document_generation(&pinned.id)?;
+        let document = db.store.get_project_document(
+            ready
+                .resulting_document_id
+                .as_deref()
+                .expect("ready document id"),
+        )?;
+        assert!(!document.content.contains("later gap"));
+        assert_eq!(document.created_from_state_revision, Some(1));
+
+        let mut cancelled_request = request;
+        cancelled_request.title = "Cancelled survey".to_string();
+        let cancelled = db
+            .store
+            .create_research_document_generation(&cancelled_request, None)?;
+        db.store
+            .cancel_research_document_generation(&cancelled.id)?;
+        let final_state = db
+            .store
+            .execute_research_document_generation(&cancelled.id)?;
+        assert_eq!(final_state.status, "cancelled");
+        assert!(final_state.resulting_document_id.is_none());
+        assert_eq!(db.store.get_library()?.project_documents.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn generated_citations_are_local_unambiguous_and_metadata_stable() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut entry_ids = Vec::new();
+        for (index, paper_id) in ["citation-paper-a", "citation-paper-b"].iter().enumerate() {
+            let extraction = extracted_paper(
+                &db,
+                paper_id,
+                &[(
+                    "paragraph",
+                    "Low-rank adaptation constrains the update subspace.",
+                )],
+            )?;
+            let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+            let created = db.store.create_research_entry(
+                "project:attention",
+                index as i64,
+                &ResearchEntryDraft {
+                    kind: ResearchEntryKind::Finding,
+                    epistemic_status: EpistemicStatus::SourceSupported,
+                    text: format!("Source-supported finding {}.", index + 1),
+                    evidence: vec![EvidenceLinkDraft {
+                        chunk_id: chunk.id,
+                        excerpt: None,
+                        support_note: None,
+                    }],
+                    relations: Vec::new(),
+                    context: Vec::new(),
+                    reason: None,
+                },
+            )?;
+            entry_ids.push(created.entry.entry.id);
+        }
+        let generation = db.store.create_research_document_generation(
+            &CreateFromResearchRequest {
+                project_id: "project:attention".to_string(),
+                state_revision: 2,
+                selected_entry_ids: entry_ids,
+                shape: ResearchDocumentShape::Survey,
+                title: "Cited survey".to_string(),
+                custom_instruction: None,
+                originating_run_id: None,
+                include_non_active: false,
+            },
+            None,
+        )?;
+        let ready = db
+            .store
+            .execute_research_document_generation(&generation.id)?;
+        let document_id = ready.resulting_document_id.expect("ready document id");
+        let before = db.store.get_project_document(&document_id)?;
+        assert_eq!(before.citations.len(), 2);
+        assert_ne!(
+            before.citations[0].citation_key,
+            before.citations[1].citation_key
+        );
+        assert!(before
+            .citations
+            .iter()
+            .all(|citation| !citation.evidence_link_ids.is_empty()));
+
+        let conn = db.store.open_connection()?;
+        conn.execute(
+            "update papers set title = 'Changed canonical title', authors_json = '[\"Different Author\"]', year = 2030 where id = 'citation-paper-a'",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+        let after = db.store.get_project_document(&document_id)?;
+        assert_eq!(after.citations, before.citations);
+        Ok(())
+    }
+
+    #[test]
+    fn generation_validation_rejects_unknown_and_missing_citations() {
+        let empty_entries = Vec::new();
+        let empty_citations = Vec::new();
+        assert!(validate_generated_document(
+            "A claim [@invented].",
+            &empty_entries,
+            &empty_citations,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn failed_generation_transaction_leaves_no_partial_document() -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "disappearing-citation-paper",
+            &[(
+                "paragraph",
+                "This evidence will become unresolvable before generation.",
+            )],
+        )?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let entry = db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Finding,
+                epistemic_status: EpistemicStatus::SourceSupported,
+                text: "A factual claim needs its resolvable source.".to_string(),
+                evidence: vec![EvidenceLinkDraft {
+                    chunk_id: chunk.id,
+                    excerpt: None,
+                    support_note: None,
+                }],
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: None,
+            },
+        )?;
+        let generation = db.store.create_research_document_generation(
+            &CreateFromResearchRequest {
+                project_id: "project:attention".to_string(),
+                state_revision: 1,
+                selected_entry_ids: vec![entry.entry.entry.id],
+                shape: ResearchDocumentShape::Survey,
+                title: "Must fail atomically".to_string(),
+                custom_instruction: None,
+                originating_run_id: None,
+                include_non_active: false,
+            },
+            None,
+        )?;
+        db.store
+            .delete_paper_globally("disappearing-citation-paper")?;
+        let error = db
+            .store
+            .execute_research_document_generation(&generation.id)
+            .expect_err("missing source evidence must fail before document creation");
+        assert!(error.contains("lacks evidence") || error.contains("no longer resolves"));
+        assert!(db.store.get_library()?.project_documents.is_empty());
+        assert!(db
+            .store
+            .get_research_document_generation(&generation.id)?
+            .resulting_document_id
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn only_ready_harness_runs_publish_state_atomically() -> StoreResult<()> {
+        let db = test_db()?;
+        db.store.save_harness_configuration(
+            "project:attention",
+            &HarnessConfiguration {
+                goal: "Understand rank component specialization".to_string(),
+                ..HarnessConfiguration::default()
+            },
+        )?;
+        let search = db.store.create_search(&sample_search_draft())?;
+        let harness_run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        let draft = ResearchEntryDraft {
+            kind: ResearchEntryKind::Hypothesis,
+            epistemic_status: EpistemicStatus::Speculative,
+            text: "Rank components may learn distinct functions.".to_string(),
+            evidence: Vec::new(),
+            relations: Vec::new(),
+            context: Vec::new(),
+            reason: Some("Run synthesis".to_string()),
+        };
+        assert!(db
+            .store
+            .publish_harness_run_research_state(&harness_run.id, 0, &[draft.clone()])
+            .is_err());
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            0
+        );
+
+        let search_run = db.store.create_search_run(&search.id, "project_harness")?;
+        db.store
+            .attach_harness_search_run(&harness_run.id, &search_run.id)?;
+        db.store.set_search_run_status(
+            &search_run.id,
+            SearchRunStatus::Ready,
+            1,
+            Some("converged"),
+            None,
+            true,
+        )?;
+        let published =
+            db.store
+                .publish_harness_run_research_state(&harness_run.id, 0, &[draft])?;
+        assert_eq!(published.revision, 1);
+        assert_eq!(published.entries.len(), 1);
+        let harness = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(harness.runs[0].starting_state_revision, 0);
+        assert_eq!(harness.runs[0].resulting_state_revision, Some(1));
+        assert!(harness
+            .events
+            .iter()
+            .any(|event| event.kind == "research_state_published"));
         Ok(())
     }
 

@@ -1,10 +1,13 @@
 pub mod chat;
 pub mod context;
 pub mod discovery;
+pub mod harness_improvement;
 pub mod highlight;
 pub mod library;
 pub mod reader;
 pub mod research;
+pub mod research_document;
+pub mod research_state;
 pub mod search;
 pub mod settings;
 pub mod source_acquisition;

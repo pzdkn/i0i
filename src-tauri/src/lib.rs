@@ -144,6 +144,12 @@ pub fn run() {
             search_manager
                 .recover_and_queue_startup_runs()
                 .map_err(std::io::Error::other)?;
+            services::research::scheduler::HarnessScheduler::new(
+                store.clone(),
+                search_manager.clone(),
+            )
+            .start()
+            .map_err(std::io::Error::other)?;
             let chat_browser_discovery = commands::discovery::browser::BrowserDiscoverySource::new(
                 source_acquisition.clone(),
                 discovery_providers.openalex.clone(),
@@ -295,6 +301,37 @@ pub fn run() {
             commands::research::cancel_search_run,
             commands::research::mark_search_candidate_saved,
             commands::research::mark_search_candidates_seen,
+            commands::research::get_research_harness,
+            commands::research::save_research_harness,
+            commands::research::list_harness_configuration_versions,
+            commands::research::get_harness_run_instructions,
+            commands::research::get_research_checkpoint,
+            commands::research::list_research_checkpoints,
+            commands::research::restore_research_checkpoint,
+            commands::research::get_harness_change_set,
+            commands::research::apply_harness_change_set,
+            commands::research::reject_harness_change_set,
+            commands::research::edit_harness_change_set,
+            commands::research::run_project_research,
+            commands::research::cancel_project_research,
+            commands::research::pause_research_harness,
+            commands::research::resume_research_harness,
+            commands::research::stop_research_harness,
+            commands::research_state::get_research_state,
+            commands::research_state::get_research_entry,
+            commands::research_state::list_research_evidence_candidates,
+            commands::research_state::create_research_entry,
+            commands::research_state::revise_research_entry,
+            commands::research_state::set_research_entry_lifecycle,
+            commands::research_document::create_document_from_research,
+            commands::research_document::get_research_document_generation,
+            commands::research_document::cancel_research_document_generation,
+            commands::research_document::retry_research_document_generation,
+            commands::harness_improvement::list_harness_improvements,
+            commands::harness_improvement::get_harness_improvement,
+            commands::harness_improvement::edit_harness_improvement,
+            commands::harness_improvement::accept_harness_improvement,
+            commands::harness_improvement::reject_harness_improvement,
             commands::vault_suggestions::get_vault_suggestions,
             commands::vault_suggestions::get_vault_suggestion_options,
             commands::vault_suggestions::save_vault_suggestion_options,

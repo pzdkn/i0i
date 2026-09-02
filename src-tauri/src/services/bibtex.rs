@@ -147,14 +147,20 @@ fn format_entry(record: &CiteRecord, key: &str) -> String {
     let (entry_type, venue_field) = entry_layout(&record.venue);
 
     let mut fields: Vec<String> = Vec::new();
-    fields.push(format!("  title = {{{{{}}}}}", escape_latex(record.title.trim())));
+    fields.push(format!(
+        "  title = {{{{{}}}}}",
+        escape_latex(record.title.trim())
+    ));
 
     let authors = format_authors(&record.authors);
     if !authors.is_empty() {
         fields.push(format!("  author = {{{authors}}}"));
     }
     if let Some(field) = venue_field {
-        fields.push(format!("  {field} = {{{}}}", escape_latex(record.venue.trim())));
+        fields.push(format!(
+            "  {field} = {{{}}}",
+            escape_latex(record.venue.trim())
+        ));
     }
     if record.year > 0 {
         fields.push(format!("  year = {{{}}}", record.year));

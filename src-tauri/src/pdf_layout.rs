@@ -227,10 +227,7 @@ fn group_blocks(lines: Vec<Line>, median_height: f32) -> Vec<Vec<Line>> {
             None => true,
             Some(current) => {
                 let previous = current.last().expect("block is never empty");
-                let block_left = current
-                    .iter()
-                    .map(|l| l.left)
-                    .fold(f32::INFINITY, f32::min);
+                let block_left = current.iter().map(|l| l.left).fold(f32::INFINITY, f32::min);
                 let gap = previous.bottom - line.top;
                 let font_delta = (line.font_size - previous.font_size).abs();
 
@@ -254,12 +251,7 @@ fn group_blocks(lines: Vec<Line>, median_height: f32) -> Vec<Vec<Line>> {
     blocks
 }
 
-fn build_block(
-    lines: Vec<Line>,
-    body_size: f32,
-    page_width: f32,
-    page_height: f32,
-) -> LayoutBlock {
+fn build_block(lines: Vec<Line>, body_size: f32, page_width: f32, page_height: f32) -> LayoutBlock {
     let mut text = String::new();
     let mut spans: Vec<LayoutSpan> = Vec::new();
     let mut previous_right: Option<f32> = None;
@@ -310,7 +302,10 @@ fn build_block(
         .iter()
         .flat_map(|l| l.fragments.iter().map(|f| f.right))
         .fold(f32::NEG_INFINITY, f32::max);
-    let top = lines.iter().map(|l| l.top).fold(f32::NEG_INFINITY, f32::max);
+    let top = lines
+        .iter()
+        .map(|l| l.top)
+        .fold(f32::NEG_INFINITY, f32::max);
     let bottom = lines.iter().map(|l| l.bottom).fold(f32::INFINITY, f32::min);
 
     let font_size = lines.iter().map(|l| l.font_size).fold(0.0_f32, f32::max);
@@ -396,7 +391,10 @@ mod tests {
     #[test]
     fn fragments_on_the_same_baseline_become_one_line_and_one_block() {
         let blocks = group_page(
-            &[frag("hello", 72.0, 700.0, 10.0), frag("world", 130.0, 700.0, 10.0)],
+            &[
+                frag("hello", 72.0, 700.0, 10.0),
+                frag("world", 130.0, 700.0, 10.0),
+            ],
             PAGE_W,
             PAGE_H,
         );
@@ -480,7 +478,12 @@ mod tests {
         let long = "x".repeat(HEADING_MAX_CHARS + 40);
         let mut fragments = vec![frag(&long, 72.0, 700.0, 16.0)];
         for index in 0..8 {
-            fragments.push(frag("ordinary body text here", 72.0, 600.0 - index as f32 * 12.0, 10.0));
+            fragments.push(frag(
+                "ordinary body text here",
+                72.0,
+                600.0 - index as f32 * 12.0,
+                10.0,
+            ));
         }
 
         let blocks = group_page(&fragments, PAGE_W, PAGE_H);
@@ -490,7 +493,10 @@ mod tests {
     #[test]
     fn span_offsets_index_the_block_text() {
         let blocks = group_page(
-            &[frag("alpha", 72.0, 700.0, 10.0), frag("beta", 140.0, 700.0, 10.0)],
+            &[
+                frag("alpha", 72.0, 700.0, 10.0),
+                frag("beta", 140.0, 700.0, 10.0),
+            ],
             PAGE_W,
             PAGE_H,
         );
@@ -592,7 +598,11 @@ mod tests {
             PAGE_H,
         );
 
-        let combined: String = blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join(" ");
+        let combined: String = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let first = combined.find("first").expect("first present");
         let second = combined.find("second").expect("second present");
         let third = combined.find("third").expect("third present");

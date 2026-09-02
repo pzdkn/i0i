@@ -13,9 +13,9 @@
     onRemoveProject,
   }: {
     activeProjectId: string;
-    activeProjectView: "vault" | "documents";
+    activeProjectView: "research" | "vault" | "documents";
     projects: ProjectWorkspace[];
-    onOpenProject: (projectId: string, view: "vault" | "documents") => void;
+    onOpenProject: (projectId: string, view: "research" | "vault" | "documents") => void;
     onOpenProjectDocument: (projectId: string, documentId: string) => void;
     onCreateProject: (title: string) => Promise<void>;
     onRenameProject: (projectId: string, title: string) => Promise<void>;
@@ -190,7 +190,7 @@
             class:active={activeProjectId === project.id}
             class="tree-row folder"
             type="button"
-            onclick={() => onOpenProject(project.id, "vault")}
+            onclick={() => onOpenProject(project.id, "research")}
             oncontextmenu={(event) => showContextMenu(event, project.id)}
             title={`${project.title} · ${project.vault.path}`}
           >
@@ -201,6 +201,15 @@
           </button>
           {#if activeProjectId === project.id}
             <div class="project-children">
+              <button
+                class:active-child={activeProjectView === "research"}
+                class="tree-row child"
+                type="button"
+                onclick={() => onOpenProject(project.id, "research")}
+              >
+                <span class="glyph">*</span>
+                <span class="truncate">Research</span>
+              </button>
               <button
                 class:active-child={activeProjectView === "vault"}
                 class="tree-row child"

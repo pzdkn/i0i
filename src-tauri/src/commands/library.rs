@@ -8,8 +8,8 @@ use tauri::{Emitter, Manager};
 
 use crate::domain::library::{
     DocumentSource, LibrarySnapshot, LocalPdfImport, LocalPdfImportResult, MetadataCandidate,
-    PaperDraft, PaperMetadataUpdate, ProjectDocument, ProjectDocumentDraft,
-    ProjectDocumentUpdate, ProjectDraft, ProjectRenameDraft, VaultDraft, VaultRenameDraft,
+    PaperDraft, PaperMetadataUpdate, ProjectDocument, ProjectDocumentDraft, ProjectDocumentUpdate,
+    ProjectDraft, ProjectRenameDraft, VaultDraft, VaultRenameDraft,
 };
 use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
@@ -139,7 +139,13 @@ pub async fn import_html_url(
         .acquire_and_store_html(&paper_id, &source_id, &normalized)
         .await?;
     let paper = html_paper_draft(stored.acquired.title.as_deref(), &normalized, &paper_id);
-    store.add_local_html_to_vault(&paper, &vault_id, &source_id, &normalized, &stored.local_path)?;
+    store.add_local_html_to_vault(
+        &paper,
+        &vault_id,
+        &source_id,
+        &normalized,
+        &stored.local_path,
+    )?;
 
     Ok(LocalPdfImportResult {
         snapshot: store.get_library()?,
@@ -356,9 +362,8 @@ pub fn export_vault_bibtex(
     }
 
     let document = crate::services::bibtex::to_bibtex(&records);
-    fs::write(&dest_path, document).map_err(|error| {
-        format!("Could not write {dest_path}: {error}")
-    })?;
+    fs::write(&dest_path, document)
+        .map_err(|error| format!("Could not write {dest_path}: {error}"))?;
 
     Ok(records.len())
 }

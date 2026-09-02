@@ -187,6 +187,9 @@ pub struct SearchRun {
     pub iteration: i32,
     pub added_count: i32,
     pub total_count: i32,
+    pub provider_query_count: u32,
+    pub llm_call_count: u32,
+    pub inspected_candidate_count: u32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]

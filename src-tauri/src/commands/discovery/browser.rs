@@ -20,7 +20,7 @@ use super::error::DiscoveryError;
 use super::provider::{DiscoveryProvider, DiscoveryProviderId, ProviderSearchResult};
 use super::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
-    CandidateMatch, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
+    CandidateMatch, DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
 };
 use crate::services::source_acquisition::types::PageInspection;
 use crate::services::source_acquisition::SourceAcquisitionService;
@@ -116,6 +116,19 @@ impl BrowserDiscoverySource {
         limit: usize,
         on_progress: &(dyn Fn(BrowserDiscoveryProgress) + Send + Sync),
     ) -> Result<Vec<PaperCandidate>, DiscoveryError> {
+        self.discover_with_resolvers(query, limit, &[], on_progress)
+            .await
+    }
+
+    /// Browser discovery with an explicit allow-list of metadata resolvers.
+    /// An empty allow-list preserves the default OpenAlex/arXiv behavior.
+    pub async fn discover_with_resolvers(
+        &self,
+        query: &str,
+        limit: usize,
+        resolvers: &[DiscoveryProviderChoice],
+        on_progress: &(dyn Fn(BrowserDiscoveryProgress) + Send + Sync),
+    ) -> Result<Vec<PaperCandidate>, DiscoveryError> {
         on_progress(BrowserDiscoveryProgress::SearchingWeb);
         let mut provisional = Vec::new();
         let mut page_errors = Vec::new();
@@ -180,14 +193,13 @@ impl BrowserDiscoverySource {
             count: provisional.len(),
         });
 
-        let resolved = stream::iter(
-            provisional
-                .into_iter()
-                .map(|candidate| async move { self.resolve_candidate(candidate).await }),
-        )
-        .buffer_unordered(RESOLUTION_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+        let resolved =
+            stream::iter(provisional.into_iter().map(|candidate| async move {
+                self.resolve_candidate(candidate, resolvers).await
+            }))
+            .buffer_unordered(RESOLUTION_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
         let resolved = crate::services::research::dedup::dedup(resolved);
         on_progress(BrowserDiscoveryProgress::Resolved {
             count: resolved.len(),
@@ -195,18 +207,29 @@ impl BrowserDiscoverySource {
         Ok(resolved)
     }
 
-    async fn resolve_candidate(&self, provisional: PaperCandidate) -> PaperCandidate {
+    async fn resolve_candidate(
+        &self,
+        provisional: PaperCandidate,
+        resolvers: &[DiscoveryProviderChoice],
+    ) -> PaperCandidate {
         let identifier = candidate_identifier(&provisional);
         let mut request = exact_request(
             identifier.as_deref().unwrap_or(&provisional.title),
             identifier.is_none(),
         );
+        let permits = |provider| resolvers.is_empty() || resolvers.contains(&provider);
 
-        let resolved = if provisional.arxiv_id.is_some() {
-            request.provider = crate::domain::discovery::DiscoveryProviderChoice::Arxiv;
+        let resolved = if provisional.arxiv_id.is_some() && permits(DiscoveryProviderChoice::Arxiv)
+        {
+            request.provider = DiscoveryProviderChoice::Arxiv;
+            self.arxiv.search(&request).await.ok()
+        } else if permits(DiscoveryProviderChoice::OpenAlex) {
+            self.openalex.search(&request).await.ok()
+        } else if permits(DiscoveryProviderChoice::Arxiv) {
+            request.provider = DiscoveryProviderChoice::Arxiv;
             self.arxiv.search(&request).await.ok()
         } else {
-            self.openalex.search(&request).await.ok()
+            None
         };
 
         let Some(candidate) = resolved

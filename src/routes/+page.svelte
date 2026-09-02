@@ -17,6 +17,7 @@
   import {
     createSearch,
     getSearch,
+    getResearchHarness,
     listSearchCandidates,
     listenSearchCandidatesPreview,
     listenSearchUpdated,
@@ -56,6 +57,7 @@
   import VaultExplorer from "$lib/features/vault/VaultExplorer.svelte";
   import VaultHome from "$lib/features/vault/VaultHome.svelte";
   import ProjectDocuments from "$lib/features/project/ProjectDocuments.svelte";
+  import ProjectResearch from "$lib/features/project/ProjectResearch.svelte";
   import {
     getAllPapers,
     getCandidateVaultTargets,
@@ -88,7 +90,7 @@
     setDiscoverCandidateAvailability,
     setDiscoverSelectedCandidate,
   } from "$lib/state/library-cache.svelte";
-  import { depthStrategy, isTerminalStatus, type SearchCandidatesPreview, type SearchUpdated } from "$lib/domain/research";
+  import { depthStrategy, isTerminalStatus, type HarnessSnapshot, type SearchCandidatesPreview, type SearchUpdated } from "$lib/domain/research";
   import { sanitizeProviders, type BrowserRuntimeStatus } from "$lib/domain/discover";
 
   // RFC 0087 R3: the status bar used to read a Rust command that returned the
@@ -130,6 +132,7 @@
   }
   let activeVaultId = $state("");
   let selectedProjectDocumentId = $state("");
+  let requestedResearchRevision = $state<number | undefined>();
   let projectDocumentDirty = $state(false);
   let selectedPaperId = $state("");
   let selectedReaderPaper = $state<Paper | null>(null);
@@ -138,6 +141,7 @@
   let activeTabId = $state("");
   let tabs = $state<WorkspaceTab[]>([]);
   let readerLayoutMode = $state<"normal" | "focus">("normal");
+  let activeProjectHarness = $state<HarnessSnapshot | null>(null);
 
   const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId));
   const activeVaultWorkspace = $derived(getVaultWorkspace(activeVaultId));
@@ -149,7 +153,22 @@
   const activeProjectWorkspace = $derived(
     projectWorkspaces.find((project) => project.id === activeProjectId),
   );
-  const activeProjectView = $derived(activeTab?.projectView ?? "vault");
+  const activeProjectView = $derived(activeTab?.projectView ?? "research");
+
+  $effect(() => {
+    const projectId = activeProjectId;
+    if (!projectId) {
+      activeProjectHarness = null;
+      return;
+    }
+    void getResearchHarness(projectId)
+      .then((snapshot) => {
+        if (activeProjectId === projectId) activeProjectHarness = snapshot;
+      })
+      .catch(() => {
+        if (activeProjectId === projectId) activeProjectHarness = null;
+      });
+  });
   const discoverWorkspaces = $derived(getDiscoverWorkspaces());
   const activeDiscoverWorkspace = $derived(getDiscoverWorkspace(activeTab?.discoverId ?? "discover-1"));
   const activePaper = $derived.by<Paper | null>(() => {
@@ -184,7 +203,7 @@
 
   function makeVaultTab(
     vault: Pick<Vault, "id" | "path">,
-    projectView: "vault" | "documents" = "vault",
+    projectView: "research" | "vault" | "documents" = "research",
   ): WorkspaceTab {
     const project = getProjectWorkspaces().find((candidate) => candidate.vault.id === vault.id);
     return {
@@ -323,7 +342,17 @@
   onMount(() => {
     let unlisten: (() => void) | undefined;
 
-    listenSearchUpdated(handleResearchUpdate)
+    listenSearchUpdated((event) => {
+      void handleResearchUpdate(event);
+      const projectId = activeProjectId;
+      if (projectId) {
+        void getResearchHarness(projectId)
+          .then((snapshot) => {
+            if (activeProjectId === projectId) activeProjectHarness = snapshot;
+          })
+          .catch(() => undefined);
+      }
+    })
       .then((nextUnlisten) => {
         unlisten = nextUnlisten;
       })
@@ -908,8 +937,9 @@
     return true;
   }
 
-  function openProject(projectId: string, view: "vault" | "documents") {
+  function openProject(projectId: string, view: "research" | "vault" | "documents") {
     if (!confirmDocumentSwitch()) return;
+    if (view === "research") requestedResearchRevision = undefined;
     const project = getProjectWorkspaces().find((candidate) => candidate.id === projectId);
     if (project) {
       const projectTab = makeVaultTab(project.vault, view);
@@ -931,13 +961,23 @@
     openProject(projectId, "documents");
   }
 
+  async function openGeneratedProjectDocument(projectId: string, documentId: string) {
+    hydrateLibrary(await getLibrary());
+    openProjectDocument(projectId, documentId);
+  }
+
+  function openProjectResearchRevision(projectId: string, revision: number) {
+    openProject(projectId, "research");
+    requestedResearchRevision = revision;
+  }
+
   async function createProjectFromExplorer(title: string) {
     try {
       const snapshot = await createProject(title);
       hydrateLibrary(snapshot);
       const project = snapshot.projects.find((candidate) => candidate.title === title.trim());
       if (project) {
-        openProject(project.id, "vault");
+        openProject(project.id, "research");
       }
     } catch (error) {
       bridgeError = String(error);
@@ -1138,6 +1178,14 @@
           <section class="workspace col">
             <WorkspaceTabs {tabs} {activeTabId} onActivate={activateTab} onClose={closeTab} />
 
+            {#if activeProjectWorkspace && activeProjectView !== "research" && activeProjectHarness}
+              <button class="project-harness-strip" type="button" onclick={() => openProject(activeProjectWorkspace.id, "research")}>
+                <strong>Research Harness · {activeProjectHarness.harness.status}</strong>
+                <span>Cycle {activeProjectHarness.harness.completedCycleCount}{activeProjectHarness.harness.nextRunAt ? ` · next while i0i is open ${new Date(activeProjectHarness.harness.nextRunAt).toLocaleString()}` : ""}</span>
+                <span>Open Research → Activity</span>
+              </button>
+            {/if}
+
             {#if activeTab?.kind === "reader" && activePaper}
               <ReaderView
                 paper={activePaper}
@@ -1170,6 +1218,16 @@
                 {browserStatus}
                 onRetryBrowser={() => void retryBrowser()}
               />
+            {:else if activeTab?.kind === "vault" && activeProjectView === "research" && activeProjectWorkspace}
+              <ProjectResearch
+                projectId={activeProjectWorkspace.id}
+                projectTitle={activeProjectWorkspace.title}
+                projectGoal={activeProjectWorkspace.goal}
+                documents={activeProjectWorkspace.documents}
+                initialRevision={requestedResearchRevision}
+                onOpenDocument={(documentId) => void openGeneratedProjectDocument(activeProjectWorkspace.id, documentId)}
+                onLibraryChanged={async () => hydrateLibrary(await getLibrary())}
+              />
             {:else if activeTab?.kind === "vault" && activeProjectView === "documents" && activeProjectWorkspace}
               <ProjectDocuments
                 project={activeProjectWorkspace}
@@ -1177,6 +1235,7 @@
                 onSelectDocument={(documentId) => openProjectDocument(activeProjectWorkspace.id, documentId)}
                 onLibraryChanged={hydrateLibrary}
                 onDirtyChange={(dirty) => (projectDocumentDirty = dirty)}
+                onViewResearchState={(revision) => openProjectResearchRevision(activeProjectWorkspace.id, revision)}
               />
             {:else if activeTab?.kind === "vault" && activeVaultWorkspace}
               <VaultHome
@@ -1226,6 +1285,28 @@
 
   .focus-workspace {
     overflow: hidden;
+  }
+
+  .project-harness-strip {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 34px;
+    padding: 6px 12px;
+    border: 0;
+    border-bottom: 1px solid var(--border-2);
+    background: color-mix(in srgb, var(--amber) 5%, var(--bg-1));
+    color: var(--fg-2);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .project-harness-strip strong {
+    color: var(--amber);
+  }
+
+  .project-harness-strip span:last-child {
+    margin-left: auto;
   }
 
   .empty-workspace {

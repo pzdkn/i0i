@@ -24,5 +24,7 @@ pub mod filter;
 pub mod manager;
 #[allow(dead_code)]
 pub mod planner;
+pub mod reconciliation;
+pub mod scheduler;
 #[allow(dead_code)]
 pub mod source;

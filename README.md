@@ -82,6 +82,19 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0122 - Harness Runs now remain active through reconciliation and finalize atomically only after Change Set, usage, reflection, and checkpoint facts are durable.
+- [x] RFC 0121 - Production reconciliation now records validated operational reflections from actual telemetry and can create recurring, reviewable Harness improvements.
+- [x] RFC 0120 - Each Harness search is now oriented by its immutable Research State, prior next direction, and bounded same-Project operational observations.
+- [x] RFC 0108 - Projects now provide the complete autonomous research harness: one Vault, typed Research State, bounded recurring Runs, reviewable reconciliation, durable checkpoints, and ordinary generated Documents.
+- [x] RFC 0119 - The Project Research workspace now exposes goal and cycle status, counted/sortable Run-filtered State, keyboard focus restoration, grouped Run Activity, checkpoint controls, and document citation provenance.
+- [x] RFC 0118 - Terminal Research Runs now retain structured Activity, actual usage, monotonic State/Vault/document revisions, complete checkpoints, and append-only same-Project State restoration.
+- [x] RFC 0117 - Completed Harness searches now produce bounded, reviewable Change Sets that can atomically add accepted Papers, exact abstract evidence, and typed Research State entries.
+- [x] RFC 0116 - Research Harnesses now have explicit bounded authority, immutable configuration history, and inspectable effective instructions for every Run.
+- [x] RFC 0115 - Selected entries from an immutable Research State revision can now create provenance-preserving Markdown documents in six transparent output shapes.
+- [x] RFC 0114 - Completed Runs now record bounded operational reflections and can produce typed, researcher-reviewed Harness improvements without self-modifying policy.
+- [x] RFC 0113 - Research Harnesses now support DST-aware local schedules, bounded startup catch-up, lifecycle controls, and durable stop limits.
+- [x] RFC 0112 - Projects now have revisioned typed Research State with validated evidence, separate working context, immutable history, and an interactive inspector.
+- [x] RFC 0111 - Projects now have a persisted Research Harness with versioned settings, immutable manual Runs, cancellation, and append-only Activity.
 - [x] RFC 0110 - Projects now contain durable Markdown documents with an editor and explicit Harness write consent.
 - [x] RFC 0109 - Projects now atomically own one Vault, and existing Vaults migrate without changing identity or Paper membership.
 - [x] RFC 0070 - Vault papers can now be exported as a BibTeX (`.bib`) file for LaTeX.

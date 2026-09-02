@@ -15,11 +15,16 @@ use tauri::{AppHandle, Emitter};
 
 use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::PaperCandidate;
+use crate::domain::harness::HarnessRun;
 use crate::domain::research::{candidate_dedup_key, SearchRunStatus};
 use crate::services::chat::config::ChatConfig;
 use crate::services::embedding::EmbeddingReranker;
 use crate::services::research::agent::{self, Progress, RunInputs};
 use crate::services::research::planner::OpenRouterPlanner;
+use crate::services::research::reconciliation::{
+    plan_reconciliation_with_retry_counted, render_reconciliation_prompt,
+    should_apply_automatically,
+};
 use crate::services::research::source::BrowserCandidateSource;
 use crate::services::source_acquisition::SourceAcquisitionService;
 use crate::storage::library_store::LibraryStore;
@@ -38,6 +43,7 @@ pub struct SearchManager {
     source_acquisition: SourceAcquisitionService,
     queued_or_active: Arc<Mutex<HashSet<String>>>,
     cancellations: Cancellations,
+    timed_out: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +90,7 @@ impl SearchManager {
             source_acquisition,
             queued_or_active: Arc::new(Mutex::new(HashSet::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
+            timed_out: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -100,9 +107,35 @@ impl SearchManager {
         let mode = mode.unwrap_or_else(|| "deep".to_string());
         let run = self.store.create_search_run(&search_id, &mode)?;
         let run_id = run.id.clone();
+        self.enqueue_run(search_id, run_id.clone(), None)?;
+        Ok(run_id)
+    }
 
+    /// Creates and links the Search Run before its background task can execute.
+    pub fn run_harness_search_with_timeout(
+        &self,
+        search_id: String,
+        mode: Option<String>,
+        maximum_seconds: Option<i64>,
+        harness_run_id: &str,
+    ) -> Result<HarnessRun, String> {
+        let mode = mode.unwrap_or_else(|| "project_harness".to_string());
+        let run = self.store.create_search_run(&search_id, &mode)?;
+        let linked = self
+            .store
+            .attach_harness_search_run(harness_run_id, &run.id)?;
+        self.enqueue_run(search_id, run.id, maximum_seconds)?;
+        Ok(linked)
+    }
+
+    fn enqueue_run(
+        &self,
+        search_id: String,
+        run_id: String,
+        maximum_seconds: Option<i64>,
+    ) -> Result<(), String> {
         if !self.mark_queued(&search_id) {
-            return Ok(run_id);
+            return Ok(());
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
@@ -122,12 +155,38 @@ impl SearchManager {
                 .lock()
                 .expect("cancellation lock")
                 .remove(&run_id_for_job);
+            manager
+                .timed_out
+                .lock()
+                .expect("timeout lock")
+                .remove(&run_id_for_job);
             if let Err(error) = result {
                 manager.fail_run(&search_id_for_cleanup, &run_id_for_job, &error);
             }
         });
 
-        Ok(run_id)
+        if let Some(seconds) = maximum_seconds.filter(|seconds| *seconds > 0) {
+            let manager = self.clone();
+            let timed_run_id = run_id;
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(seconds as u64)).await;
+                let token = manager
+                    .cancellations
+                    .lock()
+                    .expect("cancellation lock")
+                    .get(&timed_run_id)
+                    .cloned();
+                if let Some(token) = token {
+                    manager
+                        .timed_out
+                        .lock()
+                        .expect("timeout lock")
+                        .insert(timed_run_id);
+                    token.store(true, Ordering::Relaxed);
+                }
+            });
+        }
+        Ok(())
     }
 
     /// Trip the cancellation token for an in-flight run.
@@ -194,9 +253,22 @@ impl SearchManager {
         let app = self.app.clone();
         let sid = search_id.to_string();
         let rid = run_id.to_string();
+        let progress_store = self.store.clone();
+        let progress_run_id = run_id.to_string();
         let query_expansions = Arc::new(Mutex::new(Vec::<String>::new()));
         let query_expansions_for_progress = query_expansions.clone();
         let on = move |progress: Progress| {
+            let (event_kind, event_summary, event_detail, event_phase, current, total) =
+                activity_event(&progress);
+            let _ = progress_store.record_harness_search_progress(
+                &progress_run_id,
+                event_kind,
+                &event_summary,
+                event_detail,
+                Some(event_phase),
+                current,
+                total,
+            );
             if let Progress::Searching { text, .. } = &progress {
                 let mut expansions = query_expansions_for_progress
                     .lock()
@@ -250,7 +322,12 @@ impl SearchManager {
             .store
             .append_new_candidates(search_id, run_id, &outcome.ranked)?;
         let total = self.store.list_search_candidates(search_id)?.len();
-        let stop = outcome.stop_reason.as_str();
+        let timed_out = self.timed_out.lock().expect("timeout lock").remove(run_id);
+        let stop = if timed_out {
+            "maximum_run_seconds"
+        } else {
+            outcome.stop_reason.as_str()
+        };
         let summary = serde_json::to_string(&RunSummary {
             new: added,
             total,
@@ -258,12 +335,21 @@ impl SearchManager {
             stop_reason: stop.to_string(),
         })
         .map_err(|e| e.to_string())?;
-        let final_status =
-            if outcome.stop_reason == crate::services::research::budget::StopReason::Cancelled {
-                SearchRunStatus::Cancelled
-            } else {
-                SearchRunStatus::Ready
-            };
+        let final_status = if timed_out
+            || outcome.stop_reason == crate::services::research::budget::StopReason::Cancelled
+        {
+            SearchRunStatus::Cancelled
+        } else {
+            SearchRunStatus::Ready
+        };
+
+        self.store.set_search_run_usage(
+            run_id,
+            outcome.usage.provider_queries,
+            outcome.usage.llm_calls,
+            outcome.iterations,
+            outcome.ranked.len() as u32,
+        )?;
 
         self.store.set_search_run_status(
             run_id,
@@ -275,6 +361,22 @@ impl SearchManager {
         )?;
         self.store
             .set_search_status(search_id, final_status, Some(stop), Some(&summary))?;
+
+        if final_status == SearchRunStatus::Ready {
+            let reconciliation_calls = self.reconcile_harness_run(run_id, &planner).await?;
+            self.store
+                .add_search_run_llm_calls(run_id, reconciliation_calls)?;
+            if let Some(harness_run) = self.store.get_harness_run_for_search_run(run_id)? {
+                if let Err(error) = self
+                    .store
+                    .record_automatic_harness_reflection(&harness_run.id)
+                {
+                    self.store
+                        .record_harness_reflection_failure(&harness_run.id, &error)?;
+                }
+                self.store.finalize_harness_run(run_id)?;
+            }
+        }
 
         let _ = self.app.emit(
             "search_updated",
@@ -290,6 +392,45 @@ impl SearchManager {
             },
         );
         Ok(())
+    }
+
+    async fn reconcile_harness_run(
+        &self,
+        search_run_id: &str,
+        planner: &OpenRouterPlanner,
+    ) -> Result<u32, String> {
+        let Some(run) = self.store.get_harness_run_for_search_run(search_run_id)? else {
+            return Ok(0);
+        };
+        let candidates = self.store.harness_reconciliation_candidates(&run.id)?;
+        let telemetry = self.store.harness_reconciliation_telemetry(&run.id)?;
+        let prompt =
+            render_reconciliation_prompt(&run.effective_instructions, &candidates, &telemetry)?;
+        let (planned, call_count) = plan_reconciliation_with_retry_counted(
+            planner,
+            &prompt,
+            &run.effective_instructions,
+            &candidates,
+        )
+        .await;
+        let plan = match planned {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.store.fail_harness_reconciliation(&run.id, &error)?;
+                return Ok(call_count);
+            }
+        };
+        let change_set = match self.store.create_harness_change_set(&run.id, &plan) {
+            Ok(change_set) => change_set,
+            Err(error) => {
+                self.store.fail_harness_reconciliation(&run.id, &error)?;
+                return Ok(call_count);
+            }
+        };
+        if should_apply_automatically(&run.effective_instructions) {
+            let _ = self.store.apply_harness_change_set(&change_set.id);
+        }
+        Ok(call_count)
     }
 
     fn fail_run(&self, search_id: &str, run_id: &str, error: &str) {
@@ -332,6 +473,96 @@ impl SearchManager {
             .lock()
             .expect("search queue lock")
             .remove(search_id);
+    }
+}
+
+/// Maps transient agent signals to bounded persisted Activity facts.
+fn activity_event(
+    progress: &Progress,
+) -> (
+    &'static str,
+    String,
+    Option<serde_json::Value>,
+    &'static str,
+    Option<i64>,
+    Option<i64>,
+) {
+    match progress {
+        Progress::Planning { iteration } => (
+            "iteration_planned",
+            format!("Planning research iteration {}", iteration + 1),
+            Some(serde_json::json!({ "iteration": iteration + 1 })),
+            "planning",
+            Some(i64::from(*iteration + 1)),
+            None,
+        ),
+        Progress::Searching { provider, text } => (
+            "provider_query_started",
+            format!("Searching {provider}"),
+            Some(serde_json::json!({
+                "provider": provider,
+                "query": text.chars().take(500).collect::<String>(),
+            })),
+            "searching",
+            None,
+            None,
+        ),
+        Progress::SearchResult { provider, count } => (
+            "provider_query_completed",
+            format!("{provider} returned {count} candidates"),
+            Some(serde_json::json!({ "provider": provider, "candidateCount": count })),
+            "searching",
+            Some(*count as i64),
+            None,
+        ),
+        Progress::SearchFailed { provider, .. } => (
+            "provider_query_failed",
+            format!("{provider} query failed"),
+            Some(serde_json::json!({ "provider": provider })),
+            "searching",
+            None,
+            None,
+        ),
+        Progress::Deduped { unique } => (
+            "candidates_deduplicated",
+            format!("Retained {unique} unique candidates"),
+            Some(serde_json::json!({ "uniqueCandidates": unique })),
+            "searching",
+            Some(*unique as i64),
+            None,
+        ),
+        Progress::CandidatePreview { candidates } => (
+            "candidates_inspected",
+            format!("Inspected {} candidates", candidates.len()),
+            Some(serde_json::json!({ "candidateCount": candidates.len() })),
+            "searching",
+            Some(candidates.len() as i64),
+            None,
+        ),
+        Progress::Resolving { count } => (
+            "candidate_metadata_resolving",
+            format!("Resolving metadata for {count} candidates"),
+            Some(serde_json::json!({ "candidateCount": count })),
+            "searching",
+            Some(*count as i64),
+            None,
+        ),
+        Progress::Assessing => (
+            "coverage_assessing",
+            "Assessing research coverage".to_string(),
+            None,
+            "assessing",
+            None,
+            None,
+        ),
+        Progress::Ranking { count } => (
+            "candidates_ranking",
+            format!("Ranking {count} candidates"),
+            Some(serde_json::json!({ "candidateCount": count })),
+            "ranking",
+            Some(*count as i64),
+            None,
+        ),
     }
 }
 

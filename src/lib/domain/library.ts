@@ -22,6 +22,7 @@ export type ProjectDocumentSummary = {
   title: string;
   format: "markdown";
   harnessWritable: boolean;
+  contentRevision: number;
   updatedAt: string;
 };
 
@@ -29,6 +30,20 @@ export type ProjectDocument = ProjectDocumentSummary & {
   content: string;
   createdFromRunId: string | null;
   createdFromStateRevision: number | null;
+  generationId: string | null;
+  outputShape: string | null;
+  citations: ProjectDocumentCitation[];
+  createdAt: string;
+};
+
+export type ProjectDocumentCitation = {
+  documentId: string;
+  citationKey: string;
+  paperId: string;
+  evidenceLinkIds: string[];
+  titleSnapshot: string;
+  authorsSnapshot: string[];
+  yearSnapshot: number;
   createdAt: string;
 };
 
@@ -44,6 +59,7 @@ export type Vault = {
   projectId: string;
   title: string;
   path: string;
+  membershipRevision: number;
 };
 
 export type VaultDraft = {

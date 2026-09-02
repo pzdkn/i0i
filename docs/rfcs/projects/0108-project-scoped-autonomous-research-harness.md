@@ -1,6 +1,6 @@
 # RFC 0108: Project-Scoped Autonomous Research Harness
 
-- Status: Approved design; implementation not started
+- Status: Implemented and verified through RFCs 0109–0122
 - Date: 2026-09-01
 - Area: Projects / Research automation
 - Builds on: RFC 0037, RFC 0076, RFC 0077, RFC 0088, RFC 0091, RFC 0097,
@@ -615,9 +615,27 @@ This design should be delivered through focused RFCs in this order:
    operational patterns and propose traceable configuration changes.
 7. **Create from research** — generate ordinary Project documents from a
    selected Research State revision.
+8. **Harness authority and effective instructions** — persist scope, autonomy,
+   write authority, configuration history, and inspectable Run instruction
+   layers.
+9. **Autonomous Run reconciliation and review** — accept/reject candidates,
+   add allowed Papers, materialize inspected evidence, and reconcile Research
+   State through reviewable or automatic change sets.
+10. **Durable Run checkpoints and structured Activity** — retain usage,
+    decisions, State/Vault revisions, next direction, typed events, and
+    same-Project State restoration.
+11. **Research workspace conformance and accessibility** — complete Run review,
+    authority/settings, list provenance, keyboard focus, and final UI evidence.
+12. **State-informed Run orientation** — derive discovery from the immutable
+    starting State, prior next direction, and same-Project observations.
+13. **Production operational reflection** — generate validated reflection from
+    live reconciliation telemetry and feed recurring observations into review.
+14. **Run finalization at the safe boundary** — keep Runs active until
+    reconciliation, usage, reflection, and checkpoint facts are durable.
 
-Approval and completion are RFC-specific. This parent design does not authorize
-implementing every item at once.
+Approval and completion were RFC-specific. RFCs 0109–0122 are implemented and
+their automated acceptance checks pass. Runtime screenshot capture remains an
+environmental follow-up because the current sandbox denies localhost binding.
 
 ## Acceptance Criteria for This Design
 
@@ -643,5 +661,16 @@ implementing every item at once.
 
 Approved on 2026-09-01. The user requested this RFC after settling the core
 domain relationships and previously authorized agent-authored RFCs to be
-approved without a separate approval round. Implementation remains unstarted
-and must proceed through the focused RFCs listed above.
+approved without a separate approval round.
+
+## Implementation audit
+
+RFCs 0109–0115 passed their focused acceptance criteria. A requirement-level
+audit on 2026-09-02 found that the search Run still ended at ranked candidates
+instead of autonomously accepting Papers and reconciling Research State, and
+that authority, checkpoint, structured Activity, and final interaction details
+were incomplete. Those gaps were tracked by RFCs 0116–0119 and the companion
+[implementation audit](../../design/autonomous-research-projects-implementation-audit.md).
+The final audit then found three production-loop gaps—context not driving
+discovery, live reflection not reaching the improvement path, and premature
+Run finalization—which RFCs 0120–0122 implemented and verified.

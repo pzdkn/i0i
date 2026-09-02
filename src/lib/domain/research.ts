@@ -65,6 +65,9 @@ export interface SearchRun {
   iteration: number;
   addedCount: number;
   totalCount: number;
+  providerQueryCount: number;
+  llmCallCount: number;
+  inspectedCandidateCount: number;
   startedAt?: string;
   finishedAt?: string;
   error?: string;
@@ -108,6 +111,253 @@ export interface SearchCandidatesPreview {
   runId: string;
   candidates: ResearchPaper[];
   unique: number;
+}
+
+export interface HarnessConfiguration {
+  goal: string;
+  researchInstructions: string;
+  scope: string;
+  exclusions: string;
+  preferredConcepts: string[];
+  excludedConcepts: string[];
+  sources: string[];
+  depth: Depth;
+  paperBudget: number;
+  autonomy: "manual" | "propose" | "automatic";
+  mayAddPapers: boolean;
+  writableDocumentIds: string[];
+  schedule: HarnessSchedule;
+  stopConditions: HarnessStopConditions;
+}
+
+export interface HarnessSchedule {
+  enabled: boolean;
+  cadence: "daily" | "weekly";
+  localTime: string;
+  weekday?: number;
+  timezone: string;
+}
+
+export interface HarnessStopConditions {
+  maximumCycles?: number;
+  endAt?: string;
+  maximumUnproductiveRuns?: number;
+  maximumRunSeconds?: number;
+  maximumProviderQueries?: number;
+  maximumLlmCalls?: number;
+  stopOnConvergence: boolean;
+}
+
+export interface ResearchHarness {
+  projectId: string;
+  status: string;
+  configuration: HarnessConfiguration;
+  configurationVersion: number;
+  nextRunAt?: string;
+  lastScheduledFor?: string;
+  requestedPostRunStatus: string;
+  completedCycleCount: number;
+  consecutiveUnproductiveRuns: number;
+  terminalStopReason?: string;
+  updatedAt: string;
+}
+
+export interface HarnessRun {
+  id: string;
+  projectId: string;
+  status: string;
+  configurationSnapshot: HarnessConfiguration;
+  configurationVersion: number;
+  policyVersion: string;
+  effectiveInstructions: EffectiveInstructionStack;
+  searchId: string;
+  searchRunId?: string;
+  startingStateRevision: number;
+  resultingStateRevision?: number;
+  startingVaultRevision: number;
+  resultingVaultRevision?: number;
+  providerQueryCount: number;
+  llmCallCount: number;
+  iterationCount: number;
+  inspectedCandidateCount: number;
+  trigger: "manual" | "scheduled" | "startup_catch_up";
+  scheduledFor?: string;
+  stopReason?: string;
+  summary?: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export interface HarnessConfigurationVersion {
+  projectId: string;
+  version: number;
+  configuration: HarnessConfiguration;
+  actor: "researcher" | "improvement" | "migration" | string;
+  sourceImprovementId?: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface RunContextEntry {
+  id: string;
+  kind: string;
+  epistemicStatus: string;
+  text: string;
+  lifecycle: string;
+}
+
+export interface RunContextObservation {
+  kind: string;
+  description: string;
+}
+
+export interface EffectiveRunContext {
+  startingStateRevision: number;
+  activeEntries: RunContextEntry[];
+  vaultId: string;
+  vaultRevision: string;
+  vaultPaperIds: string[];
+  priorNextDirection?: string;
+  priorObservations: RunContextObservation[];
+  maximumProviderQueries: number;
+  maximumLlmCalls: number;
+  paperBudget: number;
+}
+
+export interface EffectiveInstructionStack {
+  productPolicyVersion: string;
+  productPolicySummary: string;
+  projectResearchInstructions: string;
+  structuredSettings: HarnessConfiguration;
+  runContext: EffectiveRunContext;
+}
+
+export interface CandidateDecision {
+  candidateId: string;
+  decision: "accept" | "reject";
+  reason: string;
+  relevanceConfidence: number;
+  withinScope: boolean;
+}
+
+export interface PlannedEvidence {
+  candidateId: string;
+  excerpt: string;
+  supportNote?: string;
+}
+
+export interface PlannedRelation {
+  target: string;
+  kind: "derived_from" | "motivated_by";
+}
+
+export interface PlannedResearchEntry {
+  handle: string;
+  kind: "finding" | "question" | "gap" | "hypothesis" | "experiment_idea";
+  epistemicStatus: "source_supported" | "agent_synthesis" | "speculative";
+  text: string;
+  evidence: PlannedEvidence[];
+  relations: PlannedRelation[];
+}
+
+export interface RunReconciliationPlan {
+  candidateDecisions: CandidateDecision[];
+  entries: PlannedResearchEntry[];
+  nextDirection: string;
+  operationalReflection?: PlannedHarnessReflection;
+}
+
+export interface PlannedHarnessObservation {
+  kind:
+    | "query_quality"
+    | "irrelevant_result_class"
+    | "source_failure"
+    | "terminology"
+    | "coverage_bias"
+    | "relevance_error"
+    | "scope_drift"
+    | "wasted_work";
+  signature: string;
+  severity: number;
+  confidence: number;
+  description: string;
+  target?: "preferred_concepts" | "excluded_concepts" | "metadata_resolvers";
+  proposedValue?:
+    | { kind: "concepts"; items: string[] }
+    | { kind: "metadata_resolvers"; items: string[] };
+  proposalEligible: boolean;
+}
+
+export interface PlannedHarnessReflection {
+  summary: string;
+  nextDirection?: string;
+  observations: PlannedHarnessObservation[];
+}
+
+export interface HarnessChangeSet {
+  id: string;
+  runId: string;
+  projectId: string;
+  startingStateRevision: number;
+  status: "proposed" | "applied" | "rejected" | "superseded" | "failed";
+  plan?: RunReconciliationPlan;
+  consideredCandidates: SearchCandidate[];
+  error?: string;
+  decisionReason?: string;
+  resultingStateRevision?: number;
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface HarnessEvent {
+  id: string;
+  runId: string;
+  sequence: number;
+  kind: string;
+  summary: string;
+  detail?: Record<string, unknown>;
+  phase?: string;
+  progressCurrent?: number;
+  progressTotal?: number;
+  actor: "researcher" | "harness" | "scheduler" | "system" | string;
+  occurredAt: string;
+}
+
+export interface HarnessUsage {
+  providerQueries: number;
+  llmCalls: number;
+  iterations: number;
+  inspectedCandidates: number;
+}
+
+export interface ResearchCheckpoint {
+  runId: string;
+  projectId: string;
+  status: string;
+  startingStateRevision: number;
+  resultingStateRevision?: number;
+  startingVaultRevision: number;
+  resultingVaultRevision?: number;
+  appliedChangeSetId?: string;
+  acceptedCandidateCount: number;
+  rejectedCandidateCount: number;
+  addedPaperIds: string[];
+  affectedDocuments: Array<{ documentId: string; contentRevision: number }>;
+  usage: HarnessUsage;
+  stopReason?: string;
+  complete: boolean;
+  converged: boolean;
+  reflectionId?: string;
+  nextDirection?: string;
+  startedAt: string;
+  finishedAt?: string;
+  restoreAvailable: boolean;
+}
+
+export interface HarnessSnapshot {
+  harness: ResearchHarness;
+  runs: HarnessRun[];
+  events: HarnessEvent[];
 }
 
 // Depth presets — mirror Depth::budget() in research.rs.

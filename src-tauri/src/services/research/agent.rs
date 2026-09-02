@@ -68,6 +68,8 @@ pub struct RunOutcome {
     pub complete: bool,
     /// RFC 0088 R6.4: per-round record, for the evaluation fixtures.
     pub trace: Vec<RoundTrace>,
+    /// Actual bounded-loop consumption, persisted by the manager.
+    pub usage: BudgetUsage,
 }
 
 /// One round, as the evaluation harness sees it (RFC 0088 R6.4).
@@ -174,8 +176,9 @@ where
             // the existing round and provider-query budgets.
             let progress_sink = &on;
             let searches = remaining_queries.drain(..).map(|query| {
-                let mut query_constraints = constraints.clone();
-                query_constraints.providers.clear();
+                // Browser is the discovery transport. Provider choices remain
+                // available to its exact-metadata resolution stage.
+                let query_constraints = constraints.clone();
                 let provider = transport.to_string();
                 emit_progress(
                     progress_sink,
@@ -426,6 +429,7 @@ where
         iterations: usage.iterations,
         complete: stop_reason.is_complete(),
         trace,
+        usage,
     })
 }
 
