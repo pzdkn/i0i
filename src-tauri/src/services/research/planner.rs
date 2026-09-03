@@ -249,7 +249,7 @@ impl OpenRouterPlanner {
         user: &str,
         maximum_tokens: u32,
     ) -> Result<String, ResearchError> {
-        let request = CompletionRequest {
+        let mut request = CompletionRequest {
             model: self.model.clone(),
             messages: vec![
                 WireMessage::text("system", system.to_string()),
@@ -264,9 +264,20 @@ impl OpenRouterPlanner {
             tools: None,
             tool_choice: None,
         };
-        llm::complete(&self.client, &self.url, &self.api_key, &request)
-            .await
-            .map_err(ResearchError::new)
+        match llm::complete_detailed(&self.client, &self.url, &self.api_key, &request).await {
+            Ok(text) => Ok(text),
+            Err(error) if error.is_missing_text() => {
+                if let Some(message) = request.messages.last_mut() {
+                    message.content.push_str(
+                        "\n\nThe previous attempt returned no final text. Reply now with the requested JSON object only.",
+                    );
+                }
+                llm::complete_detailed(&self.client, &self.url, &self.api_key, &request)
+                    .await
+                    .map_err(|retry_error| ResearchError::new(retry_error.to_string()))
+            }
+            Err(error) => Err(ResearchError::new(error.to_string())),
+        }
     }
 
     /// Propose a fixed number of distinct, provider-neutral vault search paths.
@@ -536,7 +547,58 @@ const DETAIL_ABSTRACT_CHARS: usize = 1_000;
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
     use super::*;
+
+    /// Serve a fixed sequence of OpenAI-compatible responses on localhost.
+    fn completion_server(
+        responses: Vec<&str>,
+    ) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind completion server");
+        let address = listener.local_addr().expect("completion server address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_server = requests.clone();
+        let responses = responses
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let handle = thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().expect("accept completion request");
+                let mut request = [0_u8; 16_384];
+                let _ = stream.read(&mut request).expect("read completion request");
+                requests_for_server.fetch_add(1, Ordering::SeqCst);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write completion response");
+            }
+        });
+        (format!("http://{address}"), requests, handle)
+    }
+
+    /// Minimal unconstrained scholarly search used by planner transport tests.
+    fn test_constraints() -> SearchConstraints {
+        SearchConstraints {
+            year_from: None,
+            year_to: None,
+            providers: Vec::new(),
+            open_access: false,
+            target_count: 10,
+            venues: Vec::new(),
+            authors: Vec::new(),
+            fields_of_study: Vec::new(),
+            seed_paper_ids: Vec::new(),
+        }
+    }
 
     #[test]
     fn parses_clean_json_object() {
@@ -562,6 +624,78 @@ mod tests {
     #[test]
     fn malformed_output_errors() {
         assert!(extract_json_object("no json at all").is_err());
+    }
+
+    #[tokio::test]
+    async fn planner_retries_once_when_provider_returns_no_text() {
+        let missing = r#"{
+            "model":"deepseek/deepseek-v4-flash",
+            "choices":[{"finish_reason":"stop","message":{"content":null,"reasoning":"hidden"}}]
+        }"#;
+        let valid = r#"{
+            "model":"deepseek/deepseek-v4-flash",
+            "choices":[{"finish_reason":"stop","message":{"content":"{\"queries\":[{\"provider\":\"arxiv\",\"text\":\"LoRA interpretability\"}]}"}}]
+        }"#;
+        let (url, requests, server) = completion_server(vec![missing, valid]);
+        let planner = OpenRouterPlanner::new(Client::new(), url, "test-key".into(), "model".into());
+
+        let queries = planner
+            .plan_queries("LoRA interpretability", &test_constraints())
+            .await
+            .expect("retry should recover the plan");
+
+        server.join().expect("completion server exits");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].text, "LoRA interpretability");
+    }
+
+    #[tokio::test]
+    async fn planner_stops_after_two_missing_text_responses() {
+        let missing = r#"{
+            "choices":[{"finish_reason":"stop","message":{"content":null}}]
+        }"#;
+        let (url, requests, server) = completion_server(vec![missing, missing]);
+        let planner = OpenRouterPlanner::new(Client::new(), url, "test-key".into(), "model".into());
+
+        let error = planner
+            .plan_queries("LoRA interpretability", &test_constraints())
+            .await
+            .expect_err("a second missing answer must fail");
+
+        server.join().expect("completion server exits");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(error.to_string().contains("no textual answer"));
+    }
+
+    /// Live contract probe for the configured OpenRouter planner.
+    ///
+    /// Run with:
+    /// `cargo test live_planner_returns_queries -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "live network + OPENROUTER_API_KEY"]
+    async fn live_planner_returns_queries() {
+        let config = crate::services::chat::config::ChatConfig::load()
+            .expect("load OpenRouter configuration");
+        let api_key = config
+            .resolve_api_key()
+            .expect("resolve OpenRouter API key");
+        let model = std::env::var("I0I_LIVE_PLANNER_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(config.planner_model);
+        let planner = OpenRouterPlanner::new(Client::new(), config.url, api_key, model.clone());
+
+        let queries = planner
+            .plan_queries("mechanistic interpretability of LoRA", &test_constraints())
+            .await
+            .unwrap_or_else(|error| panic!("planner model {model} failed: {error}"));
+
+        assert!(
+            !queries.is_empty(),
+            "planner model {model} returned no queries"
+        );
+        assert!(queries.iter().all(|query| !query.text.trim().is_empty()));
     }
 
     #[test]

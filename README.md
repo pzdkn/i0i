@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0123 - Research Runs now handle nullable planner responses, retry once, report the failed stage, and have deterministic pipeline and live smoke tests.
 - [x] RFC 0122 - Harness Runs now remain active through reconciliation and finalize atomically only after Change Set, usage, reflection, and checkpoint facts are durable.
 - [x] RFC 0121 - Production reconciliation now records validated operational reflections from actual telemetry and can create recurring, reviewable Harness improvements.
 - [x] RFC 0120 - Each Harness search is now oriented by its immutable Research State, prior next direction, and bounded same-Project operational observations.

@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// One message in the OpenAI-compatible `messages` array.
 ///
@@ -194,12 +195,74 @@ impl ResponseFormat {
 
 #[derive(Debug, Deserialize)]
 struct CompletionResponse {
+    #[serde(default)]
+    model: Option<String>,
     choices: Vec<Choice>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Choice {
-    message: WireMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
+    message: CompletionMessage,
+}
+
+/// Assistant message returned by an OpenAI-compatible completion endpoint.
+///
+/// Response content is nullable even though outbound text messages are not.
+/// Keeping this DTO separate prevents a provider response variant from
+/// weakening the request contract used throughout the application.
+#[derive(Debug, Deserialize)]
+struct CompletionMessage {
+    content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<serde_json::Value>,
+    #[serde(default)]
+    refusal: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+/// Classified failure from a non-streaming completion request.
+#[derive(Debug)]
+pub(crate) enum CompletionError {
+    /// The provider returned a valid envelope but no final text to consume.
+    MissingText {
+        model: String,
+        finish_reason: Option<String>,
+        has_reasoning: bool,
+        has_refusal: bool,
+        has_tool_calls: bool,
+    },
+    /// Transport, HTTP, or malformed-envelope failure that should not be
+    /// treated as an invitation to repeat an expensive request.
+    Other(String),
+}
+
+impl CompletionError {
+    /// Whether one planner retry may recover this response variant.
+    pub(crate) fn is_missing_text(&self) -> bool {
+        matches!(self, Self::MissingText { .. })
+    }
+}
+
+impl fmt::Display for CompletionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingText {
+                model,
+                finish_reason,
+                has_reasoning,
+                has_refusal,
+                has_tool_calls,
+            } => write!(
+                formatter,
+                "OpenRouter model {model} returned no textual answer (finish_reason={}, reasoning={has_reasoning}, refusal={has_refusal}, tool_calls={has_tool_calls}).",
+                finish_reason.as_deref().unwrap_or("unknown"),
+            ),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
 }
 
 /// POST a non-streaming completion and return the assistant's text.
@@ -209,6 +272,18 @@ pub(crate) async fn complete(
     api_key: &str,
     request: &CompletionRequest,
 ) -> Result<String, String> {
+    complete_detailed(client, url, api_key, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// POST a non-streaming completion while preserving retry classification.
+pub(crate) async fn complete_detailed(
+    client: &Client,
+    url: &str,
+    api_key: &str,
+    request: &CompletionRequest,
+) -> Result<String, CompletionError> {
     let response = client
         .post(url)
         .header("Authorization", format!("Bearer {api_key}"))
@@ -216,31 +291,46 @@ pub(crate) async fn complete(
         .json(request)
         .send()
         .await
-        .map_err(|error| format!("OpenRouter request failed: {error}"))?;
+        .map_err(|error| CompletionError::Other(format!("OpenRouter request failed: {error}")))?;
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(describe_error_status(status, &body));
+        return Err(CompletionError::Other(describe_error_status(status, &body)));
     }
 
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("Failed to read OpenRouter response: {error}"))?;
-    parse_completion(&body)
+    let body = response.text().await.map_err(|error| {
+        CompletionError::Other(format!("Failed to read OpenRouter response: {error}"))
+    })?;
+    parse_completion(&body, &request.model)
 }
 
 /// Pull the first choice's assistant text out of a completion response body.
-fn parse_completion(body: &str) -> Result<String, String> {
+fn parse_completion(body: &str, requested_model: &str) -> Result<String, CompletionError> {
     let response: CompletionResponse = serde_json::from_str(body)
-        .map_err(|error| format!("Invalid OpenRouter response: {error}"))?;
-    response
+        .map_err(|error| CompletionError::Other(format!("Invalid OpenRouter response: {error}")))?;
+    let response_model = response.model.as_deref().unwrap_or(requested_model);
+    let choice = response
         .choices
         .into_iter()
         .next()
-        .map(|choice| choice.message.content)
-        .ok_or_else(|| "OpenRouter returned no choices.".to_string())
+        .ok_or_else(|| CompletionError::Other("OpenRouter returned no choices.".to_string()))?;
+    let content = choice.message.content.unwrap_or_default();
+    if !content.trim().is_empty() {
+        return Ok(content);
+    }
+
+    Err(CompletionError::MissingText {
+        model: response_model.to_string(),
+        finish_reason: choice.finish_reason,
+        has_reasoning: choice.message.reasoning.is_some(),
+        has_refusal: choice.message.refusal.is_some(),
+        has_tool_calls: choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty()),
+    })
 }
 
 /// Map an HTTP error status (and body) into a user-facing message.
@@ -609,18 +699,67 @@ mod tests {
                 { "message": { "role": "assistant", "content": "Hello from the model." } }
             ]
         }"#;
-        assert_eq!(parse_completion(body).unwrap(), "Hello from the model.");
+        assert_eq!(
+            parse_completion(body, "requested/model").unwrap(),
+            "Hello from the model."
+        );
+    }
+
+    #[test]
+    fn nullable_content_is_a_classified_missing_text_error() {
+        let body = r#"{
+            "model": "deepseek/deepseek-v4-flash",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "private reasoning"
+                }
+            }]
+        }"#;
+
+        let error = parse_completion(body, "requested/model")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("deepseek/deepseek-v4-flash"));
+        assert!(error.contains("no textual answer"));
+        assert!(error.contains("finish_reason=stop"));
+        assert!(error.contains("reasoning=true"));
+        assert!(!error.contains("private reasoning"));
+    }
+
+    #[test]
+    fn nullable_refusal_is_reported_without_exposing_its_body() {
+        let body = r#"{
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "content": null,
+                    "refusal": "provider refusal details"
+                }
+            }]
+        }"#;
+
+        let error = parse_completion(body, "requested/model")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("requested/model"));
+        assert!(error.contains("refusal=true"));
+        assert!(!error.contains("provider refusal details"));
     }
 
     #[test]
     fn empty_choices_is_an_error() {
         let body = r#"{ "id": "gen-1", "choices": [] }"#;
-        assert!(parse_completion(body).is_err());
+        assert!(parse_completion(body, "requested/model").is_err());
     }
 
     #[test]
     fn malformed_response_is_an_error_not_a_panic() {
-        assert!(parse_completion("not json").is_err());
+        assert!(parse_completion("not json", "requested/model").is_err());
     }
 
     #[test]
