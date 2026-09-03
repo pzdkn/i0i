@@ -1,6 +1,11 @@
 # Bugs
-- The highlight consists of multiple bounding boxes. Can we do it a bit fluid, elegant ?
-- The Chat Model is a bit too dump. It should be able to connect with the Deep Research / Web Search function.
-- The Search APIs from the providers are dumbMark. We should use obscura by default and only use the Search API to query exact paper titles.
-- I dont know if its the base model or not, but the chat model does not help you underststand beyond what is written in the paper. It should be able to make some extrapolation and inferences, some hypothesis making, and synergy with other fields/areas of knowledege
-- The markdown math formatting is not super reliable. Math should always be well-formated
+- Research Activity should hide most, except most recent, and expand only when requested.
+- You can repeatedly call stop even if the research didnt start. This action is logged to the history/activity
+- Reseach Goal and research instruction feel somewhat redundant
+- Scope and Exclusion too. 
+- Why not a single Research Instruction ?
+- I think you should always be able to add papers to the vault
+- We should be able to delete configuraion history
+- Per Run limits should not be text fields but integer fields
+- "Product research policy" why is it there ?
+- Why details blended out ?
