@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod harness_improvement;
 pub mod highlight;
 pub mod library;
+pub mod mcp;
 pub mod reader;
 pub mod research;
 pub mod research_document;

@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0128 - i0i now owns an authenticated loopback MCP endpoint with project-scoped Vault and paper listing.
 - [x] RFC 0126 - An explicit research-loop evaluation now records deterministic and LLM-judge results, reporting unavailable production capabilities as blocked.
 - [x] RFC 0124 - Project Research now uses one instruction, one bounded paper count, automatic validated enrichment, and progressively disclosed Run Activity.
 - [x] RFC 0123 - Research Runs now handle nullable planner responses, retry once, report the failed stage, and have deterministic pipeline and live smoke tests.

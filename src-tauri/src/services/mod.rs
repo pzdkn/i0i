@@ -4,6 +4,7 @@ pub mod codex_runtime;
 pub mod embedding;
 pub mod highlight;
 pub mod llm;
+pub mod mcp;
 pub mod metadata_enrichment;
 pub mod query_expansion;
 pub mod reader_service;

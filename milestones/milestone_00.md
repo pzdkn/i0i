@@ -397,9 +397,9 @@ first research loop works.
 
 | Order / ID | Focused RFC | Scope and completion evidence | Status |
 | --- | --- | --- | --- |
-| 1 / M00-01 | [0126: On-Demand Research Loop Evaluation](../docs/rfcs/milestone_00/0126-on-demand-research-loop-evaluation.md) | Fixed scenarios, real agent/MCP boundary, assertions, separate LLM judge, retained reports. Execute again after all features. | Open |
-| 2 / M00-02 | [0127: Managed Codex Runtime](../docs/rfcs/milestone_00/0127-managed-codex-runtime.md) | Verify installed runtime, authentication, scoped MCP, streamed events, and interruption. | Open |
-| 3 / M00-03 | [0128: Local MCP Server and Vault Listing](../docs/rfcs/milestone_00/0128-local-mcp-server.md) | Own the endpoint, caller scope, contracts, and real Vault/paper listing. | Open |
+| 1 / M00-01 | [0126: On-Demand Research Loop Evaluation](../docs/rfcs/milestone_00/0126-on-demand-research-loop-evaluation.md) | Fixed scenarios, real agent/MCP boundary, assertions, separate LLM judge, retained reports. Execute again after all features. | Implemented; final suite pending |
+| 2 / M00-02 | [0127: Managed Codex Runtime](../docs/rfcs/milestone_00/0127-managed-codex-runtime.md) | Verify installed runtime, authentication, scoped MCP, streamed events, and interruption. | Implemented; controller smoke pending |
+| 3 / M00-03 | [0128: Local MCP Server and Vault Listing](../docs/rfcs/milestone_00/0128-local-mcp-server.md) | Own the endpoint, caller scope, contracts, and real Vault/paper listing. | Complete |
 | 4 / M00-04a | [0129: Reader Evidence Access](../docs/rfcs/milestone_00/0129-reader-evidence-access.md) | Metadata, pending acquisition, exact paginated passages, and stable references. | Open |
 | 5 / M00-04b | [0130: Agent Reader Notes](../docs/rfcs/milestone_00/0130-agent-reader-notes.md) | Persist anchored notes with authorship, retry deduplication, and Reader navigation. | Open |
 | 6 / M00-05a | [0131: Research State Read Contract](../docs/rfcs/milestone_00/0131-research-state-read-contract.md) | Minimal projection with lossless legacy provenance and consistent revision reads. | Open |

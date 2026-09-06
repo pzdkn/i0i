@@ -11,6 +11,7 @@ mod storage;
 use pdf_extraction::{PdfExtractionConfig, PdfExtractionManager};
 use pdf_ingestion::{PdfDownloadManager, PdfIngestionConfig};
 use services::chat::ChatService;
+use services::mcp::LocalMcpServer;
 use services::metadata_enrichment::MetadataEnrichmentService;
 use services::reader_service::ReaderService;
 use services::research::manager::SearchManager;
@@ -34,6 +35,8 @@ pub fn run() {
 
             let store = LibraryStore::new(&app.handle()).map_err(std::io::Error::other)?;
             store.init().map_err(std::io::Error::other)?;
+            let mcp_server = tauri::async_runtime::block_on(LocalMcpServer::start(store.clone()))
+                .map_err(std::io::Error::other)?;
             let highlight_service = services::highlight::HighlightService::new(store.clone());
             let extraction_config = PdfExtractionConfig::load(&app.handle());
             let pdf_extractions = PdfExtractionManager::new(
@@ -210,6 +213,7 @@ pub fn run() {
             let query_expander = services::query_expansion::QueryExpander::from_app_config();
             eprintln!("[query_expansion] ready={}", query_expander.is_ready());
             app.manage(store);
+            app.manage(mcp_server);
             app.manage(highlight_service);
             app.manage(pdf_downloads);
             app.manage(pdf_extractions);
@@ -271,6 +275,8 @@ pub fn run() {
             commands::library::remove_paper_from_vault,
             commands::library::delete_paper_globally,
             commands::library::export_vault_bibtex,
+            commands::mcp::create_external_mcp_grant,
+            commands::mcp::revoke_external_mcp_grant,
             commands::reader::get_reader_document,
             commands::reader::get_discovery_reader_document,
             commands::reader::cancel_discovery_pdf_acquisition,

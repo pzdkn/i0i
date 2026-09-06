@@ -87,9 +87,18 @@ impl CodexRuntime {
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| runtime_start_error(&config.executable, error))?;
-        let stdin = child.stdin.take().ok_or("Codex app-server stdin unavailable")?;
-        let stdout = child.stdout.take().ok_or("Codex app-server stdout unavailable")?;
-        let stderr = child.stderr.take().ok_or("Codex app-server stderr unavailable")?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("Codex app-server stdin unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("Codex app-server stdout unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("Codex app-server stderr unavailable")?;
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let (events, _) = broadcast::channel(256);
 
@@ -175,11 +184,19 @@ impl CodexRuntime {
     /// Stop the managed child and wait for it to exit.
     pub async fn shutdown(&self) -> Result<(), String> {
         let mut child = self.inner.child.lock().await;
-        if child.try_wait().map_err(|error| error.to_string())?.is_some() {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
             return Ok(());
         }
         child.kill().await.map_err(|error| error.to_string())?;
-        child.wait().await.map(|_| ()).map_err(|error| error.to_string())
+        child
+            .wait()
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     async fn initialize(&self) -> Result<(), String> {
@@ -202,7 +219,10 @@ impl CodexRuntime {
         let id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.inner.pending.lock().await.insert(id, sender);
-        if let Err(error) = self.write_message(json!({"id": id, "method": method, "params": params})).await {
+        if let Err(error) = self
+            .write_message(json!({"id": id, "method": method, "params": params}))
+            .await
+        {
             self.inner.pending.lock().await.remove(&id);
             return Err(error);
         }
@@ -212,14 +232,18 @@ impl CodexRuntime {
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
-        self.write_message(json!({"method": method, "params": params})).await
+        self.write_message(json!({"method": method, "params": params}))
+            .await
     }
 
     async fn write_message(&self, message: Value) -> Result<(), String> {
         let mut stdin = self.inner.stdin.lock().await;
         let mut encoded = serde_json::to_vec(&message).map_err(|error| error.to_string())?;
         encoded.push(b'\n');
-        stdin.write_all(&encoded).await.map_err(|error| error.to_string())?;
+        stdin
+            .write_all(&encoded)
+            .await
+            .map_err(|error| error.to_string())?;
         stdin.flush().await.map_err(|error| error.to_string())
     }
 }
@@ -260,7 +284,10 @@ fn spawn_diagnostic_reader(stderr: tokio::process::ChildStderr) {
 }
 
 enum ProtocolMessage {
-    Response { id: u64, result: Result<Value, String> },
+    Response {
+        id: u64,
+        result: Result<Value, String>,
+    },
     Event(CodexEvent),
 }
 
@@ -324,7 +351,10 @@ mod tests {
             panic!("expected response");
         };
         assert_eq!(id, 7);
-        assert_eq!(string_at(&result.unwrap(), &["thread", "id"], "thread"), Ok("t1".into()));
+        assert_eq!(
+            string_at(&result.unwrap(), &["thread", "id"], "thread"),
+            Ok("t1".into())
+        );
     }
 
     #[test]
@@ -341,10 +371,9 @@ mod tests {
 
     #[test]
     fn parses_notification() {
-        let message = parse_protocol_line(
-            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#,
-        )
-        .expect("parse event");
+        let message =
+            parse_protocol_line(r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#)
+                .expect("parse event");
         let ProtocolMessage::Event(event) = message else {
             panic!("expected event");
         };
