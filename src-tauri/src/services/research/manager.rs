@@ -125,6 +125,11 @@ impl SearchManager {
         Ok(run_id)
     }
 
+    /// Enqueue a Search Run that was created atomically by another capability.
+    pub fn enqueue_existing_run(&self, search_id: String, run_id: String) -> Result<(), String> {
+        self.enqueue_run(search_id, run_id, None)
+    }
+
     /// Creates and links the Search Run before its background task can execute.
     pub fn run_harness_search_with_timeout(
         &self,
@@ -204,7 +209,7 @@ impl SearchManager {
     }
 
     /// Trip the cancellation token for an in-flight run.
-    pub fn cancel_run(&self, run_id: &str) {
+    pub fn cancel_run(&self, run_id: &str) -> bool {
         if let Some(flag) = self
             .cancellations
             .lock()
@@ -212,6 +217,9 @@ impl SearchManager {
             .get(run_id)
         {
             flag.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
         }
     }
 
@@ -227,7 +235,10 @@ impl SearchManager {
         // falls back to the chat model (RFC 0055).
         let chat = ChatConfig::load()?;
         let api_key = chat.resolve_api_key()?;
-        let planner_model = crate::services::settings::preference("model.planner")
+        let planner_model = self
+            .store
+            .agent_search_model_id(run_id)?
+            .or_else(|| crate::services::settings::preference("model.planner"))
             .unwrap_or_else(|| chat.model.clone());
         let planner =
             OpenRouterPlanner::new(Client::new(), chat.url.clone(), api_key, planner_model);
@@ -296,9 +307,20 @@ impl SearchManager {
         let current_phase_for_progress = current_phase.clone();
         let query_expansions = Arc::new(Mutex::new(Vec::<String>::new()));
         let query_expansions_for_progress = query_expansions.clone();
+        let progress_constraints = search.constraints.clone();
         let on = move |progress: Progress| {
             let (event_kind, event_summary, event_detail, event_phase, current, total) =
                 activity_event(&progress);
+            let activity_error = match &progress {
+                Progress::SearchFailed { error, .. } => Some(error.as_str()),
+                _ => None,
+            };
+            let _ = progress_store.append_agent_search_activity(
+                &progress_run_id,
+                event_kind,
+                &event_summary,
+                activity_error,
+            );
             *current_phase_for_progress
                 .lock()
                 .expect("research phase lock") = event_phase.to_string();
@@ -321,7 +343,28 @@ impl SearchManager {
             }
 
             if let Progress::CandidatePreview { candidates } = progress {
+                let candidate_count = candidates.len();
+                let candidates = crate::services::research::filter::apply_resolved_constraints(
+                    candidates,
+                    &progress_constraints,
+                );
+                let excluded = candidate_count.saturating_sub(candidates.len());
+                if excluded > 0 {
+                    let _ = progress_store.append_agent_search_activity(
+                        &progress_run_id,
+                        "candidates_filtered",
+                        &format!(
+                            "Excluded {excluded} candidates that did not satisfy required metadata filters"
+                        ),
+                        None,
+                    );
+                }
                 let unique = candidates.len() as u32;
+                let _ = progress_store.append_agent_search_candidates(
+                    &progress_run_id,
+                    "preview",
+                    &candidates,
+                );
                 if let Some(app) = &app {
                     let _ = app.emit(
                         "search_candidates_preview",
@@ -370,6 +413,13 @@ impl SearchManager {
         let added = self
             .store
             .append_new_candidates(search_id, run_id, &outcome.ranked)?;
+        let ranked_candidates = outcome
+            .ranked
+            .iter()
+            .map(|ranked| ranked.candidate.clone())
+            .collect::<Vec<_>>();
+        self.store
+            .append_agent_search_candidates(run_id, "ranked", &ranked_candidates)?;
         let total = self.store.list_search_candidates(search_id)?.len();
         let timed_out = self.timed_out.lock().expect("timeout lock").remove(run_id);
         let stop = if timed_out {
@@ -497,6 +547,12 @@ impl SearchManager {
         let _ = self
             .store
             .set_search_status(search_id, SearchRunStatus::Failed, None, None);
+        let _ = self.store.append_agent_search_activity(
+            run_id,
+            "run_failed",
+            "Search Run failed",
+            Some(error),
+        );
         if let Some(app) = &self.app {
             let _ = app.emit(
                 "search_updated",

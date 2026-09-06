@@ -149,6 +149,7 @@ pub fn run() {
                 embedding_reranker.clone(),
                 source_acquisition.clone(),
             );
+            mcp_server.attach_search_manager(search_manager.clone());
             search_manager
                 .recover_and_queue_startup_runs()
                 .map_err(std::io::Error::other)?;

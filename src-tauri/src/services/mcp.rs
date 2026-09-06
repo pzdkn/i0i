@@ -7,7 +7,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
@@ -30,13 +30,15 @@ use uuid::Uuid;
 use crate::domain::chat::{ChatEntry, ThreadAnchor, ENTRY_NOTE};
 use crate::domain::highlight::HighlightAuthor;
 use crate::domain::library::{DocumentChunk, DocumentSource, LibrarySnapshot, Paper, Vault};
+use crate::domain::research::{Depth, SearchConstraints, SearchDraft, SearchRunStatus};
 use crate::domain::research_state::{
     EntryLifecycle, EntryRelationDraft, EntryRelationKind, EpistemicStatus, EvidenceLinkDraft,
     ResearchEntryDraft, ResearchEntryKind, ResearchEntryUpdate,
 };
 use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
-use crate::storage::library_store::{AgentStateChange, LibraryStore};
+use crate::services::research::manager::SearchManager;
+use crate::storage::library_store::{AgentSearchCandidateEvent, AgentStateChange, LibraryStore};
 use tauri::{AppHandle, Emitter};
 
 const DEFAULT_PAGE_SIZE: usize = 25;
@@ -44,6 +46,8 @@ const MAX_PAGE_SIZE: usize = 100;
 const DEFAULT_CURSOR_TTL: Duration = Duration::from_secs(10 * 60);
 const READER_TEXT_BUDGET: usize = 12_000;
 const MAX_PASSAGE_CHARS: usize = 4_000;
+const DEFAULT_AGENT_SEARCH_LIMIT: i32 = 10;
+const MAX_AGENT_SEARCH_CONCURRENCY: i64 = 2;
 
 pub const VAULT_LIST: &str = "vault_list";
 pub const VAULT_LIST_PAPERS: &str = "vault_list_papers";
@@ -53,6 +57,9 @@ pub const READER_ADD_NOTE: &str = "reader_add_note";
 pub const READER_LIST_NOTES: &str = "reader_list_notes";
 pub const STATE_READ: &str = "state_read";
 pub const STATE_UPDATE: &str = "state_update";
+pub const SEARCH_START: &str = "search_start";
+pub const SEARCH_GET: &str = "search_get";
+pub const SEARCH_CANCEL: &str = "search_cancel";
 
 /// Caller identity and scope established by an opaque local credential.
 #[derive(Debug, Clone)]
@@ -175,6 +182,15 @@ struct StateCursorSnapshot {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct SearchCursorSnapshot {
+    grant_token: String,
+    run_id: String,
+    high_water: i64,
+    after_sequence: i64,
+    expires_at: Instant,
+}
+
 #[derive(Clone)]
 struct I0iMcpHandler {
     app: Option<AppHandle>,
@@ -186,6 +202,8 @@ struct I0iMcpHandler {
     passage_anchors: Arc<RwLock<HashMap<String, RegisteredPassage>>>,
     note_cursors: Arc<Mutex<HashMap<String, NoteCursorSnapshot>>>,
     state_cursors: Arc<Mutex<HashMap<String, StateCursorSnapshot>>>,
+    search_cursors: Arc<Mutex<HashMap<String, SearchCursorSnapshot>>>,
+    search_manager: Arc<StdRwLock<Option<SearchManager>>>,
     cursor_ttl: Duration,
 }
 
@@ -207,6 +225,8 @@ impl I0iMcpHandler {
             passage_anchors: Arc::new(RwLock::new(HashMap::new())),
             note_cursors: Arc::new(Mutex::new(HashMap::new())),
             state_cursors: Arc::new(Mutex::new(HashMap::new())),
+            search_cursors: Arc::new(Mutex::new(HashMap::new())),
+            search_manager: Arc::new(StdRwLock::new(None)),
             cursor_ttl,
         }
     }
@@ -862,6 +882,273 @@ impl I0iMcpHandler {
         }))
     }
 
+    /// Start one bounded child Search and return before its background work.
+    #[tool(description = "Start a bounded i0i literature search")]
+    async fn search_start(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<SearchStartInput>,
+    ) -> Result<Json<SearchStartResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, _) = Self::context(&context, SEARCH_START)?;
+        let instructions = input.instructions.trim();
+        let request_id = input.request_id.trim();
+        if instructions.is_empty() || instructions.chars().count() > 8_000 {
+            return Err(invalid_input(
+                "instructions must contain between 1 and 8000 characters",
+            ));
+        }
+        if request_id.is_empty() {
+            return Err(invalid_input("request_id must not be empty"));
+        }
+        let limit = input.result_limit.unwrap_or(DEFAULT_AGENT_SEARCH_LIMIT);
+        if !(1..=100).contains(&limit) {
+            return Err(invalid_input("result_limit must be between 1 and 100"));
+        }
+        if input
+            .year_from
+            .zip(input.year_to)
+            .is_some_and(|(from, to)| from > to)
+        {
+            return Err(invalid_input("year_from must not exceed year_to"));
+        }
+        let model_id = input
+            .model_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if input.model_id.is_some() && model_id.is_none() {
+            return Err(invalid_input("model_id must not be empty"));
+        }
+        let snapshot = self.snapshot()?;
+        let scoped_papers = snapshot
+            .vault_papers
+            .iter()
+            .filter(|membership| membership.vault_id == grant.vault_id)
+            .map(|membership| membership.paper_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if input
+            .seed_paper_ids
+            .iter()
+            .any(|paper_id| !scoped_papers.contains(paper_id.as_str()))
+        {
+            return Err(out_of_scope());
+        }
+        if !input.state_entry_ids.is_empty() {
+            let state = self
+                .store
+                .get_research_state(&grant.project_id, None)
+                .map_err(internal_failure)?;
+            let entry_ids = state
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<BTreeSet<_>>();
+            if input
+                .state_entry_ids
+                .iter()
+                .any(|entry_id| !entry_ids.contains(entry_id.as_str()))
+            {
+                return Err(out_of_scope());
+            }
+        }
+        let manager = self
+            .search_manager
+            .read()
+            .expect("MCP SearchManager lock")
+            .clone()
+            .ok_or_else(|| service_unavailable("Search service is not ready"))?;
+        let depth = if limit <= 25 {
+            Depth::Quick
+        } else {
+            Depth::Standard
+        };
+        let draft = SearchDraft {
+            title: search_title(instructions),
+            goal: render_agent_search_goal(instructions, &input.state_entry_ids),
+            constraints: SearchConstraints {
+                year_from: input.year_from,
+                year_to: input.year_to,
+                providers: Vec::new(),
+                open_access: false,
+                target_count: limit,
+                venues: input
+                    .venue
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| vec![value.to_string()])
+                    .unwrap_or_default(),
+                authors: Vec::new(),
+                fields_of_study: Vec::new(),
+                seed_paper_ids: input.seed_paper_ids.clone(),
+            },
+            strategy: depth.budget(),
+            schedule: None,
+        };
+        let payload_hash = sha256(
+            &serde_json::to_string(&input).map_err(|error| internal_failure(error.to_string()))?,
+        );
+        let receipt = self
+            .store
+            .create_agent_search_run(
+                &grant.project_id,
+                &grant.vault_id,
+                &grant.caller,
+                grant.run_id.as_deref(),
+                request_id,
+                &payload_hash,
+                model_id,
+                &draft,
+                MAX_AGENT_SEARCH_CONCURRENCY,
+            )
+            .map_err(search_write_failure)?;
+        let (run, _) = self
+            .store
+            .get_agent_search_run(&grant.project_id, &receipt.run_id)
+            .map_err(search_write_failure)?;
+        if run.status == SearchRunStatus::Queued.as_str() {
+            manager
+                .enqueue_existing_run(receipt.search_id.clone(), receipt.run_id.clone())
+                .map_err(internal_failure)?;
+        }
+        trace_tool(&grant, SEARCH_START, started, &run.status, 0);
+        Ok(Json(SearchStartResult {
+            search_id: receipt.search_id,
+            run_id: receipt.run_id,
+            status: run.status,
+        }))
+    }
+
+    /// Poll one scoped Search Run and a stable page of candidate events.
+    #[tool(description = "Read progress and incremental candidates from an i0i search")]
+    async fn search_get(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<SearchGetInput>,
+    ) -> Result<Json<SearchGetResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, SEARCH_GET)?;
+        let limit = validated_limit(input.limit)?;
+        let (run, cancel_requested) = self
+            .store
+            .get_agent_search_run(&grant.project_id, &input.run_id)
+            .map_err(|_| out_of_scope())?;
+        let mut cursor = if let Some(cursor_id) = input.cursor.as_deref() {
+            let cursor = self
+                .search_cursors
+                .lock()
+                .await
+                .remove(cursor_id)
+                .ok_or_else(cursor_expired)?;
+            if cursor.expires_at <= Instant::now()
+                || cursor.grant_token != grant_token
+                || cursor.run_id != input.run_id
+            {
+                return Err(cursor_expired());
+            }
+            cursor
+        } else {
+            SearchCursorSnapshot {
+                grant_token: grant_token.clone(),
+                run_id: input.run_id.clone(),
+                high_water: 0,
+                after_sequence: 0,
+                expires_at: Instant::now() + self.cursor_ttl,
+            }
+        };
+        if cursor.high_water == 0 {
+            cursor.high_water = self
+                .store
+                .agent_search_candidate_high_water(&input.run_id)
+                .map_err(internal_failure)?;
+        }
+        let events = self
+            .store
+            .list_agent_search_candidate_events(
+                &input.run_id,
+                cursor.after_sequence,
+                cursor.high_water,
+                limit,
+            )
+            .map_err(internal_failure)?;
+        if let Some(last) = events.last() {
+            cursor.after_sequence = last.sequence;
+        }
+        let terminal = is_terminal_search_status(&run.status);
+        let has_more = cursor.after_sequence < cursor.high_water;
+        let next_cursor = if has_more || !terminal {
+            if !has_more {
+                cursor.high_water = 0;
+            }
+            cursor.expires_at = Instant::now() + self.cursor_ttl;
+            let cursor_id = Uuid::new_v4().simple().to_string();
+            self.search_cursors
+                .lock()
+                .await
+                .insert(cursor_id.clone(), cursor);
+            Some(cursor_id)
+        } else {
+            None
+        };
+        let activity = self
+            .store
+            .list_agent_search_activity(&input.run_id, 20)
+            .map_err(internal_failure)?;
+        let errors = activity
+            .iter()
+            .filter_map(|item| item.error.clone())
+            .collect::<Vec<_>>();
+        trace_tool(&grant, SEARCH_GET, started, &run.status, events.len());
+        Ok(Json(SearchGetResult {
+            status: run.status,
+            stop_reason: run.stop_reason,
+            candidates: events
+                .into_iter()
+                .map(McpSearchCandidateEvent::from)
+                .collect(),
+            next_cursor,
+            activity: activity.into_iter().map(McpSearchActivity::from).collect(),
+            errors,
+            usage: SearchUsage {
+                provider_queries: run.provider_query_count,
+                llm_calls: run.llm_call_count,
+                inspected_candidates: run.inspected_candidate_count,
+            },
+            cancel_requested,
+        }))
+    }
+
+    /// Request cancellation once for one scoped child Search.
+    #[tool(description = "Cancel a bounded i0i literature search")]
+    async fn search_cancel(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<SearchCancelInput>,
+    ) -> Result<Json<SearchCancelResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, _) = Self::context(&context, SEARCH_CANCEL)?;
+        let (run, changed) = self
+            .store
+            .request_agent_search_cancel(&grant.project_id, &input.run_id)
+            .map_err(|_| out_of_scope())?;
+        if changed {
+            if let Some(manager) = self
+                .search_manager
+                .read()
+                .expect("MCP SearchManager lock")
+                .as_ref()
+            {
+                manager.cancel_run(&input.run_id);
+            }
+        }
+        trace_tool(&grant, SEARCH_CANCEL, started, &run.status, 0);
+        Ok(Json(SearchCancelResult {
+            status: run.status,
+            cancellation_requested: changed,
+        }))
+    }
+
     async fn prepare_state_change(
         &self,
         grant: &McpCallContext,
@@ -1475,6 +1762,15 @@ impl LocalMcpServer {
         })
     }
 
+    /// Attach the app's existing SearchManager after startup construction.
+    pub fn attach_search_manager(&self, manager: SearchManager) {
+        *self
+            .handler
+            .search_manager
+            .write()
+            .expect("MCP SearchManager lock") = Some(manager);
+    }
+
     /// Revoke one credential without revealing whether it ever existed.
     pub async fn revoke_grant(&self, token: &str) {
         self.grants.revoke(token).await;
@@ -1588,6 +1884,24 @@ fn state_write_failure(error: String) -> rmcp::ErrorData {
     rmcp::ErrorData::invalid_request(error, Some(serde_json::json!({"code": code})))
 }
 
+fn search_write_failure(error: String) -> rmcp::ErrorData {
+    let code = if error.contains("Request ID") {
+        "request_conflict"
+    } else if error.contains("concurrency limit") {
+        "limit_reached"
+    } else {
+        "invalid_input"
+    };
+    rmcp::ErrorData::invalid_request(error, Some(serde_json::json!({"code": code})))
+}
+
+fn service_unavailable(message: &str) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(
+        message.to_string(),
+        Some(serde_json::json!({"code": "unavailable"})),
+    )
+}
+
 /// Confirm that an in-memory passage still names the currently persisted source.
 fn validate_passage_anchor(
     snapshot: &LibrarySnapshot,
@@ -1676,6 +1990,31 @@ fn validate_state_reason(value: String) -> Result<String, rmcp::ErrorData> {
     } else {
         Ok(reason.to_string())
     }
+}
+
+fn search_title(instructions: &str) -> String {
+    instructions
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Agent search")
+        .trim()
+        .chars()
+        .take(80)
+        .collect()
+}
+
+fn render_agent_search_goal(instructions: &str, state_entry_ids: &[String]) -> String {
+    if state_entry_ids.is_empty() {
+        return instructions.to_string();
+    }
+    format!(
+        "{instructions}\n\nMotivating Research State entries: {}",
+        state_entry_ids.join(", ")
+    )
+}
+
+fn is_terminal_search_status(status: &str) -> bool {
+    matches!(status, "ready" | "failed" | "cancelled")
 }
 
 fn trace_tool(
@@ -1869,6 +2208,40 @@ struct StateUpdateInput {
     base_revision: i64,
     request_id: String,
     changes: Vec<StateChangeInput>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct SearchStartInput {
+    instructions: String,
+    #[serde(default)]
+    result_limit: Option<i32>,
+    #[serde(default)]
+    year_from: Option<i32>,
+    #[serde(default)]
+    year_to: Option<i32>,
+    #[serde(default)]
+    venue: Option<String>,
+    #[serde(default)]
+    seed_paper_ids: Vec<String>,
+    #[serde(default)]
+    state_entry_ids: Vec<String>,
+    #[serde(default)]
+    model_id: Option<String>,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct SearchGetInput {
+    run_id: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct SearchCancelInput {
+    run_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -2134,6 +2507,121 @@ struct StateUpdateResult {
     created_entry_ids: HashMap<String, String>,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SearchStartResult {
+    search_id: String,
+    run_id: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SearchGetResult {
+    status: String,
+    stop_reason: Option<String>,
+    candidates: Vec<McpSearchCandidateEvent>,
+    next_cursor: Option<String>,
+    activity: Vec<McpSearchActivity>,
+    errors: Vec<String>,
+    usage: SearchUsage,
+    cancel_requested: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpSearchCandidateEvent {
+    sequence: i64,
+    phase: String,
+    candidate: McpSearchCandidate,
+}
+
+impl From<AgentSearchCandidateEvent> for McpSearchCandidateEvent {
+    fn from(event: AgentSearchCandidateEvent) -> Self {
+        Self {
+            sequence: event.sequence,
+            phase: event.phase,
+            candidate: McpSearchCandidate::from(event.candidate),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpSearchCandidate {
+    id: String,
+    source_provider: String,
+    title: String,
+    authors: Vec<String>,
+    #[serde(rename = "abstract")]
+    abstract_text: Option<String>,
+    year: Option<i32>,
+    venue: Option<String>,
+    citation_count: Option<i32>,
+    doi: Option<String>,
+    openalex_id: Option<String>,
+    arxiv_id: Option<String>,
+    external_url: Option<String>,
+    pdf_url: Option<String>,
+    already_in_library: bool,
+}
+
+impl From<crate::domain::discovery::PaperCandidate> for McpSearchCandidate {
+    fn from(candidate: crate::domain::discovery::PaperCandidate) -> Self {
+        Self {
+            id: candidate.id,
+            source_provider: candidate.source_provider,
+            title: candidate.title,
+            authors: candidate.authors,
+            abstract_text: candidate.abstract_text,
+            year: candidate.year,
+            venue: candidate.venue,
+            citation_count: candidate.citation_count,
+            doi: candidate.doi,
+            openalex_id: candidate.openalex_id,
+            arxiv_id: candidate.arxiv_id,
+            external_url: candidate.external_url,
+            pdf_url: candidate.pdf_url,
+            already_in_library: candidate.already_in_library,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpSearchActivity {
+    sequence: i64,
+    kind: String,
+    message: String,
+    error: Option<String>,
+}
+
+impl From<crate::storage::library_store::AgentSearchActivity> for McpSearchActivity {
+    fn from(activity: crate::storage::library_store::AgentSearchActivity) -> Self {
+        Self {
+            sequence: activity.sequence,
+            kind: activity.kind,
+            message: activity.message,
+            error: activity.error,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SearchUsage {
+    provider_queries: u32,
+    llm_calls: u32,
+    inspected_candidates: u32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SearchCancelResult {
+    status: String,
+    cancellation_requested: bool,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpVault {
@@ -2308,7 +2796,9 @@ struct VaultPapersResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::discovery::{CandidateMatch, PaperCandidate};
     use crate::domain::library::{DocumentBlock, DocumentPage, PaperDraft, PaperSourceDraft};
+    use crate::domain::research::{Depth, SearchConstraints, SearchDraft};
     use crate::domain::research_state::{EpistemicStatus, ResearchEntryDraft, ResearchEntryKind};
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::streamable_http_client::{
@@ -2360,6 +2850,54 @@ mod tests {
             relations: Vec::new(),
             context: Vec::new(),
             reason: Some("MCP fixture".to_string()),
+        }
+    }
+
+    fn search_candidate(id: &str) -> PaperCandidate {
+        PaperCandidate {
+            id: id.to_string(),
+            source_provider: "fixture".to_string(),
+            source_id: id.to_string(),
+            title: format!("Candidate {id}"),
+            authors: vec!["A. Researcher".to_string()],
+            abstract_text: Some("Controlled search evidence.".to_string()),
+            year: Some(2025),
+            publication_date: None,
+            venue: Some("Fixture Conference".to_string()),
+            citation_count: Some(4),
+            doi: Some(format!("10.1/{id}")),
+            openalex_id: None,
+            arxiv_id: None,
+            external_url: None,
+            pdf_url: None,
+            open_access: None,
+            match_summary: CandidateMatch {
+                score: Some(0.9),
+                reasons: vec!["fixture".to_string()],
+                matched_keywords: Vec::new(),
+                from_seed_paper_ids: Vec::new(),
+            },
+            already_in_library: false,
+        }
+    }
+
+    fn agent_search_draft() -> SearchDraft {
+        SearchDraft {
+            title: "Controlled agent search".to_string(),
+            goal: "Find controlled evidence".to_string(),
+            constraints: SearchConstraints {
+                year_from: None,
+                year_to: None,
+                providers: Vec::new(),
+                open_access: false,
+                target_count: 10,
+                venues: Vec::new(),
+                authors: Vec::new(),
+                fields_of_study: Vec::new(),
+                seed_paper_ids: Vec::new(),
+            },
+            strategy: Depth::Quick.budget(),
+            schedule: None,
         }
     }
 
@@ -2469,6 +3007,122 @@ mod tests {
             papers.structured_content.unwrap()["membershipRevision"],
             vault.membership_revision
         );
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn real_client_polls_candidates_added_while_search_is_active() {
+        let store = test_store("search-poll");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let receipt = store
+            .create_agent_search_run(
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                None,
+                "search-poll-request",
+                "search-poll-payload",
+                None,
+                &agent_search_draft(),
+                2,
+            )
+            .expect("create agent search");
+        store
+            .set_search_run_status(
+                &receipt.run_id,
+                SearchRunStatus::Searching,
+                0,
+                None,
+                None,
+                false,
+            )
+            .expect("mark search active");
+        store
+            .append_agent_search_candidates(
+                &receipt.run_id,
+                "preview",
+                &[search_candidate("first"), search_candidate("second")],
+            )
+            .expect("append first candidates");
+
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                None,
+                [SEARCH_GET],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let first = client
+            .call_tool(
+                CallToolRequestParams::new(SEARCH_GET).with_arguments(
+                    serde_json::json!({"run_id": receipt.run_id, "limit": 1})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("poll first candidate")
+            .structured_content
+            .expect("first poll result");
+        assert_eq!(first["status"], "searching");
+        assert_eq!(first["candidates"][0]["candidate"]["id"], "first");
+        let first_cursor = first["nextCursor"].as_str().expect("first cursor");
+
+        store
+            .append_agent_search_candidates(
+                &receipt.run_id,
+                "preview",
+                &[search_candidate("third")],
+            )
+            .expect("append candidate during polling");
+        let second = client
+            .call_tool(
+                CallToolRequestParams::new(SEARCH_GET).with_arguments(
+                    serde_json::json!({"run_id": receipt.run_id, "cursor": first_cursor, "limit": 10})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("finish captured page")
+            .structured_content
+            .expect("second poll result");
+        assert_eq!(second["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(second["candidates"][0]["candidate"]["id"], "second");
+        let second_cursor = second["nextCursor"].as_str().expect("active cursor");
+        let third = client
+            .call_tool(
+                CallToolRequestParams::new(SEARCH_GET).with_arguments(
+                    serde_json::json!({"run_id": receipt.run_id, "cursor": second_cursor, "limit": 10})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("poll newly arrived candidate")
+            .structured_content
+            .expect("third poll result");
+        assert_eq!(third["candidates"][0]["candidate"]["id"], "third");
 
         client.cancel().await.expect("stop client");
         server.shutdown().await;

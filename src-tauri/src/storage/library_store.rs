@@ -116,6 +116,32 @@ pub struct AgentStateUpdateReceipt {
     pub created_entry_ids: HashMap<String, String>,
 }
 
+/// Stable identity returned by an idempotent agent search start.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSearchReceipt {
+    pub search_id: String,
+    pub run_id: String,
+}
+
+/// One persisted candidate snapshot emitted while an agent search runs.
+#[derive(Debug, Clone)]
+pub struct AgentSearchCandidateEvent {
+    pub sequence: i64,
+    pub phase: String,
+    pub candidate: PaperCandidate,
+}
+
+/// One persisted activity item emitted while an agent search runs.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSearchActivity {
+    pub sequence: i64,
+    pub kind: String,
+    pub message: String,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 struct SeedVault {
     id: &'static str,
@@ -6112,6 +6138,53 @@ impl LibraryStore {
             create index if not exists idx_search_runs_search_id
               on search_runs(search_id);
 
+            create table if not exists agent_search_runs (
+              run_id text primary key,
+              search_id text not null,
+              project_id text not null,
+              vault_id text not null,
+              caller text not null,
+              parent_run_id text,
+              model_id text,
+              reserved_provider_queries integer not null default 0,
+              reserved_llm_calls integer not null default 0,
+              cancel_requested integer not null default 0,
+              created_at text not null,
+              foreign key (run_id) references search_runs(id) on delete cascade,
+              foreign key (search_id) references searches(id) on delete cascade,
+              foreign key (project_id) references projects(id) on delete cascade,
+              foreign key (vault_id) references vaults(id) on delete cascade,
+              foreign key (parent_run_id) references harness_runs(id) on delete cascade
+            );
+
+            create index if not exists idx_agent_search_runs_scope
+              on agent_search_runs(project_id, caller, parent_run_id);
+
+            create table if not exists agent_search_candidate_events (
+              sequence integer primary key autoincrement,
+              run_id text not null,
+              phase text not null,
+              candidate_json text not null,
+              created_at text not null,
+              foreign key (run_id) references agent_search_runs(run_id) on delete cascade
+            );
+
+            create index if not exists idx_agent_search_candidate_events_run
+              on agent_search_candidate_events(run_id, sequence);
+
+            create table if not exists agent_search_activity (
+              sequence integer primary key autoincrement,
+              run_id text not null,
+              kind text not null,
+              message text not null,
+              error text,
+              created_at text not null,
+              foreign key (run_id) references agent_search_runs(run_id) on delete cascade
+            );
+
+            create index if not exists idx_agent_search_activity_run
+              on agent_search_activity(run_id, sequence);
+
             create table if not exists search_provider_queries (
               id text primary key,
               run_id text not null,
@@ -6321,6 +6394,18 @@ impl LibraryStore {
         ] {
             add_column_if_missing(conn, "search_runs", column, "integer not null default 0")?;
         }
+        add_column_if_missing(
+            conn,
+            "agent_search_runs",
+            "reserved_provider_queries",
+            "integer not null default 0",
+        )?;
+        add_column_if_missing(
+            conn,
+            "agent_search_runs",
+            "reserved_llm_calls",
+            "integer not null default 0",
+        )?;
         add_column_if_missing(conn, "harness_events", "detail_json", "text")?;
         add_column_if_missing(conn, "harness_events", "phase", "text")?;
         add_column_if_missing(conn, "harness_events", "progress_current", "integer")?;
@@ -8603,6 +8688,368 @@ fn find_or_create_thread_id_with(
 // `allow(dead_code)`: consumed by the commands layer that lands later; remove then.
 #[allow(dead_code)]
 impl LibraryStore {
+    /// Atomically create one scoped agent Search, Run, and retry receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_agent_search_run(
+        &self,
+        project_id: &str,
+        vault_id: &str,
+        caller: &str,
+        parent_run_id: Option<&str>,
+        request_id: &str,
+        payload_hash: &str,
+        model_id: Option<&str>,
+        draft: &SearchDraft,
+        maximum_concurrent: i64,
+    ) -> StoreResult<AgentSearchReceipt> {
+        const TOOL: &str = "search_start";
+        let receipt_caller = format!("{caller}@{project_id}");
+        let mut conn = self.open_connection()?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "select payload_hash, result_json from mcp_mutation_receipts
+                 where caller = ?1 and tool = ?2 and request_id = ?3",
+                params![receipt_caller, TOOL, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((existing_hash, result_json)) = existing {
+            if existing_hash != payload_hash {
+                return Err("Request ID was already used with a different payload".to_string());
+            }
+            return serde_json::from_str(&result_json).map_err(|error| error.to_string());
+        }
+
+        let scoped_vault: bool = tx
+            .query_row(
+                "select exists(select 1 from vaults where id = ?1 and project_id = ?2)",
+                params![vault_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !scoped_vault {
+            return Err("Search Vault is outside this Project".to_string());
+        }
+        if let Some(parent_run_id) = parent_run_id {
+            let parent_stack_json: Option<String> = tx
+                .query_row(
+                    "select effective_instruction_stack_json from harness_runs
+                     where id = ?1 and project_id = ?2",
+                    params![parent_run_id, project_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let Some(parent_stack_json) = parent_stack_json else {
+                return Err("Parent Research Run is outside this Project".to_string());
+            };
+            let parent_stack: EffectiveInstructionStack = serde_json::from_str(&parent_stack_json)
+                .map_err(|error| format!("Parent Research Run limits are unreadable: {error}"))?;
+            let (reserved_provider_queries, reserved_llm_calls): (u32, u32) = tx
+                .query_row(
+                    "select coalesce(sum(reserved_provider_queries), 0),
+                            coalesce(sum(reserved_llm_calls), 0)
+                     from agent_search_runs where parent_run_id = ?1",
+                    params![parent_run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| error.to_string())?;
+            if reserved_provider_queries.saturating_add(draft.strategy.max_provider_queries)
+                > parent_stack.run_context.maximum_provider_queries
+                || reserved_llm_calls.saturating_add(draft.strategy.max_llm_calls)
+                    > parent_stack.run_context.maximum_llm_calls
+            {
+                return Err("Parent Research Run search budget is exhausted".to_string());
+            }
+        }
+        let active: i64 = tx
+            .query_row(
+                "select count(*) from agent_search_runs a
+                 join search_runs r on r.id = a.run_id
+                 where a.project_id = ?1 and a.caller = ?2
+                   and a.parent_run_id is ?3
+                   and r.status not in ('ready', 'failed', 'cancelled')",
+                params![project_id, caller, parent_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if active >= maximum_concurrent {
+            return Err(format!(
+                "Search concurrency limit reached ({maximum_concurrent})"
+            ));
+        }
+
+        let search_id = timestamped_id("search")?;
+        let run_id = timestamped_id("run")?;
+        let constraints = serde_json::to_string(&draft.constraints).map_err(|e| e.to_string())?;
+        let strategy = serde_json::to_string(&draft.strategy).map_err(|e| e.to_string())?;
+        let provider_set = serde_json::to_string(&draft.constraints.providers)
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into searches
+               (id, title, goal, constraints, strategy, schedule, status,
+                created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, null, 'queued', datetime('now'), datetime('now'))",
+            params![search_id, draft.title, draft.goal, constraints, strategy],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into search_runs
+               (id, search_id, mode, provider_set, query_expansions, status, created_at, started_at)
+             values (?1, ?2, 'agent_child', ?3, '[]', 'queued', datetime('now'), datetime('now'))",
+            params![run_id, search_id, provider_set],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into agent_search_runs
+               (run_id, search_id, project_id, vault_id, caller, parent_run_id,
+                model_id, reserved_provider_queries, reserved_llm_calls, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))",
+            params![
+                run_id,
+                search_id,
+                project_id,
+                vault_id,
+                caller,
+                parent_run_id,
+                model_id,
+                draft.strategy.max_provider_queries,
+                draft.strategy.max_llm_calls,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let receipt = AgentSearchReceipt { search_id, run_id };
+        let result_json = serde_json::to_string(&receipt).map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into mcp_mutation_receipts
+               (caller, tool, request_id, payload_hash, result_json, created_at)
+             values (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![receipt_caller, TOOL, request_id, payload_hash, result_json],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(receipt)
+    }
+
+    /// Return a scoped agent Search Run and whether cancellation was requested.
+    pub fn get_agent_search_run(
+        &self,
+        project_id: &str,
+        run_id: &str,
+    ) -> StoreResult<(SearchRun, bool)> {
+        let conn = self.open_connection()?;
+        let scoped: bool = conn
+            .query_row(
+                "select exists(select 1 from agent_search_runs where run_id = ?1 and project_id = ?2)",
+                params![run_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !scoped {
+            return Err("Agent Search Run is outside this Project".to_string());
+        }
+        let cancel_requested: bool = conn
+            .query_row(
+                "select cancel_requested from agent_search_runs where run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok((read_search_run(&conn, run_id)?, cancel_requested))
+    }
+
+    /// Return the optional model override recorded for an agent Search Run.
+    pub fn agent_search_model_id(&self, run_id: &str) -> StoreResult<Option<String>> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "select model_id from agent_search_runs where run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+        .map_err(|error| error.to_string())
+    }
+
+    /// Record candidate snapshots for incremental, run-scoped polling.
+    pub fn append_agent_search_candidates(
+        &self,
+        run_id: &str,
+        phase: &str,
+        candidates: &[PaperCandidate],
+    ) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let tracked: bool = tx
+            .query_row(
+                "select exists(select 1 from agent_search_runs where run_id = ?1)",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !tracked {
+            return Ok(());
+        }
+        for candidate in candidates {
+            let candidate_json =
+                serde_json::to_string(candidate).map_err(|error| error.to_string())?;
+            tx.execute(
+                "insert into agent_search_candidate_events
+                   (run_id, phase, candidate_json, created_at)
+                 values (?1, ?2, ?3, datetime('now'))",
+                params![run_id, phase, candidate_json],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// Highest candidate event currently visible for one run.
+    pub fn agent_search_candidate_high_water(&self, run_id: &str) -> StoreResult<i64> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "select coalesce(max(sequence), 0) from agent_search_candidate_events where run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Read candidate events within a captured high-water mark.
+    pub fn list_agent_search_candidate_events(
+        &self,
+        run_id: &str,
+        after_sequence: i64,
+        high_water: i64,
+        limit: usize,
+    ) -> StoreResult<Vec<AgentSearchCandidateEvent>> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select sequence, phase, candidate_json
+                 from agent_search_candidate_events
+                 where run_id = ?1 and sequence > ?2 and sequence <= ?3
+                 order by sequence limit ?4",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                params![run_id, after_sequence, high_water, limit as i64],
+                |row| {
+                    let candidate_json: String = row.get(2)?;
+                    let candidate = serde_json::from_str(&candidate_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(AgentSearchCandidateEvent {
+                        sequence: row.get(0)?,
+                        phase: row.get(1)?,
+                        candidate,
+                    })
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        collect_rows(rows)
+    }
+
+    /// Append one run-scoped Search activity item when the run is agent-owned.
+    pub fn append_agent_search_activity(
+        &self,
+        run_id: &str,
+        kind: &str,
+        message: &str,
+        error: Option<&str>,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "insert into agent_search_activity (run_id, kind, message, error, created_at)
+             select ?1, ?2, ?3, ?4, datetime('now')
+             where exists(select 1 from agent_search_runs where run_id = ?1)",
+            params![run_id, kind, message, error],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
+    /// Return the newest bounded activity slice for one Search Run.
+    pub fn list_agent_search_activity(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> StoreResult<Vec<AgentSearchActivity>> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select sequence, kind, message, error from agent_search_activity
+                 where run_id = ?1 order by sequence desc limit ?2",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![run_id, limit as i64], |row| {
+                Ok(AgentSearchActivity {
+                    sequence: row.get(0)?,
+                    kind: row.get(1)?,
+                    message: row.get(2)?,
+                    error: row.get(3)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let mut activity = collect_rows(rows)?;
+        activity.reverse();
+        Ok(activity)
+    }
+
+    /// Mark cancellation once and return whether this call changed the intent.
+    pub fn request_agent_search_cancel(
+        &self,
+        project_id: &str,
+        run_id: &str,
+    ) -> StoreResult<(SearchRun, bool)> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let exists: bool = tx
+            .query_row(
+                "select exists(select 1 from agent_search_runs where run_id = ?1 and project_id = ?2)",
+                params![run_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !exists {
+            return Err("Agent Search Run is outside this Project".to_string());
+        }
+        let run = read_search_run(&tx, run_id)?;
+        let terminal = matches!(run.status.as_str(), "ready" | "failed" | "cancelled");
+        let changed = if terminal {
+            0
+        } else {
+            tx.execute(
+                "update agent_search_runs set cancel_requested = 1
+                 where run_id = ?1 and project_id = ?2 and cancel_requested = 0",
+                params![run_id, project_id],
+            )
+            .map_err(|error| error.to_string())?
+        };
+        if changed == 1 {
+            tx.execute(
+                "insert into agent_search_activity (run_id, kind, message, created_at)
+                 values (?1, 'cancellation_requested', 'Cancellation requested', datetime('now'))",
+                params![run_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok((run, changed == 1))
+    }
+
     /// Create a saved search (status `queued`, no runs yet).
     pub fn create_search(&self, draft: &SearchDraft) -> StoreResult<Search> {
         let conn = self.open_connection()?;
@@ -17136,6 +17583,19 @@ mod tests {
         }
     }
 
+    fn quick_agent_search_draft() -> SearchDraft {
+        SearchDraft {
+            title: "Focused child search".to_string(),
+            goal: "Find direct evidence for one focused question".to_string(),
+            constraints: SearchConstraints {
+                target_count: 10,
+                ..sample_constraints()
+            },
+            strategy: Depth::Quick.budget(),
+            schedule: None,
+        }
+    }
+
     fn sample_candidate(title: &str, doi: Option<&str>) -> PaperCandidate {
         PaperCandidate {
             id: format!("cand-{title}"),
@@ -17162,6 +17622,163 @@ mod tests {
             },
             already_in_library: false,
         }
+    }
+
+    #[test]
+    fn agent_search_start_is_idempotent_and_reserves_parent_budget() -> StoreResult<()> {
+        let db = test_db()?;
+        let library = db.store.get_library()?;
+        let vault = library.vaults.first().expect("seed vault");
+        let mut configuration = db
+            .store
+            .get_harness_snapshot(&vault.project_id)?
+            .harness
+            .configuration;
+        configuration.research_instructions = "Investigate the fixture topic".to_string();
+        db.store
+            .save_harness_configuration(&vault.project_id, &configuration)?;
+        let parent_search = db.store.create_search(&sample_search_draft())?;
+        let parent = db
+            .store
+            .create_harness_run(&vault.project_id, &parent_search.id)?;
+        let draft = quick_agent_search_draft();
+
+        let first = db.store.create_agent_search_run(
+            &vault.project_id,
+            &vault.id,
+            "codex-test",
+            Some(&parent.id),
+            "request-1",
+            "payload-1",
+            None,
+            &draft,
+            10,
+        )?;
+        let retry = db.store.create_agent_search_run(
+            &vault.project_id,
+            &vault.id,
+            "codex-test",
+            Some(&parent.id),
+            "request-1",
+            "payload-1",
+            None,
+            &draft,
+            10,
+        )?;
+        assert_eq!(first.run_id, retry.run_id);
+        assert!(db
+            .store
+            .create_agent_search_run(
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                Some(&parent.id),
+                "request-1",
+                "changed-payload",
+                None,
+                &draft,
+                10,
+            )
+            .expect_err("changed retry must conflict")
+            .contains("different payload"));
+
+        db.store.create_agent_search_run(
+            &vault.project_id,
+            &vault.id,
+            "codex-test",
+            Some(&parent.id),
+            "request-2",
+            "payload-2",
+            None,
+            &draft,
+            10,
+        )?;
+        assert!(db
+            .store
+            .create_agent_search_run(
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                Some(&parent.id),
+                "request-3",
+                "payload-3",
+                None,
+                &draft,
+                10,
+            )
+            .expect_err("third reservation exceeds the parent provider budget")
+            .contains("budget is exhausted"));
+        Ok(())
+    }
+
+    #[test]
+    fn agent_search_events_page_stably_and_cancel_only_once() -> StoreResult<()> {
+        let db = test_db()?;
+        let library = db.store.get_library()?;
+        let vault = library.vaults.first().expect("seed vault");
+        let receipt = db.store.create_agent_search_run(
+            &vault.project_id,
+            &vault.id,
+            "external-test",
+            None,
+            "request-events",
+            "payload-events",
+            None,
+            &quick_agent_search_draft(),
+            2,
+        )?;
+        db.store.append_agent_search_candidates(
+            &receipt.run_id,
+            "preview",
+            &[
+                sample_candidate("First", Some("10.1/first")),
+                sample_candidate("Second", Some("10.1/second")),
+            ],
+        )?;
+        let high_water = db
+            .store
+            .agent_search_candidate_high_water(&receipt.run_id)?;
+        let first_page =
+            db.store
+                .list_agent_search_candidate_events(&receipt.run_id, 0, high_water, 1)?;
+        db.store.append_agent_search_candidates(
+            &receipt.run_id,
+            "ranked",
+            &[sample_candidate("Third", Some("10.1/third"))],
+        )?;
+        let second_page = db.store.list_agent_search_candidate_events(
+            &receipt.run_id,
+            first_page[0].sequence,
+            high_water,
+            10,
+        )?;
+        assert_eq!(first_page[0].candidate.title, "First");
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].candidate.title, "Second");
+
+        assert!(
+            db.store
+                .request_agent_search_cancel(&vault.project_id, &receipt.run_id)?
+                .1
+        );
+        assert!(
+            !db.store
+                .request_agent_search_cancel(&vault.project_id, &receipt.run_id)?
+                .1
+        );
+        assert_eq!(
+            db.store
+                .list_agent_search_activity(&receipt.run_id, 10)?
+                .iter()
+                .filter(|event| event.kind == "cancellation_requested")
+                .count(),
+            1
+        );
+        assert!(db
+            .store
+            .get_agent_search_run("project:missing", &receipt.run_id)
+            .is_err());
+        Ok(())
     }
 
     fn ranked(title: &str, doi: Option<&str>, rank: i32) -> RankedCandidate {
