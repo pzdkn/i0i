@@ -5,6 +5,8 @@
 //! tool calls onto the same `LibraryStore` used by Tauri commands.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,20 +21,27 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{schemars, tool, tool_router, Json};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::domain::library::{LibrarySnapshot, Paper, Vault};
+use crate::domain::library::{DocumentChunk, DocumentSource, LibrarySnapshot, Paper, Vault};
+use crate::pdf_extraction::PdfExtractionManager;
+use crate::pdf_ingestion::PdfDownloadManager;
 use crate::storage::library_store::LibraryStore;
 
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_PAGE_SIZE: usize = 100;
 const DEFAULT_CURSOR_TTL: Duration = Duration::from_secs(10 * 60);
+const READER_TEXT_BUDGET: usize = 12_000;
+const MAX_PASSAGE_CHARS: usize = 4_000;
 
 pub const VAULT_LIST: &str = "vault_list";
 pub const VAULT_LIST_PAPERS: &str = "vault_list_papers";
+pub const VAULT_GET_PAPER: &str = "vault_get_paper";
+pub const READER_READ: &str = "reader_read";
 
 /// Caller identity and scope established by an opaque local credential.
 #[derive(Debug, Clone)]
@@ -104,18 +113,57 @@ struct CursorSnapshot {
     expires_at: Instant,
 }
 
+/// Canonical source location represented by an opaque passage reference.
+#[derive(Debug, Clone)]
+pub(crate) struct PassageAnchor {
+    pub paper_id: String,
+    pub source_id: String,
+    pub extraction_id: Option<String>,
+    pub chunk_id: Option<String>,
+    pub page_start: Option<i32>,
+    pub page_end: Option<i32>,
+    pub source_start: i64,
+    pub source_end: i64,
+    pub quote: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReaderCursorSnapshot {
+    grant_token: String,
+    paper_id: String,
+    source_version: String,
+    page_start: Option<i32>,
+    page_end: Option<i32>,
+    passages: Vec<McpPassage>,
+    offset: usize,
+    expires_at: Instant,
+}
+
 #[derive(Clone)]
 struct I0iMcpHandler {
     store: LibraryStore,
+    pdf_downloads: Option<PdfDownloadManager>,
+    pdf_extractions: Option<PdfExtractionManager>,
     cursors: Arc<Mutex<HashMap<String, CursorSnapshot>>>,
+    reader_cursors: Arc<Mutex<HashMap<String, ReaderCursorSnapshot>>>,
+    passage_anchors: Arc<RwLock<HashMap<String, PassageAnchor>>>,
     cursor_ttl: Duration,
 }
 
 impl I0iMcpHandler {
-    fn new(store: LibraryStore, cursor_ttl: Duration) -> Self {
+    fn new(
+        store: LibraryStore,
+        pdf_downloads: Option<PdfDownloadManager>,
+        pdf_extractions: Option<PdfExtractionManager>,
+        cursor_ttl: Duration,
+    ) -> Self {
         Self {
             store,
+            pdf_downloads,
+            pdf_extractions,
             cursors: Arc::new(Mutex::new(HashMap::new())),
+            reader_cursors: Arc::new(Mutex::new(HashMap::new())),
+            passage_anchors: Arc::new(RwLock::new(HashMap::new())),
             cursor_ttl,
         }
     }
@@ -148,6 +196,109 @@ impl I0iMcpHandler {
                 Some(serde_json::json!({"code": "internal_failure", "detail": error})),
             )
         })
+    }
+
+    fn scoped_paper<'a>(
+        snapshot: &'a LibrarySnapshot,
+        grant: &McpCallContext,
+        paper_id: &str,
+    ) -> Result<&'a Paper, rmcp::ErrorData> {
+        let belongs_to_vault = snapshot.vault_papers.iter().any(|membership| {
+            membership.vault_id == grant.vault_id && membership.paper_id == paper_id
+        });
+        if !belongs_to_vault {
+            return Err(out_of_scope());
+        }
+        snapshot
+            .papers
+            .iter()
+            .find(|paper| paper.id == paper_id)
+            .ok_or_else(out_of_scope)
+    }
+
+    fn active_source<'a>(
+        snapshot: &'a LibrarySnapshot,
+        paper: &Paper,
+    ) -> Option<&'a DocumentSource> {
+        paper
+            .active_source_id
+            .as_deref()
+            .and_then(|id| {
+                snapshot
+                    .document_sources
+                    .iter()
+                    .find(|source| source.id == id)
+            })
+            .or_else(|| {
+                snapshot
+                    .document_sources
+                    .iter()
+                    .find(|source| source.paper_id == paper.id)
+            })
+    }
+
+    async fn register_passage(&self, anchor: PassageAnchor) -> String {
+        let passage_ref = format!("passage_{}", Uuid::new_v4().simple());
+        self.passage_anchors
+            .write()
+            .await
+            .insert(passage_ref.clone(), anchor);
+        passage_ref
+    }
+
+    async fn passages_from_chunks(
+        &self,
+        chunks: Vec<DocumentChunk>,
+        page_start: Option<i32>,
+        page_end: Option<i32>,
+    ) -> Vec<McpPassage> {
+        let mut passages = Vec::new();
+        for chunk in chunks.into_iter().filter(|chunk| {
+            page_start.is_none_or(|start| chunk.page_end + 1 >= start)
+                && page_end.is_none_or(|end| chunk.page_start + 1 <= end)
+        }) {
+            for (relative_start, relative_end, text) in split_text(&chunk.text, MAX_PASSAGE_CHARS) {
+                let anchor = PassageAnchor {
+                    paper_id: chunk.paper_id.clone(),
+                    source_id: chunk.source_id.clone(),
+                    extraction_id: Some(chunk.extraction_id.clone()),
+                    chunk_id: Some(chunk.id.clone()),
+                    page_start: Some(chunk.page_start + 1),
+                    page_end: Some(chunk.page_end + 1),
+                    source_start: chunk.source_start + relative_start as i64,
+                    source_end: chunk.source_start + relative_end as i64,
+                    quote: text.clone(),
+                };
+                let passage_ref = self.register_passage(anchor.clone()).await;
+                passages.push(McpPassage::from_anchor(passage_ref, anchor));
+            }
+        }
+        passages
+    }
+
+    async fn passages_from_flow_text(
+        &self,
+        paper_id: &str,
+        source_id: &str,
+        text: &str,
+    ) -> Vec<McpPassage> {
+        let mut passages = Vec::new();
+        for (start, end, text) in split_text(text, MAX_PASSAGE_CHARS) {
+            let anchor = PassageAnchor {
+                paper_id: paper_id.to_string(),
+                source_id: source_id.to_string(),
+                extraction_id: None,
+                chunk_id: None,
+                page_start: None,
+                page_end: None,
+                source_start: start as i64,
+                source_end: end as i64,
+                quote: text.clone(),
+            };
+            let passage_ref = self.register_passage(anchor.clone()).await;
+            passages.push(McpPassage::from_anchor(passage_ref, anchor));
+        }
+        passages
     }
 }
 
@@ -214,6 +365,294 @@ impl I0iMcpHandler {
             result.papers.len(),
         );
         Ok(Json(result))
+    }
+
+    /// Return metadata and honest document availability for one scoped paper.
+    #[tool(description = "Get one i0i paper's metadata and document availability")]
+    async fn vault_get_paper(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<GetPaperInput>,
+    ) -> Result<Json<GetPaperResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, _) = Self::context(&context, VAULT_GET_PAPER)?;
+        if input.vault_id != grant.vault_id {
+            return Err(out_of_scope());
+        }
+        let snapshot = self.snapshot()?;
+        let paper = Self::scoped_paper(&snapshot, &grant, &input.paper_id)?;
+        let source = Self::active_source(&snapshot, paper);
+        let extraction = paper.active_extraction_id.as_deref().and_then(|id| {
+            snapshot
+                .document_extractions
+                .iter()
+                .find(|extraction| extraction.id == id)
+        });
+        let availability = document_availability(paper, source, extraction);
+        trace_tool(&grant, VAULT_GET_PAPER, started, "ok", 1);
+        Ok(Json(GetPaperResult {
+            paper: McpPaper::from(paper),
+            source: source.map(McpSource::from),
+            extraction_id: extraction.map(|value| value.id.clone()),
+            text_availability: availability.status,
+            reason: availability.reason,
+        }))
+    }
+
+    /// Read bounded exact passages from a scoped saved document.
+    #[tool(description = "Read exact, referenceable passages from an i0i paper")]
+    async fn reader_read(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<ReaderReadInput>,
+    ) -> Result<Json<ReaderReadResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, READER_READ)?;
+        let (page_start, page_end) = validate_page_range(input.page_start, input.page_end)?;
+        let result = if let Some(cursor) = input.cursor.as_deref() {
+            self.continue_reader_page(cursor, &grant_token, &input.paper_id, page_start, page_end)
+                .await?
+        } else {
+            self.start_reader_page(&grant, &grant_token, &input.paper_id, page_start, page_end)
+                .await?
+        };
+        trace_tool(
+            &grant,
+            READER_READ,
+            started,
+            &result.availability,
+            result.passages.len(),
+        );
+        Ok(Json(result))
+    }
+
+    async fn start_reader_page(
+        &self,
+        grant: &McpCallContext,
+        grant_token: &str,
+        paper_id: &str,
+        page_start: Option<i32>,
+        page_end: Option<i32>,
+    ) -> Result<ReaderReadResult, rmcp::ErrorData> {
+        let snapshot = self.snapshot()?;
+        let paper = Self::scoped_paper(&snapshot, grant, paper_id)?;
+        let source = Self::active_source(&snapshot, paper);
+
+        let Some(source) = source else {
+            return self.abstract_or_unavailable(paper).await;
+        };
+        if source.source_kind == "html" {
+            if page_start.is_some() {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "HTML documents do not support PDF page ranges",
+                    Some(serde_json::json!({"code": "invalid_input"})),
+                ));
+            }
+            if source.status != "cached" {
+                return Ok(unavailable_or_pending(source));
+            }
+            let text = read_html_source_text(source).map_err(internal_failure)?;
+            let passages = self
+                .passages_from_flow_text(paper_id, &source.id, &text)
+                .await;
+            return self
+                .first_reader_result(
+                    grant_token,
+                    paper_id,
+                    &source.id,
+                    None,
+                    None,
+                    "full_text",
+                    passages,
+                )
+                .await;
+        }
+
+        if source.status == "remote_available" || source.status == "downloading" {
+            if source.status == "remote_available" {
+                if let Some(downloads) = &self.pdf_downloads {
+                    downloads.queue_source(source.id.clone());
+                }
+            }
+            return Ok(ReaderReadResult::pending(
+                "PDF acquisition is still in progress",
+                source.source_url.clone(),
+            ));
+        }
+        if source.status == "failed" {
+            return Ok(ReaderReadResult::unavailable(
+                source.error.as_deref().unwrap_or("PDF acquisition failed"),
+                source.source_url.clone(),
+            ));
+        }
+
+        let extraction = snapshot.document_extractions.iter().find(|extraction| {
+            extraction.source_id == source.id
+                && extraction.status == "ready"
+                && (paper.active_extraction_id.as_deref() == Some(extraction.id.as_str())
+                    || paper.active_extraction_id.is_none())
+        });
+        let Some(extraction) = extraction else {
+            if let Some(failed) = snapshot.document_extractions.iter().find(|extraction| {
+                extraction.source_id == source.id && extraction.status == "failed"
+            }) {
+                return Ok(ReaderReadResult::unavailable(
+                    failed.error.as_deref().unwrap_or("Text extraction failed"),
+                    source.source_url.clone(),
+                ));
+            }
+            if let Some(extractions) = &self.pdf_extractions {
+                extractions.queue_source(source.id.clone(), false);
+            }
+            return Ok(ReaderReadResult::pending(
+                "PDF text extraction is still in progress",
+                source.source_url.clone(),
+            ));
+        };
+
+        let chunks = self
+            .store
+            .chunks_for_extraction(&extraction.id)
+            .map_err(internal_failure)?;
+        let passages = self
+            .passages_from_chunks(chunks, page_start, page_end)
+            .await;
+        self.first_reader_result(
+            grant_token,
+            paper_id,
+            &extraction.id,
+            page_start,
+            page_end,
+            "full_text",
+            passages,
+        )
+        .await
+    }
+
+    async fn abstract_or_unavailable(
+        &self,
+        paper: &Paper,
+    ) -> Result<ReaderReadResult, rmcp::ErrorData> {
+        let Some(abstract_text) = paper.abstract_text.as_deref() else {
+            return Ok(ReaderReadResult::unavailable(
+                "No readable source or abstract is available",
+                None,
+            ));
+        };
+        let digest = sha256(abstract_text);
+        let source_id = format!("metadata:{}:{}", paper.id, &digest[..12]);
+        let passages = self
+            .passages_from_flow_text(&paper.id, &source_id, abstract_text)
+            .await;
+        Ok(ReaderReadResult {
+            availability: "available".to_string(),
+            coverage: "abstract_only".to_string(),
+            source_version: Some(source_id),
+            passages,
+            next_cursor: None,
+            has_more: false,
+            reason: None,
+            source_url: None,
+        })
+    }
+
+    async fn first_reader_result(
+        &self,
+        grant_token: &str,
+        paper_id: &str,
+        source_version: &str,
+        page_start: Option<i32>,
+        page_end: Option<i32>,
+        coverage: &str,
+        passages: Vec<McpPassage>,
+    ) -> Result<ReaderReadResult, rmcp::ErrorData> {
+        self.reader_result_from_snapshot(
+            ReaderCursorSnapshot {
+                grant_token: grant_token.to_string(),
+                paper_id: paper_id.to_string(),
+                source_version: source_version.to_string(),
+                page_start,
+                page_end,
+                passages,
+                offset: 0,
+                expires_at: Instant::now() + self.cursor_ttl,
+            },
+            coverage,
+        )
+        .await
+    }
+
+    async fn continue_reader_page(
+        &self,
+        cursor: &str,
+        grant_token: &str,
+        paper_id: &str,
+        page_start: Option<i32>,
+        page_end: Option<i32>,
+    ) -> Result<ReaderReadResult, rmcp::ErrorData> {
+        let snapshot = self
+            .reader_cursors
+            .lock()
+            .await
+            .remove(cursor)
+            .ok_or_else(cursor_expired)?;
+        if snapshot.expires_at <= Instant::now() {
+            return Err(cursor_expired());
+        }
+        if snapshot.grant_token != grant_token
+            || snapshot.paper_id != paper_id
+            || snapshot.page_start != page_start
+            || snapshot.page_end != page_end
+        {
+            return Err(rmcp::ErrorData::invalid_params(
+                "Cursor does not belong to this paper, range, or connection",
+                Some(serde_json::json!({"code": "invalid_input"})),
+            ));
+        }
+        self.reader_result_from_snapshot(snapshot, "full_text")
+            .await
+    }
+
+    async fn reader_result_from_snapshot(
+        &self,
+        mut snapshot: ReaderCursorSnapshot,
+        coverage: &str,
+    ) -> Result<ReaderReadResult, rmcp::ErrorData> {
+        let start = snapshot.offset;
+        let mut end = start;
+        let mut characters = 0;
+        while end < snapshot.passages.len() {
+            let next = snapshot.passages[end].text.chars().count();
+            if end > start && characters + next > READER_TEXT_BUDGET {
+                break;
+            }
+            characters += next;
+            end += 1;
+        }
+        let passages = snapshot.passages[start..end].to_vec();
+        snapshot.offset = end;
+        let source_version = snapshot.source_version.clone();
+        let has_more = end < snapshot.passages.len();
+        let next_cursor = if has_more {
+            let cursor = Uuid::new_v4().simple().to_string();
+            self.reader_cursors
+                .lock()
+                .await
+                .insert(cursor.clone(), snapshot);
+            Some(cursor)
+        } else {
+            None
+        };
+        Ok(ReaderReadResult {
+            availability: "available".to_string(),
+            coverage: coverage.to_string(),
+            source_version: Some(source_version),
+            passages,
+            next_cursor,
+            has_more,
+            reason: None,
+            source_url: None,
+        })
     }
 
     async fn start_paper_page(
@@ -338,18 +777,31 @@ struct AuthorizedGrant {
 pub struct LocalMcpServer {
     endpoint: String,
     grants: GrantRegistry,
+    handler: I0iMcpHandler,
     cancellation: CancellationToken,
     server_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl LocalMcpServer {
     /// Bind an authenticated Streamable HTTP MCP endpoint on an ephemeral port.
-    pub async fn start(store: LibraryStore) -> Result<Self, String> {
-        Self::start_with_cursor_ttl(store, DEFAULT_CURSOR_TTL).await
+    pub async fn start(
+        store: LibraryStore,
+        pdf_downloads: PdfDownloadManager,
+        pdf_extractions: PdfExtractionManager,
+    ) -> Result<Self, String> {
+        Self::start_with_cursor_ttl(
+            store,
+            Some(pdf_downloads),
+            Some(pdf_extractions),
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
     }
 
     async fn start_with_cursor_ttl(
         store: LibraryStore,
+        pdf_downloads: Option<PdfDownloadManager>,
+        pdf_extractions: Option<PdfExtractionManager>,
         cursor_ttl: Duration,
     ) -> Result<Self, String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -359,10 +811,11 @@ impl LocalMcpServer {
         let endpoint = format!("http://{address}/mcp");
         let grants = GrantRegistry::new();
         let cancellation = CancellationToken::new();
-        let handler = I0iMcpHandler::new(store, cursor_ttl);
+        let handler = I0iMcpHandler::new(store, pdf_downloads, pdf_extractions, cursor_ttl);
+        let session_handler = handler.clone();
         let service: StreamableHttpService<I0iMcpHandler, LocalSessionManager> =
             StreamableHttpService::new(
-                move || Ok(handler.clone()),
+                move || Ok(session_handler.clone()),
                 Default::default(),
                 StreamableHttpServerConfig::default()
                     .with_allowed_hosts(vec![
@@ -391,6 +844,7 @@ impl LocalMcpServer {
         Ok(Self {
             endpoint,
             grants,
+            handler,
             cancellation,
             server_task: Arc::new(Mutex::new(Some(server_task))),
         })
@@ -438,6 +892,16 @@ impl LocalMcpServer {
     /// Revoke every credential owned by a completed or canceled run.
     pub async fn revoke_run(&self, run_id: &str) {
         self.grants.revoke_run(run_id).await;
+    }
+
+    /// Resolve a passage issued by this app session for a later write tool.
+    pub(crate) async fn resolve_passage(&self, passage_ref: &str) -> Option<PassageAnchor> {
+        self.handler
+            .passage_anchors
+            .read()
+            .await
+            .get(passage_ref)
+            .cloned()
     }
 
     /// Stop accepting calls and wait for the HTTP task to finish.
@@ -524,6 +988,121 @@ fn trace_tool(
     );
 }
 
+fn validate_page_range(
+    page_start: Option<i32>,
+    page_end: Option<i32>,
+) -> Result<(Option<i32>, Option<i32>), rmcp::ErrorData> {
+    match (page_start, page_end) {
+        (None, None) => Ok((None, None)),
+        (Some(start), None) if start >= 1 => Ok((Some(start), Some(start))),
+        (None, Some(end)) if end >= 1 => Ok((Some(1), Some(end))),
+        (Some(start), Some(end)) if start >= 1 && end >= start => Ok((Some(start), Some(end))),
+        _ => Err(rmcp::ErrorData::invalid_params(
+            "Pages are one-based and page_end must not precede page_start",
+            Some(serde_json::json!({"code": "invalid_input"})),
+        )),
+    }
+}
+
+fn split_text(text: &str, max_chars: usize) -> Vec<(usize, usize, String)> {
+    let characters = text.chars().collect::<Vec<_>>();
+    (0..characters.len())
+        .step_by(max_chars)
+        .map(|start| {
+            let end = (start + max_chars).min(characters.len());
+            (start, end, characters[start..end].iter().collect())
+        })
+        .collect()
+}
+
+fn sha256(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+fn read_html_source_text(source: &DocumentSource) -> Result<String, String> {
+    let html_path = source
+        .local_path
+        .as_deref()
+        .ok_or_else(|| "Saved HTML source has no local path".to_string())?;
+    let metadata = fs::read_to_string(Path::new(html_path).with_file_name("meta.json"))
+        .map_err(|error| format!("Saved HTML metadata is missing: {error}"))?;
+    serde_json::from_str::<serde_json::Value>(&metadata)
+        .map_err(|error| format!("Saved HTML metadata is invalid: {error}"))?
+        .get("source_text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "Saved HTML metadata has no source text".to_string())
+}
+
+fn internal_failure(error: String) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(
+        "Could not read document evidence",
+        Some(serde_json::json!({"code": "internal_failure", "detail": error})),
+    )
+}
+
+struct Availability {
+    status: String,
+    reason: Option<String>,
+}
+
+fn document_availability(
+    paper: &Paper,
+    source: Option<&DocumentSource>,
+    extraction: Option<&crate::domain::library::DocumentExtraction>,
+) -> Availability {
+    let Some(source) = source else {
+        return Availability {
+            status: if paper.abstract_text.is_some() {
+                "abstract_only"
+            } else {
+                "unavailable"
+            }
+            .to_string(),
+            reason: None,
+        };
+    };
+    if source.status == "failed" {
+        return Availability {
+            status: "unavailable".to_string(),
+            reason: source.error.clone(),
+        };
+    }
+    if source.source_kind == "html" && source.status == "cached" {
+        return Availability {
+            status: "full_text".to_string(),
+            reason: None,
+        };
+    }
+    if extraction.is_some_and(|value| value.status == "ready") {
+        return Availability {
+            status: "full_text".to_string(),
+            reason: None,
+        };
+    }
+    Availability {
+        status: "pending".to_string(),
+        reason: Some("Document acquisition or extraction is pending".to_string()),
+    }
+}
+
+fn unavailable_or_pending(source: &DocumentSource) -> ReaderReadResult {
+    if source.status == "failed" {
+        ReaderReadResult::unavailable(
+            source
+                .error
+                .as_deref()
+                .unwrap_or("Document acquisition failed"),
+            source.source_url.clone(),
+        )
+    } else {
+        ReaderReadResult::pending(
+            "Document acquisition is still in progress",
+            source.source_url.clone(),
+        )
+    }
+}
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 struct PageInput {
     cursor: Option<String>,
@@ -537,6 +1116,20 @@ struct VaultPapersInput {
     year: Option<i32>,
     cursor: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetPaperInput {
+    vault_id: String,
+    paper_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReaderReadInput {
+    paper_id: String,
+    page_start: Option<i32>,
+    page_end: Option<i32>,
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -574,6 +1167,111 @@ struct McpPaper {
     extraction_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpSource {
+    id: String,
+    kind: String,
+    status: String,
+    source_url: Option<String>,
+    error: Option<String>,
+}
+
+impl From<&DocumentSource> for McpSource {
+    fn from(source: &DocumentSource) -> Self {
+        Self {
+            id: source.id.clone(),
+            kind: source.source_kind.clone(),
+            status: source.status.clone(),
+            source_url: source.source_url.clone(),
+            error: source.error.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct GetPaperResult {
+    paper: McpPaper,
+    source: Option<McpSource>,
+    extraction_id: Option<String>,
+    text_availability: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpPassage {
+    passage_ref: String,
+    paper_id: String,
+    source_id: String,
+    extraction_id: Option<String>,
+    chunk_id: Option<String>,
+    page_start: Option<i32>,
+    page_end: Option<i32>,
+    source_start: i64,
+    source_end: i64,
+    text: String,
+}
+
+impl McpPassage {
+    fn from_anchor(passage_ref: String, anchor: PassageAnchor) -> Self {
+        Self {
+            passage_ref,
+            paper_id: anchor.paper_id,
+            source_id: anchor.source_id,
+            extraction_id: anchor.extraction_id,
+            chunk_id: anchor.chunk_id,
+            page_start: anchor.page_start,
+            page_end: anchor.page_end,
+            source_start: anchor.source_start,
+            source_end: anchor.source_end,
+            text: anchor.quote,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReaderReadResult {
+    availability: String,
+    coverage: String,
+    source_version: Option<String>,
+    passages: Vec<McpPassage>,
+    next_cursor: Option<String>,
+    has_more: bool,
+    reason: Option<String>,
+    source_url: Option<String>,
+}
+
+impl ReaderReadResult {
+    fn pending(reason: &str, source_url: Option<String>) -> Self {
+        Self {
+            availability: "pending".to_string(),
+            coverage: "none".to_string(),
+            source_version: None,
+            passages: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+            reason: Some(reason.to_string()),
+            source_url,
+        }
+    }
+
+    fn unavailable(reason: &str, source_url: Option<String>) -> Self {
+        Self {
+            availability: "unavailable".to_string(),
+            coverage: "none".to_string(),
+            source_version: None,
+            passages: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+            reason: Some(reason.to_string()),
+            source_url,
+        }
+    }
+}
+
 impl From<&Paper> for McpPaper {
     fn from(paper: &Paper) -> Self {
         Self {
@@ -608,6 +1306,7 @@ struct VaultPapersResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::library::{DocumentBlock, DocumentPage, PaperDraft, PaperSourceDraft};
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::streamable_http_client::{
         StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
@@ -634,14 +1333,83 @@ mod tests {
         ().serve(transport).await.expect("connect MCP client")
     }
 
+    fn paper_draft(id: &str, abstract_text: Option<&str>) -> PaperDraft {
+        PaperDraft {
+            id: id.to_string(),
+            title: format!("Fixture {id}"),
+            authors: vec!["Ada Example".to_string()],
+            venue: "Fixture Journal".to_string(),
+            year: 2026,
+            citations: 0,
+            tags: Vec::new(),
+            status: "saved".to_string(),
+            abstract_text: abstract_text.map(str::to_string),
+            sources: Vec::new(),
+        }
+    }
+
+    fn add_extracted_pdf(store: &LibraryStore, vault_id: &str, paper_id: &str, text: &str) {
+        let source_id = format!("pdf:{paper_id}:fixture");
+        let paper = paper_draft(paper_id, None);
+        store
+            .add_local_pdf_to_vault(
+                &paper,
+                vault_id,
+                &source_id,
+                "file://fixture.pdf",
+                "/tmp/i0i-fixture.pdf",
+            )
+            .expect("add fixture PDF");
+        let extraction = store
+            .start_document_extraction(
+                &source_id,
+                "pdfium_basic",
+                "fixture",
+                &format!("annotation:{source_id}"),
+                false,
+            )
+            .expect("start fixture extraction");
+        store
+            .finish_document_extraction(
+                &extraction.id,
+                &[DocumentPage {
+                    id: format!("page:{paper_id}:0"),
+                    paper_id: paper_id.to_string(),
+                    source_id: source_id.clone(),
+                    extraction_id: extraction.id.clone(),
+                    page_index: 0,
+                    width: 100.0,
+                    height: 100.0,
+                }],
+                &[DocumentBlock {
+                    id: format!("block:{paper_id}:0"),
+                    paper_id: paper_id.to_string(),
+                    source_id,
+                    extraction_id: extraction.id.clone(),
+                    page_index: 0,
+                    block_index: 0,
+                    reading_order: 0,
+                    kind: "paragraph".to_string(),
+                    text: Some(text.to_string()),
+                    asset_id: None,
+                    source_start: Some(0),
+                    source_end: Some(text.chars().count() as i64),
+                    bbox_json: None,
+                }],
+                &[],
+            )
+            .expect("finish fixture extraction");
+    }
+
     #[tokio::test]
     async fn real_client_lists_only_the_granted_vault_and_its_papers() {
         let store = test_store("listing");
         let snapshot = store.get_library().expect("read fixture library");
         let vault = snapshot.vaults.first().expect("seed vault");
-        let server = LocalMcpServer::start(store.clone())
-            .await
-            .expect("start MCP");
+        let server =
+            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
+                .await
+                .expect("start MCP");
         let grant = server
             .issue_grant(
                 &store,
@@ -691,9 +1459,10 @@ mod tests {
         let store = test_store("revoked");
         let snapshot = store.get_library().expect("read fixture library");
         let vault = snapshot.vaults.first().expect("seed vault");
-        let server = LocalMcpServer::start(store.clone())
-            .await
-            .expect("start MCP");
+        let server =
+            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
+                .await
+                .expect("start MCP");
         let grant = server
             .issue_grant(
                 &store,
@@ -720,9 +1489,14 @@ mod tests {
         let store = test_store("cursor");
         let snapshot = store.get_library().expect("read fixture library");
         let vault = snapshot.vaults.first().expect("seed vault");
-        let server = LocalMcpServer::start_with_cursor_ttl(store.clone(), Duration::from_millis(1))
-            .await
-            .expect("start MCP");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            store.clone(),
+            None,
+            None,
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("start MCP");
         let grant = server
             .issue_grant(
                 &store,
@@ -762,5 +1536,204 @@ mod tests {
         }
         client.cancel().await.expect("stop client");
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn real_client_reads_exact_extracted_text_and_resolves_its_reference() {
+        let store = test_store("reader-pdf");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let expected = "Evidence on the first fixture page.";
+        add_extracted_pdf(&store, &vault.id, "paper:reader-fixture", expected);
+        let server =
+            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
+                .await
+                .expect("start MCP");
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                Some("test-run"),
+                [VAULT_GET_PAPER, READER_READ],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+
+        let response = client
+            .call_tool(
+                CallToolRequestParams::new(READER_READ).with_arguments(
+                    serde_json::json!({"paper_id": "paper:reader-fixture", "page_start": 1})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read fixture");
+        let content = response.structured_content.expect("structured result");
+        assert_eq!(content["coverage"], "full_text");
+        assert_eq!(content["passages"][0]["text"], expected);
+        let passage_ref = content["passages"][0]["passageRef"]
+            .as_str()
+            .expect("passage ref");
+        let anchor = server
+            .resolve_passage(passage_ref)
+            .await
+            .expect("resolve passage");
+        assert_eq!(anchor.quote, expected);
+        assert_eq!(anchor.page_start, Some(1));
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reader_reports_abstract_pending_and_failed_sources_honestly() {
+        let store = test_store("reader-states");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let abstract_paper = paper_draft("paper:abstract", Some("Only abstract evidence."));
+        store
+            .add_paper_to_vaults(&abstract_paper, std::slice::from_ref(&vault.id))
+            .expect("add abstract paper");
+        let mut pending_paper = paper_draft("paper:pending", None);
+        pending_paper.sources.push(PaperSourceDraft {
+            source_kind: "pdf".to_string(),
+            source_url: "https://example.test/pending.pdf".to_string(),
+            landing_url: None,
+        });
+        store
+            .add_paper_to_vaults(&pending_paper, std::slice::from_ref(&vault.id))
+            .expect("add pending paper");
+        let pending_source = store
+            .get_document_sources(&pending_paper.id)
+            .expect("pending source")
+            .remove(0);
+        let failed_paper = paper_draft("paper:failed", None);
+        store
+            .add_local_pdf_to_vault(
+                &failed_paper,
+                &vault.id,
+                "pdf:paper:failed:fixture",
+                "https://example.test/failed.pdf",
+                "/tmp/failed.pdf",
+            )
+            .expect("add failed paper");
+        store
+            .set_document_source_failed("pdf:paper:failed:fixture", "publisher denied access")
+            .expect("fail source");
+
+        let handler = I0iMcpHandler::new(store, None, None, DEFAULT_CURSOR_TTL);
+        let saved_abstract = handler
+            .store
+            .get_paper(&abstract_paper.id)
+            .expect("read abstract paper")
+            .expect("abstract paper exists");
+        let abstract_result = handler
+            .abstract_or_unavailable(&saved_abstract)
+            .await
+            .expect("abstract result");
+        assert_eq!(abstract_result.coverage, "abstract_only");
+        assert_eq!(
+            unavailable_or_pending(&pending_source).availability,
+            "pending"
+        );
+        let failed_source = handler
+            .store
+            .get_document_source("pdf:paper:failed:fixture")
+            .expect("failed source");
+        let failed_result = unavailable_or_pending(&failed_source);
+        assert_eq!(failed_result.availability, "unavailable");
+        assert_eq!(
+            failed_result.reason.as_deref(),
+            Some("publisher denied access")
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_paginates_exact_html_text_and_rejects_pdf_page_ranges() {
+        let store = test_store("reader-html");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let paper = paper_draft("paper:html", None);
+        let directory = std::env::temp_dir().join(format!("i0i-html-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&directory).expect("create HTML fixture directory");
+        let html_path = directory.join("source.html");
+        fs::write(&html_path, "<p>fixture</p>").expect("write HTML fixture");
+        let expected = "évidence ".repeat(2_000);
+        fs::write(
+            directory.join("meta.json"),
+            serde_json::json!({"source_text": expected}).to_string(),
+        )
+        .expect("write HTML metadata");
+        store
+            .add_local_html_to_vault(
+                &paper,
+                &vault.id,
+                "html:paper:html:fixture",
+                "https://example.test/article",
+                html_path.to_str().expect("UTF-8 fixture path"),
+            )
+            .expect("add HTML fixture");
+        let server =
+            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
+                .await
+                .expect("start MCP");
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [READER_READ],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+
+        let first = client
+            .call_tool(
+                CallToolRequestParams::new(READER_READ).with_arguments(
+                    serde_json::json!({"paper_id": paper.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read HTML");
+        let first_content = first.structured_content.expect("structured HTML result");
+        assert_eq!(first_content["coverage"], "full_text");
+        assert_eq!(first_content["hasMore"], true);
+        assert!(first_content["nextCursor"].is_string());
+
+        let invalid_range = client
+            .call_tool(
+                CallToolRequestParams::new(READER_READ).with_arguments(
+                    serde_json::json!({"paper_id": paper.id, "page_start": 1})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await;
+        assert!(invalid_range.is_err());
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn reader_text_splitting_uses_character_offsets() {
+        let parts = split_text("aé日z", 2);
+        assert_eq!(parts[0], (0, 2, "aé".to_string()));
+        assert_eq!(parts[1], (2, 4, "日z".to_string()));
+        assert!(validate_page_range(Some(0), None).is_err());
+        assert!(validate_page_range(Some(3), Some(2)).is_err());
     }
 }

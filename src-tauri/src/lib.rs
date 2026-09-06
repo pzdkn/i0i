@@ -35,8 +35,6 @@ pub fn run() {
 
             let store = LibraryStore::new(&app.handle()).map_err(std::io::Error::other)?;
             store.init().map_err(std::io::Error::other)?;
-            let mcp_server = tauri::async_runtime::block_on(LocalMcpServer::start(store.clone()))
-                .map_err(std::io::Error::other)?;
             let highlight_service = services::highlight::HighlightService::new(store.clone());
             let extraction_config = PdfExtractionConfig::load(&app.handle());
             let pdf_extractions = PdfExtractionManager::new(
@@ -66,6 +64,12 @@ pub fn run() {
                 pdf_extractions.clone(),
                 source_acquisition.clone(),
             );
+            let mcp_server = tauri::async_runtime::block_on(LocalMcpServer::start(
+                store.clone(),
+                pdf_downloads.clone(),
+                pdf_extractions.clone(),
+            ))
+            .map_err(std::io::Error::other)?;
             pdf_downloads
                 .recover_and_queue_startup_downloads()
                 .map_err(std::io::Error::other)?;
