@@ -117,8 +117,8 @@ export async function runProjectResearch(projectId: string): Promise<HarnessRun>
   return invoke<HarnessRun>("run_project_research", { projectId });
 }
 
-export async function cancelProjectResearch(projectId: string): Promise<void> {
-  return invoke<void>("cancel_project_research", { projectId });
+export async function cancelProjectResearch(projectId: string): Promise<HarnessRun> {
+  return invoke<HarnessRun>("cancel_project_research", { projectId });
 }
 
 export async function pauseResearchHarness(projectId: string): Promise<HarnessSnapshot> {

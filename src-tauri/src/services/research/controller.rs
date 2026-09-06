@@ -181,22 +181,30 @@ impl ProjectResearchController {
         Ok(run)
     }
 
-    /// Signal the active managed Run for one project; the worker owns cleanup.
-    pub async fn cancel(&self, project_id: &str) -> Result<(), String> {
-        let active = self
+    /// Close one managed Run to new work and interrupt its active workers.
+    pub async fn cancel(&self, project_id: &str) -> Result<HarnessRun, String> {
+        self.cancel_with_reason(project_id, "cancelled_by_user")
+            .await
+    }
+
+    /// Stop managed research before the native app exits.
+    pub async fn shutdown(&self) {
+        let projects: Vec<String> = self
             .active_runs
             .lock()
             .expect("active Research Run lock")
-            .get(project_id)
+            .keys()
             .cloned()
-            .ok_or_else(|| "No Research Run is active for this Project".to_string())?;
-        active.cancellation.cancel();
-        self.store.record_harness_activity(
-            &active.run_id,
-            "cancellation_requested",
-            "Research Run cancellation requested",
-            Some("complete"),
-        )
+            .collect();
+        for project_id in projects {
+            let _ = self
+                .cancel_with_reason(&project_id, "application_shutdown")
+                .await;
+        }
+        if let Some(runtime) = self.runtime.lock().await.take() {
+            let _ = runtime.shutdown().await;
+        }
+        let _ = self.store.recover_interrupted_harness_runs();
     }
 
     async fn execute(
@@ -211,20 +219,37 @@ impl ProjectResearchController {
         if let Err(error) = result {
             eprintln!("[research-controller] run_id={run_id} failed: {error}");
             let bounded_error: String = error.chars().take(500).collect();
-            let _ = self.store.record_harness_activity(
-                &run_id,
-                "agent_failed",
-                &bounded_error,
-                Some("complete"),
-            );
             let finalized = match self.store.get_harness_run(&run_id) {
-                Ok(run) => self
-                    .settle_child_searches(&run.project_id, &run_id)
-                    .await
-                    .and_then(|()| {
-                        self.store
-                            .finish_codex_harness_run(&run_id, "failed", "agent_failed")
-                    }),
+                Ok(run) => {
+                    let cancellation_reason = run.stop_reason.clone();
+                    if run.status != "canceling" {
+                        let _ = self.store.record_harness_activity(
+                            &run_id,
+                            "agent_failed",
+                            &bounded_error,
+                            Some("complete"),
+                        );
+                    }
+                    self.settle_child_searches(&run.project_id, &run_id)
+                        .await
+                        .and_then(|()| {
+                            if run.status == "canceling" {
+                                self.store.finish_codex_harness_run(
+                                    &run_id,
+                                    "cancelled",
+                                    cancellation_reason
+                                        .as_deref()
+                                        .unwrap_or("cancelled_by_user"),
+                                )
+                            } else {
+                                self.store.finish_codex_harness_run(
+                                    &run_id,
+                                    "failed",
+                                    runtime_failure_reason(&error),
+                                )
+                            }
+                        })
+                }
                 Err(store_error) => Err(store_error),
             };
             if finalized.is_err() {
@@ -244,6 +269,15 @@ impl ProjectResearchController {
         cancellation: CancellationToken,
     ) -> Result<(), String> {
         let run = self.store.get_harness_run(run_id)?;
+        if run.status == "canceling" {
+            self.settle_child_searches(&run.project_id, run_id).await?;
+            self.store.finish_codex_harness_run(
+                run_id,
+                "cancelled",
+                run.stop_reason.as_deref().unwrap_or("cancelled_by_user"),
+            )?;
+            return Ok(());
+        }
         let limits = run
             .agent_limits
             .clone()
@@ -310,13 +344,14 @@ impl ProjectResearchController {
                 Ok(TurnCompletion { status: "cancelled".to_string(), final_message: None })
             }
             _ = tokio::time::sleep(Duration::from_secs(limits.maximum_run_seconds)) => {
+                self.cancel_with_reason(&run.project_id, "time_limit").await?;
                 runtime.interrupt(&turn).await?;
                 Ok(TurnCompletion { status: "timed_out".to_string(), final_message: None })
             }
         }?;
 
         self.settle_child_searches(&run.project_id, run_id).await?;
-        let (status, reason) = match completion.status.as_str() {
+        let (status, reason): (&str, String) = match completion.status.as_str() {
             "completed" => {
                 self.store.begin_codex_harness_finalization(run_id)?;
                 match parse_research_outcome(completion.final_message.as_deref())
@@ -332,22 +367,33 @@ impl ProjectResearchController {
                         )?;
                     }
                 }
-                ("ready", "agent_completed")
+                ("ready", "agent_completed".to_string())
             }
-            "interrupted" | "cancelled" => ("cancelled", "cancelled_by_user"),
-            "timed_out" => ("failed", "maximum_run_seconds_reached"),
-            "failed" => ("failed", "agent_failed"),
+            "cancelled" => {
+                let reason = self
+                    .store
+                    .get_harness_run(run_id)?
+                    .stop_reason
+                    .unwrap_or_else(|| "cancelled_by_user".to_string());
+                ("cancelled", reason)
+            }
+            "timed_out" => ("cancelled", "time_limit".to_string()),
+            "interrupted" | "runtime_exited" => ("failed", "agent_process_interrupted".to_string()),
+            "failed" => ("failed", "agent_failed".to_string()),
             other => return Err(format!("Unknown Codex turn status: {other}")),
         };
         self.store
-            .finish_codex_harness_run(run_id, status, reason)?;
+            .finish_codex_harness_run(run_id, status, &reason)?;
         Ok(())
     }
 
     async fn ensure_runtime(&self, config: CodexRuntimeConfig) -> Result<CodexRuntime, String> {
         let mut runtime = self.runtime.lock().await;
         if let Some(existing) = runtime.as_ref() {
-            return Ok(existing.clone());
+            if existing.is_running().await? {
+                return Ok(existing.clone());
+            }
+            *runtime = None;
         }
         let started = CodexRuntime::start(config).await?;
         *runtime = Some(started.clone());
@@ -363,12 +409,9 @@ impl ProjectResearchController {
             .store
             .list_agent_search_runs_for_parent(project_id, parent_run_id)?;
         for child in children.iter().filter(|run| !is_terminal(&run.status)) {
-            let (_, changed) = self
-                .store
+            self.store
                 .request_agent_search_cancel(project_id, &child.id)?;
-            if changed {
-                self.search_manager.cancel_run(&child.id);
-            }
+            self.search_manager.cancel_run(&child.id);
         }
         tokio::time::timeout(Duration::from_secs(CHILD_SETTLE_SECONDS), async {
             loop {
@@ -383,6 +426,49 @@ impl ProjectResearchController {
         })
         .await
         .map_err(|_| "Child searches did not stop before finalization".to_string())?
+    }
+
+    async fn cancel_with_reason(
+        &self,
+        project_id: &str,
+        reason: &str,
+    ) -> Result<HarnessRun, String> {
+        let (run, changed) = self
+            .store
+            .request_codex_harness_cancellation(project_id, reason)?;
+        if !changed {
+            return Ok(run);
+        }
+        self.mcp_server.revoke_run(&run.id).await;
+        self.signal_child_searches(project_id, &run.id)?;
+        if let Some(active) = self
+            .active_runs
+            .lock()
+            .expect("active Research Run lock")
+            .get(project_id)
+            .filter(|active| active.run_id == run.id)
+            .cloned()
+        {
+            active.cancellation.cancel();
+        }
+        let _ = self
+            .app
+            .emit("research_harness_updated", json!({"runId": run.id}));
+        Ok(run)
+    }
+
+    fn signal_child_searches(&self, project_id: &str, parent_run_id: &str) -> Result<(), String> {
+        for child in self
+            .store
+            .list_agent_search_runs_for_parent(project_id, parent_run_id)?
+            .iter()
+            .filter(|run| !is_terminal(&run.status))
+        {
+            self.store
+                .request_agent_search_cancel(project_id, &child.id)?;
+            self.search_manager.cancel_run(&child.id);
+        }
+        Ok(())
     }
 }
 
@@ -462,6 +548,12 @@ async fn wait_for_turn(
     loop {
         match events.recv().await {
             Ok(event) => {
+                if event.method == "runtime/exited" {
+                    return Ok(TurnCompletion {
+                        status: "runtime_exited".to_string(),
+                        final_message: None,
+                    });
+                }
                 if event.method == "item/completed"
                     && event.params["threadId"].as_str() == Some(&turn.thread_id)
                     && event.params["turnId"].as_str() == Some(&turn.turn_id)
@@ -560,6 +652,14 @@ fn observable_activity<'a>(
 
 fn is_terminal(status: &str) -> bool {
     matches!(status, "ready" | "failed" | "cancelled")
+}
+
+fn runtime_failure_reason(error: &str) -> &'static str {
+    if error.contains("app-server closed") || error.contains("interruption timed out") {
+        "agent_process_interrupted"
+    } else {
+        "agent_failed"
+    }
 }
 
 #[cfg(test)]
@@ -663,5 +763,33 @@ mod tests {
         let expected = outcome_json();
         assert_eq!(completion.status, "completed");
         assert_eq!(completion.final_message.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn turn_wait_reports_process_eof_as_interrupted() {
+        let (sender, mut receiver) = broadcast::channel(2);
+        let turn = CodexTurn {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        };
+        sender
+            .send(CodexEvent {
+                method: "runtime/exited".to_string(),
+                params: Value::Null,
+            })
+            .expect("send process exit");
+        let store = LibraryStore::for_test(std::env::temp_dir().join(format!(
+            "i0i-controller-exit-{}.sqlite",
+            uuid::Uuid::new_v4().simple()
+        )));
+
+        let completion = wait_for_turn(&mut receiver, &turn, &store, "unused-run")
+            .await
+            .expect("process exit is observable");
+        assert_eq!(completion.status, "runtime_exited");
+        assert_eq!(
+            runtime_failure_reason("Codex app-server closed its output"),
+            "agent_process_interrupted"
+        );
     }
 }

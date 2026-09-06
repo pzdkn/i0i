@@ -227,6 +227,6 @@ pub async fn stop_research_harness(
 pub async fn cancel_project_research(
     controller: tauri::State<'_, ProjectResearchController>,
     project_id: String,
-) -> Result<(), String> {
+) -> Result<HarnessRun, String> {
     controller.cancel(&project_id).await
 }

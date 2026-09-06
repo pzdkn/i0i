@@ -199,16 +199,32 @@ impl CodexRuntime {
 
     /// Ask Codex to interrupt one active turn.
     pub async fn interrupt(&self, turn: &CodexTurn) -> Result<(), String> {
-        timeout(
+        let interrupted = timeout(
             self.config.interrupt_grace,
             self.request(
                 "turn/interrupt",
                 json!({"threadId": turn.thread_id, "turnId": turn.turn_id}),
             ),
         )
-        .await
-        .map_err(|_| "Codex turn interruption timed out".to_string())??;
-        Ok(())
+        .await;
+        match interrupted {
+            Ok(result) => result.map(|_| ()),
+            Err(_) => {
+                self.shutdown().await?;
+                Err("Codex turn interruption timed out; app-server terminated".to_string())
+            }
+        }
+    }
+
+    /// Report whether the managed child process is still alive.
+    pub async fn is_running(&self) -> Result<bool, String> {
+        self.inner
+            .child
+            .lock()
+            .await
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|error| error.to_string())
     }
 
     /// Stop the managed child and wait for it to exit.
@@ -340,6 +356,10 @@ fn spawn_protocol_reader(
                 Err(error) => eprintln!("[codex-runtime] invalid protocol message: {error}"),
             }
         }
+        let _ = events.send(CodexEvent {
+            method: "runtime/exited".to_string(),
+            params: Value::Null,
+        });
         for (_, sender) in pending.lock().await.drain() {
             let _ = sender.send(Err("Codex app-server closed its output".to_string()));
         }
@@ -415,6 +435,9 @@ fn duration_preference(key: &str, default_seconds: u64) -> Duration {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     #[test]
     fn parses_success_response() {
         let message = parse_protocol_line(r#"{"id":7,"result":{"thread":{"id":"t1"}}}"#)
@@ -467,6 +490,55 @@ mod tests {
     fn quotes_unusual_mcp_names_for_config_overrides() {
         assert_eq!(toml_path_segment("ordinary-name"), "ordinary-name");
         assert_eq!(toml_path_segment("team.reader"), "\"team.reader\"");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonresponsive_interrupt_terminates_the_managed_process() {
+        let executable = std::env::temp_dir().join(format!(
+            "i0i-fake-codex-{}.sh",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$1" = "mcp" ]; then
+  printf '[]'
+  exit 0
+fi
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":1,"result":{}}\n' ;;
+    *'"method":"turn/interrupt"'*) exec sleep 30 ;;
+  esac
+done
+"#,
+        )
+        .expect("write fake Codex");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("read fake Codex metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).expect("make fake Codex executable");
+        let runtime = CodexRuntime::start(CodexRuntimeConfig {
+            executable: executable.clone(),
+            model: "test-model".to_string(),
+            startup_timeout: Duration::from_secs(1),
+            interrupt_grace: Duration::from_millis(25),
+        })
+        .await
+        .expect("start fake Codex");
+
+        let error = runtime
+            .interrupt(&CodexTurn {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            })
+            .await
+            .expect_err("nonresponsive interruption must fail closed");
+        assert!(error.contains("app-server terminated"));
+        assert!(!runtime.is_running().await.expect("inspect child"));
+        std::fs::remove_file(executable).expect("remove fake Codex");
     }
 
     #[tokio::test]

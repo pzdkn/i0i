@@ -23,7 +23,7 @@ use tauri::{Listener, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -36,6 +36,10 @@ pub fn run() {
 
             let store = LibraryStore::new(&app.handle()).map_err(std::io::Error::other)?;
             store.init().map_err(std::io::Error::other)?;
+            // Recover parent Runs before SearchManager inspects child Search work.
+            store
+                .recover_interrupted_harness_runs()
+                .map_err(std::io::Error::other)?;
             let highlight_service = services::highlight::HighlightService::new(store.clone());
             let extraction_config = PdfExtractionConfig::load(&app.handle());
             let pdf_extractions = PdfExtractionManager::new(
@@ -376,6 +380,27 @@ pub fn run() {
             commands::highlight::create_agent_highlight,
             commands::highlight::list_agent_highlights,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    let mut shutdown_started = false;
+    app.run(move |app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+            if shutdown_started {
+                return;
+            }
+            shutdown_started = true;
+            api.prevent_exit();
+            let app_handle = app_handle.clone();
+            let controller = app_handle
+                .state::<ProjectResearchController>()
+                .inner()
+                .clone();
+            let mcp_server = app_handle.state::<LocalMcpServer>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                controller.shutdown().await;
+                mcp_server.shutdown().await;
+                app_handle.exit(code.unwrap_or(0));
+            });
+        }
+    });
 }

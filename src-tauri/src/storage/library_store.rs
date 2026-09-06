@@ -2977,7 +2977,7 @@ impl LibraryStore {
                  where schedule_enabled = 1 and next_run_at <= ?1 and status = 'idle'
                    and not exists (
                      select 1 from harness_runs r where r.project_id = research_harnesses.project_id
-                       and r.status in ('queued','planning','searching','assessing','ranking','reconciling')
+                       and r.status in ('queued','planning','searching','assessing','ranking','reconciling','canceling')
                    )
                  order by next_run_at, project_id limit 1",
                 params![now.to_rfc3339()],
@@ -3038,8 +3038,10 @@ impl LibraryStore {
         let run_ids = {
             let mut statement = tx
                 .prepare(
-                    "select id from harness_runs where status in
-                     ('queued','planning','searching','assessing','ranking') order by id",
+                    "select id from harness_runs
+                     where status in ('queued','planning','searching','assessing','ranking','canceling')
+                        or (status = 'reconciling' and execution_kind = 'codex_agent')
+                     order by id",
                 )
                 .map_err(|error| error.to_string())?;
             let rows = statement
@@ -3051,7 +3053,8 @@ impl LibraryStore {
             let mut statement = tx
                 .prepare(
                     "select id, search_run_id from harness_runs
-                     where status = 'reconciling' and search_run_id is not null order by id",
+                     where status = 'reconciling' and execution_kind != 'codex_agent'
+                       and search_run_id is not null order by id",
                 )
                 .map_err(|error| error.to_string())?;
             let rows = statement
@@ -3063,7 +3066,26 @@ impl LibraryStore {
         };
         for run_id in &run_ids {
             tx.execute(
-                "update harness_runs set status = 'failed', stop_reason = 'application_restarted',
+                "update agent_search_runs set cancel_requested = 1
+                 where parent_run_id = ?1",
+                params![run_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "update search_runs set status = 'cancelled', stop_reason = 'application_restarted',
+                     finished_at = datetime('now')
+                 where id in (select run_id from agent_search_runs where parent_run_id = ?1)
+                   and status not in ('ready','failed','cancelled')",
+                params![run_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "update harness_runs set status = 'failed',
+                 stop_reason = case
+                   when status = 'canceling' and stop_reason is not null then stop_reason
+                   else 'application_restarted'
+                 end,
+                 summary = 'Research Run interrupted; committed work was preserved',
                  finished_at = datetime('now') where id = ?1",
                 params![run_id],
             )
@@ -3071,8 +3093,8 @@ impl LibraryStore {
             append_harness_event(
                 &tx,
                 run_id,
-                "failed",
-                "Application restarted before Run completion",
+                "interrupted",
+                "Application restarted before Research Run completion",
             )?;
         }
         tx.execute(
@@ -3679,6 +3701,54 @@ impl LibraryStore {
         tx.commit().map_err(|error| error.to_string())?;
         let conn = self.open_connection()?;
         read_harness_run(&conn, harness_run_id)
+    }
+
+    /// Close a managed Run to new work and request cancellation of its child Searches.
+    pub fn request_codex_harness_cancellation(
+        &self,
+        project_id: &str,
+        reason: &str,
+    ) -> StoreResult<(HarnessRun, bool)> {
+        let mut conn = self.open_connection()?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let run_id: String = tx
+            .query_row(
+                "select id from harness_runs
+                 where project_id = ?1 and execution_kind = 'codex_agent'
+                 order by started_at desc, id desc limit 1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| format!("Managed Research Run not found for Project: {project_id}"))?;
+        let changed = tx
+            .execute(
+                "update harness_runs set status = 'canceling', stop_reason = ?2
+                 where id = ?1 and status in
+                   ('queued','planning','searching','assessing','ranking','reconciling')",
+                params![run_id, reason],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 1 {
+            tx.execute(
+                "update agent_search_runs set cancel_requested = 1
+                 where parent_run_id = ?1 and cancel_requested = 0",
+                params![run_id],
+            )
+            .map_err(|error| error.to_string())?;
+            append_harness_event(
+                &tx,
+                &run_id,
+                "cancellation_requested",
+                "Research Run cancellation requested",
+            )?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        Ok((read_harness_run(&conn, &run_id)?, changed == 1))
     }
 
     /// Append one public lifecycle observation without storing model reasoning.
@@ -4949,6 +5019,7 @@ impl LibraryStore {
             }
             return serde_json::from_str(&result_json).map_err(|error| error.to_string());
         }
+        require_agent_run_write_admission(&tx, run_id, None)?;
 
         let thread = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
         let entry_id = timestamped_id("entry")?;
@@ -5039,6 +5110,7 @@ impl LibraryStore {
             }
             return serde_json::from_str(&result_json).map_err(|error| error.to_string());
         }
+        require_agent_run_write_admission(&tx, run_id, Some(project_id))?;
         require_current_state_revision(&tx, project_id, base_revision)?;
 
         enum PreparedChange {
@@ -6051,7 +6123,7 @@ impl LibraryStore {
 
             create unique index if not exists idx_harness_runs_one_active
               on harness_runs(project_id)
-              where status in ('queued', 'planning', 'searching', 'assessing', 'ranking', 'reconciling');
+              where status in ('queued', 'planning', 'searching', 'assessing', 'ranking', 'reconciling', 'canceling');
 
             create table if not exists agent_reader_usage (
               run_id text not null,
@@ -7029,7 +7101,7 @@ impl LibraryStore {
         conn.execute_batch(
             "drop index if exists idx_harness_runs_one_active;
              create unique index idx_harness_runs_one_active on harness_runs(project_id)
-               where status in ('queued', 'planning', 'searching', 'assessing', 'ranking', 'reconciling');
+               where status in ('queued', 'planning', 'searching', 'assessing', 'ranking', 'reconciling', 'canceling');
              create unique index if not exists idx_harness_runs_scheduled_occurrence
                on harness_runs(project_id, scheduled_for) where scheduled_for is not null;
              create index if not exists idx_research_harnesses_due
@@ -9580,17 +9652,7 @@ impl LibraryStore {
             return Err("Target Vault is outside this Project".to_string());
         }
         if let Some(parent_run_id) = parent_run_id {
-            let scoped_run: bool = tx
-                .query_row(
-                    "select exists(select 1 from harness_runs
-                     where id = ?1 and project_id = ?2)",
-                    params![parent_run_id, project_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            if !scoped_run {
-                return Err("Parent Research Run is outside this Project".to_string());
-            }
+            require_agent_run_write_admission(&tx, Some(parent_run_id), Some(project_id))?;
         }
         let membership_exists: bool = tx
             .query_row(
@@ -9689,7 +9751,16 @@ impl LibraryStore {
         let tx = conn.transaction().map_err(|error| error.to_string())?;
         let tracked: bool = tx
             .query_row(
-                "select exists(select 1 from agent_search_runs where run_id = ?1)",
+                "select exists(
+                   select 1 from agent_search_runs child
+                   where child.run_id = ?1 and (
+                     child.parent_run_id is null or exists(
+                       select 1 from harness_runs parent
+                       where parent.id = child.parent_run_id and parent.status in
+                         ('queued','planning','searching','assessing','ranking')
+                     )
+                   )
+                 )",
                 params![run_id],
                 |row| row.get(0),
             )
@@ -13774,6 +13845,31 @@ fn validate_outcome_text(label: &str, value: &str, maximum_chars: usize) -> Stor
         return Err(format!(
             "Research outcome {label} must contain 1 to {maximum_chars} characters"
         ));
+    }
+    Ok(())
+}
+
+/// Reject a new managed-agent mutation after cancellation has closed admission.
+fn require_agent_run_write_admission(
+    conn: &Connection,
+    run_id: Option<&str>,
+    project_id: Option<&str>,
+) -> StoreResult<()> {
+    let Some(run_id) = run_id else {
+        return Ok(());
+    };
+    let admitted: bool = conn
+        .query_row(
+            "select exists(select 1 from harness_runs
+             where id = ?1 and execution_kind = 'codex_agent'
+               and (?2 is null or project_id = ?2)
+               and status in ('queued','planning','searching','assessing','ranking'))",
+            params![run_id, project_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !admitted {
+        return Err("Managed Research Run no longer accepts writes".to_string());
     }
     Ok(())
 }
@@ -20129,6 +20225,161 @@ mod tests {
             .create_harness_run("project:attention", &search.id)
             .expect_err("a second active Run must fail atomically")
             .contains("already active"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_cancellation_closes_writes_once_and_preserves_prior_state() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        let child = db.store.create_agent_search_run(
+            "project:attention",
+            "attention",
+            "codex-test",
+            Some(&run.id),
+            "search-before-cancel",
+            "search-before-cancel-payload",
+            None,
+            &quick_agent_search_draft(),
+            2,
+        )?;
+        let committed = db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            Some(&run.id),
+            "before-cancel",
+            "before-cancel-payload",
+            vec![agent_question("known-gap", "What remains uncertain?")],
+        )?;
+        assert_eq!(committed.revision, 1);
+
+        let (canceling, changed) = db
+            .store
+            .request_codex_harness_cancellation("project:attention", "cancelled_by_user")?;
+        assert!(changed);
+        assert_eq!(canceling.status, "canceling");
+        let (_, repeated) = db
+            .store
+            .request_codex_harness_cancellation("project:attention", "cancelled_by_user")?;
+        assert!(!repeated);
+        assert!(
+            db.store
+                .get_agent_search_run("project:attention", &child.run_id)?
+                .1
+        );
+        assert!(db
+            .store
+            .create_agent_search_run(
+                "project:attention",
+                "attention",
+                "codex-test",
+                Some(&run.id),
+                "search-after-cancel",
+                "search-after-cancel-payload",
+                None,
+                &quick_agent_search_draft(),
+                2,
+            )
+            .expect_err("canceled Runs must reject new child Searches")
+            .contains("no longer active"));
+        assert!(db
+            .store
+            .apply_agent_state_update(
+                "project:attention",
+                1,
+                "codex-test",
+                Some(&run.id),
+                "after-cancel",
+                "after-cancel-payload",
+                vec![agent_question("late-gap", "Should this be rejected?")],
+            )
+            .expect_err("canceled Runs must reject new State writes")
+            .contains("no longer accepts writes"));
+        assert!(db
+            .store
+            .add_agent_note_idempotent(
+                "paper",
+                "vaswani2017",
+                &ThreadAnchor::Document,
+                "Late note",
+                "codex-test",
+                Some(&run.id),
+                "late-note",
+                "late-note-payload",
+            )
+            .expect_err("canceled Runs must reject new notes")
+            .contains("no longer accepts writes"));
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .current_revision,
+            1
+        );
+        let events = db.store.get_harness_snapshot("project:attention")?.events;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.run_id == run.id && event.kind == "cancellation_requested")
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_completion_wins_over_a_late_cancel() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+
+        let (completed, changed) = db
+            .store
+            .request_codex_harness_cancellation("project:attention", "cancelled_by_user")?;
+        assert!(!changed);
+        assert_eq!(completed.status, "ready");
+        assert!(!db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .events
+            .iter()
+            .any(|event| event.run_id == run.id && event.kind == "cancellation_requested"));
+        Ok(())
+    }
+
+    #[test]
+    fn restart_interrupts_managed_finalization_and_keeps_saved_sources() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        let source_ids_before: Vec<String> = db
+            .store
+            .get_document_sources("vaswani2017")?
+            .into_iter()
+            .map(|source| source.id)
+            .collect();
+
+        assert_eq!(db.store.recover_interrupted_harness_runs()?, 1);
+        let recovered = db.store.get_harness_run(&run.id)?;
+        assert_eq!(recovered.status, "failed");
+        assert_eq!(
+            recovered.stop_reason.as_deref(),
+            Some("application_restarted")
+        );
+        let source_ids_after: Vec<String> = db
+            .store
+            .get_document_sources("vaswani2017")?
+            .into_iter()
+            .map(|source| source.id)
+            .collect();
+        assert_eq!(source_ids_after, source_ids_before);
+        assert!(db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .events
+            .iter()
+            .any(|event| event.run_id == run.id && event.kind == "interrupted"));
         Ok(())
     }
 

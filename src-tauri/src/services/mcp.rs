@@ -3703,7 +3703,7 @@ mod tests {
                 &ThreadAnchor::Document,
                 "Agent note",
                 "codex-test",
-                Some("run-1"),
+                None,
                 "request-1",
                 "hash-1",
             )
@@ -3715,7 +3715,7 @@ mod tests {
                 &ThreadAnchor::Document,
                 "Agent note",
                 "codex-test",
-                Some("run-1"),
+                None,
                 "request-1",
                 "hash-1",
             )
@@ -3728,7 +3728,7 @@ mod tests {
                 &ThreadAnchor::Document,
                 "Different note",
                 "codex-test",
-                Some("run-1"),
+                None,
                 "request-1",
                 "different-hash",
             )
@@ -3741,7 +3741,7 @@ mod tests {
         assert_eq!(view.entries.len(), 2);
         assert_eq!(view.entries[0].author_kind, "user");
         assert_eq!(view.entries[1].author_kind, "agent");
-        assert_eq!(view.entries[1].run_id.as_deref(), Some("run-1"));
+        assert_eq!(view.entries[1].run_id, None);
     }
 
     #[tokio::test]
