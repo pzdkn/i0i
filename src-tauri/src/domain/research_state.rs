@@ -207,6 +207,8 @@ pub struct ResearchEvidenceLink {
     pub page_start: i32,
     pub page_end: i32,
     pub support_note: Option<String>,
+    /// How the evidence bears on the statement; legacy rows are `unspecified`.
+    pub relationship: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

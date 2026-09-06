@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
@@ -87,6 +87,33 @@ pub struct AnchoredThreadWrite {
 pub struct AgentNoteReceipt {
     pub thread_id: String,
     pub entry_id: String,
+}
+
+/// One validated operation in an agent-authored State commit.
+pub enum AgentStateChange {
+    Create {
+        operation_key: String,
+        draft: ResearchEntryDraft,
+        evidence_relationships: Vec<String>,
+    },
+    Revise {
+        update: ResearchEntryUpdate,
+        evidence_relationships: Vec<String>,
+    },
+    SetLifecycle {
+        entry_id: String,
+        lifecycle: EntryLifecycle,
+        reason: String,
+    },
+}
+
+/// Stable result of one idempotent State batch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStateUpdateReceipt {
+    pub revision: i64,
+    pub affected_entry_ids: Vec<String>,
+    pub created_entry_ids: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -664,6 +691,29 @@ impl LibraryStore {
     pub fn chunks_for_extraction(&self, extraction_id: &str) -> StoreResult<Vec<DocumentChunk>> {
         let conn = self.open_connection()?;
         read_chunks(&conn, "where c.extraction_id = ?1", params![extraction_id])
+    }
+
+    /// Materialize a saved paper's provider abstract as typed, citable evidence.
+    pub fn materialize_paper_abstract(&self, paper_id: &str) -> StoreResult<DocumentChunk> {
+        let conn = self.open_connection()?;
+        let abstract_text: String = conn
+            .query_row(
+                "select abstract from papers where id = ?1 and abstract is not null",
+                params![paper_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                    format!("Paper has no abstract: {paper_id}")
+                } else {
+                    error.to_string()
+                }
+            })?;
+        let chunk_id = materialize_metadata_abstract_text(&conn, paper_id, &abstract_text, None)?;
+        read_chunks(&conn, "where c.id = ?1", params![chunk_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("Materialized abstract chunk was not found: {paper_id}"))
     }
 
     /// Extractions that are ready but whose chunks predate the current chunker
@@ -4375,6 +4425,237 @@ impl LibraryStore {
         Ok(receipt)
     }
 
+    /// Return a prior State update result, rejecting a changed retry payload.
+    pub fn find_agent_state_update_receipt(
+        &self,
+        caller: &str,
+        request_id: &str,
+        payload_hash: &str,
+    ) -> StoreResult<Option<AgentStateUpdateReceipt>> {
+        let conn = self.open_connection()?;
+        let existing: Option<(String, String)> = conn
+            .query_row(
+                "select payload_hash, result_json from mcp_mutation_receipts
+                 where caller = ?1 and tool = 'state_update' and request_id = ?2",
+                params![caller, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some((existing_hash, result_json)) = existing else {
+            return Ok(None);
+        };
+        if existing_hash != payload_hash {
+            return Err("Request ID was already used with a different payload".to_string());
+        }
+        serde_json::from_str(&result_json)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Apply a bounded agent State batch as one revision and one retry receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_agent_state_update(
+        &self,
+        project_id: &str,
+        base_revision: i64,
+        caller: &str,
+        run_id: Option<&str>,
+        request_id: &str,
+        payload_hash: &str,
+        changes: Vec<AgentStateChange>,
+    ) -> StoreResult<AgentStateUpdateReceipt> {
+        const TOOL: &str = "state_update";
+        if changes.is_empty() || changes.len() > 20 {
+            return Err("State update must contain between 1 and 20 changes".to_string());
+        }
+        let mut conn = self.open_connection()?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "select payload_hash, result_json from mcp_mutation_receipts
+                 where caller = ?1 and tool = ?2 and request_id = ?3",
+                params![caller, TOOL, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((existing_hash, result_json)) = existing {
+            if existing_hash != payload_hash {
+                return Err("Request ID was already used with a different payload".to_string());
+            }
+            return serde_json::from_str(&result_json).map_err(|error| error.to_string());
+        }
+        require_current_state_revision(&tx, project_id, base_revision)?;
+
+        enum PreparedChange {
+            Create(String, String, ResearchEntryDraft, Vec<String>),
+            Revise(ResearchEntryUpdate, ResearchEntryDraft, Vec<String>),
+            Lifecycle(String, EntryLifecycle, ResearchEntryDraft),
+        }
+        let mut prepared = Vec::new();
+        let mut operation_keys = std::collections::HashSet::new();
+        for change in changes {
+            match change {
+                AgentStateChange::Create {
+                    operation_key,
+                    draft,
+                    evidence_relationships,
+                } => {
+                    if operation_key.trim().is_empty()
+                        || !operation_keys.insert(operation_key.clone())
+                    {
+                        return Err(
+                            "Create operation keys must be non-empty and unique".to_string()
+                        );
+                    }
+                    validate_evidence_relationships(&draft, &evidence_relationships)?;
+                    validate_research_entry_draft(&tx, project_id, &draft)?;
+                    prepared.push(PreparedChange::Create(
+                        operation_key,
+                        timestamped_id("research_entry")?,
+                        draft,
+                        evidence_relationships,
+                    ));
+                }
+                AgentStateChange::Revise {
+                    update,
+                    evidence_relationships,
+                } => {
+                    let current = read_current_research_entry(&tx, &update.id)?;
+                    if current.project_id != project_id {
+                        return Err(format!(
+                            "Research Entry is outside this Project: {}",
+                            update.id
+                        ));
+                    }
+                    let draft = ResearchEntryDraft {
+                        kind: current.kind,
+                        epistemic_status: update.epistemic_status,
+                        text: update.text.clone(),
+                        evidence: update.evidence.clone(),
+                        relations: update.relations.clone(),
+                        context: update.context.clone(),
+                        reason: update.reason.clone(),
+                    };
+                    validate_evidence_relationships(&draft, &evidence_relationships)?;
+                    validate_research_entry_draft(&tx, project_id, &draft)?;
+                    prepared.push(PreparedChange::Revise(
+                        update,
+                        draft,
+                        evidence_relationships,
+                    ));
+                }
+                AgentStateChange::SetLifecycle {
+                    entry_id,
+                    lifecycle,
+                    reason,
+                } => {
+                    let current = read_current_research_entry(&tx, &entry_id)?;
+                    if current.project_id != project_id || reason.trim().is_empty() {
+                        return Err(
+                            "Lifecycle change requires a scoped entry and reason".to_string()
+                        );
+                    }
+                    let detail =
+                        read_research_entry_detail_from_conn(&tx, &entry_id, Some(base_revision))?;
+                    prepared.push(PreparedChange::Lifecycle(
+                        entry_id,
+                        lifecycle,
+                        research_entry_draft_from_detail(&detail, &reason),
+                    ));
+                }
+            }
+        }
+
+        let revision = base_revision + 1;
+        insert_state_revision(
+            &tx,
+            project_id,
+            revision,
+            run_id,
+            "Agent Research State update",
+        )?;
+        let mut affected_entry_ids = Vec::new();
+        let mut created_entry_ids = HashMap::new();
+        for change in prepared {
+            match change {
+                PreparedChange::Create(key, entry_id, draft, relationships) => {
+                    insert_new_research_entry(
+                        &tx, &entry_id, project_id, revision, run_id, &draft,
+                    )?;
+                    set_evidence_relationships(&tx, &entry_id, revision, &relationships)?;
+                    created_entry_ids.insert(key, entry_id.clone());
+                    affected_entry_ids.push(entry_id);
+                }
+                PreparedChange::Revise(update, draft, relationships) => {
+                    let current = read_current_research_entry(&tx, &update.id)?;
+                    insert_research_entry_version(
+                        &tx,
+                        &update.id,
+                        project_id,
+                        revision,
+                        current.lifecycle,
+                        run_id,
+                        &draft,
+                    )?;
+                    set_evidence_relationships(&tx, &update.id, revision, &relationships)?;
+                    tx.execute(
+                        "update research_entries set epistemic_status = ?2, text = ?3,
+                         last_revision = ?4, updated_at = datetime('now') where id = ?1",
+                        params![
+                            update.id,
+                            update.epistemic_status.as_str(),
+                            update.text.trim(),
+                            revision
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                    affected_entry_ids.push(update.id);
+                }
+                PreparedChange::Lifecycle(entry_id, lifecycle, draft) => {
+                    let current = read_current_research_entry(&tx, &entry_id)?;
+                    insert_research_entry_version(
+                        &tx,
+                        &entry_id,
+                        project_id,
+                        revision,
+                        lifecycle,
+                        run_id.or(current.origin_run_id.as_deref()),
+                        &draft,
+                    )?;
+                    tx.execute(
+                        "update research_entries set lifecycle = ?2, last_revision = ?3,
+                         updated_at = datetime('now') where id = ?1",
+                        params![entry_id, lifecycle.as_str(), revision],
+                    )
+                    .map_err(|error| error.to_string())?;
+                    affected_entry_ids.push(entry_id);
+                }
+            }
+        }
+        set_current_state_revision(&tx, project_id, revision)?;
+        let receipt = AgentStateUpdateReceipt {
+            revision,
+            affected_entry_ids,
+            created_entry_ids,
+        };
+        let result_json = serde_json::to_string(&receipt).map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into mcp_mutation_receipts
+               (caller, tool, request_id, payload_hash, result_json, created_at)
+             values (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![caller, TOOL, request_id, payload_hash, result_json],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(receipt)
+    }
+
     /// Persist a completed ask turn at an anchor, creating the thread lazily.
     ///
     /// The thread (created or reused, like [`Self::add_note_at_anchor`]), the
@@ -5386,6 +5667,7 @@ impl LibraryStore {
               page_start integer not null,
               page_end integer not null,
               support_note text,
+              relationship text not null default 'unspecified',
               foreign key (entry_id, state_revision)
                 references research_entry_revisions(entry_id, state_revision) on delete cascade,
               foreign key (paper_id) references papers(id) on delete cascade
@@ -5937,6 +6219,12 @@ impl LibraryStore {
         )?;
         add_column_if_missing(conn, "chat_entries", "author_id", "text")?;
         add_column_if_missing(conn, "chat_entries", "run_id", "text")?;
+        add_column_if_missing(
+            conn,
+            "research_evidence_links",
+            "relationship",
+            "text not null default 'unspecified'",
+        )?;
         add_column_if_missing(conn, "vaults", "project_id", "text")?;
         add_column_if_missing(
             conn,
@@ -10216,13 +10504,27 @@ fn materialize_metadata_abstract(
         .abstract_text
         .as_deref()
         .ok_or_else(|| format!("Candidate has no abstract: {}", candidate.id))?;
+    materialize_metadata_abstract_text(
+        conn,
+        &paper.id,
+        abstract_text,
+        paper.external_url.as_deref(),
+    )
+}
+
+fn materialize_metadata_abstract_text(
+    conn: &Connection,
+    paper_id: &str,
+    abstract_text: &str,
+    external_url: Option<&str>,
+) -> StoreResult<String> {
     let digest = format!("{:x}", Sha256::digest(abstract_text.as_bytes()));
     let suffix = &digest[..16];
-    let source_id = format!("metadata_abstract:{}:{suffix}", paper.id);
-    let extraction_id = format!("metadata_abstract_extraction:{}:{suffix}", paper.id);
-    let page_id = format!("metadata_abstract_page:{}:{suffix}", paper.id);
-    let block_id = format!("metadata_abstract_block:{}:{suffix}", paper.id);
-    let chunk_id = format!("metadata_abstract_chunk:{}:{suffix}", paper.id);
+    let source_id = format!("metadata_abstract:{paper_id}:{suffix}");
+    let extraction_id = format!("metadata_abstract_extraction:{paper_id}:{suffix}");
+    let page_id = format!("metadata_abstract_page:{paper_id}:{suffix}");
+    let block_id = format!("metadata_abstract_block:{paper_id}:{suffix}");
+    let chunk_id = format!("metadata_abstract_chunk:{paper_id}:{suffix}");
     conn.execute(
         "insert into document_sources (
            id, paper_id, source_kind, source_url, landing_url, final_url,
@@ -10230,7 +10532,7 @@ fn materialize_metadata_abstract(
          ) values (?1, ?2, 'metadata_abstract', ?3, ?4, ?3, 'provider_metadata',
                    null, 'cached', null, datetime('now'), datetime('now'))
          on conflict(id) do nothing",
-        params![source_id, paper.id, paper.external_url, paper.external_url],
+        params![source_id, paper_id, external_url, external_url],
     )
     .map_err(|error| error.to_string())?;
     conn.execute(
@@ -10240,7 +10542,7 @@ fn materialize_metadata_abstract(
          ) values (?1, ?2, ?3, 'metadata_abstract', '1', ?3, 'ready', null,
                    datetime('now'), datetime('now'))
          on conflict(id) do nothing",
-        params![extraction_id, paper.id, source_id],
+        params![extraction_id, paper_id, source_id],
     )
     .map_err(|error| error.to_string())?;
     let exists: bool = conn
@@ -10256,7 +10558,7 @@ fn materialize_metadata_abstract(
             "insert into document_pages
              (id, paper_id, source_id, extraction_id, page_index, width, height)
              values (?1, ?2, ?3, ?4, 0, 1, 1)",
-            params![page_id, paper.id, source_id, extraction_id],
+            params![page_id, paper_id, source_id, extraction_id],
         )
         .map_err(|error| error.to_string())?;
         conn.execute(
@@ -10266,7 +10568,7 @@ fn materialize_metadata_abstract(
              ) values (?1, ?2, ?3, ?4, 0, 0, 0, 'abstract', ?5, null, 0, ?6, null)",
             params![
                 block_id,
-                paper.id,
+                paper_id,
                 source_id,
                 extraction_id,
                 abstract_text,
@@ -10278,7 +10580,7 @@ fn materialize_metadata_abstract(
             conn,
             &[DocumentChunk {
                 id: chunk_id.clone(),
-                paper_id: paper.id.clone(),
+                paper_id: paper_id.to_string(),
                 source_id: source_id.clone(),
                 extraction_id: extraction_id.clone(),
                 chunk_index: 0,
@@ -10299,7 +10601,7 @@ fn materialize_metadata_abstract(
         "update papers set active_source_id = coalesce(active_source_id, ?2),
          active_extraction_id = coalesce(active_extraction_id, ?3), updated_at = datetime('now')
          where id = ?1",
-        params![paper.id, source_id, extraction_id],
+        params![paper_id, source_id, extraction_id],
     )
     .map_err(|error| error.to_string())?;
     Ok(chunk_id)
@@ -11258,6 +11560,49 @@ fn validate_research_entry_draft(
     Ok(())
 }
 
+fn validate_evidence_relationships(
+    draft: &ResearchEntryDraft,
+    relationships: &[String],
+) -> StoreResult<()> {
+    if relationships.len() != draft.evidence.len() {
+        return Err("Every evidence link requires one relationship".to_string());
+    }
+    if relationships.iter().any(|value| {
+        !matches!(
+            value.as_str(),
+            "supports" | "contradicts" | "context" | "unspecified"
+        )
+    }) {
+        return Err(
+            "Evidence relationship must be supports, contradicts, context, or unspecified"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn set_evidence_relationships(
+    conn: &Connection,
+    entry_id: &str,
+    revision: i64,
+    relationships: &[String],
+) -> StoreResult<()> {
+    for (index, relationship) in relationships.iter().enumerate() {
+        conn.execute(
+            "update research_evidence_links set relationship = ?4
+             where id = ?1 and entry_id = ?2 and state_revision = ?3",
+            params![
+                format!("{entry_id}:r{revision}:e{index}"),
+                entry_id,
+                revision,
+                relationship
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn validate_research_context(
     conn: &Connection,
     project_id: &str,
@@ -11684,7 +12029,7 @@ fn read_research_entry_detail_from_conn(
         .prepare(
             "select id, entry_id, state_revision, paper_id, source_id, extraction_id,
                     chunk_id, excerpt, source_start, source_end, page_start, page_end,
-                    support_note
+                    support_note, relationship
              from research_evidence_links where entry_id = ?1 and state_revision = ?2
              order by id",
         )
@@ -11705,6 +12050,7 @@ fn read_research_entry_detail_from_conn(
                 page_start: row.get(10)?,
                 page_end: row.get(11)?,
                 support_note: row.get(12)?,
+                relationship: row.get(13)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -12719,6 +13065,22 @@ mod tests {
         store.init()?;
 
         Ok(TestDb { store, dir })
+    }
+
+    fn agent_question(operation_key: &str, text: &str) -> AgentStateChange {
+        AgentStateChange::Create {
+            operation_key: operation_key.to_string(),
+            draft: ResearchEntryDraft {
+                kind: ResearchEntryKind::Question,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: text.to_string(),
+                evidence: Vec::new(),
+                relations: Vec::new(),
+                context: Vec::new(),
+                reason: Some("Agent State test".to_string()),
+            },
+            evidence_relationships: Vec::new(),
+        }
     }
 
     fn seed_harness_improvement(db: &TestDb, signature: &str) -> StoreResult<String> {
@@ -14744,6 +15106,179 @@ mod tests {
                 .lifecycle,
             EntryLifecycle::Active
         );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_state_update_is_atomic_and_idempotent() -> StoreResult<()> {
+        let db = test_db()?;
+        let invalid_batch = vec![
+            agent_question("valid", "Which mechanism explains the result?"),
+            agent_question("invalid", ""),
+        ];
+        db.store
+            .apply_agent_state_update(
+                "project:attention",
+                0,
+                "codex-test",
+                None,
+                "invalid-batch",
+                "invalid-hash",
+                invalid_batch,
+            )
+            .expect_err("one invalid operation must reject the batch");
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            0
+        );
+
+        let first = db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            None,
+            "request-1",
+            "payload-a",
+            vec![agent_question(
+                "question",
+                "Which mechanism explains the result?",
+            )],
+        )?;
+        let retry = db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            None,
+            "request-1",
+            "payload-a",
+            vec![agent_question(
+                "question",
+                "Which mechanism explains the result?",
+            )],
+        )?;
+        assert_eq!(first.revision, retry.revision);
+        assert_eq!(first.created_entry_ids, retry.created_entry_ids);
+
+        let changed_retry = db
+            .store
+            .apply_agent_state_update(
+                "project:attention",
+                0,
+                "codex-test",
+                None,
+                "request-1",
+                "payload-b",
+                vec![agent_question("question", "A different question")],
+            )
+            .expect_err("a request id cannot be reused for another payload");
+        assert!(changed_retry.contains("different payload"));
+        let reopened = LibraryStore::for_test(db.store.db_path.clone());
+        let state = reopened.get_research_state("project:attention", None)?;
+        assert_eq!(state.revision, 1);
+        assert_eq!(state.entries.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_agent_state_updates_allow_one_revision() -> StoreResult<()> {
+        let db = test_db()?;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = ["first", "second"].map(|request_id| {
+            let store = db.store.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.apply_agent_state_update(
+                    "project:attention",
+                    0,
+                    "codex-test",
+                    None,
+                    request_id,
+                    request_id,
+                    vec![agent_question(
+                        request_id,
+                        "What should we investigate next?",
+                    )],
+                )
+            })
+        });
+        let results = handles.map(|handle| handle.join().expect("State writer panicked"));
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let conflict = results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .expect("one writer must conflict");
+        assert!(conflict.contains("expected revision 0, current revision is 1"));
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .revision,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_state_update_revises_content_and_lifecycle_without_changing_kind() -> StoreResult<()> {
+        let db = test_db()?;
+        let created = db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            None,
+            "create-question",
+            "create-question",
+            vec![agent_question(
+                "question",
+                "What explains the observed behavior?",
+            )],
+        )?;
+        let entry_id = created.created_entry_ids["question"].clone();
+
+        db.store.apply_agent_state_update(
+            "project:attention",
+            1,
+            "codex-test",
+            None,
+            "revise-question",
+            "revise-question",
+            vec![AgentStateChange::Revise {
+                update: ResearchEntryUpdate {
+                    id: entry_id.clone(),
+                    epistemic_status: EpistemicStatus::Speculative,
+                    text: "Under which conditions does the behavior occur?".to_string(),
+                    evidence: Vec::new(),
+                    relations: Vec::new(),
+                    context: Vec::new(),
+                    reason: Some("Narrow the question".to_string()),
+                },
+                evidence_relationships: Vec::new(),
+            }],
+        )?;
+        db.store.apply_agent_state_update(
+            "project:attention",
+            2,
+            "codex-test",
+            None,
+            "contest-question",
+            "contest-question",
+            vec![AgentStateChange::SetLifecycle {
+                entry_id: entry_id.clone(),
+                lifecycle: EntryLifecycle::Contested,
+                reason: "The premise is now disputed".to_string(),
+            }],
+        )?;
+
+        let detail = db.store.get_research_entry(&entry_id, None)?;
+        assert_eq!(detail.entry.kind, ResearchEntryKind::Question);
+        assert_eq!(detail.entry.lifecycle, EntryLifecycle::Contested);
+        assert_eq!(
+            detail.entry.text,
+            "Under which conditions does the behavior occur?"
+        );
+        assert_eq!(detail.history.len(), 3);
         Ok(())
     }
 

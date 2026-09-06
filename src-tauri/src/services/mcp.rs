@@ -30,9 +30,13 @@ use uuid::Uuid;
 use crate::domain::chat::{ChatEntry, ThreadAnchor, ENTRY_NOTE};
 use crate::domain::highlight::HighlightAuthor;
 use crate::domain::library::{DocumentChunk, DocumentSource, LibrarySnapshot, Paper, Vault};
+use crate::domain::research_state::{
+    EntryLifecycle, EntryRelationDraft, EntryRelationKind, EpistemicStatus, EvidenceLinkDraft,
+    ResearchEntryDraft, ResearchEntryKind, ResearchEntryUpdate,
+};
 use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
-use crate::storage::library_store::LibraryStore;
+use crate::storage::library_store::{AgentStateChange, LibraryStore};
 use tauri::{AppHandle, Emitter};
 
 const DEFAULT_PAGE_SIZE: usize = 25;
@@ -48,6 +52,7 @@ pub const READER_READ: &str = "reader_read";
 pub const READER_ADD_NOTE: &str = "reader_add_note";
 pub const READER_LIST_NOTES: &str = "reader_list_notes";
 pub const STATE_READ: &str = "state_read";
+pub const STATE_UPDATE: &str = "state_update";
 
 /// Caller identity and scope established by an opaque local credential.
 #[derive(Debug, Clone)]
@@ -773,6 +778,238 @@ impl I0iMcpHandler {
         }
     }
 
+    /// Commit a bounded, evidence-validated State batch as one revision.
+    #[tool(description = "Create, revise, or change lifecycle of i0i Research State entries")]
+    async fn state_update(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<StateUpdateInput>,
+    ) -> Result<Json<StateUpdateResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, STATE_UPDATE)?;
+        if input.project_id != grant.project_id {
+            return Err(out_of_scope());
+        }
+        if input.changes.is_empty() || input.changes.len() > 20 {
+            return Err(invalid_input(
+                "changes must contain between 1 and 20 operations",
+            ));
+        }
+        let request_id = input.request_id.trim();
+        if request_id.is_empty() {
+            return Err(invalid_input("request_id must not be empty"));
+        }
+        let payload_hash = sha256(
+            &serde_json::to_string(&input).map_err(|error| internal_failure(error.to_string()))?,
+        );
+        if let Some(receipt) = self
+            .store
+            .find_agent_state_update_receipt(&grant.caller, request_id, &payload_hash)
+            .map_err(state_write_failure)?
+        {
+            trace_tool(
+                &grant,
+                STATE_UPDATE,
+                started,
+                "retry",
+                receipt.affected_entry_ids.len(),
+            );
+            return Ok(Json(StateUpdateResult {
+                revision: receipt.revision,
+                affected_entry_ids: receipt.affected_entry_ids,
+                created_entry_ids: receipt.created_entry_ids,
+            }));
+        }
+        let mut changes = Vec::with_capacity(input.changes.len());
+        for change in input.changes {
+            changes.push(
+                self.prepare_state_change(&grant, &grant_token, change)
+                    .await?,
+            );
+        }
+        let receipt = self
+            .store
+            .apply_agent_state_update(
+                &grant.project_id,
+                input.base_revision,
+                &grant.caller,
+                grant.run_id.as_deref(),
+                request_id,
+                &payload_hash,
+                changes,
+            )
+            .map_err(state_write_failure)?;
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                "research_state_updated",
+                serde_json::json!({
+                    "projectId": grant.project_id,
+                    "revision": receipt.revision,
+                }),
+            );
+        }
+        trace_tool(
+            &grant,
+            STATE_UPDATE,
+            started,
+            "ok",
+            receipt.affected_entry_ids.len(),
+        );
+        Ok(Json(StateUpdateResult {
+            revision: receipt.revision,
+            affected_entry_ids: receipt.affected_entry_ids,
+            created_entry_ids: receipt.created_entry_ids,
+        }))
+    }
+
+    async fn prepare_state_change(
+        &self,
+        grant: &McpCallContext,
+        grant_token: &str,
+        change: StateChangeInput,
+    ) -> Result<AgentStateChange, rmcp::ErrorData> {
+        match change {
+            StateChangeInput::Create {
+                operation_key,
+                kind,
+                statement,
+                epistemic_status,
+                evidence,
+                relationships,
+                reason,
+            } => {
+                let reason = validate_state_reason(reason)?;
+                let (evidence, evidence_relationships) = self
+                    .prepare_state_evidence(grant, grant_token, None, evidence)
+                    .await?;
+                Ok(AgentStateChange::Create {
+                    operation_key,
+                    draft: ResearchEntryDraft {
+                        kind: parse_minimal_kind(&kind)?,
+                        epistemic_status: parse_epistemic_status(&epistemic_status)?,
+                        text: statement,
+                        evidence,
+                        relations: parse_state_relations(relationships)?,
+                        context: Vec::new(),
+                        reason: Some(reason),
+                    },
+                    evidence_relationships,
+                })
+            }
+            StateChangeInput::Revise {
+                entry_id,
+                statement,
+                epistemic_status,
+                evidence,
+                relationships,
+                reason,
+            } => {
+                let reason = validate_state_reason(reason)?;
+                let (evidence, evidence_relationships) = self
+                    .prepare_state_evidence(grant, grant_token, Some(&entry_id), evidence)
+                    .await?;
+                Ok(AgentStateChange::Revise {
+                    update: ResearchEntryUpdate {
+                        id: entry_id,
+                        epistemic_status: parse_epistemic_status(&epistemic_status)?,
+                        text: statement,
+                        evidence,
+                        relations: parse_state_relations(relationships)?,
+                        context: Vec::new(),
+                        reason: Some(reason),
+                    },
+                    evidence_relationships,
+                })
+            }
+            StateChangeInput::SetLifecycle {
+                entry_id,
+                lifecycle,
+                reason,
+            } => Ok(AgentStateChange::SetLifecycle {
+                entry_id,
+                lifecycle: EntryLifecycle::parse(&lifecycle).map_err(|_| {
+                    invalid_input("lifecycle must be active, contested, or superseded")
+                })?,
+                reason: validate_state_reason(reason)?,
+            }),
+        }
+    }
+
+    async fn prepare_state_evidence(
+        &self,
+        grant: &McpCallContext,
+        grant_token: &str,
+        revised_entry_id: Option<&str>,
+        evidence: Vec<StateEvidenceInput>,
+    ) -> Result<(Vec<EvidenceLinkDraft>, Vec<String>), rmcp::ErrorData> {
+        let snapshot = self.snapshot()?;
+        let retained = revised_entry_id
+            .map(|entry_id| self.store.get_research_entry(entry_id, None))
+            .transpose()
+            .map_err(internal_failure)?;
+        if retained
+            .as_ref()
+            .is_some_and(|detail| detail.entry.project_id != grant.project_id)
+        {
+            return Err(out_of_scope());
+        }
+        let mut drafts = Vec::new();
+        let mut relationships = Vec::new();
+        for item in evidence {
+            match item {
+                StateEvidenceInput::Passage {
+                    passage_ref,
+                    relationship,
+                    explanation,
+                } => {
+                    validate_evidence_relationship(&relationship)?;
+                    let explanation = explanation.trim().to_string();
+                    if explanation.is_empty() {
+                        return Err(invalid_input("Evidence explanation must not be empty"));
+                    }
+                    let passage = self
+                        .passage_anchors
+                        .read()
+                        .await
+                        .get(&passage_ref)
+                        .filter(|registered| registered.grant_token == grant_token)
+                        .map(|registered| registered.anchor.clone())
+                        .ok_or_else(|| {
+                            invalid_input("Evidence passage is stale or out of scope")
+                        })?;
+                    let paper = Self::scoped_paper(&snapshot, grant, &passage.paper_id)?;
+                    validate_passage_anchor(&snapshot, paper, &passage)?;
+                    let chunk_id = passage
+                        .chunk_id
+                        .ok_or_else(|| invalid_input("Passage has no citable source chunk"))?;
+                    drafts.push(EvidenceLinkDraft {
+                        chunk_id,
+                        excerpt: Some(passage.quote),
+                        support_note: Some(explanation),
+                    });
+                    relationships.push(relationship);
+                }
+                StateEvidenceInput::Retain { evidence_id } => {
+                    let link = retained
+                        .as_ref()
+                        .and_then(|detail| {
+                            detail.evidence.iter().find(|link| link.id == evidence_id)
+                        })
+                        .ok_or_else(|| {
+                            invalid_input("Retained evidence does not belong to this entry")
+                        })?;
+                    drafts.push(EvidenceLinkDraft {
+                        chunk_id: link.chunk_id.clone(),
+                        excerpt: Some(link.excerpt.clone()),
+                        support_note: link.support_note.clone(),
+                    });
+                    relationships.push(link.relationship.clone());
+                }
+            }
+        }
+        Ok((drafts, relationships))
+    }
+
     async fn start_reader_page(
         &self,
         grant: &McpCallContext,
@@ -881,21 +1118,24 @@ impl I0iMcpHandler {
         grant_token: &str,
         paper: &Paper,
     ) -> Result<ReaderReadResult, rmcp::ErrorData> {
-        let Some(abstract_text) = paper.abstract_text.as_deref() else {
+        let Some(_) = paper.abstract_text.as_deref() else {
             return Ok(ReaderReadResult::unavailable(
                 "No readable source or abstract is available",
                 None,
             ));
         };
-        let digest = sha256(abstract_text);
-        let source_id = format!("metadata:{}:{}", paper.id, &digest[..12]);
+        let chunk = self
+            .store
+            .materialize_paper_abstract(&paper.id)
+            .map_err(internal_failure)?;
+        let source_version = chunk.extraction_id.clone();
         let passages = self
-            .passages_from_flow_text(grant_token, &paper.id, &source_id, abstract_text)
+            .passages_from_chunks(grant_token, vec![chunk], None, None)
             .await;
         Ok(ReaderReadResult {
             availability: "available".to_string(),
             coverage: "abstract_only".to_string(),
-            source_version: Some(source_id),
+            source_version: Some(source_version),
             passages,
             next_cursor: None,
             has_more: false,
@@ -1337,6 +1577,17 @@ fn write_failure(error: String) -> rmcp::ErrorData {
     rmcp::ErrorData::invalid_request(error, Some(serde_json::json!({"code": code})))
 }
 
+fn state_write_failure(error: String) -> rmcp::ErrorData {
+    let code = if error.contains("Request ID") {
+        "request_conflict"
+    } else if error.contains("Research State changed") {
+        "conflict"
+    } else {
+        "invalid_input"
+    };
+    rmcp::ErrorData::invalid_request(error, Some(serde_json::json!({"code": code})))
+}
+
 /// Confirm that an in-memory passage still names the currently persisted source.
 fn validate_passage_anchor(
     snapshot: &LibrarySnapshot,
@@ -1376,6 +1627,55 @@ fn validate_passage_anchor(
         ));
     }
     Ok(())
+}
+
+fn parse_minimal_kind(value: &str) -> Result<ResearchEntryKind, rmcp::ErrorData> {
+    match value {
+        "finding" => Ok(ResearchEntryKind::Finding),
+        "hypothesis" => Ok(ResearchEntryKind::Hypothesis),
+        "question" => Ok(ResearchEntryKind::Question),
+        _ => Err(invalid_input(
+            "kind must be finding, hypothesis, or question",
+        )),
+    }
+}
+
+fn parse_epistemic_status(value: &str) -> Result<EpistemicStatus, rmcp::ErrorData> {
+    EpistemicStatus::parse(value).map_err(|_| invalid_input("Invalid epistemic_status"))
+}
+
+fn parse_state_relations(
+    values: Vec<StateRelationInput>,
+) -> Result<Vec<EntryRelationDraft>, rmcp::ErrorData> {
+    values
+        .into_iter()
+        .map(|value| {
+            Ok(EntryRelationDraft {
+                target_entry_id: value.target_entry_id,
+                kind: EntryRelationKind::parse(&value.kind)
+                    .map_err(|_| invalid_input("Invalid entry relationship kind"))?,
+            })
+        })
+        .collect()
+}
+
+fn validate_evidence_relationship(value: &str) -> Result<(), rmcp::ErrorData> {
+    if matches!(value, "supports" | "contradicts" | "context") {
+        Ok(())
+    } else {
+        Err(invalid_input(
+            "Evidence relationship must be supports, contradicts, or context",
+        ))
+    }
+}
+
+fn validate_state_reason(value: String) -> Result<String, rmcp::ErrorData> {
+    let reason = value.trim();
+    if reason.is_empty() {
+        Err(invalid_input("State change reason must not be empty"))
+    } else {
+        Ok(reason.to_string())
+    }
 }
 
 fn trace_tool(
@@ -1563,6 +1863,60 @@ struct StateReadInput {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct StateUpdateInput {
+    project_id: String,
+    base_revision: i64,
+    request_id: String,
+    changes: Vec<StateChangeInput>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum StateChangeInput {
+    Create {
+        operation_key: String,
+        kind: String,
+        statement: String,
+        epistemic_status: String,
+        evidence: Vec<StateEvidenceInput>,
+        relationships: Vec<StateRelationInput>,
+        reason: String,
+    },
+    Revise {
+        entry_id: String,
+        statement: String,
+        epistemic_status: String,
+        evidence: Vec<StateEvidenceInput>,
+        relationships: Vec<StateRelationInput>,
+        reason: String,
+    },
+    SetLifecycle {
+        entry_id: String,
+        lifecycle: String,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "source", rename_all = "snake_case")]
+enum StateEvidenceInput {
+    Passage {
+        passage_ref: String,
+        relationship: String,
+        explanation: String,
+    },
+    Retain {
+        evidence_id: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct StateRelationInput {
+    target_entry_id: String,
+    kind: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ReaderAddNoteResult {
@@ -1729,7 +2083,7 @@ impl McpStateEntry {
                 .into_iter()
                 .map(|evidence| McpStateEvidence {
                     id: evidence.id,
-                    relationship: "unspecified".to_string(),
+                    relationship: evidence.relationship,
                     paper_id: evidence.paper_id,
                     source_id: evidence.source_id,
                     extraction_id: evidence.extraction_id,
@@ -1770,6 +2124,14 @@ struct StateReadResult {
     current_revision: i64,
     entries: Vec<McpStateEntry>,
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct StateUpdateResult {
+    revision: i64,
+    affected_entry_ids: Vec<String>,
+    created_entry_ids: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -2534,6 +2896,175 @@ mod tests {
 
         client.cancel().await.expect("stop client");
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn state_update_commits_typed_evidence_once_and_reads_it_back() {
+        let store = test_store("state-update");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        add_extracted_pdf(
+            &store,
+            &vault.id,
+            "paper:support",
+            "Measured accuracy improved after the intervention.",
+        );
+        add_extracted_pdf(
+            &store,
+            &vault.id,
+            "paper:conflict",
+            "A second benchmark showed no measurable improvement.",
+        );
+        store
+            .add_paper_to_vaults(
+                &paper_draft(
+                    "paper:abstract-evidence",
+                    Some("The provider abstract describes a related intervention."),
+                ),
+                std::slice::from_ref(&vault.id),
+            )
+            .expect("add abstract evidence paper");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                None,
+                [READER_READ, STATE_READ, STATE_UPDATE],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let mut passage_refs = Vec::new();
+        for paper_id in ["paper:support", "paper:conflict", "paper:abstract-evidence"] {
+            let read = client
+                .call_tool(
+                    CallToolRequestParams::new(READER_READ).with_arguments(
+                        serde_json::json!({"paper_id": paper_id})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                )
+                .await
+                .expect("read evidence")
+                .structured_content
+                .expect("read result");
+            passage_refs.push(
+                read["passages"][0]["passageRef"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        let arguments = serde_json::json!({
+            "project_id": vault.project_id,
+            "base_revision": 0,
+            "request_id": "state-request-1",
+            "changes": [{
+                "operation": "create",
+                "operation_key": "finding-1",
+                "kind": "finding",
+                "statement": "The intervention has mixed benchmark evidence.",
+                "epistemic_status": "source_supported",
+                "evidence": [
+                    {"source": "passage", "passage_ref": passage_refs[0], "relationship": "supports", "explanation": "Positive benchmark"},
+                    {"source": "passage", "passage_ref": passage_refs[1], "relationship": "contradicts", "explanation": "Null benchmark"},
+                    {"source": "passage", "passage_ref": passage_refs[2], "relationship": "context", "explanation": "Abstract-only context"}
+                ],
+                "relationships": [],
+                "reason": "Record mixed evidence"
+            }]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let first = client
+            .call_tool(CallToolRequestParams::new(STATE_UPDATE).with_arguments(arguments.clone()))
+            .await
+            .expect("update state")
+            .structured_content
+            .expect("update result");
+        client.cancel().await.expect("stop first client");
+        server.shutdown().await;
+
+        let retry_server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("restart MCP");
+        let retry_grant = retry_server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                None,
+                [STATE_READ, STATE_UPDATE],
+            )
+            .await
+            .expect("issue retry grant");
+        let retry_client = client_for(&retry_grant).await;
+        let retry = retry_client
+            .call_tool(CallToolRequestParams::new(STATE_UPDATE).with_arguments(arguments.clone()))
+            .await
+            .expect("retry state")
+            .structured_content
+            .expect("retry result");
+        assert_eq!(first, retry);
+        assert_eq!(first["revision"], 1);
+
+        let mut changed_arguments = arguments;
+        changed_arguments["changes"][0]["statement"] =
+            serde_json::json!("A changed retry must fail.");
+        let changed_retry = retry_client
+            .call_tool(CallToolRequestParams::new(STATE_UPDATE).with_arguments(changed_arguments))
+            .await
+            .expect_err("changed retry payload must conflict");
+        assert!(format!("{changed_retry:?}").contains("request_conflict"));
+
+        let state = retry_client
+            .call_tool(
+                CallToolRequestParams::new(STATE_READ).with_arguments(
+                    serde_json::json!({"project_id": vault.project_id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read updated state")
+            .structured_content
+            .expect("state result");
+        assert_eq!(state["entries"].as_array().unwrap().len(), 1);
+        let relationships = state["entries"][0]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|evidence| evidence["relationship"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            relationships,
+            BTreeSet::from(["context", "contradicts", "supports"])
+        );
+        assert!(state["entries"][0]["originRunId"].is_null());
+
+        retry_client.cancel().await.expect("stop retry client");
+        retry_server.shutdown().await;
     }
 
     #[tokio::test]
