@@ -1,5 +1,6 @@
 pub mod bibtex;
 pub mod chat;
+pub mod codex_runtime;
 pub mod embedding;
 pub mod highlight;
 pub mod llm;
