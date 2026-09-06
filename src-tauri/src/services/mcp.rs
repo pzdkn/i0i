@@ -27,10 +27,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::domain::chat::{ChatEntry, ThreadAnchor, ENTRY_NOTE};
+use crate::domain::highlight::HighlightAuthor;
 use crate::domain::library::{DocumentChunk, DocumentSource, LibrarySnapshot, Paper, Vault};
 use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
 use crate::storage::library_store::LibraryStore;
+use tauri::{AppHandle, Emitter};
 
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_PAGE_SIZE: usize = 100;
@@ -42,6 +45,8 @@ pub const VAULT_LIST: &str = "vault_list";
 pub const VAULT_LIST_PAPERS: &str = "vault_list_papers";
 pub const VAULT_GET_PAPER: &str = "vault_get_paper";
 pub const READER_READ: &str = "reader_read";
+pub const READER_ADD_NOTE: &str = "reader_add_note";
+pub const READER_LIST_NOTES: &str = "reader_list_notes";
 
 /// Caller identity and scope established by an opaque local credential.
 #[derive(Debug, Clone)]
@@ -128,6 +133,12 @@ pub(crate) struct PassageAnchor {
 }
 
 #[derive(Debug, Clone)]
+struct RegisteredPassage {
+    grant_token: String,
+    anchor: PassageAnchor,
+}
+
+#[derive(Debug, Clone)]
 struct ReaderCursorSnapshot {
     grant_token: String,
     paper_id: String,
@@ -139,31 +150,45 @@ struct ReaderCursorSnapshot {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct NoteCursorSnapshot {
+    grant_token: String,
+    paper_id: String,
+    notes: Vec<McpReaderNote>,
+    offset: usize,
+    expires_at: Instant,
+}
+
 #[derive(Clone)]
 struct I0iMcpHandler {
+    app: Option<AppHandle>,
     store: LibraryStore,
     pdf_downloads: Option<PdfDownloadManager>,
     pdf_extractions: Option<PdfExtractionManager>,
     cursors: Arc<Mutex<HashMap<String, CursorSnapshot>>>,
     reader_cursors: Arc<Mutex<HashMap<String, ReaderCursorSnapshot>>>,
-    passage_anchors: Arc<RwLock<HashMap<String, PassageAnchor>>>,
+    passage_anchors: Arc<RwLock<HashMap<String, RegisteredPassage>>>,
+    note_cursors: Arc<Mutex<HashMap<String, NoteCursorSnapshot>>>,
     cursor_ttl: Duration,
 }
 
 impl I0iMcpHandler {
     fn new(
+        app: Option<AppHandle>,
         store: LibraryStore,
         pdf_downloads: Option<PdfDownloadManager>,
         pdf_extractions: Option<PdfExtractionManager>,
         cursor_ttl: Duration,
     ) -> Self {
         Self {
+            app,
             store,
             pdf_downloads,
             pdf_extractions,
             cursors: Arc::new(Mutex::new(HashMap::new())),
             reader_cursors: Arc::new(Mutex::new(HashMap::new())),
             passage_anchors: Arc::new(RwLock::new(HashMap::new())),
+            note_cursors: Arc::new(Mutex::new(HashMap::new())),
             cursor_ttl,
         }
     }
@@ -237,17 +262,21 @@ impl I0iMcpHandler {
             })
     }
 
-    async fn register_passage(&self, anchor: PassageAnchor) -> String {
+    async fn register_passage(&self, grant_token: &str, anchor: PassageAnchor) -> String {
         let passage_ref = format!("passage_{}", Uuid::new_v4().simple());
-        self.passage_anchors
-            .write()
-            .await
-            .insert(passage_ref.clone(), anchor);
+        self.passage_anchors.write().await.insert(
+            passage_ref.clone(),
+            RegisteredPassage {
+                grant_token: grant_token.to_string(),
+                anchor,
+            },
+        );
         passage_ref
     }
 
     async fn passages_from_chunks(
         &self,
+        grant_token: &str,
         chunks: Vec<DocumentChunk>,
         page_start: Option<i32>,
         page_end: Option<i32>,
@@ -269,7 +298,7 @@ impl I0iMcpHandler {
                     source_end: chunk.source_start + relative_end as i64,
                     quote: text.clone(),
                 };
-                let passage_ref = self.register_passage(anchor.clone()).await;
+                let passage_ref = self.register_passage(grant_token, anchor.clone()).await;
                 passages.push(McpPassage::from_anchor(passage_ref, anchor));
             }
         }
@@ -278,6 +307,7 @@ impl I0iMcpHandler {
 
     async fn passages_from_flow_text(
         &self,
+        grant_token: &str,
         paper_id: &str,
         source_id: &str,
         text: &str,
@@ -295,7 +325,7 @@ impl I0iMcpHandler {
                 source_end: end as i64,
                 quote: text.clone(),
             };
-            let passage_ref = self.register_passage(anchor.clone()).await;
+            let passage_ref = self.register_passage(grant_token, anchor.clone()).await;
             passages.push(McpPassage::from_anchor(passage_ref, anchor));
         }
         passages
@@ -426,6 +456,191 @@ impl I0iMcpHandler {
         Ok(Json(result))
     }
 
+    /// Persist an agent-authored note at an opaque Reader passage reference.
+    #[tool(description = "Add an agent-authored note to an exact i0i Reader passage")]
+    async fn reader_add_note(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<ReaderAddNoteInput>,
+    ) -> Result<Json<ReaderAddNoteResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, READER_ADD_NOTE)?;
+        let body = input.body.trim();
+        let request_id = input.request_id.trim();
+        if body.is_empty() || request_id.is_empty() {
+            return Err(invalid_input("body and request_id must not be empty"));
+        }
+        let snapshot = self.snapshot()?;
+        let paper = Self::scoped_paper(&snapshot, &grant, &input.paper_id)?;
+        let anchor = match input.passage_ref.as_deref() {
+            None => ThreadAnchor::Document,
+            Some(passage_ref) => {
+                let passage = self
+                    .passage_anchors
+                    .read()
+                    .await
+                    .get(passage_ref)
+                    .filter(|registered| registered.grant_token == grant_token)
+                    .map(|registered| registered.anchor.clone())
+                    .ok_or_else(|| invalid_input("Passage reference is stale or unknown"))?;
+                validate_passage_anchor(&snapshot, paper, &passage)?;
+                ThreadAnchor::SourcePassage {
+                    source_id: passage.source_id,
+                    page_index: passage.page_start.map(|page| page - 1),
+                    start_offset: passage.source_start,
+                    end_offset: passage.source_end,
+                    selected_text: passage.quote,
+                }
+            }
+        };
+        let payload_hash = sha256(
+            &serde_json::to_string(&serde_json::json!({
+                "paperId": input.paper_id,
+                "passageRef": input.passage_ref,
+                "body": body,
+                "runId": grant.run_id,
+            }))
+            .map_err(|error| internal_failure(error.to_string()))?,
+        );
+        let receipt = self
+            .store
+            .add_agent_note_idempotent(
+                "paper",
+                &paper.id,
+                &anchor,
+                body,
+                &grant.caller,
+                grant.run_id.as_deref(),
+                request_id,
+                &payload_hash,
+            )
+            .map_err(write_failure)?;
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                "chat_scope_updated",
+                serde_json::json!({"paperId": paper.id}),
+            );
+        }
+        trace_tool(&grant, READER_ADD_NOTE, started, "ok", 1);
+        Ok(Json(ReaderAddNoteResult {
+            thread_id: receipt.thread_id,
+            entry_id: receipt.entry_id,
+            anchor: serde_json::to_value(&anchor)
+                .map_err(|error| internal_failure(error.to_string()))?,
+            quote: anchor.selected_text().map(str::to_string),
+            author: McpNoteAuthor {
+                kind: "agent".to_string(),
+                id: grant.caller,
+                run_id: grant.run_id,
+            },
+        }))
+    }
+
+    /// List note entries from the scoped paper using a stable snapshot.
+    #[tool(description = "List notes and their anchors from an i0i Reader paper")]
+    async fn reader_list_notes(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<ReaderListNotesInput>,
+    ) -> Result<Json<ReaderListNotesResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, READER_LIST_NOTES)?;
+        let limit = validated_limit(input.limit)?;
+        let result = if let Some(cursor) = input.cursor.as_deref() {
+            self.continue_note_page(cursor, &grant_token, &input.paper_id, limit)
+                .await?
+        } else {
+            let snapshot = self.snapshot()?;
+            Self::scoped_paper(&snapshot, &grant, &input.paper_id)?;
+            let mut notes = Vec::new();
+            for thread in self
+                .store
+                .list_chat_threads("paper", &input.paper_id)
+                .map_err(internal_failure)?
+            {
+                let view = self
+                    .store
+                    .get_chat_thread(&thread.id)
+                    .map_err(internal_failure)?;
+                notes.extend(
+                    view.entries
+                        .into_iter()
+                        .filter(|entry| entry.kind == ENTRY_NOTE)
+                        .map(|entry| McpReaderNote::new(entry, &view.thread.anchor)),
+                );
+            }
+            notes.extend(
+                self.store
+                    .list_highlights(&input.paper_id)
+                    .map_err(internal_failure)?
+                    .into_iter()
+                    .filter_map(McpReaderNote::from_annotation),
+            );
+            notes.sort_by(|left, right| {
+                right
+                    .created_at
+                    .cmp(&left.created_at)
+                    .then_with(|| right.entry_id.cmp(&left.entry_id))
+            });
+            self.note_result_from_snapshot(
+                NoteCursorSnapshot {
+                    grant_token: grant_token.clone(),
+                    paper_id: input.paper_id.clone(),
+                    notes,
+                    offset: 0,
+                    expires_at: Instant::now() + self.cursor_ttl,
+                },
+                limit,
+            )
+            .await
+        };
+        trace_tool(&grant, READER_LIST_NOTES, started, "ok", result.notes.len());
+        Ok(Json(result))
+    }
+
+    async fn continue_note_page(
+        &self,
+        cursor: &str,
+        grant_token: &str,
+        paper_id: &str,
+        limit: usize,
+    ) -> Result<ReaderListNotesResult, rmcp::ErrorData> {
+        let snapshot = self
+            .note_cursors
+            .lock()
+            .await
+            .remove(cursor)
+            .ok_or_else(cursor_expired)?;
+        if snapshot.expires_at <= Instant::now()
+            || snapshot.grant_token != grant_token
+            || snapshot.paper_id != paper_id
+        {
+            return Err(cursor_expired());
+        }
+        Ok(self.note_result_from_snapshot(snapshot, limit).await)
+    }
+
+    async fn note_result_from_snapshot(
+        &self,
+        mut snapshot: NoteCursorSnapshot,
+        limit: usize,
+    ) -> ReaderListNotesResult {
+        let end = (snapshot.offset + limit).min(snapshot.notes.len());
+        let notes = snapshot.notes[snapshot.offset..end].to_vec();
+        snapshot.offset = end;
+        let next_cursor = if end < snapshot.notes.len() {
+            let cursor = Uuid::new_v4().simple().to_string();
+            self.note_cursors
+                .lock()
+                .await
+                .insert(cursor.clone(), snapshot);
+            Some(cursor)
+        } else {
+            None
+        };
+        ReaderListNotesResult { notes, next_cursor }
+    }
+
     async fn start_reader_page(
         &self,
         grant: &McpCallContext,
@@ -439,7 +654,7 @@ impl I0iMcpHandler {
         let source = Self::active_source(&snapshot, paper);
 
         let Some(source) = source else {
-            return self.abstract_or_unavailable(paper).await;
+            return self.abstract_or_unavailable(grant_token, paper).await;
         };
         if source.source_kind == "html" {
             if page_start.is_some() {
@@ -453,7 +668,7 @@ impl I0iMcpHandler {
             }
             let text = read_html_source_text(source).map_err(internal_failure)?;
             let passages = self
-                .passages_from_flow_text(paper_id, &source.id, &text)
+                .passages_from_flow_text(grant_token, paper_id, &source.id, &text)
                 .await;
             return self
                 .first_reader_result(
@@ -515,7 +730,7 @@ impl I0iMcpHandler {
             .chunks_for_extraction(&extraction.id)
             .map_err(internal_failure)?;
         let passages = self
-            .passages_from_chunks(chunks, page_start, page_end)
+            .passages_from_chunks(grant_token, chunks, page_start, page_end)
             .await;
         self.first_reader_result(
             grant_token,
@@ -531,6 +746,7 @@ impl I0iMcpHandler {
 
     async fn abstract_or_unavailable(
         &self,
+        grant_token: &str,
         paper: &Paper,
     ) -> Result<ReaderReadResult, rmcp::ErrorData> {
         let Some(abstract_text) = paper.abstract_text.as_deref() else {
@@ -542,7 +758,7 @@ impl I0iMcpHandler {
         let digest = sha256(abstract_text);
         let source_id = format!("metadata:{}:{}", paper.id, &digest[..12]);
         let passages = self
-            .passages_from_flow_text(&paper.id, &source_id, abstract_text)
+            .passages_from_flow_text(grant_token, &paper.id, &source_id, abstract_text)
             .await;
         Ok(ReaderReadResult {
             availability: "available".to_string(),
@@ -785,11 +1001,13 @@ pub struct LocalMcpServer {
 impl LocalMcpServer {
     /// Bind an authenticated Streamable HTTP MCP endpoint on an ephemeral port.
     pub async fn start(
+        app: AppHandle,
         store: LibraryStore,
         pdf_downloads: PdfDownloadManager,
         pdf_extractions: PdfExtractionManager,
     ) -> Result<Self, String> {
         Self::start_with_cursor_ttl(
+            Some(app),
             store,
             Some(pdf_downloads),
             Some(pdf_extractions),
@@ -799,6 +1017,7 @@ impl LocalMcpServer {
     }
 
     async fn start_with_cursor_ttl(
+        app: Option<AppHandle>,
         store: LibraryStore,
         pdf_downloads: Option<PdfDownloadManager>,
         pdf_extractions: Option<PdfExtractionManager>,
@@ -811,7 +1030,7 @@ impl LocalMcpServer {
         let endpoint = format!("http://{address}/mcp");
         let grants = GrantRegistry::new();
         let cancellation = CancellationToken::new();
-        let handler = I0iMcpHandler::new(store, pdf_downloads, pdf_extractions, cursor_ttl);
+        let handler = I0iMcpHandler::new(app, store, pdf_downloads, pdf_extractions, cursor_ttl);
         let session_handler = handler.clone();
         let service: StreamableHttpService<I0iMcpHandler, LocalSessionManager> =
             StreamableHttpService::new(
@@ -901,7 +1120,7 @@ impl LocalMcpServer {
             .read()
             .await
             .get(passage_ref)
-            .cloned()
+            .map(|registered| registered.anchor.clone())
     }
 
     /// Stop accepting calls and wait for the HTTP task to finish.
@@ -968,6 +1187,63 @@ fn cursor_expired() -> rmcp::ErrorData {
         "Cursor is unknown or expired; start a new listing",
         Some(serde_json::json!({"code": "cursor_expired"})),
     )
+}
+
+fn invalid_input(message: &str) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(
+        message.to_string(),
+        Some(serde_json::json!({"code": "invalid_input"})),
+    )
+}
+
+fn write_failure(error: String) -> rmcp::ErrorData {
+    let code = if error.contains("Request ID") {
+        "request_conflict"
+    } else {
+        "internal_failure"
+    };
+    rmcp::ErrorData::invalid_request(error, Some(serde_json::json!({"code": code})))
+}
+
+/// Confirm that an in-memory passage still names the currently persisted source.
+fn validate_passage_anchor(
+    snapshot: &LibrarySnapshot,
+    paper: &Paper,
+    passage: &PassageAnchor,
+) -> Result<(), rmcp::ErrorData> {
+    if passage.paper_id != paper.id || passage.source_end < passage.source_start {
+        return Err(invalid_input(
+            "Passage reference does not belong to this paper",
+        ));
+    }
+    if passage.source_id.starts_with("metadata:") {
+        let abstract_text = paper
+            .abstract_text
+            .as_deref()
+            .ok_or_else(|| invalid_input("Abstract passage is no longer available"))?;
+        let expected = format!("metadata:{}:{}", paper.id, &sha256(abstract_text)[..12]);
+        if passage.source_id != expected {
+            return Err(invalid_input("Abstract passage refers to an older version"));
+        }
+        return Ok(());
+    }
+    let source_exists = snapshot
+        .document_sources
+        .iter()
+        .any(|source| source.id == passage.source_id && source.paper_id == paper.id);
+    let extraction_exists = passage.extraction_id.as_ref().is_none_or(|extraction_id| {
+        snapshot.document_extractions.iter().any(|extraction| {
+            extraction.id == *extraction_id
+                && extraction.source_id == passage.source_id
+                && extraction.status == "ready"
+        })
+    });
+    if !source_exists || !extraction_exists {
+        return Err(invalid_input(
+            "Passage reference names a stale document version",
+        ));
+    }
+    Ok(())
 }
 
 fn trace_tool(
@@ -1130,6 +1406,103 @@ struct ReaderReadInput {
     page_start: Option<i32>,
     page_end: Option<i32>,
     cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReaderAddNoteInput {
+    paper_id: String,
+    passage_ref: Option<String>,
+    body: String,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReaderListNotesInput {
+    paper_id: String,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReaderAddNoteResult {
+    thread_id: String,
+    entry_id: String,
+    anchor: serde_json::Value,
+    quote: Option<String>,
+    author: McpNoteAuthor,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpNoteAuthor {
+    kind: String,
+    id: String,
+    run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpReaderNote {
+    kind: String,
+    entry_id: String,
+    thread_id: String,
+    body: String,
+    anchor: serde_json::Value,
+    quote: Option<String>,
+    author: McpNoteAuthor,
+    created_at: String,
+}
+
+impl McpReaderNote {
+    fn new(entry: ChatEntry, anchor: &ThreadAnchor) -> Self {
+        Self {
+            kind: "thread_note".to_string(),
+            entry_id: entry.id,
+            thread_id: entry.thread_id,
+            body: entry.body,
+            anchor: serde_json::to_value(anchor).unwrap_or(serde_json::Value::Null),
+            quote: anchor.selected_text().map(str::to_string),
+            author: McpNoteAuthor {
+                kind: entry.author_kind,
+                id: entry.author_id.unwrap_or_else(|| "researcher".to_string()),
+                run_id: entry.run_id,
+            },
+            created_at: entry.created_at,
+        }
+    }
+
+    fn from_annotation(highlight: crate::domain::highlight::Highlight) -> Option<Self> {
+        let body = highlight.note?.trim().to_string();
+        if body.is_empty() {
+            return None;
+        }
+        let (author_kind, author_id) = match highlight.author {
+            HighlightAuthor::User => ("user".to_string(), "researcher".to_string()),
+            HighlightAuthor::Agent { model } => ("agent".to_string(), model),
+        };
+        Some(Self {
+            kind: "annotation_note".to_string(),
+            entry_id: highlight.id.clone(),
+            thread_id: String::new(),
+            body,
+            anchor: serde_json::to_value(&highlight.locator).unwrap_or(serde_json::Value::Null),
+            quote: Some(highlight.excerpt),
+            author: McpNoteAuthor {
+                kind: author_kind,
+                id: author_id,
+                run_id: None,
+            },
+            created_at: highlight.created_at,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReaderListNotesResult {
+    notes: Vec<McpReaderNote>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1406,10 +1779,15 @@ mod tests {
         let store = test_store("listing");
         let snapshot = store.get_library().expect("read fixture library");
         let vault = snapshot.vaults.first().expect("seed vault");
-        let server =
-            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
-                .await
-                .expect("start MCP");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
         let grant = server
             .issue_grant(
                 &store,
@@ -1459,10 +1837,15 @@ mod tests {
         let store = test_store("revoked");
         let snapshot = store.get_library().expect("read fixture library");
         let vault = snapshot.vaults.first().expect("seed vault");
-        let server =
-            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
-                .await
-                .expect("start MCP");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
         let grant = server
             .issue_grant(
                 &store,
@@ -1490,6 +1873,7 @@ mod tests {
         let snapshot = store.get_library().expect("read fixture library");
         let vault = snapshot.vaults.first().expect("seed vault");
         let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
             store.clone(),
             None,
             None,
@@ -1545,10 +1929,15 @@ mod tests {
         let vault = snapshot.vaults.first().expect("seed vault");
         let expected = "Evidence on the first fixture page.";
         add_extracted_pdf(&store, &vault.id, "paper:reader-fixture", expected);
-        let server =
-            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
-                .await
-                .expect("start MCP");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
         let grant = server
             .issue_grant(
                 &store,
@@ -1591,6 +1980,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_client_adds_and_lists_one_idempotent_anchored_agent_note() {
+        let store = test_store("reader-note");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let paper_id = "paper:agent-note";
+        let quote = "The repeated observation belongs to page one.";
+        add_extracted_pdf(&store, &vault.id, paper_id, quote);
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                Some("run-note-1"),
+                [READER_READ, READER_ADD_NOTE, READER_LIST_NOTES],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let read = client
+            .call_tool(
+                CallToolRequestParams::new(READER_READ).with_arguments(
+                    serde_json::json!({"paper_id": paper_id, "page_start": 1})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read paper")
+            .structured_content
+            .expect("read result");
+        let passage_ref = read["passages"][0]["passageRef"]
+            .as_str()
+            .expect("passage ref");
+        let arguments = serde_json::json!({
+            "paper_id": paper_id,
+            "passage_ref": passage_ref,
+            "body": "Keep this observation.",
+            "request_id": "request-note-1"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let first = client
+            .call_tool(
+                CallToolRequestParams::new(READER_ADD_NOTE).with_arguments(arguments.clone()),
+            )
+            .await
+            .expect("add note")
+            .structured_content
+            .expect("add result");
+        let retry = client
+            .call_tool(CallToolRequestParams::new(READER_ADD_NOTE).with_arguments(arguments))
+            .await
+            .expect("retry note")
+            .structured_content
+            .expect("retry result");
+        assert_eq!(first["entryId"], retry["entryId"]);
+        assert_eq!(first["anchor"]["kind"], "sourcePassage");
+        assert_eq!(first["anchor"]["pageIndex"], 0);
+
+        let listed = client
+            .call_tool(
+                CallToolRequestParams::new(READER_LIST_NOTES).with_arguments(
+                    serde_json::json!({"paper_id": paper_id, "limit": 25})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("list notes")
+            .structured_content
+            .expect("list result");
+        assert_eq!(listed["notes"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["notes"][0]["quote"], quote);
+        assert_eq!(listed["notes"][0]["author"]["id"], "codex-test");
+        assert_eq!(listed["notes"][0]["author"]["runId"], "run-note-1");
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn agent_note_retry_is_atomic_and_preserves_existing_user_notes() {
+        let store = test_store("reader-note-retry");
+        let snapshot = store.get_library().expect("read fixture library");
+        let paper = snapshot.papers.first().expect("seed paper");
+        store
+            .add_note_at_anchor("paper", &paper.id, &ThreadAnchor::Document, "User note")
+            .expect("add user note");
+
+        let first = store
+            .add_agent_note_idempotent(
+                "paper",
+                &paper.id,
+                &ThreadAnchor::Document,
+                "Agent note",
+                "codex-test",
+                Some("run-1"),
+                "request-1",
+                "hash-1",
+            )
+            .expect("add agent note");
+        let retry = store
+            .add_agent_note_idempotent(
+                "paper",
+                &paper.id,
+                &ThreadAnchor::Document,
+                "Agent note",
+                "codex-test",
+                Some("run-1"),
+                "request-1",
+                "hash-1",
+            )
+            .expect("retry agent note");
+        assert_eq!(first.entry_id, retry.entry_id);
+        assert!(store
+            .add_agent_note_idempotent(
+                "paper",
+                &paper.id,
+                &ThreadAnchor::Document,
+                "Different note",
+                "codex-test",
+                Some("run-1"),
+                "request-1",
+                "different-hash",
+            )
+            .unwrap_err()
+            .contains("different payload"));
+
+        let view = store
+            .get_chat_thread(&first.thread_id)
+            .expect("read document thread");
+        assert_eq!(view.entries.len(), 2);
+        assert_eq!(view.entries[0].author_kind, "user");
+        assert_eq!(view.entries[1].author_kind, "agent");
+        assert_eq!(view.entries[1].run_id.as_deref(), Some("run-1"));
+    }
+
+    #[tokio::test]
     async fn reader_reports_abstract_pending_and_failed_sources_honestly() {
         let store = test_store("reader-states");
         let snapshot = store.get_library().expect("read fixture library");
@@ -1626,14 +2166,14 @@ mod tests {
             .set_document_source_failed("pdf:paper:failed:fixture", "publisher denied access")
             .expect("fail source");
 
-        let handler = I0iMcpHandler::new(store, None, None, DEFAULT_CURSOR_TTL);
+        let handler = I0iMcpHandler::new(None, store, None, None, DEFAULT_CURSOR_TTL);
         let saved_abstract = handler
             .store
             .get_paper(&abstract_paper.id)
             .expect("read abstract paper")
             .expect("abstract paper exists");
         let abstract_result = handler
-            .abstract_or_unavailable(&saved_abstract)
+            .abstract_or_unavailable("test-grant", &saved_abstract)
             .await
             .expect("abstract result");
         assert_eq!(abstract_result.coverage, "abstract_only");
@@ -1678,10 +2218,15 @@ mod tests {
                 html_path.to_str().expect("UTF-8 fixture path"),
             )
             .expect("add HTML fixture");
-        let server =
-            LocalMcpServer::start_with_cursor_ttl(store.clone(), None, None, DEFAULT_CURSOR_TTL)
-                .await
-                .expect("start MCP");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
         let grant = server
             .issue_grant(
                 &store,

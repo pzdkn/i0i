@@ -28,7 +28,7 @@
   } from "$lib/bridge/highlight";
   import { getSettings } from "$lib/bridge/settings";
   import ResizableSplit from "$lib/components/layout/ResizableSplit.svelte";
-  import type { ChatThreadSummary, PinnedHighlight } from "$lib/domain/chat";
+  import type { ChatThreadSummary, PinnedHighlight, ThreadAnchor } from "$lib/domain/chat";
   import { HIGHLIGHT_COLORS, type Highlight, type HighlightColor, type Locator } from "$lib/domain/highlight";
   import type {
     MetadataAutofillProgress,
@@ -424,6 +424,7 @@
     let unlistenSource: (() => void) | undefined;
     let unlistenExtraction: (() => void) | undefined;
     let unlistenChatThread: (() => void) | undefined;
+    let unlistenChatScope: (() => void) | undefined;
     let unlistenMetadata: (() => void) | undefined;
     let unlistenAcquisition: (() => void) | undefined;
 
@@ -524,6 +525,19 @@
         console.error("Failed to listen for chat_thread_updated:", error);
       });
 
+    listen("chat_scope_updated", (event) => {
+      const payload = event.payload as { paperId?: string; paper_id?: string };
+      if ((payload.paperId ?? payload.paper_id) === paper.id) {
+        void reloadChat(paper.id);
+      }
+    })
+      .then((nextUnlisten) => {
+        unlistenChatScope = nextUnlisten;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for chat_scope_updated:", error);
+      });
+
     // RFC 0059 Phase 2 (Task 8): the model string agent-created highlights
     // are attributed to. Best-effort — a settings load failure just leaves
     // the "agent" fallback.
@@ -542,6 +556,7 @@
       unlistenSource?.();
       unlistenExtraction?.();
       unlistenChatThread?.();
+      unlistenChatScope?.();
       unlistenMetadata?.();
       unlistenAcquisition?.();
     };
@@ -1268,6 +1283,17 @@
     openThreadsPanel();
   }
 
+  function openThreadAnchor(anchor: ThreadAnchor) {
+    if (anchor.kind !== "sourcePassage") {
+      return;
+    }
+    if (anchor.pageIndex !== null) {
+      pdfPageRef?.scrollToPage(anchor.pageIndex);
+    } else {
+      htmlReaderRef?.focusOffsets(anchor.startOffset, anchor.endOffset);
+    }
+  }
+
   function consumeRequestedThread() {
     requestedThreadId = null;
   }
@@ -1673,6 +1699,7 @@
           {onOpenResearch}
           {activeVaultId}
           onOpenCitation={openCitation}
+          onOpenThreadAnchor={openThreadAnchor}
           onHighlightIntent={handleHighlightIntent}
           onAskTurnStart={handleAskTurnStart}
           onAskTurnComplete={handleAskTurnComplete}

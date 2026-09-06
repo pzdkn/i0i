@@ -65,6 +65,7 @@ pub fn run() {
                 source_acquisition.clone(),
             );
             let mcp_server = tauri::async_runtime::block_on(LocalMcpServer::start(
+                app.handle().clone(),
                 store.clone(),
                 pdf_downloads.clone(),
                 pdf_extractions.clone(),

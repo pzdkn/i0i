@@ -17,7 +17,7 @@ type Passage = {
   sourceId?: string;
   startOffset?: number;
   endOffset?: number;
-  pageIndex?: number;
+  pageIndex?: number | null;
   rectsJson?: string;
   x?: number;
   y?: number;

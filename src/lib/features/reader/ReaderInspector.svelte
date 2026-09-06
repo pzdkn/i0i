@@ -95,6 +95,7 @@
     onUndoTurnHighlights,
     onDismissTurnAffordance,
     onOpenCitation = () => {},
+    onOpenThreadAnchor,
   }: {
     document: ReaderDocument;
     chatEnabled: boolean;
@@ -139,6 +140,8 @@
     showTurnAffordance?: boolean;
     /// RFC 0077: jump the reader to the passage behind a `[C1]` marker.
     onOpenCitation?: (citation: ContextCitation) => void;
+    /** Navigate an anchored thread that has no drawable highlight geometry. */
+    onOpenThreadAnchor?: (anchor: ThreadAnchor) => void;
     onKeepTurnHighlights?: () => void;
     onUndoTurnHighlights?: () => void | Promise<void>;
     // Fired at the thread-close chokepoints (back to list, opening a
@@ -579,6 +582,7 @@
     onDismissTurnAffordance?.();
     try {
       openThread = await getChatThread(threadId);
+      onOpenThreadAnchor?.(openThread.thread.anchor);
     } catch (caught) {
       error = String(caught);
     }
@@ -819,6 +823,9 @@
   function entryAuthor(entry: ChatEntry) {
     if (entry.kind === "answer") {
       return "AI";
+    }
+    if (entry.authorKind === "agent") {
+      return entry.authorId ? `Agent · ${entry.authorId}` : "Agent";
     }
     return entry.kind === "note" ? "Note" : "You";
   }

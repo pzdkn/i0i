@@ -9,7 +9,8 @@ export type ChatScope = { kind: "paper"; paperId: string };
 export type ThreadAnchor =
   | { kind: "document" }
   | { kind: "textOffset"; sourceId: string; startOffset: number; endOffset: number; selectedText: string }
-  | { kind: "pdfRect"; sourceId: string; pageIndex: number; rectsJson: string; selectedText: string };
+  | { kind: "pdfRect"; sourceId: string; pageIndex: number; rectsJson: string; selectedText: string }
+  | { kind: "sourcePassage"; sourceId: string; pageIndex: number | null; startOffset: number; endOffset: number; selectedText: string };
 
 export type ChatContextSummary = {
   paperTitle: string;
@@ -81,6 +82,9 @@ export type ChatEntry = {
   model: string | null;
   contextSummary: ChatContextSummary | null;
   pinned: boolean;
+  authorKind: "user" | "agent";
+  authorId: string | null;
+  runId: string | null;
   createdAt: string;
 };
 

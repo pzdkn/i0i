@@ -80,6 +80,24 @@ pub enum ThreadAnchor {
         #[serde(rename = "selectedText")]
         selected_text: String,
     },
+    /// An exact source-text passage created from a Reader MCP reference.
+    ///
+    /// PDF extraction gives us stable text offsets and a page, but not always
+    /// trustworthy rectangles. Keeping that distinction avoids drawing a fake
+    /// highlight while still letting the Reader navigate to the cited page.
+    #[serde(rename = "sourcePassage")]
+    SourcePassage {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "pageIndex")]
+        page_index: Option<i32>,
+        #[serde(rename = "startOffset")]
+        start_offset: i64,
+        #[serde(rename = "endOffset")]
+        end_offset: i64,
+        #[serde(rename = "selectedText")]
+        selected_text: String,
+    },
 }
 
 impl ThreadAnchor {
@@ -89,6 +107,7 @@ impl ThreadAnchor {
             ThreadAnchor::Document => "document",
             ThreadAnchor::TextOffset { .. } => "text_offset",
             ThreadAnchor::PdfRect { .. } => "pdf_rect",
+            ThreadAnchor::SourcePassage { .. } => "source_passage",
         }
     }
 
@@ -97,7 +116,8 @@ impl ThreadAnchor {
         match self {
             ThreadAnchor::Document => None,
             ThreadAnchor::TextOffset { selected_text, .. }
-            | ThreadAnchor::PdfRect { selected_text, .. } => Some(selected_text),
+            | ThreadAnchor::PdfRect { selected_text, .. }
+            | ThreadAnchor::SourcePassage { selected_text, .. } => Some(selected_text),
         }
     }
 
@@ -144,7 +164,20 @@ pub struct ChatEntry {
     pub model: Option<String>,                       // answers only
     pub context_summary: Option<ChatContextSummary>, // answers only
     pub pinned: bool,
+    /// `user` for researcher-authored entries and `agent` for MCP writes.
+    #[serde(default = "default_user_author")]
+    pub author_kind: String,
+    /// Stable caller identity supplied by the authenticated MCP grant.
+    #[serde(default)]
+    pub author_id: Option<String>,
+    /// Research run that produced the entry, when one exists.
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub created_at: String,
+}
+
+fn default_user_author() -> String {
+    "user".to_string()
 }
 
 /// An entry to append. Internal to the backend; never crosses the IPC boundary.
@@ -155,6 +188,9 @@ pub struct ChatEntryDraft {
     pub model: Option<String>,
     pub context_summary: Option<ChatContextSummary>,
     pub pinned: bool,
+    pub author_kind: String,
+    pub author_id: Option<String>,
+    pub run_id: Option<String>,
 }
 
 impl ChatEntryDraft {
@@ -166,6 +202,23 @@ impl ChatEntryDraft {
             model: None,
             context_summary: None,
             pinned: true,
+            author_kind: "user".to_string(),
+            author_id: None,
+            run_id: None,
+        }
+    }
+
+    /// A note written through an authenticated agent connection.
+    pub fn agent_note(body: String, caller: String, run_id: Option<String>) -> Self {
+        Self {
+            kind: ENTRY_NOTE.to_string(),
+            body,
+            model: None,
+            context_summary: None,
+            pinned: true,
+            author_kind: "agent".to_string(),
+            author_id: Some(caller),
+            run_id,
         }
     }
 
@@ -177,6 +230,9 @@ impl ChatEntryDraft {
             model: None,
             context_summary: None,
             pinned: false,
+            author_kind: "user".to_string(),
+            author_id: None,
+            run_id: None,
         }
     }
 
@@ -185,9 +241,12 @@ impl ChatEntryDraft {
         Self {
             kind: ENTRY_ANSWER.to_string(),
             body,
-            model: Some(model),
+            model: Some(model.clone()),
             context_summary: Some(context_summary),
             pinned: false,
+            author_kind: "agent".to_string(),
+            author_id: Some(model.clone()),
+            run_id: None,
         }
     }
 }
@@ -504,6 +563,25 @@ mod tests {
         };
         assert_eq!(anchor.default_title(), "multi-head");
         assert_eq!(anchor.storage_kind(), "pdf_rect");
+    }
+
+    #[test]
+    fn source_passage_keeps_exact_offsets_and_optional_page() {
+        let anchor = ThreadAnchor::SourcePassage {
+            source_id: "pdf:paper:version-1".to_string(),
+            page_index: Some(3),
+            start_offset: 120,
+            end_offset: 148,
+            selected_text: "same words, specific location".to_string(),
+        };
+        let value = serde_json::to_value(&anchor).expect("anchor serializes");
+        assert_eq!(value["kind"], "sourcePassage");
+        assert_eq!(value["pageIndex"], 3);
+        assert_eq!(value["startOffset"], 120);
+        assert_eq!(
+            serde_json::from_value::<ThreadAnchor>(value).expect("anchor parses"),
+            anchor
+        );
     }
 
     #[test]

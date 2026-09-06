@@ -1147,6 +1147,9 @@ mod tests {
             model: None,
             context_summary: None,
             pinned: false,
+            author_kind: "user".to_string(),
+            author_id: None,
+            run_id: None,
             created_at: "2026-06-14".to_string(),
         }
     }

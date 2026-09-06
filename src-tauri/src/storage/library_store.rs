@@ -81,6 +81,14 @@ pub struct AnchoredThreadWrite {
     pub created: bool,
 }
 
+/// Stable identity returned by an idempotent agent note write.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentNoteReceipt {
+    pub thread_id: String,
+    pub entry_id: String,
+}
+
 #[derive(Clone)]
 struct SeedVault {
     id: &'static str,
@@ -4306,6 +4314,67 @@ impl LibraryStore {
         })
     }
 
+    /// Add one agent-authored note and its retry receipt atomically.
+    ///
+    /// Replaying the same caller/tool/request tuple with the same payload
+    /// returns the original identities. Reusing it for different content is a
+    /// conflict and does not write another note.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_agent_note_idempotent(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        anchor: &ThreadAnchor,
+        body: &str,
+        caller: &str,
+        run_id: Option<&str>,
+        request_id: &str,
+        payload_hash: &str,
+    ) -> StoreResult<AgentNoteReceipt> {
+        const TOOL: &str = "reader_add_note";
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "select payload_hash, result_json from mcp_mutation_receipts
+                 where caller = ?1 and tool = ?2 and request_id = ?3",
+                params![caller, TOOL, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((existing_hash, result_json)) = existing {
+            if existing_hash != payload_hash {
+                return Err("Request ID was already used with a different payload".to_string());
+            }
+            return serde_json::from_str(&result_json).map_err(|error| error.to_string());
+        }
+
+        let thread = find_or_create_thread_id(&tx, scope_kind, scope_id, anchor)?;
+        let entry_id = timestamped_id("entry")?;
+        let draft = ChatEntryDraft::agent_note(
+            body.to_string(),
+            caller.to_string(),
+            run_id.map(str::to_string),
+        );
+        insert_chat_entry(&tx, &entry_id, &thread.id, &draft)?;
+        let receipt = AgentNoteReceipt {
+            thread_id: thread.id,
+            entry_id,
+        };
+        let result_json = serde_json::to_string(&receipt).map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into mcp_mutation_receipts
+               (caller, tool, request_id, payload_hash, result_json, created_at)
+             values (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![caller, TOOL, request_id, payload_hash, result_json],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(receipt)
+    }
+
     /// Persist a completed ask turn at an anchor, creating the thread lazily.
     ///
     /// The thread (created or reused, like [`Self::add_note_at_anchor`]), the
@@ -4378,7 +4447,8 @@ impl LibraryStore {
             .prepare(
                 "
                 select e.id, e.thread_id, e.kind, e.body, e.model, e.context_json, e.pinned,
-                       e.created_at, t.title, t.anchor_kind, t.source_id, t.start_offset,
+                       e.created_at, e.author_kind, e.author_id, e.run_id,
+                       t.title, t.anchor_kind, t.source_id, t.start_offset,
                        t.end_offset, t.selected_text, t.page_index, t.rects_json
                 from chat_entries e
                 join chat_threads t on e.thread_id = t.id
@@ -4392,8 +4462,8 @@ impl LibraryStore {
             .query_map(params![scope_kind, scope_id], |row| {
                 Ok(PinnedHighlight {
                     entry: chat_entry_from_row(row)?,
-                    thread_title: row.get(8)?,
-                    anchor: thread_anchor_from_row(row, 9)?,
+                    thread_title: row.get(11)?,
+                    anchor: thread_anchor_from_row(row, 12)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -5643,6 +5713,9 @@ impl LibraryStore {
               model text,
               context_json text,
               pinned integer not null default 0,
+              author_kind text not null default 'user',
+              author_id text,
+              run_id text,
               created_at text not null,
               foreign key (thread_id) references chat_threads(id) on delete cascade
             );
@@ -5652,6 +5725,16 @@ impl LibraryStore {
 
             create index if not exists idx_chat_entries_pinned
               on chat_entries(thread_id, pinned);
+
+            create table if not exists mcp_mutation_receipts (
+              caller text not null,
+              tool text not null,
+              request_id text not null,
+              payload_hash text not null,
+              result_json text not null,
+              created_at text not null,
+              primary key (caller, tool, request_id)
+            );
 
             -- What the model is allowed to see, per thread (RFC 0077).
             -- Only *persistent* context lives here: the current selection and
@@ -5846,6 +5929,14 @@ impl LibraryStore {
         create_vector_index(conn)?;
 
         add_column_if_missing(conn, "papers", "active_source_id", "text")?;
+        add_column_if_missing(
+            conn,
+            "chat_entries",
+            "author_kind",
+            "text not null default 'user'",
+        )?;
+        add_column_if_missing(conn, "chat_entries", "author_id", "text")?;
+        add_column_if_missing(conn, "chat_entries", "run_id", "text")?;
         add_column_if_missing(conn, "vaults", "project_id", "text")?;
         add_column_if_missing(
             conn,
@@ -7824,7 +7915,8 @@ fn read_chat_entries(conn: &Connection, thread_id: &str) -> StoreResult<Vec<Chat
     let mut stmt = conn
         .prepare(
             "
-            select id, thread_id, kind, body, model, context_json, pinned, created_at
+            select id, thread_id, kind, body, model, context_json, pinned, created_at,
+                   author_kind, author_id, run_id
             from chat_entries
             where thread_id = ?1
             order by created_at asc, id asc
@@ -7842,7 +7934,8 @@ fn read_chat_entries(conn: &Connection, thread_id: &str) -> StoreResult<Vec<Chat
 fn read_chat_entry(conn: &Connection, id: &str) -> StoreResult<ChatEntry> {
     conn.query_row(
         "
-        select id, thread_id, kind, body, model, context_json, pinned, created_at
+        select id, thread_id, kind, body, model, context_json, pinned, created_at,
+               author_kind, author_id, run_id
         from chat_entries
         where id = ?1
         ",
@@ -7867,6 +7960,9 @@ fn chat_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEntry> {
         model: row.get(4)?,
         context_summary,
         pinned: pinned != 0,
+        author_kind: row.get(8)?,
+        author_id: row.get(9)?,
+        run_id: row.get(10)?,
         created_at: row.get(7)?,
     })
 }
@@ -8005,6 +8101,13 @@ fn thread_anchor_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Res
             rects_json: rects_json.unwrap_or_default(),
             selected_text: selected_text.unwrap_or_default(),
         },
+        "source_passage" => ThreadAnchor::SourcePassage {
+            source_id: source_id.unwrap_or_default(),
+            page_index,
+            start_offset: start_offset.unwrap_or_default(),
+            end_offset: end_offset.unwrap_or_default(),
+            selected_text: selected_text.unwrap_or_default(),
+        },
         _ => ThreadAnchor::Document,
     })
 }
@@ -8050,6 +8153,21 @@ fn thread_anchor_to_columns(anchor: &ThreadAnchor) -> AnchorColumns {
             Some(selected_text.clone()),
             Some(*page_index),
             Some(rects_json.clone()),
+        ),
+        ThreadAnchor::SourcePassage {
+            source_id,
+            page_index,
+            start_offset,
+            end_offset,
+            selected_text,
+        } => (
+            "source_passage",
+            Some(source_id.clone()),
+            Some(*start_offset),
+            Some(*end_offset),
+            Some(selected_text.clone()),
+            *page_index,
+            None,
         ),
     }
 }
@@ -8111,9 +8229,10 @@ fn insert_chat_entry(
     conn.execute(
         "
         insert into chat_entries (
-          id, thread_id, kind, body, model, context_json, pinned, created_at
+          id, thread_id, kind, body, model, context_json, pinned,
+          author_kind, author_id, run_id, created_at
         )
-        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
         ",
         params![
             id,
@@ -8123,6 +8242,9 @@ fn insert_chat_entry(
             draft.model,
             context_json,
             draft.pinned as i64,
+            draft.author_kind,
+            draft.author_id,
+            draft.run_id,
         ],
     )
     .map_err(|error| error.to_string())?;
