@@ -1,4 +1,1 @@
-- been able to add pdfs to your vault / upload
-    - and background process auto populates meta data
-- been able to go into full screen model for viewing pdfs 
-    - the ai floatable chat window is maybe some window you can resize, move around etc
+- use : "https://www.pulsemcp.com/servers/blazickjp-arxiv-mcp-server"
