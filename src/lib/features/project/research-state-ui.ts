@@ -6,9 +6,77 @@ import type {
 import type {
   HarnessChangeSet,
   HarnessConfiguration,
+  HarnessEvent,
+  HarnessRun,
   HarnessSchedule,
   ResearchCheckpoint,
 } from "../../domain/research.ts";
+
+const ACTIVE_RUN_STATUSES = new Set([
+  "queued",
+  "planning",
+  "searching",
+  "assessing",
+  "ranking",
+  "reconciling",
+  "canceling",
+]);
+
+/** Returns whether a Run still owns active or canceling work. */
+export function isActiveResearchRun(run: HarnessRun): boolean {
+  return ACTIVE_RUN_STATUSES.has(run.status);
+}
+
+/** Selects the newest persisted activity item without relying on array order. */
+export function latestResearchActivity(
+  events: HarnessEvent[],
+  runId: string,
+): HarnessEvent | undefined {
+  return events
+    .filter((event) => event.runId === runId)
+    .reduce<HarnessEvent | undefined>(
+      (latest, event) => (!latest || event.sequence > latest.sequence ? event : latest),
+      undefined,
+    );
+}
+
+/** Returns the newest actionable failure recorded for one Run. */
+export function latestResearchFailure(
+  events: HarnessEvent[],
+  runId: string,
+): HarnessEvent | undefined {
+  return latestResearchActivity(
+    events.filter((event) =>
+      ["agent_failed", "interrupted", "summary_failed"].includes(event.kind),
+    ),
+    runId,
+  );
+}
+
+/** Gives active lifecycle states a stable, human-readable fallback message. */
+export function researchProgressLabel(run: HarnessRun, event?: HarnessEvent): string {
+  if (run.status === "canceling") return "Stopping research";
+  if (event?.summary) return event.summary;
+  if (run.status === "queued" || run.status === "planning") return "Starting agent";
+  return "Research agent is working";
+}
+
+/** Turns common runtime failures into an action the researcher can take. */
+export function actionableResearchError(error: unknown): string {
+  const message = String(error);
+  const normalized = message.toLowerCase();
+  if (normalized.includes("authentication") || normalized.includes("not logged in")) {
+    return "Codex authentication is required. Sign in to Codex, then run research again.";
+  }
+  if (
+    normalized.includes("could not start codex") ||
+    normalized.includes("codex executable") ||
+    normalized.includes("no such file")
+  ) {
+    return "Codex could not be started. Install Codex or configure its executable, then run research again.";
+  }
+  return message;
+}
 
 /** Preserves every legacy researcher field in one readable instruction. */
 export function canonicalResearchInstructions(configuration: HarnessConfiguration): string {

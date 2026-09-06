@@ -64,6 +64,7 @@
     onApplyMetadataCandidate,
     onUpdatePaperMetadata,
     onToggleFocus,
+    navigationTarget,
   }: {
     paper: Paper;
     candidate?: DiscoveryReaderCandidate;
@@ -79,6 +80,8 @@
     onApplyMetadataCandidate: (paperId: string, candidate: MetadataCandidate) => void | Promise<void>;
     onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
     onToggleFocus: () => void;
+    /** One-shot request to reveal a cited PDF page from another i0i surface. */
+    navigationTarget?: { requestId: number; pageIndex: number };
   } = $props();
 
   // Anchored chat state (RFC 0034). ReaderView owns the thread/pin lists so the
@@ -1545,6 +1548,7 @@
                     scale={pdfScale}
                     {activeTool}
                     {citationFlash}
+                    {navigationTarget}
                     onSelectPassage={selectPassage}
                     onHighlightClick={openHighlightPopover}
                     onHighlightContextMenu={openHighlightContextMenu}

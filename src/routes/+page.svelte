@@ -136,6 +136,12 @@
   let projectDocumentDirty = $state(false);
   let selectedPaperId = $state("");
   let selectedReaderPaper = $state<Paper | null>(null);
+  let readerNavigation = $state<{
+    paperId: string;
+    pageIndex: number;
+    requestId: number;
+  } | null>(null);
+  let readerNavigationSequence = 0;
   let autofillingMetadataPaperIds = $state<string[]>([]);
   let metadataAutofillProgressByPaperId = $state<Record<string, MetadataAutofillProgress>>({});
   let activeTabId = $state("");
@@ -435,11 +441,15 @@
     return tabs.map((tab, index) => (index === existing ? readerTab : tab));
   }
 
-  function openPaper(paperId: string) {
+  function openPaper(paperId: string, pageIndex?: number) {
     const paper = getPaperById(paperId);
     if (!paper) {
       return;
     }
+    readerNavigation =
+      pageIndex === undefined
+        ? null
+        : { paperId, pageIndex, requestId: ++readerNavigationSequence };
     selectedPaperId = paper.id;
     selectedReaderPaper = paper;
 
@@ -1168,6 +1178,7 @@
         onApplyMetadataCandidate={applyMetadataCandidateForPaper}
         onUpdatePaperMetadata={updatePaperMetadataForPaper}
         onToggleFocus={exitReaderFocus}
+        navigationTarget={readerNavigation?.paperId === activePaper.id ? readerNavigation : undefined}
         onOpenPaperReference={openPaper}
         onOpenVaultReference={openVault}
         onOpenResearch={openResearchActivity}
@@ -1217,6 +1228,7 @@
                 onApplyMetadataCandidate={applyMetadataCandidateForPaper}
                 onUpdatePaperMetadata={updatePaperMetadataForPaper}
                 onToggleFocus={enterReaderFocus}
+                navigationTarget={readerNavigation?.paperId === activePaper.id ? readerNavigation : undefined}
                 onOpenPaperReference={openPaper}
                 onOpenVaultReference={openVault}
                 onOpenResearch={openResearchActivity}
@@ -1246,6 +1258,7 @@
                 documents={activeProjectWorkspace.documents}
                 initialRevision={requestedResearchRevision}
                 onOpenDocument={(documentId) => void openGeneratedProjectDocument(activeProjectWorkspace.id, documentId)}
+                onOpenPaper={openPaper}
                 onLibraryChanged={async () => hydrateLibrary(await getLibrary())}
               />
             {:else if activeTab?.kind === "vault" && activeProjectView === "documents" && activeProjectWorkspace}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ExternalLink, LoaderCircle, Play, Square } from "@lucide/svelte";
   import { onMount, tick } from "svelte";
   import {
     applyHarnessChangeSet,
@@ -8,6 +9,9 @@
     getHarnessChangeSet,
     getResearchHarness,
     listResearchCheckpoints,
+    listenResearchHarnessUpdated,
+    listenResearchLibraryUpdated,
+    listenResearchStateUpdated,
     listenSearchUpdated,
     rejectHarnessChangeSet,
     restoreResearchCheckpoint,
@@ -56,12 +60,17 @@
   } from "$lib/domain/research-state";
   import {
     allowedEpistemicStatuses,
+    actionableResearchError,
     changeSetReviewSummary,
     checkpointRestoreAvailability,
     canonicalResearchInstructions,
     documentGenerationAvailability,
     filterResearchEntries,
+    isActiveResearchRun,
+    latestResearchActivity,
+    latestResearchFailure,
     researchEntryCounts,
+    researchProgressLabel,
     simpleResearchConfiguration,
     sortResearchEntries,
   } from "$lib/features/project/research-state-ui";
@@ -73,6 +82,7 @@
     documents = [],
     initialRevision,
     onOpenDocument,
+    onOpenPaper,
     onLibraryChanged,
   }: {
     projectId: string;
@@ -81,6 +91,7 @@
     documents?: ProjectDocumentSummary[];
     initialRevision?: number;
     onOpenDocument?: (documentId: string) => void;
+    onOpenPaper?: (paperId: string, pageIndex?: number) => void;
     onLibraryChanged?: () => void | Promise<void>;
   } = $props();
 
@@ -94,8 +105,12 @@
   let inspectorTab = $state<"activity" | "settings">("activity");
   let loading = $state(true);
   let working = $state(false);
+  let startingRun = $state(false);
+  let cancellingRun = $state(false);
   let error = $state("");
   let loadedProjectKey = "";
+  let refreshRequest = 0;
+  let lastEventSequence = 0;
 
   let researchInstructions = $state("");
   let paperBudget = $state(10);
@@ -131,16 +146,15 @@
   let entryButtons: Record<string, HTMLButtonElement> = {};
 
   const activeRun = $derived(
-    snapshot?.runs.find((run) =>
-      ["queued", "planning", "searching", "assessing", "ranking", "reconciling"].includes(run.status),
-    ),
+    snapshot?.runs.find(isActiveResearchRun),
   );
   const activeProgress = $derived(
-    activeRun
-      ? snapshot?.events.find((event) => event.runId === activeRun.id && event.phase)
-      : undefined,
+    activeRun ? latestResearchActivity(snapshot?.events ?? [], activeRun.id) : undefined,
   );
   const featuredRun = $derived(activeRun ?? snapshot?.runs[0]);
+  const featuredFailure = $derived(
+    featuredRun ? latestResearchFailure(snapshot?.events ?? [], featuredRun.id) : undefined,
+  );
   const olderRuns = $derived((snapshot?.runs ?? []).filter((run) => run.id !== featuredRun?.id));
   const historical = $derived(
     Boolean(researchState && researchState.revision !== researchState.currentRevision),
@@ -168,30 +182,67 @@
   });
 
   onMount(() => {
-    let unlisten: (() => void) | undefined;
-    let unlistenGeneration: (() => void) | undefined;
-    listenSearchUpdated((event) => {
-      if (!snapshot?.runs.some((run) => run.searchId === event.searchId)) return;
-      void refreshHarness().then(() => {
-        if (["ready", "failed", "cancelled"].includes(event.status)) void onLibraryChanged?.();
-      });
-    }).then((stop) => (unlisten = stop));
-    listenResearchDocumentGenerationUpdated((updated) => {
-      if (updated.projectId !== projectId) return;
-      generation = updated;
-      if (updated.status === "ready" && updated.resultingDocumentId) {
-        generationDialogOpen = false;
-        generationSelection = [];
-        onOpenDocument?.(updated.resultingDocumentId);
-      }
-    }).then((stop) => (unlistenGeneration = stop));
+    const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    const register = (listener: Promise<() => void>): void => {
+      void listener
+        .then((stop) => {
+          if (disposed) stop();
+          else unlisteners.push(stop);
+        })
+        .catch((caught) => {
+          if (!disposed) error = actionableResearchError(caught);
+        });
+    };
+    register(
+      listenSearchUpdated((event) => {
+        if (!snapshot?.runs.some((run) => run.searchId === event.searchId)) return;
+        void refreshHarness().then(() => {
+          if (["ready", "failed", "cancelled"].includes(event.status)) {
+            void onLibraryChanged?.();
+          }
+        });
+      }),
+    );
+    register(
+      listenResearchHarnessUpdated((event) => {
+        if (event.projectId !== projectId && !snapshot?.runs.some((run) => run.id === event.runId)) {
+          return;
+        }
+        void refreshHarness();
+      }),
+    );
+    register(
+      listenResearchStateUpdated((event) => {
+        if (event.projectId === projectId) void refreshHarness();
+      }),
+    );
+    register(
+      listenResearchLibraryUpdated((event) => {
+        if (event.projectId !== projectId) return;
+        void refreshHarness();
+        void onLibraryChanged?.();
+      }),
+    );
+    register(
+      listenResearchDocumentGenerationUpdated((updated) => {
+        if (updated.projectId !== projectId) return;
+        generation = updated;
+        if (updated.status === "ready" && updated.resultingDocumentId) {
+          generationDialogOpen = false;
+          generationSelection = [];
+          onOpenDocument?.(updated.resultingDocumentId);
+        }
+      }),
+    );
     return () => {
-      unlisten?.();
-      unlistenGeneration?.();
+      disposed = true;
+      for (const unlisten of unlisteners) unlisten();
     };
   });
 
   async function loadProject(key: string) {
+    refreshRequest += 1;
     loading = true;
     error = "";
     loadedProjectKey = key;
@@ -203,18 +254,21 @@
         listResearchCheckpoints(projectId),
       ]);
       if (loadedProjectKey !== key) return;
+      const nextChangeSets = await loadChangeSets(next.runs);
+      if (loadedProjectKey !== key) return;
       snapshot = next;
+      lastEventSequence = Math.max(0, ...next.events.map((event) => event.sequence));
       researchState = nextState;
       improvements = nextImprovements;
       checkpoints = Object.fromEntries(nextCheckpoints.map((checkpoint) => [checkpoint.runId, checkpoint]));
-      changeSets = await loadChangeSets(next.runs);
+      changeSets = nextChangeSets;
       selectedEntry = null;
       generationSelection = [];
       applyConfiguration(next.harness.configuration);
     } catch (caught) {
-      error = String(caught);
+      if (loadedProjectKey === key) error = actionableResearchError(caught);
     } finally {
-      loading = false;
+      if (loadedProjectKey === key) loading = false;
     }
   }
 
@@ -420,19 +474,28 @@
   });
 
   async function refreshHarness() {
+    const request = ++refreshRequest;
+    const requestedProjectId = projectId;
     try {
       const [nextSnapshot, nextImprovements, nextCheckpoints] = await Promise.all([
-        getResearchHarness(projectId),
-        listHarnessImprovements(projectId),
-        listResearchCheckpoints(projectId),
+        getResearchHarness(requestedProjectId),
+        listHarnessImprovements(requestedProjectId),
+        listResearchCheckpoints(requestedProjectId),
       ]);
+      const nextChangeSets = await loadChangeSets(nextSnapshot.runs);
+      const nextState = !historical ? await getResearchState(requestedProjectId) : undefined;
+      if (request !== refreshRequest || projectId !== requestedProjectId) return;
+      const nextSequence = Math.max(0, ...nextSnapshot.events.map((event) => event.sequence));
+      if (nextSequence < lastEventSequence) return;
+      lastEventSequence = nextSequence;
       snapshot = nextSnapshot;
       improvements = nextImprovements;
       checkpoints = Object.fromEntries(nextCheckpoints.map((checkpoint) => [checkpoint.runId, checkpoint]));
-      changeSets = await loadChangeSets(snapshot?.runs ?? []);
-      if (!historical) researchState = await getResearchState(projectId);
+      changeSets = nextChangeSets;
+      if (nextState) researchState = nextState;
+      error = "";
     } catch (caught) {
-      error = String(caught);
+      if (request === refreshRequest) error = actionableResearchError(caught);
     }
   }
 
@@ -585,6 +648,7 @@
 
   async function runNow() {
     working = true;
+    startingRun = true;
     error = "";
     try {
       await persistSettings();
@@ -592,22 +656,25 @@
       await refreshHarness();
       inspectorTab = "activity";
     } catch (caught) {
-      error = String(caught);
+      error = actionableResearchError(caught);
     } finally {
       working = false;
+      startingRun = false;
     }
   }
 
   async function cancelRun() {
     working = true;
+    cancellingRun = true;
     error = "";
     try {
       await cancelProjectResearch(projectId);
       await refreshHarness();
     } catch (caught) {
-      error = String(caught);
+      error = actionableResearchError(caught);
     } finally {
       working = false;
+      cancellingRun = false;
     }
   }
 
@@ -794,15 +861,27 @@
           <input type="number" min="1" max="100" step="1" bind:value={paperBudget} />
         </label>
         {#if activeRun}
-          <button class="primary" type="button" disabled={working || !activeRun.searchRunId} onclick={() => void cancelRun()}>Cancel</button>
+          <button
+            class="primary command-button"
+            type="button"
+            disabled={working || activeRun.status === "canceling"}
+            onclick={() => void cancelRun()}
+          >
+            {#if cancellingRun || activeRun.status === "canceling"}<span class="spin"><LoaderCircle size={14} aria-hidden="true" /></span>{:else}<Square size={13} aria-hidden="true" />{/if}
+            {activeRun.status === "canceling" ? "Stopping" : "Cancel"}
+          </button>
         {:else}
-          <button class="primary" type="button" disabled={working || !researchInstructions.trim()} onclick={() => void runNow()}>
-            {working ? "Starting…" : "Run research"}
+          <button class="primary command-button" type="button" disabled={working || !researchInstructions.trim()} onclick={() => void runNow()}>
+            {#if startingRun}<span class="spin"><LoaderCircle size={14} aria-hidden="true" /></span>{:else}<Play size={14} aria-hidden="true" />{/if}
+            {startingRun ? "Starting" : "Run research"}
           </button>
         {/if}
       </div>
-      {#if activeProgress}
-        <small class="live-progress">{activeProgress.summary}{activeProgress.progressCurrent !== undefined ? ` · ${activeProgress.progressCurrent}${activeProgress.progressTotal !== undefined ? `/${activeProgress.progressTotal}` : ""}` : ""}</small>
+      {#if activeRun}
+        <small class="live-progress" aria-live="polite">
+          <span class="spin"><LoaderCircle size={13} aria-hidden="true" /></span>
+          <span>{researchProgressLabel(activeRun, activeProgress)}{activeProgress?.progressCurrent !== undefined ? ` · ${activeProgress.progressCurrent}${activeProgress.progressTotal !== undefined ? `/${activeProgress.progressTotal}` : ""}` : ""}</span>
+        </small>
       {/if}
     </header>
 
@@ -822,7 +901,7 @@
         {#if !historical}
           <div class="actions"><button type="button" onclick={() => void startEdit()}>Revise</button><button type="button" onclick={() => void changeLifecycle("contested")}>Contest</button><button type="button" onclick={() => void changeLifecycle("superseded")}>Supersede</button>{#if selectedEntry.entry.kind === "experiment_idea"}<button class="primary" type="button" onclick={promoteExperiment}>Promote to document</button>{/if}</div>
         {/if}
-        <section><h3>Source evidence</h3>{#each selectedEntry.evidence as link}<article class="provenance"><strong>Paper {link.paperId} · pp. {link.pageStart + 1}–{link.pageEnd + 1}</strong><p>“{link.excerpt}”</p>{#if link.supportNote}<small>{link.supportNote}</small>{/if}</article>{:else}<p class="empty-list">No direct source evidence. This entry is not presented as a sourced quotation.</p>{/each}</section>
+        <section><h3>Source evidence</h3>{#each selectedEntry.evidence as link}<button class="provenance provenance-link" type="button" onclick={() => onOpenPaper?.(link.paperId, link.pageStart)}><span><strong>Paper {link.paperId} · pp. {link.pageStart + 1}–{link.pageEnd + 1}</strong><ExternalLink size={12} aria-hidden="true" /></span><p>“{link.excerpt}”</p>{#if link.supportNote}<small>{link.supportNote}</small>{/if}</button>{:else}<p class="empty-list">No direct source evidence. This entry is not presented as a sourced quotation.</p>{/each}</section>
         <section><h3>Derivation</h3>{#each selectedEntry.relations as link}<p class="provenance">{link.kind.replaceAll("_", " ")} · {link.targetEntryId}</p>{:else}<p class="empty-list">No entry derivations.</p>{/each}</section>
         <section><h3>Researcher context</h3>{#each selectedEntry.context as link}<p class="provenance">{link.kind.replaceAll("_", " ")} · {link.label}</p>{:else}<p class="empty-list">No working context attached.</p>{/each}</section>
         <section><h3>Immutable history</h3>{#each selectedEntry.history as version}<article class="history"><strong>r{version.stateRevision} · {version.lifecycle}</strong><p>{version.reason}</p><time>{version.createdAt}</time></article>{/each}</section>
@@ -846,11 +925,18 @@
           {@const run = featuredRun}
           <article class="improvement-card run-card">
             <div class="row"><span class="event-kind">{activeRun ? "Current Run" : "Last Run"} · {run.status}</span><time>{run.finishedAt ?? run.startedAt}</time></div>
-            <p>{run.summary ?? run.stopReason ?? "No Run summary yet."}</p>
+            {#if featuredFailure && ["failed", "cancelled"].includes(run.status)}
+              <p class="error-text">{actionableResearchError(featuredFailure.summary)}</p>
+            {:else if checkpoints[run.id]?.outcome}
+              <p>{checkpoints[run.id].outcome?.summary}</p>
+            {:else}
+              <p>{run.summary ?? run.stopReason ?? "Research is starting."}</p>
+            {/if}
             {#if checkpoints[run.id]}
               {@const checkpoint = checkpoints[run.id]}
               {@const restoreAvailability = checkpointRestoreAvailability(checkpoint, historical)}
               <p class="result-summary">{checkpoint.addedPaperIds.length} papers added to Vault · State {checkpoint.resultingStateRevision === undefined ? "unchanged" : `advanced to r${checkpoint.resultingStateRevision}`}</p>
+              {#if checkpoint.outcome?.unansweredQuestions[0]}<p><strong>Still open</strong><br />{checkpoint.outcome.unansweredQuestions[0]}</p>{/if}
               {#if checkpoint.nextDirection}<p><strong>Next</strong><br />{checkpoint.nextDirection}</p>{/if}
               <details class="checkpoint">
                 <summary>Technical activity</summary>
@@ -976,6 +1062,34 @@
     min-height: 32px;
   }
 
+  .command-button,
+  .live-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .command-button {
+    justify-content: center;
+    white-space: nowrap;
+  }
+
+  .live-progress {
+    min-width: 0;
+    color: var(--fg-2);
+    line-height: 1.35;
+  }
+
+  .live-progress span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .spin {
+    flex: 0 0 auto;
+    animation: research-spin 850ms linear infinite;
+  }
+
   .project-header {
     display: flex;
     align-items: center;
@@ -1014,7 +1128,7 @@
     color: var(--fg-3);
     font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0;
   }
 
   .status {
@@ -1252,6 +1366,31 @@
     margin-top: 5px;
     color: var(--fg-2);
     line-height: 1.4;
+  }
+
+  .provenance-link {
+    display: block;
+    width: 100%;
+    text-align: left;
+  }
+
+  .provenance-link > span {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  @keyframes research-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spin {
+      animation: none;
+    }
   }
 
   .event p {

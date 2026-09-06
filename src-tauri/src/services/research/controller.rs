@@ -168,6 +168,10 @@ impl ProjectResearchController {
             .lock()
             .expect("active Research Run lock")
             .insert(project_key.clone(), active);
+        let _ = self.app.emit(
+            "research_harness_updated",
+            json!({"projectId": project_id, "runId": run.id}),
+        );
         tauri::async_runtime::spawn(async move {
             controller
                 .execute(run_id, runtime_config, cancellation)
@@ -257,9 +261,15 @@ impl ProjectResearchController {
             }
         }
         self.mcp_server.revoke_run(&run_id).await;
-        let _ = self
-            .app
-            .emit("research_harness_updated", json!({"runId": run_id}));
+        let project_id = self
+            .store
+            .get_harness_run(&run_id)
+            .ok()
+            .map(|run| run.project_id);
+        let _ = self.app.emit(
+            "research_harness_updated",
+            json!({"projectId": project_id, "runId": run_id}),
+        );
     }
 
     async fn execute_inner(
@@ -338,7 +348,14 @@ impl ProjectResearchController {
             .attach_codex_turn(run_id, &turn.thread_id, &turn.turn_id)?;
 
         let completion = tokio::select! {
-            result = wait_for_turn(&mut events, &turn, &self.store, run_id) => result,
+            result = wait_for_turn(
+                &mut events,
+                &turn,
+                &self.store,
+                Some(&self.app),
+                &run.project_id,
+                run_id,
+            ) => result,
             _ = cancellation.cancelled() => {
                 runtime.interrupt(&turn).await?;
                 Ok(TurnCompletion { status: "cancelled".to_string(), final_message: None })
@@ -451,9 +468,10 @@ impl ProjectResearchController {
         {
             active.cancellation.cancel();
         }
-        let _ = self
-            .app
-            .emit("research_harness_updated", json!({"runId": run.id}));
+        let _ = self.app.emit(
+            "research_harness_updated",
+            json!({"projectId": project_id, "runId": run.id}),
+        );
         Ok(run)
     }
 
@@ -542,6 +560,8 @@ async fn wait_for_turn(
     events: &mut broadcast::Receiver<CodexEvent>,
     turn: &CodexTurn,
     store: &LibraryStore,
+    app: Option<&AppHandle>,
+    project_id: &str,
     run_id: &str,
 ) -> Result<TurnCompletion, String> {
     let mut final_message = None;
@@ -563,6 +583,12 @@ async fn wait_for_turn(
                 }
                 if let Some((kind, summary)) = observable_activity(&event, turn) {
                     store.record_harness_activity(run_id, kind, &summary, Some("agent"))?;
+                    if let Some(app) = app {
+                        let _ = app.emit(
+                            "research_harness_updated",
+                            json!({"projectId": project_id, "runId": run_id}),
+                        );
+                    }
                 }
                 if event.method == "turn/completed"
                     && event.params["threadId"].as_str() == Some(&turn.thread_id)
@@ -757,9 +783,16 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         )));
 
-        let completion = wait_for_turn(&mut receiver, &turn, &store, "unused-run")
-            .await
-            .expect("wait for completion");
+        let completion = wait_for_turn(
+            &mut receiver,
+            &turn,
+            &store,
+            None,
+            "project:test",
+            "unused-run",
+        )
+        .await
+        .expect("wait for completion");
         let expected = outcome_json();
         assert_eq!(completion.status, "completed");
         assert_eq!(completion.final_message.as_deref(), Some(expected.as_str()));
@@ -783,9 +816,16 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         )));
 
-        let completion = wait_for_turn(&mut receiver, &turn, &store, "unused-run")
-            .await
-            .expect("process exit is observable");
+        let completion = wait_for_turn(
+            &mut receiver,
+            &turn,
+            &store,
+            None,
+            "project:test",
+            "unused-run",
+        )
+        .await
+        .expect("process exit is observable");
         assert_eq!(completion.status, "runtime_exited");
         assert_eq!(
             runtime_failure_reason("Codex app-server closed its output"),

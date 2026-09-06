@@ -305,6 +305,8 @@ pub struct ResearchCheckpoint {
     pub converged: bool,
     pub reflection_id: Option<String>,
     pub next_direction: Option<String>,
+    /// Validated managed-agent interpretation, when the Run produced one.
+    pub outcome: Option<ResearchRunOutcome>,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub restore_available: bool,

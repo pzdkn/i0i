@@ -151,6 +151,47 @@ export async function listenSearchUpdated(
   return listen<SearchUpdated>("search_updated", (event) => onEvent(event.payload));
 }
 
+export interface ResearchHarnessUpdated {
+  projectId?: string;
+  runId: string;
+}
+
+export interface ResearchStateUpdated {
+  projectId: string;
+  revision: number;
+}
+
+export interface ResearchLibraryUpdated {
+  projectId: string;
+  vaultId: string;
+  paperId: string;
+}
+
+/** Subscribe to persisted managed-Run activity and lifecycle changes. */
+export async function listenResearchHarnessUpdated(
+  onEvent: (payload: ResearchHarnessUpdated) => void,
+): Promise<UnlistenFn> {
+  return listen<ResearchHarnessUpdated>("research_harness_updated", (event) =>
+    onEvent(event.payload),
+  );
+}
+
+/** Subscribe to committed Research State revisions. */
+export async function listenResearchStateUpdated(
+  onEvent: (payload: ResearchStateUpdated) => void,
+): Promise<UnlistenFn> {
+  return listen<ResearchStateUpdated>("research_state_updated", (event) =>
+    onEvent(event.payload),
+  );
+}
+
+/** Subscribe to papers committed through the managed Vault tools. */
+export async function listenResearchLibraryUpdated(
+  onEvent: (payload: ResearchLibraryUpdated) => void,
+): Promise<UnlistenFn> {
+  return listen<ResearchLibraryUpdated>("library_updated", (event) => onEvent(event.payload));
+}
+
 /** Subscribe to transient deep-search candidate previews. */
 export async function listenSearchCandidatesPreview(
   onEvent: (payload: SearchCandidatesPreview) => void,

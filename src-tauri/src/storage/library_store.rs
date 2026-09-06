@@ -7851,9 +7851,15 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
     };
     let reflection = conn
         .query_row(
-            "select id, next_direction from harness_reflections where run_id = ?1",
+            "select id, next_direction, metrics_json from harness_reflections where run_id = ?1",
             params![run_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| error.to_string())?;
@@ -7863,11 +7869,18 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
             run.stop_reason.as_deref(),
             Some("target_reached" | "coverage_sufficient" | "converged")
         );
-    let reflection_id = reflection.as_ref().map(|(id, _)| id.clone());
+    let reflection_id = reflection.as_ref().map(|(id, _, _)| id.clone());
     let next_direction = reflection
         .as_ref()
-        .and_then(|(_, next_direction)| next_direction.clone())
+        .and_then(|(_, next_direction, _)| next_direction.clone())
         .or_else(|| plan.map(|plan| plan.next_direction.clone()));
+    let outcome = reflection
+        .as_ref()
+        .and_then(|(_, _, metrics_json)| {
+            serde_json::from_str::<serde_json::Value>(metrics_json).ok()
+        })
+        .and_then(|metrics| metrics.get("agentOutcome").cloned())
+        .and_then(|value| serde_json::from_value(value).ok());
     Ok(ResearchCheckpoint {
         run_id: run.id,
         project_id: run.project_id,
@@ -7894,6 +7907,7 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
         converged: run.stop_reason.as_deref() == Some("converged"),
         reflection_id,
         next_direction,
+        outcome,
         started_at: run.started_at,
         finished_at: run.finished_at,
         restore_available: terminal && run.resulting_state_revision.is_some(),
@@ -20576,8 +20590,10 @@ mod tests {
     #[test]
     fn continuation_history_is_recent_and_character_bounded() -> StoreResult<()> {
         let db = test_db()?;
+        let mut latest_run_id = String::new();
         for index in 0..4 {
             let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+            latest_run_id = run.id.clone();
             db.store.begin_codex_harness_finalization(&run.id)?;
             db.store.persist_agent_run_outcome(
                 &run.id,
@@ -20592,6 +20608,14 @@ mod tests {
             .list_recent_agent_run_outcomes("project:attention", 3, 12_000)?;
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].outcome.summary, "Outcome 3");
+        assert_eq!(
+            db.store
+                .get_research_checkpoint(&latest_run_id)?
+                .outcome
+                .expect("checkpoint outcome")
+                .summary,
+            "Outcome 3"
+        );
         let one_outcome_chars = serde_json::to_string(&recent[0].outcome)
             .map_err(|error| error.to_string())?
             .chars()

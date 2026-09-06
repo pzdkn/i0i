@@ -3,18 +3,25 @@ import { test } from "node:test";
 import type { ResearchEntrySummary } from "../../domain/research-state.ts";
 import {
   allowedEpistemicStatuses,
+  actionableResearchError,
   canonicalResearchInstructions,
   changeSetReviewSummary,
   checkpointRestoreAvailability,
   documentGenerationAvailability,
   filterResearchEntries,
+  isActiveResearchRun,
+  latestResearchActivity,
+  latestResearchFailure,
   researchEntryCounts,
+  researchProgressLabel,
   simpleResearchConfiguration,
   sortResearchEntries,
 } from "./research-state-ui.ts";
 import type {
+  HarnessEvent,
   HarnessChangeSet,
   HarnessConfiguration,
+  HarnessRun,
   ResearchCheckpoint,
 } from "../../domain/research.ts";
 
@@ -143,4 +150,38 @@ test("simple Research settings preserve legacy intent and enforce bounded enrich
   assert.equal(simple.mayAddPapers, true);
   assert.deepEqual(simple.writableDocumentIds, []);
   assert.deepEqual(simple.stopConditions, { stopOnConvergence: false });
+});
+
+test("Research progress uses the newest sequence and includes canceling", () => {
+  const run = { id: "run-1", status: "searching" } as HarnessRun;
+  const older = {
+    id: "event-1",
+    runId: run.id,
+    sequence: 2,
+    summary: "Searching old query",
+  } as HarnessEvent;
+  const newer = {
+    id: "event-2",
+    runId: run.id,
+    sequence: 7,
+    summary: "Reading relevant passages",
+  } as HarnessEvent;
+  assert.equal(latestResearchActivity([newer, older], run.id), newer);
+  assert.equal(
+    latestResearchFailure(
+      [newer, { ...older, kind: "agent_failed", summary: "authentication required" }],
+      run.id,
+    )?.kind,
+    "agent_failed",
+  );
+  assert.equal(researchProgressLabel(run, newer), "Reading relevant passages");
+  run.status = "canceling";
+  assert.equal(isActiveResearchRun(run), true);
+  assert.equal(researchProgressLabel(run, newer), "Stopping research");
+});
+
+test("Research startup failures tell the user how to recover", () => {
+  assert.match(actionableResearchError("authentication required"), /Sign in to Codex/);
+  assert.match(actionableResearchError("Could not start Codex executable"), /Install Codex/);
+  assert.equal(actionableResearchError("provider failed"), "provider failed");
 });

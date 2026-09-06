@@ -409,7 +409,7 @@ first research loop works.
 | 10 / M00-07 | [0135: Codex-Driven Project Research Loop](../docs/rfcs/milestone_00/0135-codex-project-research-loop.md) | Integrate one real iteration through the production Run entry point. | Implemented; fixed-corpus acceptance pending |
 | 11 / M00-08 | [0136: Research Feedback and Continuation](../docs/rfcs/milestone_00/0136-research-feedback-and-continuation.md) | Adapt searches after evidence and carry useful outcomes into a new thread. | Implemented; controlled evaluation pending |
 | 12 / M00-09a | [0137: Research Cancellation and Recovery](../docs/rfcs/milestone_00/0137-research-cancellation-and-recovery.md) | Handle cancellation/commit races, crashes, and restart without losing results. | Implemented; live interruption pending |
-| 13 / M00-09b | [0138: Native Research Progress](../docs/rfcs/milestone_00/0138-native-research-progress.md) | Existing Run/Cancel UI, live changes, evidence navigation, and native acceptance. | Open |
+| 13 / M00-09b | [0138: Native Research Progress](../docs/rfcs/milestone_00/0138-native-research-progress.md) | Existing Run/Cancel UI, live changes, evidence navigation, and native acceptance. | Implemented; native acceptance pending |
 | 14 / M00-10a | [0139: Evidence Question Tools](../docs/rfcs/milestone_00/0139-evidence-question-tools.md) | Optional paper/Vault answers with source references and no implicit note writes. | Open |
 | 15 / M00-10b | [0140: Vault Evidence Summary](../docs/rfcs/milestone_00/0140-vault-evidence-summary.md) | Bounded collection overview with coverage and freshness. | Open |
 

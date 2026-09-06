@@ -31,6 +31,7 @@
     onToolHighlight,
     onPlaceNote,
     onPageChange,
+    navigationTarget,
   }: {
     pdfUrl: string;
     sourceId: string;
@@ -56,6 +57,8 @@
     onHighlightContextMenu?: (highlightId: string, x: number, y: number) => void;
     onToolHighlight?: (selection: ReaderTextSelection) => void;
     onPlaceNote?: (pageIndex: number, x: number, y: number, clientX: number, clientY: number) => void;
+    /** One-shot request to reveal a page after its PDF page element is mounted. */
+    navigationTarget?: { requestId: number; pageIndex: number };
   } = $props();
 
   let pdfDocument = $state<PDFDocumentProxy | null>(null);
@@ -68,6 +71,7 @@
   let isLoading = $state(false);
   let error = $state("");
   let renderSessionSequence = 0;
+  let handledNavigationRequest = 0;
 
   // Highlights anchored to this PDF source become the on-page marks (RFC 0056;
   // no longer gated on pinnedCount — asks persist their highlight too).
@@ -257,6 +261,20 @@
     const behavior = Math.abs(delta) > scroller.clientHeight * 2 ? "auto" : "smooth";
     scroller.scrollBy({ top: delta, behavior });
   }
+
+  $effect(() => {
+    const target = navigationTarget;
+    if (
+      !target ||
+      target.requestId === handledNavigationRequest ||
+      !scrollElement ||
+      !pageRefs[target.pageIndex]?.getElement()
+    ) {
+      return;
+    }
+    handledNavigationRequest = target.requestId;
+    scrollToPage(target.pageIndex);
+  });
 
   // Resolves an agent quote to a pdfRect by asking each rendered page to match
   // it against its own text layer (tight, selection-accurate rects). Exposed to

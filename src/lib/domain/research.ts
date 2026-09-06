@@ -378,6 +378,7 @@ export interface ResearchCheckpoint {
   converged: boolean;
   reflectionId?: string;
   nextDirection?: string;
+  outcome?: ResearchRunOutcome;
   startedAt: string;
   finishedAt?: string;
   restoreAvailable: boolean;
