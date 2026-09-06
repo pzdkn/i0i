@@ -180,12 +180,27 @@ export interface HarnessRun {
   llmCallCount: number;
   iterationCount: number;
   inspectedCandidateCount: number;
+  executionKind: "legacy_search" | "codex_agent" | string;
+  runtimeModel?: string;
+  runtimeThreadId?: string;
+  runtimeTurnId?: string;
+  agentLimits?: AgentRunLimits;
   trigger: "manual" | "scheduled" | "startup_catch_up";
   scheduledFor?: string;
   stopReason?: string;
   summary?: string;
   startedAt: string;
   finishedAt?: string;
+}
+
+export interface AgentRunLimits {
+  maximumRunSeconds: number;
+  maximumChildSearches: number;
+  maximumProviderQueries: number;
+  maximumLlmCalls: number;
+  maximumDistinctPapersRead: number;
+  maximumReturnedTextChars: number;
+  maximumConcurrentSearches: number;
 }
 
 export interface HarnessConfigurationVersion {

@@ -4,20 +4,19 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use crate::commands::research::start_project_research;
-use crate::services::research::manager::SearchManager;
+use crate::services::research::controller::ProjectResearchController;
 use crate::storage::library_store::LibraryStore;
 
 /// Recovers interrupted Runs and claims at most one due Project per minute.
 #[derive(Clone)]
 pub struct HarnessScheduler {
     store: LibraryStore,
-    manager: SearchManager,
+    controller: ProjectResearchController,
 }
 
 impl HarnessScheduler {
-    pub fn new(store: LibraryStore, manager: SearchManager) -> Self {
-        Self { store, manager }
+    pub fn new(store: LibraryStore, controller: ProjectResearchController) -> Self {
+        Self { store, controller }
     }
 
     pub fn start(&self) -> Result<(), String> {
@@ -39,13 +38,8 @@ impl HarnessScheduler {
         let Some(claim) = self.store.claim_due_harness(Utc::now(), startup)? else {
             return Ok(());
         };
-        start_project_research(
-            &self.store,
-            &self.manager,
-            &claim.project_id,
-            claim.trigger,
-            Some(&claim.scheduled_for),
-        )?;
+        self.controller
+            .start(&claim.project_id, claim.trigger, Some(&claim.scheduled_for))?;
         Ok(())
     }
 }

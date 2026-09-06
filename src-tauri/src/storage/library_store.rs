@@ -16,7 +16,7 @@ use crate::domain::chunking::{chunk_blocks, CHUNK_VERSION};
 use crate::domain::context::{ContextItem, ContextItemDraft, ContextKey, PageRects};
 use crate::domain::discovery::PaperCandidate;
 use crate::domain::harness::{
-    next_schedule_occurrence, render_harness_search_goal, DueHarnessClaim,
+    next_schedule_occurrence, render_harness_search_goal, AgentRunLimits, DueHarnessClaim,
     EffectiveInstructionStack, EffectiveRunContext, HarnessAutonomy, HarnessConfiguration,
     HarnessConfigurationVersion, HarnessEvent, HarnessRun, HarnessRunTrigger, HarnessSnapshot,
     HarnessUsage, ResearchCheckpoint, ResearchHarness, RunContextEntry, RunContextObservation,
@@ -1997,6 +1997,12 @@ impl LibraryStore {
         .map_err(|error| error.to_string())
     }
 
+    /// Load one persisted Research Run by its stable identifier.
+    pub fn get_harness_run(&self, run_id: &str) -> StoreResult<HarnessRun> {
+        let conn = self.open_connection()?;
+        read_harness_run(&conn, run_id)
+    }
+
     /// Loads the immutable effective instruction stack captured for one Run.
     pub fn get_harness_run_instructions(
         &self,
@@ -3602,6 +3608,323 @@ impl LibraryStore {
         tx.commit().map_err(|error| error.to_string())?;
         let conn = self.open_connection()?;
         read_harness_run(&conn, &id)
+    }
+
+    /// Convert a newly queued Run into an immutable managed-Codex snapshot.
+    pub fn configure_codex_harness_run(
+        &self,
+        harness_run_id: &str,
+        model: &str,
+        limits: &AgentRunLimits,
+    ) -> StoreResult<HarnessRun> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let mut run = read_harness_run(&tx, harness_run_id)?;
+        if run.status != "queued" {
+            return Err("Only a queued Research Run can start Codex".to_string());
+        }
+        run.effective_instructions
+            .run_context
+            .maximum_provider_queries = limits.maximum_provider_queries;
+        run.effective_instructions.run_context.maximum_llm_calls = limits.maximum_llm_calls;
+        let instructions_json = serde_json::to_string(&run.effective_instructions)
+            .map_err(|error| error.to_string())?;
+        let limits_json = serde_json::to_string(limits).map_err(|error| error.to_string())?;
+        tx.execute(
+            "update harness_runs
+             set status = 'planning', execution_kind = 'codex_agent', runtime_model = ?2,
+                 effective_instruction_stack_json = ?3, agent_limits_json = ?4
+             where id = ?1 and status = 'queued'",
+            params![harness_run_id, model, instructions_json, limits_json],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(
+            &tx,
+            harness_run_id,
+            "agent_starting",
+            "Starting the managed research agent",
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_harness_run(&conn, harness_run_id)
+    }
+
+    /// Persist the app-server identities before the Codex turn does any work.
+    pub fn attach_codex_turn(
+        &self,
+        harness_run_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> StoreResult<HarnessRun> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let updated = tx
+            .execute(
+                "update harness_runs
+                 set status = 'searching', runtime_thread_id = ?2, runtime_turn_id = ?3
+                 where id = ?1 and execution_kind = 'codex_agent'
+                   and status in ('planning', 'searching')",
+                params![harness_run_id, thread_id, turn_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if updated != 1 {
+            return Err("Managed Research Run is no longer active".to_string());
+        }
+        append_harness_event(
+            &tx,
+            harness_run_id,
+            "agent_started",
+            "Managed research agent is working",
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_harness_run(&conn, harness_run_id)
+    }
+
+    /// Append one public lifecycle observation without storing model reasoning.
+    pub fn record_harness_activity(
+        &self,
+        harness_run_id: &str,
+        kind: &str,
+        summary: &str,
+        phase: Option<&str>,
+    ) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        append_structured_harness_event(
+            &conn,
+            harness_run_id,
+            kind,
+            summary,
+            None,
+            phase,
+            None,
+            None,
+            "harness",
+        )
+    }
+
+    /// Charge exact text returned by Reader to the owning managed Run.
+    pub fn record_agent_reader_delivery(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        paper_id: &str,
+        returned_text_chars: u64,
+    ) -> StoreResult<()> {
+        if returned_text_chars == 0 {
+            return Ok(());
+        }
+        let mut conn = self.open_connection()?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let limits_json: Option<String> = tx
+            .query_row(
+                "select agent_limits_json from harness_runs
+                 where id = ?1 and project_id = ?2 and execution_kind = 'codex_agent'
+                   and status in ('planning', 'searching', 'assessing', 'ranking')",
+                params![run_id, project_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .flatten();
+        let limits_json = limits_json.ok_or("Managed Research Run is no longer active")?;
+        let limits: AgentRunLimits =
+            serde_json::from_str(&limits_json).map_err(|error| error.to_string())?;
+        let already_read: bool = tx
+            .query_row(
+                "select exists(select 1 from agent_reader_usage
+                 where run_id = ?1 and paper_id = ?2)",
+                params![run_id, paper_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let (distinct_papers, returned_chars): (u32, i64) = tx
+            .query_row(
+                "select count(*), coalesce(sum(returned_text_chars), 0)
+                 from agent_reader_usage where run_id = ?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if !already_read && distinct_papers >= limits.maximum_distinct_papers_read {
+            return Err("Research Run paper-read limit is exhausted".to_string());
+        }
+        let returned_text_chars: i64 = returned_text_chars
+            .try_into()
+            .map_err(|_| "Reader response is too large to account for".to_string())?;
+        if returned_chars.saturating_add(returned_text_chars)
+            > limits.maximum_returned_text_chars as i64
+        {
+            return Err("Research Run returned-text limit is exhausted".to_string());
+        }
+        tx.execute(
+            "insert into agent_reader_usage
+               (run_id, paper_id, returned_text_chars, read_count)
+             values (?1, ?2, ?3, 1)
+             on conflict(run_id, paper_id) do update set
+               returned_text_chars = returned_text_chars + excluded.returned_text_chars,
+               read_count = read_count + 1",
+            params![run_id, paper_id, returned_text_chars],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// List child searches that must settle before their parent can finish.
+    pub fn list_agent_search_runs_for_parent(
+        &self,
+        project_id: &str,
+        parent_run_id: &str,
+    ) -> StoreResult<Vec<SearchRun>> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select r.id from agent_search_runs a
+                 join search_runs r on r.id = a.run_id
+                 where a.project_id = ?1 and a.parent_run_id = ?2 order by r.created_at, r.id",
+            )
+            .map_err(|error| error.to_string())?;
+        let ids = statement
+            .query_map(params![project_id, parent_run_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        collect_rows(ids)?
+            .into_iter()
+            .map(|id| read_search_run(&conn, &id))
+            .collect()
+    }
+
+    /// Finish a managed Run from committed State, Vault, search, and Reader facts.
+    pub fn finish_codex_harness_run(
+        &self,
+        harness_run_id: &str,
+        status: &str,
+        stop_reason: &str,
+    ) -> StoreResult<HarnessRun> {
+        if !matches!(status, "ready" | "failed" | "cancelled") {
+            return Err(format!("Invalid managed Research Run status: {status}"));
+        }
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let run = read_harness_run(&tx, harness_run_id)?;
+        if matches!(run.status.as_str(), "ready" | "failed" | "cancelled") {
+            return Ok(run);
+        }
+        let active_children: i64 = tx
+            .query_row(
+                "select count(*) from agent_search_runs a
+                 join search_runs r on r.id = a.run_id
+                 where a.parent_run_id = ?1
+                   and r.status not in ('ready', 'failed', 'cancelled')",
+                params![harness_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if active_children > 0 {
+            return Err("Managed Research Run still has active child searches".to_string());
+        }
+        let (provider_queries, llm_calls, inspected_candidates): (u32, u32, u32) = tx
+            .query_row(
+                "select coalesce(sum(r.provider_query_count), 0),
+                        coalesce(sum(r.llm_call_count), 0),
+                        coalesce(sum(r.inspected_candidate_count), 0)
+                 from agent_search_runs a join search_runs r on r.id = a.run_id
+                 where a.parent_run_id = ?1",
+                params![harness_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let (papers_read, returned_chars): (u32, i64) = tx
+            .query_row(
+                "select count(*), coalesce(sum(returned_text_chars), 0)
+                 from agent_reader_usage where run_id = ?1",
+                params![harness_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let state_iterations: u32 = tx
+            .query_row(
+                "select count(*) from research_state_revisions where run_id = ?1",
+                params![harness_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let resulting_state_revision: i64 = tx
+            .query_row(
+                "select current_revision from research_state_heads where project_id = ?1",
+                params![run.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let resulting_vault_revision: i64 = tx
+            .query_row(
+                "select membership_revision from vaults where project_id = ?1",
+                params![run.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let added_papers: i64 = tx
+            .query_row(
+                "select count(*) from agent_vault_additions
+                 where run_id = ?1 and membership_added = 1",
+                params![harness_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let summary = format!(
+            "Read {papers_read} papers ({returned_chars} characters), added {added_papers} papers, and committed {state_iterations} State revisions"
+        );
+        tx.execute(
+            "update harness_runs
+             set status = ?2, stop_reason = ?3, summary = ?4,
+                 resulting_state_revision = ?5, resulting_vault_revision = ?6,
+                 provider_query_count = ?7, llm_call_count = ?8,
+                 iteration_count = ?9, inspected_candidate_count = ?10,
+                 finished_at = datetime('now') where id = ?1",
+            params![
+                harness_run_id,
+                status,
+                stop_reason,
+                summary,
+                resulting_state_revision,
+                resulting_vault_revision,
+                provider_queries,
+                llm_calls,
+                state_iterations,
+                inspected_candidates,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update searches set status = ?2, stop_reason = ?3, summary = ?4,
+             updated_at = datetime('now') where id = ?1",
+            params![run.search_id, status, stop_reason, summary],
+        )
+        .map_err(|error| error.to_string())?;
+        append_harness_event(&tx, harness_run_id, status, &summary)?;
+        if status == "ready" {
+            settle_harness_after_run(
+                &tx,
+                &run.project_id,
+                harness_run_id,
+                resulting_state_revision > run.starting_state_revision || added_papers > 0,
+            )?;
+        } else {
+            tx.execute(
+                "update research_harnesses set status = requested_post_run_status,
+                 updated_at = datetime('now') where project_id = ?1",
+                params![run.project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        let conn = self.open_connection()?;
+        read_harness_run(&conn, harness_run_id)
     }
 
     /// Attaches the concrete Deep Research Run and catches up its current status.
@@ -5495,6 +5818,11 @@ impl LibraryStore {
               llm_call_count integer not null default 0,
               iteration_count integer not null default 0,
               inspected_candidate_count integer not null default 0,
+              execution_kind text not null default 'legacy_search',
+              runtime_model text,
+              runtime_thread_id text,
+              runtime_turn_id text,
+              agent_limits_json text,
               trigger text not null default 'manual',
               scheduled_for text,
               started_at text not null,
@@ -5507,6 +5835,26 @@ impl LibraryStore {
             create unique index if not exists idx_harness_runs_one_active
               on harness_runs(project_id)
               where status in ('queued', 'planning', 'searching', 'assessing', 'ranking', 'reconciling');
+
+            create table if not exists agent_reader_usage (
+              run_id text not null,
+              paper_id text not null,
+              returned_text_chars integer not null default 0,
+              read_count integer not null default 0,
+              primary key (run_id, paper_id),
+              foreign key (run_id) references harness_runs(id) on delete cascade,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create table if not exists agent_vault_additions (
+              run_id text not null,
+              paper_id text not null,
+              membership_added integer not null,
+              created_at text not null,
+              primary key (run_id, paper_id),
+              foreign key (run_id) references harness_runs(id) on delete cascade,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
 
             create table if not exists harness_change_sets (
               id text primary key,
@@ -6396,6 +6744,16 @@ impl LibraryStore {
         ] {
             add_column_if_missing(conn, "harness_runs", column, "integer not null default 0")?;
         }
+        add_column_if_missing(
+            conn,
+            "harness_runs",
+            "execution_kind",
+            "text not null default 'legacy_search'",
+        )?;
+        add_column_if_missing(conn, "harness_runs", "runtime_model", "text")?;
+        add_column_if_missing(conn, "harness_runs", "runtime_thread_id", "text")?;
+        add_column_if_missing(conn, "harness_runs", "runtime_turn_id", "text")?;
+        add_column_if_missing(conn, "harness_runs", "agent_limits_json", "text")?;
         for column in [
             "provider_query_count",
             "llm_call_count",
@@ -7112,7 +7470,8 @@ fn read_harness_run(conn: &Connection, run_id: &str) -> StoreResult<HarnessRun> 
                 stop_reason, summary, starting_state_revision,
                 resulting_state_revision, starting_vault_revision, resulting_vault_revision,
                 provider_query_count, llm_call_count, iteration_count, inspected_candidate_count,
-                trigger, scheduled_for, started_at, finished_at
+                execution_kind, runtime_model, runtime_thread_id, runtime_turn_id,
+                agent_limits_json, trigger, scheduled_for, started_at, finished_at
          from harness_runs where id = ?1",
         params![run_id],
         harness_run_from_row,
@@ -7135,7 +7494,7 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
     let plan = change_set
         .as_ref()
         .and_then(|change_set| change_set.plan.as_ref());
-    let accepted_candidate_count = plan
+    let legacy_accepted_candidate_count = plan
         .map(|plan| {
             plan.candidate_decisions
                 .iter()
@@ -7151,7 +7510,7 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
                 .count() as i64
         })
         .unwrap_or(0);
-    let added_paper_ids = match (&change_set, plan) {
+    let mut added_paper_ids = match (&change_set, plan) {
         (Some(change_set), Some(plan)) if change_set.status == HarnessChangeSetStatus::Applied => {
             plan.candidate_decisions
                 .iter()
@@ -7172,6 +7531,24 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
                 .collect()
         }
         _ => Vec::new(),
+    };
+    let mut managed_added_paper_ids = conn
+        .prepare(
+            "select paper_id from agent_vault_additions
+             where run_id = ?1 and membership_added = 1 order by created_at, paper_id",
+        )
+        .map_err(|error| error.to_string())?
+        .query_map(params![run_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    added_paper_ids.append(&mut managed_added_paper_ids);
+    added_paper_ids.sort();
+    added_paper_ids.dedup();
+    let accepted_candidate_count = if run.execution_kind == "codex_agent" {
+        added_paper_ids.len() as i64
+    } else {
+        legacy_accepted_candidate_count
     };
     let reflection = conn
         .query_row(
@@ -7501,7 +7878,8 @@ fn read_harness_runs(conn: &Connection, project_id: &str) -> StoreResult<Vec<Har
                     stop_reason, summary, starting_state_revision,
                     resulting_state_revision, starting_vault_revision, resulting_vault_revision,
                     provider_query_count, llm_call_count, iteration_count, inspected_candidate_count,
-                    trigger, scheduled_for, started_at, finished_at
+                    execution_kind, runtime_model, runtime_thread_id, runtime_turn_id,
+                    agent_limits_json, trigger, scheduled_for, started_at, finished_at
              from harness_runs where project_id = ?1 order by started_at desc, id desc",
         )
         .map_err(|error| error.to_string())?;
@@ -7536,7 +7914,11 @@ fn harness_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HarnessRun>
         .unwrap_or_else(|| {
             legacy_effective_instruction_stack(&configuration_snapshot, starting_state_revision)
         });
-    let trigger: String = row.get(19)?;
+    let limits_json: Option<String> = row.get(23)?;
+    let agent_limits = limits_json
+        .map(|json| deserialize_sql_json(23, &json))
+        .transpose()?;
+    let trigger: String = row.get(24)?;
     Ok(HarnessRun {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -7557,10 +7939,15 @@ fn harness_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HarnessRun>
         llm_call_count: row.get(16)?,
         iteration_count: row.get(17)?,
         inspected_candidate_count: row.get(18)?,
-        trigger: parse_sql_enum(19, &trigger, HarnessRunTrigger::parse)?,
-        scheduled_for: row.get(20)?,
-        started_at: row.get(21)?,
-        finished_at: row.get(22)?,
+        execution_kind: row.get(19)?,
+        runtime_model: row.get(20)?,
+        runtime_thread_id: row.get(21)?,
+        runtime_turn_id: row.get(22)?,
+        agent_limits,
+        trigger: parse_sql_enum(24, &trigger, HarnessRunTrigger::parse)?,
+        scheduled_for: row.get(25)?,
+        started_at: row.get(26)?,
+        finished_at: row.get(27)?,
     })
 }
 
@@ -8746,29 +9133,47 @@ impl LibraryStore {
             return Err("Search Vault is outside this Project".to_string());
         }
         if let Some(parent_run_id) = parent_run_id {
-            let parent_stack_json: Option<String> = tx
+            let parent: Option<(String, Option<String>, String)> = tx
                 .query_row(
-                    "select effective_instruction_stack_json from harness_runs
+                    "select effective_instruction_stack_json, agent_limits_json, status
+                     from harness_runs
                      where id = ?1 and project_id = ?2",
                     params![parent_run_id, project_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(|error| error.to_string())?;
-            let Some(parent_stack_json) = parent_stack_json else {
+            let Some((parent_stack_json, parent_limits_json, parent_status)) = parent else {
                 return Err("Parent Research Run is outside this Project".to_string());
             };
+            if !matches!(
+                parent_status.as_str(),
+                "queued" | "planning" | "searching" | "assessing" | "ranking"
+            ) {
+                return Err("Parent Research Run is no longer active".to_string());
+            }
             let parent_stack: EffectiveInstructionStack = serde_json::from_str(&parent_stack_json)
                 .map_err(|error| format!("Parent Research Run limits are unreadable: {error}"))?;
-            let (reserved_provider_queries, reserved_llm_calls): (u32, u32) = tx
-                .query_row(
-                    "select coalesce(sum(reserved_provider_queries), 0),
+            let (child_searches, reserved_provider_queries, reserved_llm_calls): (u32, u32, u32) =
+                tx.query_row(
+                    "select count(*), coalesce(sum(reserved_provider_queries), 0),
                             coalesce(sum(reserved_llm_calls), 0)
                      from agent_search_runs where parent_run_id = ?1",
                     params![parent_run_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(|error| error.to_string())?;
+            let maximum_child_searches = parent_limits_json
+                .map(|json| {
+                    serde_json::from_str::<AgentRunLimits>(&json)
+                        .map(|limits| limits.maximum_child_searches)
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?
+                .unwrap_or(u32::MAX);
+            if child_searches >= maximum_child_searches {
+                return Err("Parent Research Run child-search limit is exhausted".to_string());
+            }
             if reserved_provider_queries.saturating_add(draft.strategy.max_provider_queries)
                 > parent_stack.run_context.maximum_provider_queries
                 || reserved_llm_calls.saturating_add(draft.strategy.max_llm_calls)
@@ -8908,6 +9313,7 @@ impl LibraryStore {
         project_id: &str,
         vault_id: &str,
         caller: &str,
+        parent_run_id: Option<&str>,
         request_id: &str,
         payload_hash: &str,
         paper: &PaperDraft,
@@ -8945,6 +9351,19 @@ impl LibraryStore {
             .map_err(|error| error.to_string())?;
         if !scoped_vault {
             return Err("Target Vault is outside this Project".to_string());
+        }
+        if let Some(parent_run_id) = parent_run_id {
+            let scoped_run: bool = tx
+                .query_row(
+                    "select exists(select 1 from harness_runs
+                     where id = ?1 and project_id = ?2)",
+                    params![parent_run_id, project_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !scoped_run {
+                return Err("Parent Research Run is outside this Project".to_string());
+            }
         }
         let membership_exists: bool = tx
             .query_row(
@@ -8997,6 +9416,16 @@ impl LibraryStore {
                 .map(|source| document_source_id(&paper.id, source))
                 .collect(),
         };
+        if let Some(parent_run_id) = parent_run_id {
+            tx.execute(
+                "insert into agent_vault_additions
+                   (run_id, paper_id, membership_added, created_at)
+                 values (?1, ?2, ?3, datetime('now'))
+                 on conflict(run_id, paper_id) do nothing",
+                params![parent_run_id, paper.id, receipt.membership_added],
+            )
+            .map_err(|error| error.to_string())?;
+        }
         let result_json = serde_json::to_string(&receipt).map_err(|error| error.to_string())?;
         tx.execute(
             "insert into mcp_mutation_receipts
@@ -19362,6 +19791,176 @@ mod tests {
             ),
         ];
         assert_eq!(mean_embedding(&rows)?, Some(vec![2.0, 4.0]));
+        Ok(())
+    }
+
+    fn managed_harness_run(db: &TestDb, limits: &AgentRunLimits) -> StoreResult<HarnessRun> {
+        let mut configuration = db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .harness
+            .configuration;
+        configuration.research_instructions = "Investigate grounded evidence".to_string();
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let search = db.store.create_search(&sample_search_draft())?;
+        let run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        db.store
+            .configure_codex_harness_run(&run.id, "test-model", limits)
+    }
+
+    #[test]
+    fn managed_run_snapshots_runtime_limits_and_remains_singleton() -> StoreResult<()> {
+        let db = test_db()?;
+        let limits = AgentRunLimits {
+            maximum_provider_queries: 9,
+            ..AgentRunLimits::default()
+        };
+        let run = managed_harness_run(&db, &limits)?;
+        assert_eq!(run.status, "planning");
+        assert_eq!(run.execution_kind, "codex_agent");
+        assert_eq!(run.runtime_model.as_deref(), Some("test-model"));
+        assert_eq!(run.agent_limits, Some(limits));
+        assert_eq!(
+            run.effective_instructions
+                .run_context
+                .maximum_provider_queries,
+            9
+        );
+
+        let search = db.store.create_search(&sample_search_draft())?;
+        assert!(db
+            .store
+            .create_harness_run("project:attention", &search.id)
+            .expect_err("a second active Run must fail atomically")
+            .contains("already active"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_reader_budget_counts_repeats_and_distinct_papers() -> StoreResult<()> {
+        let db = test_db()?;
+        let limits = AgentRunLimits {
+            maximum_distinct_papers_read: 1,
+            maximum_returned_text_chars: 10,
+            ..AgentRunLimits::default()
+        };
+        let run = managed_harness_run(&db, &limits)?;
+        db.store
+            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 6)?;
+        db.store
+            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 4)?;
+        assert!(db
+            .store
+            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 1,)
+            .expect_err("repeat reads still consume returned-text budget")
+            .contains("returned-text"));
+        assert!(db
+            .store
+            .record_agent_reader_delivery(&run.id, "project:attention", "caron2021", 1,)
+            .expect_err("new papers consume the distinct-paper budget")
+            .contains("paper-read"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_search_budget_limits_total_child_searches() -> StoreResult<()> {
+        let db = test_db()?;
+        let limits = AgentRunLimits {
+            maximum_child_searches: 1,
+            ..AgentRunLimits::default()
+        };
+        let run = managed_harness_run(&db, &limits)?;
+        let draft = quick_agent_search_draft();
+        db.store.create_agent_search_run(
+            "project:attention",
+            "attention",
+            "codex-test",
+            Some(&run.id),
+            "child-request-1",
+            "child-payload-1",
+            None,
+            &draft,
+            2,
+        )?;
+
+        assert!(db
+            .store
+            .create_agent_search_run(
+                "project:attention",
+                "attention",
+                "codex-test",
+                Some(&run.id),
+                "child-request-2",
+                "child-payload-2",
+                None,
+                &draft,
+                2,
+            )
+            .expect_err("the parent child-search budget must be enforced")
+            .contains("child-search limit"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_checkpoint_attributes_only_its_own_vault_additions() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        let paper = paper_draft("managed-addition");
+        db.store.add_agent_search_candidate_to_vault(
+            "project:attention",
+            "attention",
+            "codex-test",
+            Some(&run.id),
+            "vault-request-1",
+            "vault-payload-1",
+            &paper,
+        )?;
+        db.store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+
+        let checkpoint = db.store.get_research_checkpoint(&run.id)?;
+        assert_eq!(checkpoint.accepted_candidate_count, 1);
+        assert_eq!(checkpoint.added_paper_ids, vec![paper.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn managed_finalization_uses_committed_state_and_preserves_failed_work() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.attach_codex_turn(&run.id, "thread-1", "turn-1")?;
+        let receipt = db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            Some(&run.id),
+            "state-request-1",
+            "state-payload-1",
+            vec![agent_question("gap", "Which conditions change the result?")],
+        )?;
+        assert_eq!(receipt.revision, 1);
+
+        let finished = db
+            .store
+            .finish_codex_harness_run(&run.id, "failed", "agent_failed")?;
+        assert_eq!(finished.status, "failed");
+        assert_eq!(finished.resulting_state_revision, Some(1));
+        assert_eq!(finished.iteration_count, 1);
+        assert!(finished
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("1 State revisions"));
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .current_revision,
+            1,
+            "validated writes survive a later agent failure"
+        );
         Ok(())
     }
 }

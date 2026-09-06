@@ -14,6 +14,7 @@ use services::chat::ChatService;
 use services::mcp::LocalMcpServer;
 use services::metadata_enrichment::MetadataEnrichmentService;
 use services::reader_service::ReaderService;
+use services::research::controller::ProjectResearchController;
 use services::research::manager::SearchManager;
 use services::source_acquisition::SourceAcquisitionService;
 use services::vault_suggestions::VaultSuggestionManager;
@@ -153,9 +154,15 @@ pub fn run() {
             search_manager
                 .recover_and_queue_startup_runs()
                 .map_err(std::io::Error::other)?;
-            services::research::scheduler::HarnessScheduler::new(
+            let research_controller = ProjectResearchController::new(
+                app.handle().clone(),
                 store.clone(),
                 search_manager.clone(),
+                mcp_server.clone(),
+            );
+            services::research::scheduler::HarnessScheduler::new(
+                store.clone(),
+                research_controller.clone(),
             )
             .start()
             .map_err(std::io::Error::other)?;
@@ -229,6 +236,7 @@ pub fn run() {
             app.manage(metadata_enrichment);
             app.manage(discovery_providers);
             app.manage(search_manager);
+            app.manage(research_controller);
             app.manage(vault_suggestion_manager);
             app.manage(embedding_reranker);
             app.manage(chunk_embedder);

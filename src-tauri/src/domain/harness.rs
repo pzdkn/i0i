@@ -229,10 +229,43 @@ pub struct HarnessRun {
     pub llm_call_count: u32,
     pub iteration_count: u32,
     pub inspected_candidate_count: u32,
+    /// Distinguishes the legacy search pipeline from managed agent execution.
+    pub execution_kind: String,
+    pub runtime_model: Option<String>,
+    pub runtime_thread_id: Option<String>,
+    pub runtime_turn_id: Option<String>,
+    pub agent_limits: Option<AgentRunLimits>,
     pub trigger: HarnessRunTrigger,
     pub scheduled_for: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+}
+
+/// Hard limits captured before a managed research agent is dispatched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunLimits {
+    pub maximum_run_seconds: u64,
+    pub maximum_child_searches: u32,
+    pub maximum_provider_queries: u32,
+    pub maximum_llm_calls: u32,
+    pub maximum_distinct_papers_read: u32,
+    pub maximum_returned_text_chars: u64,
+    pub maximum_concurrent_searches: u32,
+}
+
+impl Default for AgentRunLimits {
+    fn default() -> Self {
+        Self {
+            maximum_run_seconds: 600,
+            maximum_child_searches: 6,
+            maximum_provider_queries: 12,
+            maximum_llm_calls: 20,
+            maximum_distinct_papers_read: 10,
+            maximum_returned_text_chars: 120_000,
+            maximum_concurrent_searches: 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

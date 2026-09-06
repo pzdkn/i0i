@@ -22,6 +22,16 @@ use crate::services::settings;
 
 const DEFAULT_EXECUTABLE: &str = "codex";
 const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+const DISABLED_RESEARCH_FEATURES: &[&str] = &[
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "multi_agent",
+    "apps",
+    "plugins",
+    "browser_use",
+    "computer_use",
+];
 
 /// Runtime settings read when a managed app-server is started.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,8 +89,22 @@ struct RuntimeInner {
 impl CodexRuntime {
     /// Start and initialize Codex, or return a readable setup/protocol error.
     pub async fn start(config: CodexRuntimeConfig) -> Result<Self, String> {
-        let mut child = Command::new(&config.executable)
-            .args(["app-server", "--listen", "stdio://"])
+        let inherited_mcp_overrides = inherited_mcp_disable_overrides(&config.executable).await?;
+        let mut command = Command::new(&config.executable);
+        command.args([
+            "app-server",
+            "--listen",
+            "stdio://",
+            "--config",
+            "web_search=\"disabled\"",
+        ]);
+        for feature in DISABLED_RESEARCH_FEATURES {
+            command.args(["--disable", feature]);
+        }
+        for config_override in inherited_mcp_overrides {
+            command.args(["--config", &config_override]);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -143,7 +167,9 @@ impl CodexRuntime {
                     "developerInstructions": developer_instructions,
                     "config": config,
                     "ephemeral": true,
-                    "approvalPolicy": "never"
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "environments": []
                 }),
             )
             .await?;
@@ -245,6 +271,48 @@ impl CodexRuntime {
             .await
             .map_err(|error| error.to_string())?;
         stdin.flush().await.map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfiguredMcpServer {
+    name: String,
+}
+
+/// Disable every MCP server inherited from the user's global Codex settings.
+async fn inherited_mcp_disable_overrides(executable: &Path) -> Result<Vec<String>, String> {
+    let output = Command::new(executable)
+        .args(["mcp", "list", "--json"])
+        .output()
+        .await
+        .map_err(|error| runtime_start_error(executable, error))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not inspect inherited Codex MCP servers: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let servers: Vec<ConfiguredMcpServer> = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Invalid `codex mcp list --json` response: {error}"))?;
+    Ok(servers
+        .into_iter()
+        .map(|server| {
+            format!(
+                "mcp_servers.{}.enabled=false",
+                toml_path_segment(&server.name)
+            )
+        })
+        .collect())
+}
+
+fn toml_path_segment(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('\"', "\\\""))
     }
 }
 
@@ -389,6 +457,12 @@ mod tests {
         );
         assert!(error.contains("research.codex_executable"));
         assert!(error.contains("/missing/codex"));
+    }
+
+    #[test]
+    fn quotes_unusual_mcp_names_for_config_overrides() {
+        assert_eq!(toml_path_segment("ordinary-name"), "ordinary-name");
+        assert_eq!(toml_path_segment("team.reader"), "\"team.reader\"");
     }
 
     #[tokio::test]

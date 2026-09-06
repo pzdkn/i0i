@@ -1,13 +1,13 @@
 //! Tauri commands for deep-research agentic search (RFC 0037).
 
-use crate::domain::discovery::DiscoveryProviderChoice;
 use crate::domain::harness::{
     EffectiveInstructionStack, HarnessConfiguration, HarnessConfigurationVersion, HarnessRun,
     HarnessRunTrigger, HarnessSnapshot, ResearchCheckpoint,
 };
 use crate::domain::reconciliation::{HarnessChangeSet, HarnessChangeSetPatch};
-use crate::domain::research::{Search, SearchCandidate, SearchConstraints, SearchDraft};
+use crate::domain::research::{Search, SearchCandidate, SearchDraft};
 use crate::domain::research_state::ResearchStateSnapshot;
+use crate::services::research::controller::ProjectResearchController;
 use crate::services::research::manager::SearchManager;
 use crate::storage::library_store::LibraryStore;
 
@@ -183,88 +183,10 @@ pub fn edit_harness_change_set(
 
 #[tauri::command]
 pub fn run_project_research(
-    store: tauri::State<'_, LibraryStore>,
-    manager: tauri::State<'_, SearchManager>,
+    controller: tauri::State<'_, ProjectResearchController>,
     project_id: String,
 ) -> Result<HarnessRun, String> {
-    start_project_research(
-        &store,
-        &manager,
-        &project_id,
-        HarnessRunTrigger::Manual,
-        None,
-    )
-}
-
-pub(crate) fn start_project_research(
-    store: &LibraryStore,
-    manager: &SearchManager,
-    project_id: &str,
-    trigger: HarnessRunTrigger,
-    scheduled_for: Option<&str>,
-) -> Result<HarnessRun, String> {
-    if trigger != HarnessRunTrigger::Manual {
-        store.ensure_harness_can_start(project_id)?;
-    }
-    let snapshot = store.get_harness_snapshot(&project_id)?;
-    if snapshot.runs.iter().any(|run| {
-        matches!(
-            run.status.as_str(),
-            "queued" | "planning" | "searching" | "assessing" | "ranking" | "reconciling"
-        )
-    }) {
-        return Err("A Research Run is already active for this Project".to_string());
-    }
-    let configuration = snapshot.harness.configuration;
-    let instructions = configuration.canonical_instructions();
-    if instructions.trim().is_empty() {
-        return Err("Research instructions cannot be empty".to_string());
-    }
-    let mut strategy = configuration.depth.budget();
-    if let Some(limit) = configuration.stop_conditions.maximum_provider_queries {
-        strategy.max_provider_queries = strategy.max_provider_queries.min(limit);
-    }
-    if let Some(limit) = configuration.stop_conditions.maximum_llm_calls {
-        strategy.max_llm_calls = strategy.max_llm_calls.min(limit);
-    }
-    // Reconciliation may make one plan call and one correction call. Keep
-    // those inside the Run ceiling rather than silently spending beyond it.
-    strategy.max_llm_calls = strategy.max_llm_calls.saturating_sub(2);
-    let search = store.create_search(&SearchDraft {
-        title: instructions
-            .lines()
-            .next()
-            .unwrap_or("Project research")
-            .to_string(),
-        goal: effective_research_goal(&configuration),
-        constraints: SearchConstraints {
-            year_from: None,
-            year_to: None,
-            providers: configured_providers(&configuration.sources),
-            open_access: false,
-            target_count: configuration.paper_budget,
-            venues: Vec::new(),
-            authors: Vec::new(),
-            fields_of_study: Vec::new(),
-            seed_paper_ids: Vec::new(),
-        },
-        strategy,
-        schedule: None,
-    })?;
-    let harness_run =
-        store.create_harness_run_with_trigger(project_id, &search.id, trigger, scheduled_for)?;
-    match manager.run_harness_search_with_timeout(
-        search.id,
-        Some("project_harness".to_string()),
-        configuration.stop_conditions.maximum_run_seconds,
-        &harness_run.id,
-    ) {
-        Ok(run) => Ok(run),
-        Err(error) => {
-            store.fail_harness_run(&harness_run.id, &error)?;
-            Err(error)
-        }
-    }
+    controller.start(&project_id, HarnessRunTrigger::Manual, None)
 }
 
 #[tauri::command]
@@ -284,61 +206,27 @@ pub fn resume_research_harness(
 }
 
 #[tauri::command]
-pub fn stop_research_harness(
+pub async fn stop_research_harness(
     store: tauri::State<'_, LibraryStore>,
-    manager: tauri::State<'_, SearchManager>,
+    controller: tauri::State<'_, ProjectResearchController>,
     project_id: String,
 ) -> Result<HarnessSnapshot, String> {
     let snapshot = store.stop_research_harness(&project_id)?;
-    if let Some(run) = snapshot.runs.iter().find(|run| {
+    if snapshot.runs.iter().any(|run| {
         matches!(
             run.status.as_str(),
             "queued" | "planning" | "searching" | "assessing" | "ranking" | "reconciling"
         )
     }) {
-        if let Some(search_run_id) = run.search_run_id.as_deref() {
-            manager.cancel_run(search_run_id);
-        }
+        controller.cancel(&project_id).await?;
     }
     Ok(snapshot)
 }
 
 #[tauri::command]
-pub fn cancel_project_research(
-    store: tauri::State<'_, LibraryStore>,
-    manager: tauri::State<'_, SearchManager>,
+pub async fn cancel_project_research(
+    controller: tauri::State<'_, ProjectResearchController>,
     project_id: String,
 ) -> Result<(), String> {
-    let snapshot = store.get_harness_snapshot(&project_id)?;
-    let active = snapshot
-        .runs
-        .iter()
-        .find(|run| {
-            matches!(
-                run.status.as_str(),
-                "queued" | "planning" | "searching" | "assessing" | "ranking" | "reconciling"
-            )
-        })
-        .ok_or_else(|| "No Research Run is active for this Project".to_string())?;
-    let search_run_id = active
-        .search_run_id
-        .as_deref()
-        .ok_or_else(|| "Research Run has not started its search yet".to_string())?;
-    manager.cancel_run(search_run_id);
-    Ok(())
-}
-
-fn configured_providers(sources: &[String]) -> Vec<DiscoveryProviderChoice> {
-    let mut providers = Vec::new();
-    if sources.iter().any(|source| source == "open_alex") {
-        providers.push(DiscoveryProviderChoice::OpenAlex);
-    }
-    if sources.iter().any(|source| source == "arxiv") {
-        providers.push(DiscoveryProviderChoice::Arxiv);
-    }
-    providers
-}
-
-fn effective_research_goal(configuration: &HarnessConfiguration) -> String {
-    configuration.canonical_instructions()
+    controller.cancel(&project_id).await
 }

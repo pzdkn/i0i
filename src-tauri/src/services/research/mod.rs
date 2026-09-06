@@ -15,6 +15,7 @@ pub mod agent;
 pub mod budget;
 #[allow(dead_code)]
 pub mod clock;
+pub mod controller;
 #[allow(dead_code)]
 pub mod dedup;
 #[allow(dead_code)]

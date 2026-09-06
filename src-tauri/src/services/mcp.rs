@@ -487,6 +487,21 @@ impl I0iMcpHandler {
             self.start_reader_page(&grant, &grant_token, &input.paper_id, page_start, page_end)
                 .await?
         };
+        if let Some(run_id) = grant.run_id.as_deref() {
+            let returned_text_chars: u64 = result
+                .passages
+                .iter()
+                .map(|passage| passage.text.chars().count() as u64)
+                .sum();
+            self.store
+                .record_agent_reader_delivery(
+                    run_id,
+                    &grant.project_id,
+                    &input.paper_id,
+                    returned_text_chars,
+                )
+                .map_err(search_write_failure)?;
+        }
         trace_tool(
             &grant,
             READER_READ,
@@ -1182,6 +1197,7 @@ impl I0iMcpHandler {
                 &grant.project_id,
                 &grant.vault_id,
                 &grant.caller,
+                grant.run_id.as_deref(),
                 request_id,
                 &payload_hash,
                 &paper,
@@ -1979,7 +1995,7 @@ fn state_write_failure(error: String) -> rmcp::ErrorData {
 fn search_write_failure(error: String) -> rmcp::ErrorData {
     let code = if error.contains("Request ID") {
         "request_conflict"
-    } else if error.contains("concurrency limit") {
+    } else if error.contains("limit") || error.contains("exhausted") {
         "limit_reached"
     } else {
         "invalid_input"
@@ -2933,6 +2949,7 @@ struct VaultPapersResult {
 #[cfg(test)]
 mod tests {
     use crate::domain::discovery::{CandidateMatch, PaperCandidate};
+    use crate::domain::harness::{AgentRunLimits, HarnessRun};
     use crate::domain::library::{DocumentBlock, DocumentPage, PaperDraft, PaperSourceDraft};
     use crate::domain::research::{Depth, SearchConstraints, SearchDraft};
     use crate::domain::research_state::{EpistemicStatus, ResearchEntryDraft, ResearchEntryKind};
@@ -2950,6 +2967,43 @@ mod tests {
         let store = LibraryStore::for_test(path);
         store.init().expect("initialize test library");
         store
+    }
+
+    fn managed_run(store: &LibraryStore, project_id: &str) -> HarnessRun {
+        let mut configuration = store
+            .get_harness_snapshot(project_id)
+            .expect("load managed test Harness")
+            .harness
+            .configuration;
+        configuration.research_instructions = "Read fixture evidence".to_string();
+        store
+            .save_harness_configuration(project_id, &configuration)
+            .expect("save managed test instructions");
+        let search = store
+            .create_search(&SearchDraft {
+                title: "Managed MCP test".to_string(),
+                goal: "Read fixture evidence".to_string(),
+                constraints: SearchConstraints {
+                    year_from: None,
+                    year_to: None,
+                    providers: Vec::new(),
+                    open_access: false,
+                    target_count: 1,
+                    venues: Vec::new(),
+                    authors: Vec::new(),
+                    fields_of_study: Vec::new(),
+                    seed_paper_ids: Vec::new(),
+                },
+                strategy: Depth::Quick.budget(),
+                schedule: None,
+            })
+            .expect("create managed test search");
+        let run = store
+            .create_harness_run(project_id, &search.id)
+            .expect("create managed test Run");
+        store
+            .configure_codex_harness_run(&run.id, "test-model", &AgentRunLimits::default())
+            .expect("configure managed test Run")
     }
 
     async fn client_for(
@@ -3110,7 +3164,7 @@ mod tests {
                 &vault.project_id,
                 &vault.id,
                 "test-client",
-                Some("test-run"),
+                None,
                 [VAULT_LIST, VAULT_LIST_PAPERS],
             )
             .await
@@ -3481,6 +3535,7 @@ mod tests {
         let vault = snapshot.vaults.first().expect("seed vault");
         let expected = "Evidence on the first fixture page.";
         add_extracted_pdf(&store, &vault.id, "paper:reader-fixture", expected);
+        let run = managed_run(&store, &vault.project_id);
         let server = LocalMcpServer::start_with_cursor_ttl(
             None,
             store.clone(),
@@ -3496,7 +3551,7 @@ mod tests {
                 &vault.project_id,
                 &vault.id,
                 "test-client",
-                Some("test-run"),
+                Some(&run.id),
                 [VAULT_GET_PAPER, READER_READ],
             )
             .await
@@ -3539,6 +3594,7 @@ mod tests {
         let paper_id = "paper:agent-note";
         let quote = "The repeated observation belongs to page one.";
         add_extracted_pdf(&store, &vault.id, paper_id, quote);
+        let run = managed_run(&store, &vault.project_id);
         let server = LocalMcpServer::start_with_cursor_ttl(
             None,
             store.clone(),
@@ -3554,7 +3610,7 @@ mod tests {
                 &vault.project_id,
                 &vault.id,
                 "codex-test",
-                Some("run-note-1"),
+                Some(&run.id),
                 [READER_READ, READER_ADD_NOTE, READER_LIST_NOTES],
             )
             .await
@@ -3619,7 +3675,7 @@ mod tests {
         assert_eq!(listed["notes"].as_array().unwrap().len(), 1);
         assert_eq!(listed["notes"][0]["quote"], quote);
         assert_eq!(listed["notes"][0]["author"]["id"], "codex-test");
-        assert_eq!(listed["notes"][0]["author"]["runId"], "run-note-1");
+        assert_eq!(listed["notes"][0]["author"]["runId"], run.id);
 
         client.cancel().await.expect("stop client");
         server.shutdown().await;
