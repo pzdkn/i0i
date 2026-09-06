@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "scenarios": [
+    {"id": "one_iteration", "description": "One search-read-update cycle."},
+    {"id": "multiple_iterations", "description": "A follow-up search informed by committed evidence."},
+    {"id": "new_run_continuation", "description": "A fresh agent thread continues from persisted State."},
+    {"id": "live_discovery_smoke", "description": "Live discovery, acquisition, reading, and State update."}
+  ],
+  "documents": []
+}

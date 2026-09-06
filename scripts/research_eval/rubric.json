@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "scale": {"0": "absent or incorrect", "1": "weak", "2": "adequate", "3": "strong"},
+  "minimum_dimension_score": 2,
+  "dimensions": ["relevance", "grounding", "epistemic_care", "state_improvement", "iterative_adaptation"]
+}

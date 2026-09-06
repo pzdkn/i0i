@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "eval:research": "python3 scripts/research_eval/run.py",
     "spike:extractors": "python3 scripts/extractor_spike/run_spike.py",
     "spike:extractors:fetch": "python3 scripts/extractor_spike/fetch_corpus.py",
     "spike:extractors:setup": "bash scripts/extractor_spike/setup_tools.sh",
