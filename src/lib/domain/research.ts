@@ -226,6 +226,20 @@ export interface RunContextObservation {
   description: string;
 }
 
+export interface ResearchTaskOutcome {
+  searchRunIds: string[];
+  motivatingEntryIds: string[];
+  learnedPoints: string[];
+  citedPassageRefs: string[];
+}
+
+export interface ResearchRunOutcome {
+  summary: string;
+  taskOutcomes: ResearchTaskOutcome[];
+  unansweredQuestions: string[];
+  nextDirection?: string | null;
+}
+
 export interface EffectiveRunContext {
   startingStateRevision: number;
   activeEntries: RunContextEntry[];

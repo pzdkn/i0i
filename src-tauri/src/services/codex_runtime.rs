@@ -176,17 +176,21 @@ impl CodexRuntime {
         string_at(&result, &["thread", "id"], "thread/start response")
     }
 
-    /// Start a text turn and return its stable app-server identifiers.
-    pub async fn start_turn(&self, thread_id: &str, input: &str) -> Result<CodexTurn, String> {
-        let result = self
-            .request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": input}]
-                }),
-            )
-            .await?;
+    /// Start a text turn, optionally constraining its final assistant message.
+    pub async fn start_turn(
+        &self,
+        thread_id: &str,
+        input: &str,
+        output_schema: Option<Value>,
+    ) -> Result<CodexTurn, String> {
+        let mut params = json!({
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": input}]
+        });
+        if let Some(output_schema) = output_schema {
+            params["outputSchema"] = output_schema;
+        }
+        let result = self.request("turn/start", params).await?;
         Ok(CodexTurn {
             thread_id: thread_id.to_string(),
             turn_id: string_at(&result, &["turn", "id"], "turn/start response")?,

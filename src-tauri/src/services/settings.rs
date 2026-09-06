@@ -211,7 +211,7 @@ pub fn resolve_secret(setting_key: &str, env_key: &str) -> Option<String> {
     resolve_secret_with_source(setting_key, env_key).0
 }
 
-/// Read a non-secret preference (`model.*`, `search.*`) from the global store.
+/// Read a non-secret preference (`model.*`, `search.*`, `research.*`) from the global store.
 /// No env/`.env` fallback — callers supply their own default. `None` when unset.
 pub fn preference(key: &str) -> Option<String> {
     global()

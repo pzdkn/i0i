@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::discovery::DiscoveryProviderChoice;
 use crate::domain::harness::{
     AgentRunLimits, EffectiveInstructionStack, HarnessConfiguration, HarnessRun, HarnessRunTrigger,
+    PriorResearchRunOutcome, ResearchRunOutcome,
 };
 use crate::domain::research::{SearchConstraints, SearchDraft};
 use crate::services::codex_runtime::{CodexEvent, CodexRuntime, CodexRuntimeConfig, CodexTurn};
@@ -29,11 +30,41 @@ use crate::services::research::manager::SearchManager;
 use crate::storage::library_store::LibraryStore;
 
 const CHILD_SETTLE_SECONDS: u64 = 30;
+const DEFAULT_RECENT_OUTCOMES: usize = 3;
+const DEFAULT_OUTCOME_HISTORY_CHARS: usize = 12_000;
 
 #[derive(Clone)]
 struct ActiveAgentRun {
     run_id: String,
     cancellation: CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContinuationConfig {
+    maximum_recent_outcomes: usize,
+    maximum_history_chars: usize,
+}
+
+impl ContinuationConfig {
+    fn load() -> Self {
+        Self {
+            maximum_recent_outcomes: bounded_preference(
+                "research.continuation_outcomes",
+                DEFAULT_RECENT_OUTCOMES,
+                10,
+            ),
+            maximum_history_chars: bounded_preference(
+                "research.continuation_history_chars",
+                DEFAULT_OUTCOME_HISTORY_CHARS,
+                50_000,
+            ),
+        }
+    }
+}
+
+struct TurnCompletion {
+    status: String,
+    final_message: Option<String>,
 }
 
 /// Starts and supervises managed Codex research without duplicating tool logic.
@@ -245,6 +276,12 @@ impl ProjectResearchController {
             .await?;
         let runtime = self.ensure_runtime(runtime_config).await?;
         let mut events = runtime.subscribe();
+        let continuation = ContinuationConfig::load();
+        let prior_outcomes = self.store.list_recent_agent_run_outcomes(
+            &run.project_id,
+            continuation.maximum_recent_outcomes,
+            continuation.maximum_history_chars,
+        )?;
         let work_dir = self
             .app
             .path()
@@ -259,26 +296,44 @@ impl ProjectResearchController {
                 codex_thread_config(&grant.endpoint, &grant.bearer_token),
             )
             .await?;
-        let prompt = render_research_prompt(&run.effective_instructions, &limits)?;
-        let turn = runtime.start_turn(&thread_id, &prompt).await?;
+        let prompt = render_research_prompt(&run.effective_instructions, &limits, &prior_outcomes)?;
+        let turn = runtime
+            .start_turn(&thread_id, &prompt, Some(research_outcome_schema()))
+            .await?;
         self.store
             .attach_codex_turn(run_id, &turn.thread_id, &turn.turn_id)?;
 
-        let terminal = tokio::select! {
+        let completion = tokio::select! {
             result = wait_for_turn(&mut events, &turn, &self.store, run_id) => result,
             _ = cancellation.cancelled() => {
                 runtime.interrupt(&turn).await?;
-                Ok("cancelled".to_string())
+                Ok(TurnCompletion { status: "cancelled".to_string(), final_message: None })
             }
             _ = tokio::time::sleep(Duration::from_secs(limits.maximum_run_seconds)) => {
                 runtime.interrupt(&turn).await?;
-                Ok("timed_out".to_string())
+                Ok(TurnCompletion { status: "timed_out".to_string(), final_message: None })
             }
         }?;
 
         self.settle_child_searches(&run.project_id, run_id).await?;
-        let (status, reason) = match terminal.as_str() {
-            "completed" => ("ready", "agent_completed"),
+        let (status, reason) = match completion.status.as_str() {
+            "completed" => {
+                self.store.begin_codex_harness_finalization(run_id)?;
+                match parse_research_outcome(completion.final_message.as_deref())
+                    .and_then(|outcome| self.store.persist_agent_run_outcome(run_id, &outcome))
+                {
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.store.record_harness_activity(
+                            run_id,
+                            "summary_failed",
+                            &format!("Research outcome was not retained: {error}"),
+                            Some("complete"),
+                        )?;
+                    }
+                }
+                ("ready", "agent_completed")
+            }
             "interrupted" | "cancelled" => ("cancelled", "cancelled_by_user"),
             "timed_out" => ("failed", "maximum_run_seconds_reached"),
             "failed" => ("failed", "agent_failed"),
@@ -376,6 +431,7 @@ fn codex_thread_config(endpoint: &str, bearer_token: &str) -> Value {
 fn render_research_prompt(
     stack: &EffectiveInstructionStack,
     limits: &AgentRunLimits,
+    prior_outcomes: &[PriorResearchRunOutcome],
 ) -> Result<String, String> {
     let snapshot = serde_json::to_string_pretty(&json!({
         "projectInstructions": stack.project_research_instructions,
@@ -386,12 +442,13 @@ fn render_research_prompt(
         "vaultPaperIds": stack.run_context.vault_paper_ids,
         "priorNextDirection": stack.run_context.prior_next_direction,
         "priorObservations": stack.run_context.prior_observations,
+        "recentRunOutcomes": prior_outcomes,
         "paperTarget": stack.run_context.paper_budget,
         "limits": limits,
     }))
     .map_err(|error| error.to_string())?;
     Ok(format!(
-        "Run this project's literature research procedure. Treat the snapshot as orientation, then verify current data with i0i tools before writing.\n\n{snapshot}"
+        "Run this project's literature research procedure. Treat the snapshot as orientation, then verify current data with i0i tools before writing. Current evidence and the user's instructions outrank recommendations from prior Runs. Do not repeat an earlier search unless changed evidence, broader coverage, or an external failure justifies it. A search with no results does not prove that no such research exists. In the final structured response, report only IDs and passage references returned by this Run's tools.\n\n{snapshot}"
     ))
 }
 
@@ -400,10 +457,18 @@ async fn wait_for_turn(
     turn: &CodexTurn,
     store: &LibraryStore,
     run_id: &str,
-) -> Result<String, String> {
+) -> Result<TurnCompletion, String> {
+    let mut final_message = None;
     loop {
         match events.recv().await {
             Ok(event) => {
+                if event.method == "item/completed"
+                    && event.params["threadId"].as_str() == Some(&turn.thread_id)
+                    && event.params["turnId"].as_str() == Some(&turn.turn_id)
+                    && event.params["item"]["type"].as_str() == Some("agentMessage")
+                {
+                    final_message = event.params["item"]["text"].as_str().map(str::to_string);
+                }
                 if let Some((kind, summary)) = observable_activity(&event, turn) {
                     store.record_harness_activity(run_id, kind, &summary, Some("agent"))?;
                 }
@@ -411,10 +476,14 @@ async fn wait_for_turn(
                     && event.params["threadId"].as_str() == Some(&turn.thread_id)
                     && event.params["turn"]["id"].as_str() == Some(&turn.turn_id)
                 {
-                    return event.params["turn"]["status"]
+                    let status = event.params["turn"]["status"]
                         .as_str()
                         .map(str::to_string)
-                        .ok_or_else(|| "Codex completion omitted turn status".to_string());
+                        .ok_or_else(|| "Codex completion omitted turn status".to_string())?;
+                    return Ok(TurnCompletion {
+                        status,
+                        final_message,
+                    });
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -423,6 +492,47 @@ async fn wait_for_turn(
             }
         }
     }
+}
+
+fn research_outcome_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["summary", "taskOutcomes", "unansweredQuestions", "nextDirection"],
+        "properties": {
+            "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "taskOutcomes": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["searchRunIds", "motivatingEntryIds", "learnedPoints", "citedPassageRefs"],
+                    "properties": {
+                        "searchRunIds": {"type": "array", "maxItems": 12, "items": {"type": "string"}},
+                        "motivatingEntryIds": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+                        "learnedPoints": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string"}},
+                        "citedPassageRefs": {"type": "array", "maxItems": 40, "items": {"type": "string"}}
+                    }
+                }
+            },
+            "unansweredQuestions": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+            "nextDirection": {"type": ["string", "null"]}
+        }
+    })
+}
+
+fn parse_research_outcome(message: Option<&str>) -> Result<ResearchRunOutcome, String> {
+    let message = message.ok_or("Codex completed without a final Research outcome")?;
+    serde_json::from_str(message).map_err(|error| format!("Invalid Research outcome JSON: {error}"))
+}
+
+fn bounded_preference(key: &str, default: usize, maximum: usize) -> usize {
+    crate::services::settings::preference(key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+        .min(maximum)
 }
 
 fn observable_activity<'a>(
@@ -455,6 +565,21 @@ fn is_terminal(status: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome_json() -> String {
+        serde_json::json!({
+            "summary": "The evidence narrows the question.",
+            "taskOutcomes": [{
+                "searchRunIds": [],
+                "motivatingEntryIds": [],
+                "learnedPoints": ["The result depends on the evaluation setting."],
+                "citedPassageRefs": []
+            }],
+            "unansweredQuestions": ["Does the result generalize?"],
+            "nextDirection": "Test a broader setting"
+        })
+        .to_string()
+    }
 
     #[test]
     fn configured_stop_conditions_override_only_public_limits() {
@@ -491,5 +616,52 @@ mod tests {
         let (_, summary) = observable_activity(&event, &turn).expect("observable tool event");
         assert_eq!(summary, "Finished reader_read: completed");
         assert!(!summary.contains("secret"));
+    }
+
+    #[test]
+    fn final_outcome_parser_requires_the_structured_contract() {
+        let outcome = parse_research_outcome(Some(&outcome_json())).expect("valid outcome");
+        assert_eq!(outcome.task_outcomes.len(), 1);
+        assert!(parse_research_outcome(Some("not json")).is_err());
+        assert!(parse_research_outcome(None).is_err());
+    }
+
+    #[tokio::test]
+    async fn turn_wait_retains_the_final_agent_message() {
+        let (sender, mut receiver) = broadcast::channel(4);
+        let turn = CodexTurn {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        };
+        sender
+            .send(CodexEvent {
+                method: "item/completed".to_string(),
+                params: json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {"type": "agentMessage", "text": outcome_json()}
+                }),
+            })
+            .expect("send message");
+        sender
+            .send(CodexEvent {
+                method: "turn/completed".to_string(),
+                params: json!({
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "completed"}
+                }),
+            })
+            .expect("send completion");
+        let store = LibraryStore::for_test(std::env::temp_dir().join(format!(
+            "i0i-controller-outcome-{}.sqlite",
+            uuid::Uuid::new_v4().simple()
+        )));
+
+        let completion = wait_for_turn(&mut receiver, &turn, &store, "unused-run")
+            .await
+            .expect("wait for completion");
+        let expected = outcome_json();
+        assert_eq!(completion.status, "completed");
+        assert_eq!(completion.final_message.as_deref(), Some(expected.as_str()));
     }
 }

@@ -339,6 +339,34 @@ pub struct RunContextObservation {
     pub description: String,
 }
 
+/// One bounded investigation reported by the managed research agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchTaskOutcome {
+    pub search_run_ids: Vec<String>,
+    pub motivating_entry_ids: Vec<String>,
+    pub learned_points: Vec<String>,
+    pub cited_passage_refs: Vec<String>,
+}
+
+/// The validated interpretation retained after one managed research Run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchRunOutcome {
+    pub summary: String,
+    pub task_outcomes: Vec<ResearchTaskOutcome>,
+    pub unanswered_questions: Vec<String>,
+    pub next_direction: Option<String>,
+}
+
+/// A prior outcome paired with the Run that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriorResearchRunOutcome {
+    pub run_id: String,
+    pub outcome: ResearchRunOutcome,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EffectiveRunContext {

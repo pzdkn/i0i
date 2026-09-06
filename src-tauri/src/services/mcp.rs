@@ -493,12 +493,18 @@ impl I0iMcpHandler {
                 .iter()
                 .map(|passage| passage.text.chars().count() as u64)
                 .sum();
+            let passage_refs: Vec<String> = result
+                .passages
+                .iter()
+                .map(|passage| passage.passage_ref.clone())
+                .collect();
             self.store
                 .record_agent_reader_delivery(
                     run_id,
                     &grant.project_id,
                     &input.paper_id,
                     returned_text_chars,
+                    &passage_refs,
                 )
                 .map_err(search_write_failure)?;
         }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,8 +19,8 @@ use crate::domain::harness::{
     next_schedule_occurrence, render_harness_search_goal, AgentRunLimits, DueHarnessClaim,
     EffectiveInstructionStack, EffectiveRunContext, HarnessAutonomy, HarnessConfiguration,
     HarnessConfigurationVersion, HarnessEvent, HarnessRun, HarnessRunTrigger, HarnessSnapshot,
-    HarnessUsage, ResearchCheckpoint, ResearchHarness, RunContextEntry, RunContextObservation,
-    HARNESS_POLICY_SUMMARY, HARNESS_POLICY_VERSION,
+    HarnessUsage, PriorResearchRunOutcome, ResearchCheckpoint, ResearchHarness, ResearchRunOutcome,
+    RunContextEntry, RunContextObservation, HARNESS_POLICY_SUMMARY, HARNESS_POLICY_VERSION,
 };
 use crate::domain::harness_improvement::{
     HarnessImprovement, HarnessImprovementStatus, HarnessImprovementTarget,
@@ -3710,6 +3710,7 @@ impl LibraryStore {
         project_id: &str,
         paper_id: &str,
         returned_text_chars: u64,
+        passage_refs: &[String],
     ) -> StoreResult<()> {
         if returned_text_chars == 0 {
             return Ok(());
@@ -3771,6 +3772,30 @@ impl LibraryStore {
             params![run_id, paper_id, returned_text_chars],
         )
         .map_err(|error| error.to_string())?;
+        for passage_ref in passage_refs {
+            tx.execute(
+                "insert into agent_reader_passages
+                   (run_id, passage_ref, paper_id, delivered_at)
+                 values (?1, ?2, ?3, datetime('now'))
+                 on conflict(run_id, passage_ref) do nothing",
+                params![run_id, passage_ref, paper_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        append_structured_harness_event(
+            &tx,
+            run_id,
+            "agent_passages_delivered",
+            &format!("Reader returned {} referenced passages", passage_refs.len()),
+            Some(serde_json::json!({
+                "paperId": paper_id,
+                "passageRefs": passage_refs,
+            })),
+            Some("reading"),
+            None,
+            None,
+            "harness",
+        )?;
         tx.commit().map_err(|error| error.to_string())
     }
 
@@ -3925,6 +3950,172 @@ impl LibraryStore {
         tx.commit().map_err(|error| error.to_string())?;
         let conn = self.open_connection()?;
         read_harness_run(&conn, harness_run_id)
+    }
+
+    /// Move a completed Codex turn into its short outcome-persistence phase.
+    pub fn begin_codex_harness_finalization(&self, run_id: &str) -> StoreResult<()> {
+        let conn = self.open_connection()?;
+        let changed = conn
+            .execute(
+                "update harness_runs set status = 'reconciling'
+                 where id = ?1 and execution_kind = 'codex_agent'
+                   and status in ('planning', 'searching', 'assessing', 'ranking')",
+                params![run_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Err("Managed Research Run cannot begin finalization".to_string());
+        }
+        append_harness_event(
+            &conn,
+            run_id,
+            "summarizing",
+            "Validating the Research Run outcome",
+        )
+    }
+
+    /// Validate and retain one managed Run outcome in the existing reflection record.
+    pub fn persist_agent_run_outcome(
+        &self,
+        run_id: &str,
+        outcome: &ResearchRunOutcome,
+    ) -> StoreResult<HarnessReflection> {
+        validate_research_run_outcome_shape(outcome)?;
+        let conn = self.open_connection()?;
+        let (project_id, execution_kind, status): (String, String, String) = conn
+            .query_row(
+                "select project_id, execution_kind, status from harness_runs where id = ?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if execution_kind != "codex_agent" || status != "reconciling" {
+            return Err("Only a finalizing managed Run may record an outcome".to_string());
+        }
+
+        let allowed_search_runs: HashSet<String> = {
+            let mut statement = conn
+                .prepare("select run_id from agent_search_runs where parent_run_id = ?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![run_id], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?.into_iter().collect()
+        };
+        let allowed_entry_ids: HashSet<String> = {
+            let mut statement = conn
+                .prepare("select id from research_entries where project_id = ?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![project_id], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?.into_iter().collect()
+        };
+        let allowed_passage_refs: HashSet<String> = {
+            let mut statement = conn
+                .prepare("select passage_ref from agent_reader_passages where run_id = ?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![run_id], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?.into_iter().collect()
+        };
+        for task in &outcome.task_outcomes {
+            if task
+                .search_run_ids
+                .iter()
+                .any(|id| !allowed_search_runs.contains(id))
+            {
+                return Err("Research outcome references an unrelated Search Run".to_string());
+            }
+            if task
+                .motivating_entry_ids
+                .iter()
+                .any(|id| !allowed_entry_ids.contains(id))
+            {
+                return Err("Research outcome references an unknown State entry".to_string());
+            }
+            if task
+                .cited_passage_refs
+                .iter()
+                .any(|id| !allowed_passage_refs.contains(id))
+            {
+                return Err(
+                    "Research outcome references a passage the Run did not read".to_string()
+                );
+            }
+        }
+        drop(conn);
+
+        let metrics_json = serde_json::json!({
+            "schemaVersion": 1,
+            "agentOutcome": outcome,
+        })
+        .to_string();
+        self.persist_harness_reflection(
+            run_id,
+            &HarnessReflectionDraft {
+                summary: outcome.summary.clone(),
+                next_direction: outcome.next_direction.clone(),
+                metrics_json,
+                observations: Vec::new(),
+            },
+        )
+    }
+
+    /// Return recent validated managed outcomes within count and character bounds.
+    pub fn list_recent_agent_run_outcomes(
+        &self,
+        project_id: &str,
+        maximum_outcomes: usize,
+        maximum_chars: usize,
+    ) -> StoreResult<Vec<PriorResearchRunOutcome>> {
+        if maximum_outcomes == 0 || maximum_chars == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select run.id, reflection.metrics_json
+                 from harness_reflections reflection
+                 join harness_runs run on run.id = reflection.run_id
+                 where run.project_id = ?1 and run.execution_kind = 'codex_agent'
+                   and run.status = 'ready'
+                 order by reflection.created_at desc, reflection.id desc limit 20",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut outcomes: Vec<PriorResearchRunOutcome> = Vec::new();
+        let mut used_chars: usize = 0;
+        for row in rows {
+            let (run_id, metrics_json) = row.map_err(|error| error.to_string())?;
+            let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&metrics_json) else {
+                continue;
+            };
+            let Some(value) = metrics.get("agentOutcome") else {
+                continue;
+            };
+            let Ok(outcome) = serde_json::from_value::<ResearchRunOutcome>(value.clone()) else {
+                continue;
+            };
+            let size = serde_json::to_string(&outcome)
+                .map_err(|error| error.to_string())?
+                .chars()
+                .count();
+            if used_chars.saturating_add(size) > maximum_chars {
+                continue;
+            }
+            used_chars += size;
+            outcomes.push(PriorResearchRunOutcome { run_id, outcome });
+            if outcomes.len() == maximum_outcomes {
+                break;
+            }
+        }
+        Ok(outcomes)
     }
 
     /// Attaches the concrete Deep Research Run and catches up its current status.
@@ -5010,6 +5201,32 @@ impl LibraryStore {
             params![caller, TOOL, request_id, payload_hash, result_json],
         )
         .map_err(|error| error.to_string())?;
+        if let Some(run_id) = run_id {
+            let managed_run: bool = tx
+                .query_row(
+                    "select exists(select 1 from harness_runs
+                     where id = ?1 and execution_kind = 'codex_agent')",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if managed_run {
+                append_structured_harness_event(
+                    &tx,
+                    run_id,
+                    "agent_state_committed",
+                    &format!("Committed Research State revision {revision}"),
+                    Some(serde_json::json!({
+                        "revision": revision,
+                        "affectedEntryIds": receipt.affected_entry_ids,
+                    })),
+                    Some("assessing"),
+                    None,
+                    None,
+                    "harness",
+                )?;
+            }
+        }
         tx.commit().map_err(|error| error.to_string())?;
         Ok(receipt)
     }
@@ -5842,6 +6059,16 @@ impl LibraryStore {
               returned_text_chars integer not null default 0,
               read_count integer not null default 0,
               primary key (run_id, paper_id),
+              foreign key (run_id) references harness_runs(id) on delete cascade,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create table if not exists agent_reader_passages (
+              run_id text not null,
+              passage_ref text not null,
+              paper_id text not null,
+              delivered_at text not null,
+              primary key (run_id, passage_ref),
               foreign key (run_id) references harness_runs(id) on delete cascade,
               foreign key (paper_id) references papers(id) on delete cascade
             );
@@ -13315,6 +13542,11 @@ fn validate_harness_event_detail(
             ("observationCount", "integer"),
             ("nextDirection", "nullable_string"),
         ],
+        "agent_passages_delivered" => &[("paperId", "string"), ("passageRefs", "string_array")],
+        "agent_state_committed" => &[
+            ("revision", "integer"),
+            ("affectedEntryIds", "string_array"),
+        ],
         _ => {
             return Err(format!(
                 "Activity event kind does not define structured detail: {kind}"
@@ -13491,6 +13723,57 @@ fn validate_reflection_draft(draft: &HarnessReflectionDraft) -> StoreResult<()> 
         } else if observation.target.is_some() != observation.proposed_value.is_some() {
             return Err("Observation target and proposed value must appear together".to_string());
         }
+    }
+    Ok(())
+}
+
+fn validate_research_run_outcome_shape(outcome: &ResearchRunOutcome) -> StoreResult<()> {
+    validate_outcome_text("summary", &outcome.summary, 2_000)?;
+    if outcome.task_outcomes.len() > 20 || outcome.unanswered_questions.len() > 20 {
+        return Err("Research outcome exceeds its item limits".to_string());
+    }
+    for question in &outcome.unanswered_questions {
+        validate_outcome_text("unanswered question", question, 1_000)?;
+    }
+    if let Some(direction) = &outcome.next_direction {
+        validate_outcome_text("next direction", direction, 1_000)?;
+    }
+    for task in &outcome.task_outcomes {
+        if task.learned_points.is_empty()
+            || task.search_run_ids.len() > 12
+            || task.motivating_entry_ids.len() > 20
+            || task.learned_points.len() > 20
+            || task.cited_passage_refs.len() > 40
+        {
+            return Err("Research task outcome is outside its item limits".to_string());
+        }
+        for id in task
+            .search_run_ids
+            .iter()
+            .chain(&task.motivating_entry_ids)
+            .chain(&task.cited_passage_refs)
+        {
+            validate_outcome_text("reference", id, 500)?;
+        }
+        for point in &task.learned_points {
+            validate_outcome_text("learned point", point, 1_000)?;
+        }
+    }
+    let serialized_chars = serde_json::to_string(outcome)
+        .map_err(|error| error.to_string())?
+        .chars()
+        .count();
+    if serialized_chars > 12_000 {
+        return Err("Research outcome exceeds 12000 characters".to_string());
+    }
+    Ok(())
+}
+
+fn validate_outcome_text(label: &str, value: &str, maximum_chars: usize) -> StoreResult<()> {
+    if value.trim().is_empty() || value.chars().count() > maximum_chars {
+        return Err(format!(
+            "Research outcome {label} must contain 1 to {maximum_chars} characters"
+        ));
     }
     Ok(())
 }
@@ -14052,6 +14335,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::domain::harness::ResearchTaskOutcome;
     use crate::domain::reconciliation::{
         CandidateDecision, PlannedEvidence, PlannedHarnessObservation, PlannedHarnessReflection,
         PlannedResearchEntry,
@@ -19811,6 +20095,15 @@ mod tests {
             .configure_codex_harness_run(&run.id, "test-model", limits)
     }
 
+    fn research_outcome(summary: &str) -> ResearchRunOutcome {
+        ResearchRunOutcome {
+            summary: summary.to_string(),
+            task_outcomes: Vec::new(),
+            unanswered_questions: vec!["What should be tested next?".to_string()],
+            next_direction: Some("Investigate the unresolved condition".to_string()),
+        }
+    }
+
     #[test]
     fn managed_run_snapshots_runtime_limits_and_remains_singleton() -> StoreResult<()> {
         let db = test_db()?;
@@ -19848,18 +20141,28 @@ mod tests {
             ..AgentRunLimits::default()
         };
         let run = managed_harness_run(&db, &limits)?;
-        db.store
-            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 6)?;
-        db.store
-            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 4)?;
+        db.store.record_agent_reader_delivery(
+            &run.id,
+            "project:attention",
+            "vaswani2017",
+            6,
+            &[],
+        )?;
+        db.store.record_agent_reader_delivery(
+            &run.id,
+            "project:attention",
+            "vaswani2017",
+            4,
+            &[],
+        )?;
         assert!(db
             .store
-            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 1,)
+            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 1, &[])
             .expect_err("repeat reads still consume returned-text budget")
             .contains("returned-text"));
         assert!(db
             .store
-            .record_agent_reader_delivery(&run.id, "project:attention", "caron2021", 1,)
+            .record_agent_reader_delivery(&run.id, "project:attention", "caron2021", 1, &[])
             .expect_err("new papers consume the distinct-paper budget")
             .contains("paper-read"));
         Ok(())
@@ -19924,6 +20227,175 @@ mod tests {
         let checkpoint = db.store.get_research_checkpoint(&run.id)?;
         assert_eq!(checkpoint.accepted_candidate_count, 1);
         assert_eq!(checkpoint.added_paper_ids, vec![paper.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn managed_outcome_rejects_a_passage_the_run_did_not_read() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.record_agent_reader_delivery(
+            &run.id,
+            "project:attention",
+            "vaswani2017",
+            20,
+            &["passage:observed".to_string()],
+        )?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        let mut outcome = research_outcome("The paper supports the bounded observation.");
+        outcome.task_outcomes.push(ResearchTaskOutcome {
+            search_run_ids: vec!["search-run:invented".to_string()],
+            motivating_entry_ids: Vec::new(),
+            learned_points: vec!["The reported observation is conditional.".to_string()],
+            cited_passage_refs: Vec::new(),
+        });
+
+        assert!(db
+            .store
+            .persist_agent_run_outcome(&run.id, &outcome)
+            .expect_err("an unrelated child Search must not enter continuation history")
+            .contains("unrelated Search Run"));
+        outcome.task_outcomes[0].search_run_ids.clear();
+        outcome.task_outcomes[0]
+            .motivating_entry_ids
+            .push("state-entry:invented".to_string());
+        assert!(db
+            .store
+            .persist_agent_run_outcome(&run.id, &outcome)
+            .expect_err("an unknown State entry must not enter continuation history")
+            .contains("unknown State entry"));
+        outcome.task_outcomes[0].motivating_entry_ids.clear();
+        outcome.task_outcomes[0]
+            .cited_passage_refs
+            .push("passage:invented".to_string());
+        assert!(db
+            .store
+            .persist_agent_run_outcome(&run.id, &outcome)
+            .expect_err("an unread passage must not enter continuation history")
+            .contains("did not read"));
+        db.store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+        assert!(db
+            .store
+            .list_recent_agent_run_outcomes("project:attention", 3, 12_000)?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_run_outcome_preserves_committed_state() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            Some(&run.id),
+            "state-before-summary-failure",
+            "state-before-summary-failure-payload",
+            vec![agent_question(
+                "summary-gap",
+                "Which conditions remain unexplained?",
+            )],
+        )?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        db.store.record_harness_activity(
+            &run.id,
+            "summary_failed",
+            "Research outcome was not retained: invalid JSON",
+            Some("complete"),
+        )?;
+        db.store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .current_revision,
+            1,
+            "summary failure must not roll back validated State writes"
+        );
+        assert!(db
+            .store
+            .list_recent_agent_run_outcomes("project:attention", 3, 12_000)?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn continuation_history_is_recent_and_character_bounded() -> StoreResult<()> {
+        let db = test_db()?;
+        for index in 0..4 {
+            let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+            db.store.begin_codex_harness_finalization(&run.id)?;
+            db.store.persist_agent_run_outcome(
+                &run.id,
+                &research_outcome(&format!("Outcome {index}")),
+            )?;
+            db.store
+                .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+        }
+
+        let recent = db
+            .store
+            .list_recent_agent_run_outcomes("project:attention", 3, 12_000)?;
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].outcome.summary, "Outcome 3");
+        let one_outcome_chars = serde_json::to_string(&recent[0].outcome)
+            .map_err(|error| error.to_string())?
+            .chars()
+            .count();
+        assert_eq!(
+            db.store
+                .list_recent_agent_run_outcomes(
+                    "project:attention",
+                    3,
+                    one_outcome_chars.saturating_sub(1),
+                )?
+                .len(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_activity_orders_passage_delivery_before_state_commit() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.record_agent_reader_delivery(
+            &run.id,
+            "project:attention",
+            "vaswani2017",
+            20,
+            &["passage:observed".to_string()],
+        )?;
+        db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            Some(&run.id),
+            "ordered-state-request",
+            "ordered-state-payload",
+            vec![agent_question(
+                "ordered-gap",
+                "Which setting changes the result?",
+            )],
+        )?;
+
+        let snapshot = db.store.get_harness_snapshot("project:attention")?;
+        let read_sequence = snapshot
+            .events
+            .iter()
+            .find(|event| event.run_id == run.id && event.kind == "agent_passages_delivered")
+            .map(|event| event.sequence)
+            .expect("Reader activity");
+        let state_sequence = snapshot
+            .events
+            .iter()
+            .find(|event| event.run_id == run.id && event.kind == "agent_state_committed")
+            .map(|event| event.sequence)
+            .expect("State activity");
+        assert!(read_sequence < state_sequence);
         Ok(())
     }
 
