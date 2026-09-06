@@ -273,6 +273,26 @@
   onMount(() => {
     let unlisten: (() => void) | undefined;
 
+    listen("library_updated", async () => {
+      try {
+        hydrateLibrary(await getLibrary());
+      } catch (error) {
+        bridgeError = String(error);
+      }
+    })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        bridgeError = String(error);
+      });
+
+    return () => unlisten?.();
+  });
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+
     listen<{ paperId: string; status: string; error?: string }>("paper_metadata_updated", async (event) => {
       try {
         const snapshot = await getLibrary();

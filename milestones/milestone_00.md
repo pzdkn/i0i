@@ -405,7 +405,7 @@ first research loop works.
 | 6 / M00-05a | [0131: Research State Read Contract](../docs/rfcs/milestone_00/0131-research-state-read-contract.md) | Minimal projection with lossless legacy provenance and consistent revision reads. | Complete |
 | 7 / M00-05b | [0132: Validated Research State Updates](../docs/rfcs/milestone_00/0132-validated-research-state-updates.md) | Atomic entry changes, source validation, conflicts, and retry receipts. | Complete |
 | 8 / M00-06a | [0133: Bounded Search Tools](../docs/rfcs/milestone_00/0133-bounded-search-tools.md) | Concurrent scoped searches, incremental results, shared limits, cancellation. | Complete |
-| 9 / M00-06b | [0134: Vault Candidate Collection](../docs/rfcs/milestone_00/0134-vault-candidate-collection.md) | Save candidates once and acquire readable sources without opening tabs. | Open |
+| 9 / M00-06b | [0134: Vault Candidate Collection](../docs/rfcs/milestone_00/0134-vault-candidate-collection.md) | Save candidates once and acquire readable sources without opening tabs. | Complete |
 | 10 / M00-07 | [0135: Codex-Driven Project Research Loop](../docs/rfcs/milestone_00/0135-codex-project-research-loop.md) | Integrate one real iteration through the production Run entry point. | Open |
 | 11 / M00-08 | [0136: Research Feedback and Continuation](../docs/rfcs/milestone_00/0136-research-feedback-and-continuation.md) | Adapt searches after evidence and carry useful outcomes into a new thread. | Open |
 | 12 / M00-09a | [0137: Research Cancellation and Recovery](../docs/rfcs/milestone_00/0137-research-cancellation-and-recovery.md) | Handle cancellation/commit races, crashes, and restart without losing results. | Open |

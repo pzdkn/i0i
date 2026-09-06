@@ -2,8 +2,8 @@
 
 use crate::services::mcp::{
     LocalMcpServer, McpConnectionGrant, READER_ADD_NOTE, READER_LIST_NOTES, READER_READ,
-    SEARCH_CANCEL, SEARCH_GET, SEARCH_START, STATE_READ, STATE_UPDATE, VAULT_GET_PAPER, VAULT_LIST,
-    VAULT_LIST_PAPERS,
+    SEARCH_CANCEL, SEARCH_GET, SEARCH_START, STATE_READ, STATE_UPDATE, VAULT_ADD_PAPER,
+    VAULT_GET_PAPER, VAULT_LIST, VAULT_LIST_PAPERS,
 };
 use crate::storage::library_store::LibraryStore;
 
@@ -31,6 +31,7 @@ pub async fn create_external_mcp_grant(
                 VAULT_LIST,
                 VAULT_LIST_PAPERS,
                 VAULT_GET_PAPER,
+                VAULT_ADD_PAPER,
                 READER_READ,
                 READER_ADD_NOTE,
                 READER_LIST_NOTES,

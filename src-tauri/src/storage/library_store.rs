@@ -124,6 +124,15 @@ pub struct AgentSearchReceipt {
     pub run_id: String,
 }
 
+/// Stable result of one idempotent agent candidate collection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentVaultAddReceipt {
+    pub paper_id: String,
+    pub membership_added: bool,
+    pub source_ids: Vec<String>,
+}
+
 /// One persisted candidate snapshot emitted while an agent search runs.
 #[derive(Debug, Clone)]
 pub struct AgentSearchCandidateEvent {
@@ -8862,6 +8871,142 @@ impl LibraryStore {
             )
             .map_err(|error| error.to_string())?;
         Ok((read_search_run(&conn, run_id)?, cancel_requested))
+    }
+
+    /// Resolve a candidate that appeared in an agent Search scoped to a Project.
+    pub fn get_agent_search_candidate(
+        &self,
+        project_id: &str,
+        candidate_id: &str,
+    ) -> StoreResult<PaperCandidate> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare(
+                "select event.candidate_json
+                 from agent_search_candidate_events event
+                 join agent_search_runs run on run.run_id = event.run_id
+                 where run.project_id = ?1 order by event.sequence desc",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![project_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let json = row.map_err(|error| error.to_string())?;
+            let candidate: PaperCandidate =
+                serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            if candidate.id == candidate_id {
+                return Ok(candidate);
+            }
+        }
+        Err("Search candidate is outside this Project".to_string())
+    }
+
+    /// Atomically save one scoped candidate, its Vault membership, and retry receipt.
+    pub fn add_agent_search_candidate_to_vault(
+        &self,
+        project_id: &str,
+        vault_id: &str,
+        caller: &str,
+        request_id: &str,
+        payload_hash: &str,
+        paper: &PaperDraft,
+    ) -> StoreResult<AgentVaultAddReceipt> {
+        const TOOL: &str = "vault_add_paper";
+        let receipt_caller = format!("{caller}@{project_id}");
+        let mut conn = self.open_connection()?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "select payload_hash, result_json from mcp_mutation_receipts
+                 where caller = ?1 and tool = ?2 and request_id = ?3",
+                params![receipt_caller, TOOL, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((existing_hash, result_json)) = existing {
+            if existing_hash != payload_hash {
+                return Err("Request ID was already used with a different payload".to_string());
+            }
+            return serde_json::from_str(&result_json).map_err(|error| error.to_string());
+        }
+
+        let scoped_vault: bool = tx
+            .query_row(
+                "select exists(select 1 from vaults where id = ?1 and project_id = ?2)",
+                params![vault_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !scoped_vault {
+            return Err("Target Vault is outside this Project".to_string());
+        }
+        let membership_exists: bool = tx
+            .query_row(
+                "select exists(select 1 from vault_papers where vault_id = ?1 and paper_id = ?2)",
+                params![vault_id, paper.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let authors_json = to_json(&paper.authors)?;
+        let tags_json = to_json(&paper.tags)?;
+        tx.execute(
+            "insert into papers (
+               id, title, authors_json, venue, year, citations, tags_json,
+               note_count, annotation_count, status, abstract, created_at, updated_at
+             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?9,
+                       datetime('now'), datetime('now'))
+             on conflict(id) do update set
+               title = excluded.title, authors_json = excluded.authors_json,
+               venue = excluded.venue, year = excluded.year,
+               citations = excluded.citations, abstract = excluded.abstract,
+               updated_at = datetime('now')",
+            params![
+                paper.id,
+                paper.title,
+                authors_json,
+                paper.venue,
+                paper.year,
+                paper.citations,
+                tags_json,
+                paper.status,
+                paper.abstract_text,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        upsert_document_sources(&tx, paper)?;
+        tx.execute(
+            "insert into vault_papers (vault_id, paper_id, added_at)
+             values (?1, ?2, datetime('now'))
+             on conflict(vault_id, paper_id) do nothing",
+            params![vault_id, paper.id],
+        )
+        .map_err(|error| error.to_string())?;
+
+        let receipt = AgentVaultAddReceipt {
+            paper_id: paper.id.clone(),
+            membership_added: !membership_exists,
+            source_ids: paper
+                .sources
+                .iter()
+                .map(|source| document_source_id(&paper.id, source))
+                .collect(),
+        };
+        let result_json = serde_json::to_string(&receipt).map_err(|error| error.to_string())?;
+        tx.execute(
+            "insert into mcp_mutation_receipts
+               (caller, tool, request_id, payload_hash, result_json, created_at)
+             values (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![receipt_caller, TOOL, request_id, payload_hash, result_json],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(receipt)
     }
 
     /// Return the optional model override recorded for an agent Search Run.

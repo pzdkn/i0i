@@ -29,7 +29,9 @@ use uuid::Uuid;
 
 use crate::domain::chat::{ChatEntry, ThreadAnchor, ENTRY_NOTE};
 use crate::domain::highlight::HighlightAuthor;
-use crate::domain::library::{DocumentChunk, DocumentSource, LibrarySnapshot, Paper, Vault};
+use crate::domain::library::{
+    DocumentChunk, DocumentSource, LibrarySnapshot, Paper, PaperDraft, PaperSourceDraft, Vault,
+};
 use crate::domain::research::{Depth, SearchConstraints, SearchDraft, SearchRunStatus};
 use crate::domain::research_state::{
     EntryLifecycle, EntryRelationDraft, EntryRelationKind, EpistemicStatus, EvidenceLinkDraft,
@@ -52,6 +54,7 @@ const MAX_AGENT_SEARCH_CONCURRENCY: i64 = 2;
 pub const VAULT_LIST: &str = "vault_list";
 pub const VAULT_LIST_PAPERS: &str = "vault_list_papers";
 pub const VAULT_GET_PAPER: &str = "vault_get_paper";
+pub const VAULT_ADD_PAPER: &str = "vault_add_paper";
 pub const READER_READ: &str = "reader_read";
 pub const READER_ADD_NOTE: &str = "reader_add_note";
 pub const READER_LIST_NOTES: &str = "reader_list_notes";
@@ -1149,6 +1152,95 @@ impl I0iMcpHandler {
         }))
     }
 
+    /// Save one scoped Search candidate and queue its durable PDF acquisition.
+    #[tool(description = "Add a discovered paper to the current i0i Vault")]
+    async fn vault_add_paper(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<VaultAddPaperInput>,
+    ) -> Result<Json<VaultAddPaperResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, _) = Self::context(&context, VAULT_ADD_PAPER)?;
+        if input.vault_id != grant.vault_id {
+            return Err(out_of_scope());
+        }
+        let request_id = input.request_id.trim();
+        if request_id.is_empty() {
+            return Err(invalid_input("request_id must not be empty"));
+        }
+        let candidate = self
+            .store
+            .get_agent_search_candidate(&grant.project_id, &input.candidate_id)
+            .map_err(|_| out_of_scope())?;
+        let paper = candidate_paper_draft(&candidate);
+        let payload_hash = sha256(
+            &serde_json::to_string(&input).map_err(|error| internal_failure(error.to_string()))?,
+        );
+        let receipt = self
+            .store
+            .add_agent_search_candidate_to_vault(
+                &grant.project_id,
+                &grant.vault_id,
+                &grant.caller,
+                request_id,
+                &payload_hash,
+                &paper,
+            )
+            .map_err(search_write_failure)?;
+        let sources = self
+            .store
+            .get_document_sources(&receipt.paper_id)
+            .map_err(internal_failure)?;
+        if let Some(downloads) = &self.pdf_downloads {
+            downloads.queue_sources(
+                sources
+                    .iter()
+                    .filter(|source| {
+                        source.source_kind == "pdf" && source.status == "remote_available"
+                    })
+                    .cloned()
+                    .collect(),
+            );
+        }
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                "library_updated",
+                serde_json::json!({
+                    "projectId": grant.project_id,
+                    "vaultId": grant.vault_id,
+                    "paperId": receipt.paper_id,
+                }),
+            );
+        }
+        let acquisition_status = if sources.is_empty() {
+            "unavailable"
+        } else if sources.iter().any(|source| source.status == "cached") {
+            "available"
+        } else {
+            "pending"
+        };
+        let text_status = if paper.abstract_text.is_some() {
+            "abstract_available"
+        } else if sources.is_empty() {
+            "unavailable"
+        } else {
+            "pending"
+        };
+        trace_tool(&grant, VAULT_ADD_PAPER, started, "ok", 1);
+        Ok(Json(VaultAddPaperResult {
+            paper_id: receipt.paper_id,
+            membership_status: if receipt.membership_added {
+                "added".to_string()
+            } else {
+                "existing".to_string()
+            },
+            source_ids: receipt.source_ids,
+            acquisition_status: acquisition_status.to_string(),
+            text_status: text_status.to_string(),
+            source_url: candidate.external_url.or(candidate.pdf_url),
+        }))
+    }
+
     async fn prepare_state_change(
         &self,
         grant: &McpCallContext,
@@ -2013,6 +2105,32 @@ fn render_agent_search_goal(instructions: &str, state_entry_ids: &[String]) -> S
     )
 }
 
+fn candidate_paper_draft(candidate: &crate::domain::discovery::PaperCandidate) -> PaperDraft {
+    let sources = candidate
+        .pdf_url
+        .as_ref()
+        .map(|pdf_url| {
+            vec![PaperSourceDraft {
+                source_kind: "pdf".to_string(),
+                source_url: pdf_url.clone(),
+                landing_url: candidate.external_url.clone(),
+            }]
+        })
+        .unwrap_or_default();
+    PaperDraft {
+        id: candidate.id.clone(),
+        title: candidate.title.clone(),
+        authors: candidate.authors.clone(),
+        venue: candidate.venue.clone().unwrap_or_default(),
+        year: candidate.year.unwrap_or_default(),
+        citations: candidate.citation_count.unwrap_or_default(),
+        tags: Vec::new(),
+        status: "UNREAD".to_string(),
+        abstract_text: candidate.abstract_text.clone(),
+        sources,
+    }
+}
+
 fn is_terminal_search_status(status: &str) -> bool {
     matches!(status, "ready" | "failed" | "cancelled")
 }
@@ -2242,6 +2360,13 @@ struct SearchGetInput {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SearchCancelInput {
     run_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct VaultAddPaperInput {
+    vault_id: String,
+    candidate_id: String,
+    request_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -2622,6 +2747,17 @@ struct SearchCancelResult {
     cancellation_requested: bool,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct VaultAddPaperResult {
+    paper_id: String,
+    membership_status: String,
+    source_ids: Vec<String>,
+    acquisition_status: String,
+    text_status: String,
+    source_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpVault {
@@ -2868,8 +3004,8 @@ mod tests {
             doi: Some(format!("10.1/{id}")),
             openalex_id: None,
             arxiv_id: None,
-            external_url: None,
-            pdf_url: None,
+            external_url: Some(format!("https://example.test/{id}")),
+            pdf_url: Some(format!("https://example.test/{id}.pdf")),
             open_access: None,
             match_summary: CandidateMatch {
                 score: Some(0.9),
@@ -3123,6 +3259,126 @@ mod tests {
             .structured_content
             .expect("third poll result");
         assert_eq!(third["candidates"][0]["candidate"]["id"], "third");
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn real_client_adds_one_search_candidate_and_can_read_acquired_text() {
+        let store = test_store("candidate-add");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let search = store
+            .create_agent_search_run(
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                None,
+                "candidate-search",
+                "candidate-search-payload",
+                None,
+                &agent_search_draft(),
+                2,
+            )
+            .expect("create agent search");
+        store
+            .append_agent_search_candidates(
+                &search.run_id,
+                "ranked",
+                &[search_candidate("paper-to-save")],
+            )
+            .expect("append candidate");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                None,
+                [VAULT_ADD_PAPER, VAULT_LIST_PAPERS, READER_READ],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let arguments = serde_json::json!({
+            "vault_id": vault.id,
+            "candidate_id": "paper-to-save",
+            "request_id": "save-request"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let added = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_ADD_PAPER).with_arguments(arguments.clone()),
+            )
+            .await
+            .expect("save candidate")
+            .structured_content
+            .expect("save result");
+        let retry = client
+            .call_tool(CallToolRequestParams::new(VAULT_ADD_PAPER).with_arguments(arguments))
+            .await
+            .expect("retry save candidate")
+            .structured_content
+            .expect("retry result");
+        assert_eq!(added, retry);
+        assert_eq!(added["membershipStatus"], "added");
+        assert_eq!(added["acquisitionStatus"], "pending");
+        add_extracted_pdf(
+            &store,
+            &vault.id,
+            "paper-to-save",
+            "Controlled search evidence.",
+        );
+
+        let papers = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_LIST_PAPERS).with_arguments(
+                    serde_json::json!({"vault_id": vault.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("list saved paper")
+            .structured_content
+            .expect("paper list");
+        assert_eq!(
+            papers["papers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|paper| paper["id"] == "paper-to-save")
+                .count(),
+            1
+        );
+        let read = client
+            .call_tool(
+                CallToolRequestParams::new(READER_READ).with_arguments(
+                    serde_json::json!({"paper_id": "paper-to-save"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read saved candidate")
+            .structured_content
+            .expect("reader result");
+        assert_eq!(read["coverage"], "full_text");
+        assert_eq!(read["passages"][0]["text"], "Controlled search evidence.");
 
         client.cancel().await.expect("stop client");
         server.shutdown().await;
