@@ -402,7 +402,7 @@ first research loop works.
 | 3 / M00-03 | [0128: Local MCP Server and Vault Listing](../docs/rfcs/milestone_00/0128-local-mcp-server.md) | Own the endpoint, caller scope, contracts, and real Vault/paper listing. | Complete |
 | 4 / M00-04a | [0129: Reader Evidence Access](../docs/rfcs/milestone_00/0129-reader-evidence-access.md) | Metadata, pending acquisition, exact paginated passages, and stable references. | Complete |
 | 5 / M00-04b | [0130: Agent Reader Notes](../docs/rfcs/milestone_00/0130-agent-reader-notes.md) | Persist anchored notes with authorship, retry deduplication, and Reader navigation. | Complete |
-| 6 / M00-05a | [0131: Research State Read Contract](../docs/rfcs/milestone_00/0131-research-state-read-contract.md) | Minimal projection with lossless legacy provenance and consistent revision reads. | Open |
+| 6 / M00-05a | [0131: Research State Read Contract](../docs/rfcs/milestone_00/0131-research-state-read-contract.md) | Minimal projection with lossless legacy provenance and consistent revision reads. | Complete |
 | 7 / M00-05b | [0132: Validated Research State Updates](../docs/rfcs/milestone_00/0132-validated-research-state-updates.md) | Atomic entry changes, source validation, conflicts, and retry receipts. | Open |
 | 8 / M00-06a | [0133: Bounded Search Tools](../docs/rfcs/milestone_00/0133-bounded-search-tools.md) | Concurrent scoped searches, incremental results, shared limits, cancellation. | Open |
 | 9 / M00-06b | [0134: Vault Candidate Collection](../docs/rfcs/milestone_00/0134-vault-candidate-collection.md) | Save candidates once and acquire readable sources without opening tabs. | Open |

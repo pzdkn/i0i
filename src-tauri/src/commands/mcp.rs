@@ -2,7 +2,7 @@
 
 use crate::services::mcp::{
     LocalMcpServer, McpConnectionGrant, READER_ADD_NOTE, READER_LIST_NOTES, READER_READ,
-    VAULT_GET_PAPER, VAULT_LIST, VAULT_LIST_PAPERS,
+    STATE_READ, VAULT_GET_PAPER, VAULT_LIST, VAULT_LIST_PAPERS,
 };
 use crate::storage::library_store::LibraryStore;
 
@@ -33,6 +33,7 @@ pub async fn create_external_mcp_grant(
                 READER_READ,
                 READER_ADD_NOTE,
                 READER_LIST_NOTES,
+                STATE_READ,
             ],
         )
         .await

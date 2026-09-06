@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0131 - Agents can read a scoped, revision-consistent Research State projection without losing evidence or provenance.
 - [x] RFC 0130 - Agents can create and list scoped Reader notes with exact passage anchors, authorship, navigation, and idempotent retries.
 - [x] RFC 0129 - Agents can inspect saved-paper availability and read bounded, exact PDF or HTML passages with resolvable references.
 - [x] RFC 0128 - i0i now owns an authenticated loopback MCP endpoint with project-scoped Vault and paper listing.

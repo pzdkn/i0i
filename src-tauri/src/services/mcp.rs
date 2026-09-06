@@ -47,6 +47,7 @@ pub const VAULT_GET_PAPER: &str = "vault_get_paper";
 pub const READER_READ: &str = "reader_read";
 pub const READER_ADD_NOTE: &str = "reader_add_note";
 pub const READER_LIST_NOTES: &str = "reader_list_notes";
+pub const STATE_READ: &str = "state_read";
 
 /// Caller identity and scope established by an opaque local credential.
 #[derive(Debug, Clone)]
@@ -159,6 +160,16 @@ struct NoteCursorSnapshot {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct StateCursorSnapshot {
+    grant_token: String,
+    project_id: String,
+    revision: i64,
+    entries: Vec<McpStateEntry>,
+    offset: usize,
+    expires_at: Instant,
+}
+
 #[derive(Clone)]
 struct I0iMcpHandler {
     app: Option<AppHandle>,
@@ -169,6 +180,7 @@ struct I0iMcpHandler {
     reader_cursors: Arc<Mutex<HashMap<String, ReaderCursorSnapshot>>>,
     passage_anchors: Arc<RwLock<HashMap<String, RegisteredPassage>>>,
     note_cursors: Arc<Mutex<HashMap<String, NoteCursorSnapshot>>>,
+    state_cursors: Arc<Mutex<HashMap<String, StateCursorSnapshot>>>,
     cursor_ttl: Duration,
 }
 
@@ -189,6 +201,7 @@ impl I0iMcpHandler {
             reader_cursors: Arc::new(Mutex::new(HashMap::new())),
             passage_anchors: Arc::new(RwLock::new(HashMap::new())),
             note_cursors: Arc::new(Mutex::new(HashMap::new())),
+            state_cursors: Arc::new(Mutex::new(HashMap::new())),
             cursor_ttl,
         }
     }
@@ -639,6 +652,125 @@ impl I0iMcpHandler {
             None
         };
         ReaderListNotesResult { notes, next_cursor }
+    }
+
+    /// Read a revision-consistent projection of the scoped Project State.
+    #[tool(description = "Read findings, hypotheses, and questions from i0i Research State")]
+    async fn state_read(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<StateReadInput>,
+    ) -> Result<Json<StateReadResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, STATE_READ)?;
+        if input.project_id != grant.project_id {
+            return Err(out_of_scope());
+        }
+        let limit = validated_limit(input.limit)?;
+        let result = if let Some(cursor) = input.cursor.as_deref() {
+            self.continue_state_page(cursor, &grant_token, &input.project_id, limit)
+                .await?
+        } else {
+            let state = self
+                .store
+                .get_research_state(&input.project_id, None)
+                .map_err(internal_failure)?;
+            let requested = input
+                .entry_ids
+                .as_ref()
+                .map(|ids| ids.iter().map(String::as_str).collect::<BTreeSet<&str>>());
+            let mut entries = Vec::new();
+            for summary in state.entries.iter().filter(|entry| {
+                requested
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(entry.id.as_str()))
+            }) {
+                let detail = self
+                    .store
+                    .get_research_entry(&summary.id, Some(state.revision))
+                    .map_err(internal_failure)?;
+                entries.push(McpStateEntry::from_detail(detail, &state.revisions));
+            }
+            if let Some(ids) = requested {
+                if entries.len() != ids.len() {
+                    return Err(invalid_input(
+                        "One or more requested entries are outside this Project or revision",
+                    ));
+                }
+            }
+            self.state_result_from_snapshot(
+                StateCursorSnapshot {
+                    grant_token,
+                    project_id: input.project_id.clone(),
+                    revision: state.revision,
+                    entries,
+                    offset: 0,
+                    expires_at: Instant::now() + self.cursor_ttl,
+                },
+                state.current_revision,
+                limit,
+            )
+            .await
+        };
+        trace_tool(&grant, STATE_READ, started, "ok", result.entries.len());
+        Ok(Json(result))
+    }
+
+    async fn continue_state_page(
+        &self,
+        cursor: &str,
+        grant_token: &str,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<StateReadResult, rmcp::ErrorData> {
+        let snapshot = self
+            .state_cursors
+            .lock()
+            .await
+            .remove(cursor)
+            .ok_or_else(cursor_expired)?;
+        if snapshot.expires_at <= Instant::now()
+            || snapshot.grant_token != grant_token
+            || snapshot.project_id != project_id
+        {
+            return Err(cursor_expired());
+        }
+        let current_revision = self
+            .store
+            .get_research_state(project_id, None)
+            .map_err(internal_failure)?
+            .current_revision;
+        Ok(self
+            .state_result_from_snapshot(snapshot, current_revision, limit)
+            .await)
+    }
+
+    async fn state_result_from_snapshot(
+        &self,
+        mut snapshot: StateCursorSnapshot,
+        current_revision: i64,
+        limit: usize,
+    ) -> StateReadResult {
+        let end = (snapshot.offset + limit).min(snapshot.entries.len());
+        let entries = snapshot.entries[snapshot.offset..end].to_vec();
+        snapshot.offset = end;
+        let revision = snapshot.revision;
+        let next_cursor = if end < snapshot.entries.len() {
+            let cursor = Uuid::new_v4().simple().to_string();
+            self.state_cursors
+                .lock()
+                .await
+                .insert(cursor.clone(), snapshot);
+            Some(cursor)
+        } else {
+            None
+        };
+        StateReadResult {
+            revision,
+            current_revision,
+            entries,
+            next_cursor,
+        }
     }
 
     async fn start_reader_page(
@@ -1423,6 +1555,14 @@ struct ReaderListNotesInput {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StateReadInput {
+    project_id: String,
+    entry_ids: Option<Vec<String>>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ReaderAddNoteResult {
@@ -1502,6 +1642,133 @@ impl McpReaderNote {
 #[serde(rename_all = "camelCase")]
 struct ReaderListNotesResult {
     notes: Vec<McpReaderNote>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpStateEvidence {
+    id: String,
+    relationship: String,
+    paper_id: String,
+    source_id: String,
+    extraction_id: String,
+    chunk_id: String,
+    excerpt: String,
+    source_start: i64,
+    source_end: i64,
+    page_start: i32,
+    page_end: i32,
+    explanation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpStateRelation {
+    target_entry_id: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpStateContext {
+    kind: String,
+    context_id: String,
+    label: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpStateEntry {
+    id: String,
+    kind: String,
+    original_kind: String,
+    statement: String,
+    epistemic_status: String,
+    lifecycle: String,
+    first_revision: i64,
+    last_revision: i64,
+    origin_run_id: Option<String>,
+    revision_run_id: Option<String>,
+    evidence: Vec<McpStateEvidence>,
+    related_entries: Vec<McpStateRelation>,
+    context: Vec<McpStateContext>,
+}
+
+impl McpStateEntry {
+    fn from_detail(
+        detail: crate::domain::research_state::ResearchEntryDetail,
+        revisions: &[crate::domain::research_state::ResearchStateRevision],
+    ) -> Self {
+        let original_kind = detail.entry.kind.as_str().to_string();
+        let kind = match detail.entry.kind {
+            crate::domain::research_state::ResearchEntryKind::Finding => "finding",
+            crate::domain::research_state::ResearchEntryKind::Hypothesis => "hypothesis",
+            crate::domain::research_state::ResearchEntryKind::Question
+            | crate::domain::research_state::ResearchEntryKind::Gap
+            | crate::domain::research_state::ResearchEntryKind::ExperimentIdea => "question",
+        }
+        .to_string();
+        let revision_run_id = revisions
+            .iter()
+            .find(|revision| revision.revision == detail.entry.last_revision)
+            .and_then(|revision| revision.run_id.clone());
+        Self {
+            id: detail.entry.id,
+            kind,
+            original_kind,
+            statement: detail.entry.text,
+            epistemic_status: detail.entry.epistemic_status.as_str().to_string(),
+            lifecycle: detail.entry.lifecycle.as_str().to_string(),
+            first_revision: detail.entry.first_revision,
+            last_revision: detail.entry.last_revision,
+            origin_run_id: detail.entry.origin_run_id,
+            revision_run_id,
+            evidence: detail
+                .evidence
+                .into_iter()
+                .map(|evidence| McpStateEvidence {
+                    id: evidence.id,
+                    relationship: "unspecified".to_string(),
+                    paper_id: evidence.paper_id,
+                    source_id: evidence.source_id,
+                    extraction_id: evidence.extraction_id,
+                    chunk_id: evidence.chunk_id,
+                    excerpt: evidence.excerpt,
+                    source_start: evidence.source_start,
+                    source_end: evidence.source_end,
+                    page_start: evidence.page_start,
+                    page_end: evidence.page_end,
+                    explanation: evidence.support_note,
+                })
+                .collect(),
+            related_entries: detail
+                .relations
+                .into_iter()
+                .map(|relation| McpStateRelation {
+                    target_entry_id: relation.target_entry_id,
+                    kind: relation.kind.as_str().to_string(),
+                })
+                .collect(),
+            context: detail
+                .context
+                .into_iter()
+                .map(|context| McpStateContext {
+                    kind: context.kind.as_str().to_string(),
+                    context_id: context.context_id,
+                    label: context.label,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct StateReadResult {
+    revision: i64,
+    current_revision: i64,
+    entries: Vec<McpStateEntry>,
     next_cursor: Option<String>,
 }
 
@@ -1680,6 +1947,7 @@ struct VaultPapersResult {
 #[cfg(test)]
 mod tests {
     use crate::domain::library::{DocumentBlock, DocumentPage, PaperDraft, PaperSourceDraft};
+    use crate::domain::research_state::{EpistemicStatus, ResearchEntryDraft, ResearchEntryKind};
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::streamable_http_client::{
         StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
@@ -1718,6 +1986,18 @@ mod tests {
             status: "saved".to_string(),
             abstract_text: abstract_text.map(str::to_string),
             sources: Vec::new(),
+        }
+    }
+
+    fn state_draft(kind: ResearchEntryKind, text: &str) -> ResearchEntryDraft {
+        ResearchEntryDraft {
+            kind,
+            epistemic_status: EpistemicStatus::Speculative,
+            text: text.to_string(),
+            evidence: Vec::new(),
+            relations: Vec::new(),
+            context: Vec::new(),
+            reason: Some("MCP fixture".to_string()),
         }
     }
 
@@ -2128,6 +2408,132 @@ mod tests {
         assert_eq!(view.entries[0].author_kind, "user");
         assert_eq!(view.entries[1].author_kind, "agent");
         assert_eq!(view.entries[1].run_id.as_deref(), Some("run-1"));
+    }
+
+    #[tokio::test]
+    async fn state_read_projects_kinds_and_keeps_one_revision_across_pages() {
+        let store = test_store("state-read");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        store
+            .create_research_entry(
+                &vault.project_id,
+                0,
+                &state_draft(ResearchEntryKind::Finding, "A finding"),
+            )
+            .expect("create finding");
+        store
+            .create_research_entry(
+                &vault.project_id,
+                1,
+                &state_draft(ResearchEntryKind::Hypothesis, "A hypothesis"),
+            )
+            .expect("create hypothesis");
+        store
+            .create_research_entry(
+                &vault.project_id,
+                2,
+                &state_draft(ResearchEntryKind::Gap, "Missing comparison"),
+            )
+            .expect("create gap");
+        store
+            .create_research_entry(
+                &vault.project_id,
+                3,
+                &state_draft(ResearchEntryKind::Question, "An open question"),
+            )
+            .expect("create question");
+        store
+            .create_research_entry(
+                &vault.project_id,
+                4,
+                &state_draft(ResearchEntryKind::ExperimentIdea, "Try an ablation"),
+            )
+            .expect("create experiment idea");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "codex-test",
+                Some("state-run"),
+                [STATE_READ],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let first = client
+            .call_tool(
+                CallToolRequestParams::new(STATE_READ).with_arguments(
+                    serde_json::json!({"project_id": vault.project_id, "limit": 1})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("first state page")
+            .structured_content
+            .expect("state result");
+        assert_eq!(first["revision"], 5);
+        let cursor = first["nextCursor"].as_str().expect("next cursor");
+
+        store
+            .create_research_entry(
+                &vault.project_id,
+                5,
+                &state_draft(ResearchEntryKind::Question, "Added concurrently"),
+            )
+            .expect("concurrent update");
+        let second = client
+            .call_tool(
+                CallToolRequestParams::new(STATE_READ).with_arguments(
+                    serde_json::json!({
+                        "project_id": vault.project_id,
+                        "cursor": cursor,
+                        "limit": 100
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("continued state page")
+            .structured_content
+            .expect("continued result");
+        assert_eq!(second["revision"], 5);
+        assert_eq!(second["currentRevision"], 6);
+        assert_eq!(second["entries"].as_array().unwrap().len(), 4);
+        let projected = first["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["entries"].as_array().unwrap().iter())
+            .map(|entry| {
+                (
+                    entry["originalKind"].as_str().unwrap(),
+                    entry["kind"].as_str().unwrap(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(projected["finding"], "finding");
+        assert_eq!(projected["hypothesis"], "hypothesis");
+        assert_eq!(projected["question"], "question");
+        assert_eq!(projected["gap"], "question");
+        assert_eq!(projected["experiment_idea"], "question");
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
     }
 
     #[tokio::test]
