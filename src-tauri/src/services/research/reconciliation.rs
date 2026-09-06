@@ -149,7 +149,7 @@ pub fn render_reconciliation_prompt(
         })
         .collect();
     serde_json::to_string_pretty(&ReconciliationPrompt {
-        goal: &configuration.goal,
+        goal: &configuration.canonical_instructions(),
         scope: &configuration.scope,
         exclusions: &configuration.exclusions,
         autonomy,

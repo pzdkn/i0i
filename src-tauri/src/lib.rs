@@ -304,6 +304,7 @@ pub fn run() {
             commands::research::get_research_harness,
             commands::research::save_research_harness,
             commands::research::list_harness_configuration_versions,
+            commands::research::clear_harness_configuration_history,
             commands::research::get_harness_run_instructions,
             commands::research::get_research_checkpoint,
             commands::research::list_research_checkpoints,

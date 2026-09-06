@@ -1,6 +1,6 @@
 # RFC 0124: Simple Incremental Project Research
 
-- Status: Proposed; implementation requires approval
+- Status: Implemented and verified
 - Date: 2026-09-03
 - Area: Projects / Research Harness / UI
 - Parent: RFC 0108
@@ -295,6 +295,23 @@ Activity event merely because the application starts.
    tests for this RFC.
 10. Frontend type checking and the production build pass.
 
-## Implementation Approval
+## Implementation Record
 
-Not yet approved. This RFC records the simplification decision only.
+Implemented on 2026-09-06. The Project Research panel now presents one
+instruction, one bounded paper-count input, and one Run or Cancel action. The
+latest Run is shown first; prior Runs and technical Activity use progressive
+disclosure. Research Entry details open contextually instead of occupying a
+disabled tab.
+
+The existing configuration storage remains compatible. On initialization,
+legacy goal, instruction, scope, exclusion, and concept fields are composed
+once into the canonical instruction without creating a version or Activity
+event. New and migrated Projects use automatic, validated Paper and Research
+State enrichment while retaining immutable Run snapshots and checkpoints.
+Repeated Stop is idempotent, manual Runs are not blocked by stale scheduler
+lifecycle state, and older standalone configuration versions can be cleared
+without touching Run history.
+
+Verification completed with 543 Rust library tests passing (6 ignored), all 7
+focused Research UI helper tests passing, `pnpm check` reporting no errors or
+warnings, and the production frontend build succeeding.

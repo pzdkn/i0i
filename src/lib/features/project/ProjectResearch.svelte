@@ -3,20 +3,16 @@
   import {
     applyHarnessChangeSet,
     cancelProjectResearch,
+    clearHarnessConfigurationHistory,
     editHarnessChangeSet,
     getHarnessChangeSet,
-    getHarnessRunInstructions,
     getResearchHarness,
-    listHarnessConfigurationVersions,
     listResearchCheckpoints,
     listenSearchUpdated,
-    pauseResearchHarness,
-    resumeResearchHarness,
     rejectHarnessChangeSet,
     restoreResearchCheckpoint,
     runProjectResearch,
     saveResearchHarness,
-    stopResearchHarness,
   } from "$lib/bridge/research";
   import {
     createResearchEntry,
@@ -45,11 +41,8 @@
   } from "$lib/domain/research-document";
   import type { ProjectDocumentSummary } from "$lib/domain/library";
   import type {
-    Depth,
-    EffectiveInstructionStack,
     HarnessChangeSet,
     HarnessConfiguration,
-    HarnessConfigurationVersion,
     HarnessSnapshot,
     RunReconciliationPlan,
     ResearchCheckpoint,
@@ -65,9 +58,11 @@
     allowedEpistemicStatuses,
     changeSetReviewSummary,
     checkpointRestoreAvailability,
+    canonicalResearchInstructions,
     documentGenerationAvailability,
     filterResearchEntries,
     researchEntryCounts,
+    simpleResearchConfiguration,
     sortResearchEntries,
   } from "$lib/features/project/research-state-ui";
 
@@ -94,40 +89,21 @@
   let selectedEntry = $state<ResearchEntryDetail | null>(null);
   let evidenceCandidates = $state<ResearchEvidenceCandidate[]>([]);
   let improvements = $state<HarnessImprovement[]>([]);
-  let configurationVersions = $state<HarnessConfigurationVersion[]>([]);
-  let inspectedInstructions = $state<EffectiveInstructionStack | null>(null);
   let changeSets = $state<Record<string, HarnessChangeSet>>({});
   let checkpoints = $state<Record<string, ResearchCheckpoint>>({});
-  let inspectorTab = $state<"details" | "activity" | "settings">("activity");
+  let inspectorTab = $state<"activity" | "settings">("activity");
   let loading = $state(true);
   let working = $state(false);
   let error = $state("");
   let loadedProjectKey = "";
 
-  let goal = $state("");
   let researchInstructions = $state("");
-  let scope = $state("");
-  let exclusions = $state("");
-  let preferredConcepts = $state("");
-  let excludedConcepts = $state("");
-  let sources = $state<string[]>([]);
-  let depth = $state<Depth>("standard");
   let paperBudget = $state(10);
-  let autonomy = $state<"manual" | "propose" | "automatic">("manual");
-  let mayAddPapers = $state(false);
-  let writableDocumentIds = $state<string[]>([]);
   let scheduleEnabled = $state(false);
   let scheduleCadence = $state<"daily" | "weekly">("daily");
   let scheduleTime = $state("09:00");
   let scheduleWeekday = $state(1);
   let scheduleTimezone = $state(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
-  let maximumCycles = $state<number | undefined>();
-  let maximumUnproductiveRuns = $state<number | undefined>();
-  let maximumRunMinutes = $state<number | undefined>();
-  let maximumProviderQueries = $state<number | undefined>();
-  let maximumLlmCalls = $state<number | undefined>();
-  let endAt = $state("");
-  let stopOnConvergence = $state(false);
   let search = $state("");
   let kindFilter = $state<ResearchEntryKind | "all">("all");
   let runFilter = $state("all");
@@ -151,6 +127,7 @@
   let generation = $state<ResearchDocumentGeneration | null>(null);
   let detailHeading = $state<HTMLHeadingElement>();
   let originatingEntryId: string | null = null;
+  let previousInspectorTab: "activity" | "settings" = "activity";
   let entryButtons: Record<string, HTMLButtonElement> = {};
 
   const activeRun = $derived(
@@ -163,6 +140,8 @@
       ? snapshot?.events.find((event) => event.runId === activeRun.id && event.phase)
       : undefined,
   );
+  const featuredRun = $derived(activeRun ?? snapshot?.runs[0]);
+  const olderRuns = $derived((snapshot?.runs ?? []).filter((run) => run.id !== featuredRun?.id));
   const historical = $derived(
     Boolean(researchState && researchState.revision !== researchState.currentRevision),
   );
@@ -192,7 +171,10 @@
     let unlisten: (() => void) | undefined;
     let unlistenGeneration: (() => void) | undefined;
     listenSearchUpdated((event) => {
-      if (snapshot?.runs.some((run) => run.searchId === event.searchId)) void refreshHarness();
+      if (!snapshot?.runs.some((run) => run.searchId === event.searchId)) return;
+      void refreshHarness().then(() => {
+        if (["ready", "failed", "cancelled"].includes(event.status)) void onLibraryChanged?.();
+      });
     }).then((stop) => (unlisten = stop));
     listenResearchDocumentGenerationUpdated((updated) => {
       if (updated.projectId !== projectId) return;
@@ -214,21 +196,18 @@
     error = "";
     loadedProjectKey = key;
     try {
-      const [next, nextState, nextImprovements, nextVersions, nextCheckpoints] = await Promise.all([
+      const [next, nextState, nextImprovements, nextCheckpoints] = await Promise.all([
         getResearchHarness(projectId),
         getResearchState(projectId, initialRevision),
         listHarnessImprovements(projectId),
-        listHarnessConfigurationVersions(projectId),
         listResearchCheckpoints(projectId),
       ]);
       if (loadedProjectKey !== key) return;
       snapshot = next;
       researchState = nextState;
       improvements = nextImprovements;
-      configurationVersions = nextVersions;
       checkpoints = Object.fromEntries(nextCheckpoints.map((checkpoint) => [checkpoint.runId, checkpoint]));
       changeSets = await loadChangeSets(next.runs);
-      inspectedInstructions = null;
       selectedEntry = null;
       generationSelection = [];
       applyConfiguration(next.harness.configuration);
@@ -306,8 +285,8 @@
   async function openEntry(entryId: string) {
     try {
       originatingEntryId = entryId;
+      previousInspectorTab = inspectorTab;
       selectedEntry = await getResearchEntry(entryId, researchState?.revision);
-      inspectorTab = "details";
       await tick();
       detailHeading?.focus();
     } catch (caught) {
@@ -318,7 +297,7 @@
   async function closeDetails() {
     const entryId = originatingEntryId;
     selectedEntry = null;
-    inspectorTab = "activity";
+    inspectorTab = previousInspectorTab;
     await tick();
     if (entryId) entryButtons[entryId]?.focus();
   }
@@ -410,7 +389,6 @@
       researchState = mutation.state;
       selectedEntry = mutation.entry;
       editorOpen = false;
-      inspectorTab = "details";
     } catch (caught) {
       error = String(caught);
     } finally {
@@ -441,10 +419,6 @@
     if (!options.includes(epistemicStatus)) epistemicStatus = options[0];
   });
 
-  $effect(() => {
-    if (autonomy === "manual") scheduleEnabled = false;
-  });
-
   async function refreshHarness() {
     try {
       const [nextSnapshot, nextImprovements, nextCheckpoints] = await Promise.all([
@@ -455,7 +429,6 @@
       snapshot = nextSnapshot;
       improvements = nextImprovements;
       checkpoints = Object.fromEntries(nextCheckpoints.map((checkpoint) => [checkpoint.runId, checkpoint]));
-      configurationVersions = await listHarnessConfigurationVersions(projectId);
       changeSets = await loadChangeSets(snapshot?.runs ?? []);
       if (!historical) researchState = await getResearchState(projectId);
     } catch (caught) {
@@ -559,42 +532,13 @@
   }
 
   function applyConfiguration(configuration: HarnessConfiguration) {
-    goal = configuration.goal;
-    researchInstructions = configuration.researchInstructions;
-    scope = configuration.scope;
-    exclusions = configuration.exclusions;
-    preferredConcepts = configuration.preferredConcepts.join(", ");
-    excludedConcepts = configuration.excludedConcepts.join(", ");
-    sources = [...configuration.sources];
-    depth = configuration.depth;
+    researchInstructions = canonicalResearchInstructions(configuration);
     paperBudget = configuration.paperBudget;
-    autonomy = configuration.autonomy;
-    mayAddPapers = configuration.mayAddPapers;
-    writableDocumentIds = [...configuration.writableDocumentIds];
     scheduleEnabled = configuration.schedule.enabled;
     scheduleCadence = configuration.schedule.cadence;
     scheduleTime = configuration.schedule.localTime;
     scheduleWeekday = configuration.schedule.weekday ?? 1;
     scheduleTimezone = configuration.schedule.timezone;
-    maximumCycles = configuration.stopConditions.maximumCycles;
-    maximumUnproductiveRuns = configuration.stopConditions.maximumUnproductiveRuns;
-    maximumRunMinutes = configuration.stopConditions.maximumRunSeconds
-      ? Math.ceil(configuration.stopConditions.maximumRunSeconds / 60)
-      : undefined;
-    maximumProviderQueries = configuration.stopConditions.maximumProviderQueries;
-    maximumLlmCalls = configuration.stopConditions.maximumLlmCalls;
-    endAt = configuration.stopConditions.endAt?.slice(0, 16) ?? "";
-    stopOnConvergence = configuration.stopConditions.stopOnConvergence;
-  }
-
-  async function inspectInstructions(runId: string) {
-    error = "";
-    try {
-      inspectedInstructions = await getHarnessRunInstructions(runId);
-      inspectorTab = "activity";
-    } catch (caught) {
-      error = String(caught);
-    }
   }
 
   function conceptList(value: string): string[] {
@@ -604,51 +548,34 @@
       .filter(Boolean);
   }
 
-  function toggleSource(source: string, enabled: boolean) {
-    sources = enabled
-      ? [...new Set([...sources, source])]
-      : sources.filter((candidate) => candidate !== source);
+  function editedConfiguration(): HarnessConfiguration | null {
+    if (!snapshot) return null;
+    return simpleResearchConfiguration(
+      snapshot.harness.configuration,
+      researchInstructions,
+      Number(paperBudget),
+      {
+        enabled: scheduleEnabled,
+        cadence: scheduleCadence,
+        localTime: scheduleTime,
+        weekday: scheduleCadence === "weekly" ? Number(scheduleWeekday) : undefined,
+        timezone: scheduleTimezone,
+      },
+    );
+  }
+
+  async function persistSettings(): Promise<void> {
+    const configuration = editedConfiguration();
+    if (!configuration || JSON.stringify(configuration) === JSON.stringify(snapshot?.harness.configuration)) return;
+    snapshot = await saveResearchHarness(projectId, configuration);
+    applyConfiguration(snapshot.harness.configuration);
   }
 
   async function saveSettings() {
     working = true;
     error = "";
     try {
-      snapshot = await saveResearchHarness(projectId, {
-        goal,
-        researchInstructions,
-        scope,
-        exclusions,
-        preferredConcepts: conceptList(preferredConcepts),
-        excludedConcepts: conceptList(excludedConcepts),
-        sources,
-        depth,
-        paperBudget: Number(paperBudget),
-        autonomy,
-        mayAddPapers,
-        writableDocumentIds,
-        schedule: {
-          enabled: scheduleEnabled,
-          cadence: scheduleCadence,
-          localTime: scheduleTime,
-          weekday: scheduleCadence === "weekly" ? Number(scheduleWeekday) : undefined,
-          timezone: scheduleTimezone,
-        },
-        stopConditions: {
-          maximumCycles: maximumCycles ? Number(maximumCycles) : undefined,
-          endAt: endAt ? new Date(endAt).toISOString() : undefined,
-          maximumUnproductiveRuns: maximumUnproductiveRuns
-            ? Number(maximumUnproductiveRuns)
-            : undefined,
-          maximumRunSeconds: maximumRunMinutes ? Number(maximumRunMinutes) * 60 : undefined,
-          maximumProviderQueries: maximumProviderQueries
-            ? Number(maximumProviderQueries)
-            : undefined,
-          maximumLlmCalls: maximumLlmCalls ? Number(maximumLlmCalls) : undefined,
-          stopOnConvergence,
-        },
-      });
-      applyConfiguration(snapshot.harness.configuration);
+      await persistSettings();
     } catch (caught) {
       error = String(caught);
     } finally {
@@ -660,6 +587,7 @@
     working = true;
     error = "";
     try {
+      await persistSettings();
       await runProjectResearch(projectId);
       await refreshHarness();
       inspectorTab = "activity";
@@ -683,15 +611,12 @@
     }
   }
 
-  async function setHarnessLifecycle(action: "pause" | "resume" | "stop") {
+  async function clearConfigurationHistory() {
+    if (!window.confirm("Clear older Research configuration history? Existing Runs and their snapshots will remain unchanged.")) return;
     working = true;
     error = "";
     try {
-      snapshot = await (action === "pause"
-        ? pauseResearchHarness(projectId)
-        : action === "resume"
-          ? resumeResearchHarness(projectId)
-          : stopResearchHarness(projectId));
+      await clearHarnessConfigurationHistory(projectId);
     } catch (caught) {
       error = String(caught);
     } finally {
@@ -706,19 +631,16 @@
       <div>
         <span class="eyebrow">Project Research</span>
         <h1>{projectTitle}</h1>
-        <p class="project-goal">{projectGoal?.trim() || goal || "Define a research goal in Harness Settings."}</p>
-        <small class="next-run">Cycle {snapshot?.harness.completedCycleCount ?? 0} · Harness {activeRun?.status ?? snapshot?.harness.status ?? "inactive"}</small>
+        <p class="project-goal">{projectGoal?.trim() || researchInstructions.split("\n").find(Boolean) || "Add research instructions to begin."}</p>
+        <small class="next-run">{snapshot?.harness.completedCycleCount ?? 0} completed Runs{activeRun ? ` · ${activeRun.status}` : ""}</small>
         {#if snapshot?.harness.nextRunAt}<small class="next-run">Next while i0i is open: {new Date(snapshot.harness.nextRunAt).toLocaleString()}</small>{/if}
-        {#if snapshot?.harness.terminalStopReason}<small class="next-run">Stopped: {snapshot.harness.terminalStopReason.replaceAll("_", " ")}</small>{/if}
       </div>
-      <span class:running={Boolean(activeRun)} class="status">
-        {activeRun?.status ?? snapshot?.harness.status ?? "inactive"}
-      </span>
+      {#if activeRun}<span class="status running">{activeRun.status}</span>{/if}
     </header>
 
     {#if error}<div class="error hair-b">{error}</div>{/if}
     {#if loading}
-      <div class="empty-state">Loading Research Harness…</div>
+      <div class="empty-state">Loading research…</div>
     {:else}
       <section class="state-toolbar hair-b">
         <div class="state-heading row">
@@ -853,7 +775,7 @@
             </button>
           </article>
         {:else}
-          <div class="empty-state">{(researchState?.entries.length ?? 0) === 0 ? "Research State is empty. Seed the Project Vault, configure and run the Harness, or create a manual Research Entry." : "No Research State entries match these filters."}</div>
+          <div class="empty-state">{(researchState?.entries.length ?? 0) === 0 ? "Research State is empty. Add instructions and run research, or create a manual Research Entry." : "No Research State entries match these filters."}</div>
         {/each}
       </section>
     {/if}
@@ -861,35 +783,39 @@
 
   <aside class="harness hair-l">
     <header class="harness-header hair-b">
-      <div class="row">
-        <span class="label hot">Research Harness</span>
-        <div class="flex1"></div>
-        <span class="version">v{snapshot?.harness.configurationVersion ?? 1}</span>
-      </div>
-      <div class="actions row">
-        <button class="primary" type="button" disabled={working || Boolean(activeRun) || !goal.trim() || snapshot?.harness.status === "stopped"} onclick={() => void runNow()}>
-          Run now
-        </button>
-        {#if snapshot?.harness.status === "paused" || snapshot?.harness.status === "stopped"}
-          <button type="button" disabled={working} onclick={() => void setHarnessLifecycle("resume")}>Resume</button>
+      <span class="label hot">Research</span>
+      <label class="instruction-input">
+        <span>Research instructions</span>
+        <textarea bind:value={researchInstructions} rows="5" placeholder="What should i0i investigate, prioritize, include, or avoid?"></textarea>
+      </label>
+      <div class="run-controls">
+        <label>
+          <span>Papers to find</span>
+          <input type="number" min="1" max="100" step="1" bind:value={paperBudget} />
+        </label>
+        {#if activeRun}
+          <button class="primary" type="button" disabled={working || !activeRun.searchRunId} onclick={() => void cancelRun()}>Cancel</button>
         {:else}
-          <button type="button" disabled={working} onclick={() => void setHarnessLifecycle("pause")}>{activeRun ? "Pause after Run" : "Pause"}</button>
+          <button class="primary" type="button" disabled={working || !researchInstructions.trim()} onclick={() => void runNow()}>
+            {working ? "Starting…" : "Run research"}
+          </button>
         {/if}
-        <button type="button" disabled={working} onclick={() => void setHarnessLifecycle("stop")}>{activeRun ? "Stop and cancel" : "Stop"}</button>
-        {#if activeRun}<button type="button" disabled={working || !activeRun.searchRunId} onclick={() => void cancelRun()}>Cancel Run</button>{/if}
       </div>
-      {#if activeProgress}<small class="live-progress">{activeProgress.phase} · {activeProgress.summary}{activeProgress.progressCurrent !== undefined ? ` · ${activeProgress.progressCurrent}${activeProgress.progressTotal !== undefined ? `/${activeProgress.progressTotal}` : ""}` : ""}</small>{/if}
+      {#if activeProgress}
+        <small class="live-progress">{activeProgress.summary}{activeProgress.progressCurrent !== undefined ? ` · ${activeProgress.progressCurrent}${activeProgress.progressTotal !== undefined ? `/${activeProgress.progressTotal}` : ""}` : ""}</small>
+      {/if}
     </header>
 
-    <nav class="tabs hair-b" aria-label="Research Harness inspector">
-      <button class:active={inspectorTab === "details"} type="button" disabled={!selectedEntry} onclick={() => (inspectorTab = "details")}>Details</button>
-      <button class:active={inspectorTab === "activity"} type="button" onclick={() => (inspectorTab = "activity")}>Activity{#if improvements.some((item) => item.status === "proposed")} · {improvements.filter((item) => item.status === "proposed").length}{/if}</button>
-      <button class:active={inspectorTab === "settings"} type="button" onclick={() => (inspectorTab = "settings")}>Settings</button>
-    </nav>
+    {#if !selectedEntry}
+      <nav class="tabs hair-b" aria-label="Research inspector">
+        <button class:active={inspectorTab === "activity"} type="button" onclick={() => (inspectorTab = "activity")}>Activity</button>
+        <button class:active={inspectorTab === "settings"} type="button" onclick={() => (inspectorTab = "settings")}>Settings</button>
+      </nav>
+    {/if}
 
-    {#if inspectorTab === "details" && selectedEntry}
+    {#if selectedEntry}
       <div class="panel details">
-        <div class="row detail-heading"><h2 bind:this={detailHeading} tabindex="-1">Research Entry details</h2><button type="button" onclick={() => void closeDetails()}>Close</button></div>
+        <div class="row detail-heading"><button type="button" onclick={() => void closeDetails()}>Back</button><h2 bind:this={detailHeading} tabindex="-1">Research Entry details</h2></div>
         <div class="detail-meta">{selectedEntry.entry.kind.replaceAll("_", " ")} · {selectedEntry.entry.epistemicStatus.replaceAll("_", " ")} · {selectedEntry.entry.lifecycle}</div>
         <small>Origin: {runLabel(selectedEntry.entry.originRunId)} · first recorded r{selectedEntry.entry.firstRevision}</small>
         <p class="detail-text">{selectedEntry.entry.text}</p>
@@ -916,41 +842,24 @@
             </div>
           </article>
         {/if}
-        {#each improvements as improvement}
-          <article class:pending={improvement.status === "proposed"} class="improvement-card">
-            <div class="row"><span class="event-kind">{improvement.status === "proposed" ? "Needs review" : improvement.status}</span><span class="sequence">configuration v{improvement.baseConfigurationVersion}</span></div>
-            <h3>Improve future research</h3>
-            <small>Target: {improvement.target.replaceAll("_", " ")} · observed in {improvement.runIds.length} Runs</small>
-            <p>{improvement.rationale}</p>
-            <details><summary>Contributing Run telemetry</summary>{#each improvement.observations as observation}<article class="proposal-observation"><strong>{observation.kind.replaceAll("_", " ")} · {Math.round(observation.confidence * 100)}% confidence</strong><p>{observation.description}</p><code>{observation.metricsJson}</code></article>{/each}</details>
-            <div class="proposal-values"><div><strong>Before</strong><span>{improvement.beforeValue.items.join(", ") || "None"}</span></div><div><strong>After</strong><span>{improvement.proposedValue.items.join(", ") || "None"}</span></div></div>
-            <div class="proposal-preview"><strong>Expected effect</strong><p>{improvement.expectedEffect}</p></div>
-            <small>Operational analysis only — not Research State evidence. Active Runs keep their snapshot.</small>
-            {#if improvement.status === "proposed"}<div class="actions"><button type="button" disabled={working} onclick={() => void decideImprovement(improvement, "reject")}>Reject</button><button type="button" disabled={working} onclick={() => void decideImprovement(improvement, "edit")}>Edit</button><button class="primary" type="button" disabled={working} onclick={() => void decideImprovement(improvement, "accept")}>Accept next Run</button></div>{/if}
-          </article>
-        {/each}
-        {#each snapshot?.runs ?? [] as run}
+        {#if featuredRun}
+          {@const run = featuredRun}
           <article class="improvement-card run-card">
-            <div class="row"><span class="event-kind">Run · {run.status}</span><span class="sequence">configuration v{run.configurationVersion}</span></div>
+            <div class="row"><span class="event-kind">{activeRun ? "Current Run" : "Last Run"} · {run.status}</span><time>{run.finishedAt ?? run.startedAt}</time></div>
             <p>{run.summary ?? run.stopReason ?? "No Run summary yet."}</p>
-            <small>Started from State r{run.startingStateRevision} · {run.trigger.replaceAll("_", " ")}</small>
-            <div class="actions"><button type="button" onclick={() => void inspectInstructions(run.id)}>View effective instructions</button></div>
             {#if checkpoints[run.id]}
               {@const checkpoint = checkpoints[run.id]}
               {@const restoreAvailability = checkpointRestoreAvailability(checkpoint, historical)}
+              <p class="result-summary">{checkpoint.addedPaperIds.length} papers added to Vault · State {checkpoint.resultingStateRevision === undefined ? "unchanged" : `advanced to r${checkpoint.resultingStateRevision}`}</p>
+              {#if checkpoint.nextDirection}<p><strong>Next</strong><br />{checkpoint.nextDirection}</p>{/if}
               <details class="checkpoint">
-                <summary>Checkpoint · {checkpoint.complete ? "complete" : "stopped early"}</summary>
-                <p>
-                  State r{checkpoint.startingStateRevision} → {checkpoint.resultingStateRevision === undefined ? "unchanged" : `r${checkpoint.resultingStateRevision}`}
-                  · Vault v{checkpoint.startingVaultRevision} → {checkpoint.resultingVaultRevision === undefined ? "unchanged" : `v${checkpoint.resultingVaultRevision}`}
-                </p>
-                <p>{checkpoint.acceptedCandidateCount} accepted · {checkpoint.rejectedCandidateCount} rejected · {checkpoint.addedPaperIds.length} Papers added</p>
-                <p>{checkpoint.usage.providerQueries} provider queries · {checkpoint.usage.llmCalls} model calls · {checkpoint.usage.iterations} iterations · {checkpoint.usage.inspectedCandidates} candidates inspected</p>
-                <p><strong>Stop</strong> · {checkpoint.stopReason?.replaceAll("_", " ") ?? checkpoint.status}</p>
-                {#if checkpoint.nextDirection}<p><strong>Next direction</strong><br />{checkpoint.nextDirection}</p>{/if}
+                <summary>Technical activity</summary>
+                <p>{checkpoint.acceptedCandidateCount} accepted · {checkpoint.rejectedCandidateCount} rejected · {checkpoint.usage.providerQueries} queries · {checkpoint.usage.llmCalls} model calls</p>
+                {#each (snapshot?.events ?? []).filter((event) => event.runId === run.id) as event}
+                  <article class="event compact-event"><span class="event-kind">{event.kind.replaceAll("_", " ")}</span><p>{event.summary}</p></article>
+                {/each}
                 {#if checkpoint.restoreAvailable}
                   <button type="button" disabled={working || !restoreAvailability.enabled} title={restoreAvailability.description} onclick={() => void restoreCheckpoint(checkpoint)}>Restore Research State</button>
-                  <small>Creates a new State revision. Papers and Documents are not restored.</small>
                 {/if}
               </details>
             {/if}
@@ -961,129 +870,37 @@
                 <strong>Project changes · {changeSet.status}</strong>
                 {#if changeSet.plan}
                   <p>{reviewSummary.acceptedPapers} accepted Papers · {reviewSummary.proposedEntries} proposed State entries</p>
-                  <details><summary>Candidate decisions</summary>{#each changeSet.plan.candidateDecisions as decision}<p><strong>{decision.decision}</strong> · {changeSet.consideredCandidates.find((candidate) => candidate.id === decision.candidateId)?.candidate.title ?? decision.candidateId}<br />{decision.reason} · {Math.round(decision.relevanceConfidence * 100)}%</p>{/each}</details>
-                  <details><summary>Proposed Research State</summary>{#each changeSet.plan.entries as entry}<p><strong>{entry.kind.replaceAll("_", " ")} · {entry.epistemicStatus.replaceAll("_", " ")}</strong><br />{entry.text}</p>{/each}<p><strong>Next direction</strong><br />{changeSet.plan.nextDirection}</p></details>
                 {/if}
                 {#if changeSet.error}<p class="error-text">{changeSet.error}</p>{/if}
                 {#if changeSet.decisionReason}<p>{changeSet.decisionReason}</p>{/if}
                 {#if reviewSummary.reviewable}<div class="actions"><button type="button" disabled={working} onclick={() => void decideChangeSet(changeSet, "reject")}>Reject</button><button type="button" disabled={working} onclick={() => void decideChangeSet(changeSet, "edit")}>Edit JSON</button><button class="primary" type="button" disabled={working} onclick={() => void decideChangeSet(changeSet, "apply")}>Apply changes</button></div>{/if}
               </div>
             {/if}
-            <details class="run-events">
-              <summary>Run Activity · {(snapshot?.events ?? []).filter((event) => event.runId === run.id).length}</summary>
-              {#each (snapshot?.events ?? []).filter((event) => event.runId === run.id) as event}
-                <article class="event compact-event">
-                  <div class="row"><span class="event-kind">{event.kind.replaceAll("_", " ")}</span><span class="sequence">#{event.sequence}</span></div>
-                  <p>{event.summary}</p>
-                  <small>{event.actor}{event.phase ? ` · ${event.phase}` : ""}{event.progressCurrent !== undefined ? ` · ${event.progressCurrent}${event.progressTotal !== undefined ? `/${event.progressTotal}` : ""}` : ""}</small>
-                  {#if event.detail}<details><summary>Structured detail</summary><code>{JSON.stringify(event.detail, null, 2)}</code></details>{/if}
-                </article>
-              {/each}
-            </details>
-          </article>
-        {/each}
-        {#if inspectedInstructions}
-          <article class="instruction-stack">
-            <div class="row"><strong>Effective Run instructions</strong><button type="button" onclick={() => (inspectedInstructions = null)}>Close</button></div>
-            <section><h3>Product policy · {inspectedInstructions.productPolicyVersion}</h3><p>{inspectedInstructions.productPolicySummary}</p></section>
-            <section><h3>Researcher instructions</h3><p>{inspectedInstructions.projectResearchInstructions || "None"}</p></section>
-            <section><h3>Structured authority</h3><p>{inspectedInstructions.structuredSettings.autonomy} · {inspectedInstructions.structuredSettings.mayAddPapers ? "may add Papers" : "cannot add Papers"} · {inspectedInstructions.structuredSettings.writableDocumentIds.length} writable Documents</p></section>
-            <section><h3>Bounded context</h3><p>State r{inspectedInstructions.runContext.startingStateRevision} · {inspectedInstructions.runContext.activeEntries.length} active entries · {inspectedInstructions.runContext.priorObservations.length} operational observations · {inspectedInstructions.runContext.priorNextDirection ? "previous next direction included" : "no previous next direction"} · Vault {inspectedInstructions.runContext.vaultId} revision {inspectedInstructions.runContext.vaultRevision} · {inspectedInstructions.runContext.vaultPaperIds.length} Papers · {inspectedInstructions.runContext.maximumProviderQueries} provider queries · {inspectedInstructions.runContext.maximumLlmCalls} model calls</p></section>
-          </article>
-        {/if}
-        {#each (snapshot?.events ?? []).filter((event) => !event.runId) as event}
-          <article class="event">
-            <div class="row">
-              <span class="event-kind">{event.kind.replaceAll("_", " ")}</span>
-              <span class="sequence">#{event.sequence}</span>
-            </div>
-            <p>{event.summary}</p>
-            <small>{event.actor}{event.phase ? ` · ${event.phase}` : ""}{event.progressCurrent !== undefined ? ` · ${event.progressCurrent}${event.progressTotal !== undefined ? `/${event.progressTotal}` : ""}` : ""}</small>
-            {#if event.detail}<details><summary>Structured detail</summary><code>{JSON.stringify(event.detail, null, 2)}</code></details>{/if}
-            <time>{event.occurredAt}</time>
           </article>
         {:else}
-          <div class="empty-list">Activity is recorded when a Run starts.</div>
-        {/each}
+          <div class="empty-list">Run research to enrich this Project.</div>
+        {/if}
+
+        {#if olderRuns.length || improvements.length}
+          <details class="history-list">
+            <summary>History ({olderRuns.length})</summary>
+            {#each olderRuns as run}
+              <article class="history-run"><strong>{run.status}</strong><time>{run.finishedAt ?? run.startedAt}</time><p>{run.summary ?? run.stopReason ?? "No summary."}</p><details><summary>Technical activity</summary>{#each (snapshot?.events ?? []).filter((event) => event.runId === run.id) as event}<p>{event.summary}</p>{/each}</details></article>
+            {/each}
+            {#each improvements as improvement}
+              <article class:pending={improvement.status === "proposed"} class="improvement-card">
+                <strong>Research improvement · {improvement.status}</strong><p>{improvement.rationale}</p>
+                {#if improvement.status === "proposed"}<div class="actions"><button type="button" disabled={working} onclick={() => void decideImprovement(improvement, "reject")}>Reject</button><button type="button" disabled={working} onclick={() => void decideImprovement(improvement, "edit")}>Edit</button><button class="primary" type="button" disabled={working} onclick={() => void decideImprovement(improvement, "accept")}>Accept</button></div>{/if}
+              </article>
+            {/each}
+          </details>
+        {/if}
       </div>
     {:else}
       <form class="panel settings" onsubmit={(event) => { event.preventDefault(); void saveSettings(); }}>
-        <label>
-          <span>Research goal</span>
-          <textarea bind:value={goal} rows="3" placeholder="Improve LoRA interpretability"></textarea>
-        </label>
-        <label>
-          <span>Researcher instructions</span>
-          <textarea bind:value={researchInstructions} rows="5" placeholder="What should the Harness prioritize or question?"></textarea>
-        </label>
-        <label>
-          <span>Scope</span>
-          <textarea bind:value={scope} rows="3" placeholder="Questions, methods, populations, or periods that belong in this Project"></textarea>
-        </label>
-        <label>
-          <span>Exclusions</span>
-          <textarea bind:value={exclusions} rows="3" placeholder="Explicitly out-of-scope research"></textarea>
-        </label>
-        <label>
-          <span>Preferred concepts</span>
-          <input bind:value={preferredConcepts} placeholder="mechanistic analysis, causal evidence" />
-        </label>
-        <label>
-          <span>Excluded concepts</span>
-          <input bind:value={excludedConcepts} placeholder="application-only studies" />
-        </label>
-        <fieldset>
-          <legend>Sources</legend>
-          <label class="check" title="Research Runs use the browser-first scholarly discovery policy">
-            <input type="checkbox" checked disabled />
-            Browser discovery (required)
-          </label>
-          {#each [["open_alex", "OpenAlex metadata"], ["arxiv", "arXiv metadata"]] as source}
-            <label class="check">
-              <input
-                type="checkbox"
-                checked={sources.includes(source[0])}
-                onchange={(event) => toggleSource(source[0], event.currentTarget.checked)}
-              />
-              {source[1]}
-            </label>
-          {/each}
-        </fieldset>
-        <div class="settings-row">
-          <label>
-            <span>Depth</span>
-            <select bind:value={depth}>
-              <option value="quick">Quick</option>
-              <option value="standard">Standard</option>
-              <option value="thorough">Thorough</option>
-            </select>
-          </label>
-          <label>
-            <span>Paper budget</span>
-            <input type="number" min="1" max="100" bind:value={paperBudget} />
-          </label>
-        </div>
-        <fieldset>
-          <legend>Authority</legend>
-          <label><span>Autonomy</span><select bind:value={autonomy}><option value="manual">Manual · Run now only</option><option value="propose">Propose · review changes</option><option value="automatic">Automatic · apply allowed changes</option></select></label>
-          <label class="check"><input type="checkbox" bind:checked={mayAddPapers} /> May add accepted Papers to this Project's Vault</label>
-          <p class="setting-note">Automatic authority remains bounded by the selected Vault and Documents. Product evidence and budget policy is never editable here.</p>
-          {#if documents.length}
-            <div class="document-authority">
-              <strong>Writable Documents</strong>
-              {#each documents as document}
-                <label class="check" title={document.harnessWritable ? "Allow this Harness to update the Document" : "Enable Harness writing from the Document editor first"}>
-                  <input type="checkbox" disabled={!document.harnessWritable} checked={writableDocumentIds.includes(document.id)} onchange={(event) => (writableDocumentIds = toggleSelection(writableDocumentIds, document.id, event.currentTarget.checked))} />
-                  {document.title}{document.harnessWritable ? "" : " · Document opt-in required"}
-                </label>
-              {/each}
-            </div>
-          {/if}
-        </fieldset>
-        <fieldset>
-          <legend>Schedule · runs only while i0i is open</legend>
-          <label class="check"><input type="checkbox" bind:checked={scheduleEnabled} disabled={autonomy === "manual"} /> Enable local schedule</label>
-          {#if autonomy === "manual"}<p class="setting-note">Choose Propose or Automatic autonomy to schedule Runs.</p>{/if}
+        <details>
+          <summary>Schedule</summary>
+          <label class="check"><input type="checkbox" bind:checked={scheduleEnabled} /> Run automatically while i0i is open</label>
           {#if scheduleEnabled}
             <div class="settings-row schedule-row">
               <label><span>Cadence</span><select bind:value={scheduleCadence}><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label>
@@ -1092,42 +909,9 @@
             </div>
             <p class="setting-note">Timezone {scheduleTimezone}. Missed intervals produce at most one startup catch-up.</p>
           {/if}
-        </fieldset>
-        <fieldset>
-          <legend>Per-Run limits</legend>
-          <div class="settings-row">
-            <label><span>Provider queries</span><input type="number" min="1" bind:value={maximumProviderQueries} placeholder="Depth default" /></label>
-            <label><span>Model calls</span><input type="number" min="4" bind:value={maximumLlmCalls} placeholder="Depth default" /></label>
-            <label><span>Wall time · minutes</span><input type="number" min="1" bind:value={maximumRunMinutes} placeholder="No extra limit" /></label>
-          </div>
-        </fieldset>
-        <fieldset>
-          <legend>Stop when</legend>
-          <div class="settings-row">
-            <label><span>Completed cycles</span><input type="number" min="1" bind:value={maximumCycles} placeholder="No limit" /></label>
-            <label><span>Unproductive Runs</span><input type="number" min="1" bind:value={maximumUnproductiveRuns} placeholder="No limit" /></label>
-            <label><span>End date</span><input type="datetime-local" bind:value={endAt} /></label>
-          </div>
-          <label class="check"><input type="checkbox" bind:checked={stopOnConvergence} /> Stop after a completed Run converges</label>
-          <p class="setting-note">{snapshot?.harness.completedCycleCount ?? 0} cycles · {snapshot?.harness.consecutiveUnproductiveRuns ?? 0} consecutive unproductive</p>
-        </fieldset>
-        <section class="policy">
-          <div class="row"><strong>Product research policy</strong><span>read-only</span></div>
-          <p>
-            The application owns planning, evidence-ranking, budget, and safety instructions.
-            Project settings are labelled researcher context and cannot replace that policy.
-          </p>
-          <code>{snapshot?.runs[0]?.policyVersion ?? "project-research-v1"}</code>
-        </section>
-        <details class="configuration-history">
-          <summary>Configuration history · {configurationVersions.length} versions</summary>
-          {#each configurationVersions as version}
-            <article><strong>v{version.version} · {version.actor}</strong><span>{version.reason}</span><time>{version.createdAt}</time></article>
-          {/each}
         </details>
-        <button class="primary save" type="submit" disabled={working || !goal.trim() || sources.length === 0}>
-          {working ? "Saving…" : "Save settings"}
-        </button>
+        <button class="primary save" type="submit" disabled={working}>{working ? "Saving…" : "Save schedule"}</button>
+        <details class="danger-zone"><summary>More</summary><button type="button" disabled={working} onclick={() => void clearConfigurationHistory()}>Clear configuration history</button></details>
       </form>
     {/if}
   </aside>
@@ -1158,6 +942,38 @@
     position: sticky;
     top: 0;
     z-index: 2;
+    display: grid;
+    gap: 10px;
+  }
+
+  .instruction-input {
+    display: grid;
+    gap: 5px;
+  }
+
+  .instruction-input > span,
+  .run-controls label > span {
+    color: var(--fg-3);
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+
+  .run-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: end;
+  }
+
+  .run-controls label {
+    display: grid;
+    grid-template-columns: 1fr 72px;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .run-controls button {
+    min-height: 32px;
   }
 
   .project-header {
@@ -1193,7 +1009,6 @@
   }
 
   .eyebrow,
-  .version,
   time,
   .sequence {
     color: var(--fg-3);
@@ -1439,7 +1254,6 @@
     line-height: 1.4;
   }
 
-  .policy p,
   .event p {
     color: var(--fg-2);
     line-height: 1.5;
@@ -1518,121 +1332,16 @@
     border-color: var(--amber-mid);
   }
 
-  .instruction-stack,
-  .configuration-history {
-    margin-bottom: 10px;
-    padding: 10px;
-    border: 1px solid var(--amber-mid);
-    background: var(--bg-1);
-  }
-
   .change-set-summary {
     margin-top: 10px;
     padding-top: 10px;
     border-top: 1px solid var(--border-1);
   }
 
-  .change-set-summary details {
-    margin-top: 8px;
-  }
-
-  .change-set-summary details p {
-    margin-top: 7px;
-    padding: 7px;
-    border: 1px solid var(--border-1);
-  }
-
-  .instruction-stack > .row {
-    justify-content: space-between;
-  }
-
-  .instruction-stack section {
-    margin-top: 10px;
-  }
-
-  .instruction-stack h3,
-  .document-authority > strong {
-    display: block;
-    margin: 0 0 4px;
-    color: var(--fg-3);
-    font-size: 10px;
-    text-transform: uppercase;
-  }
-
-  .document-authority {
-    margin-top: 10px;
-  }
-
-  .document-authority .check {
-    display: flex;
-    margin-top: 6px;
-  }
-
-  .configuration-history article {
-    display: grid;
-    gap: 3px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border-1);
-  }
-
-  .improvement-card h3 {
-    margin: 7px 0 3px;
-    font-size: 13px;
-  }
-
-  .improvement-card > small {
-    color: var(--fg-3);
-    font-size: 10px;
-  }
-
-  .proposal-values {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
-    margin: 9px 0;
-  }
-
   .improvement-card details {
     margin: 8px 0;
     color: var(--fg-3);
     font-size: 10px;
-  }
-
-  .proposal-observation {
-    margin-top: 5px;
-    padding: 7px;
-    border: 1px solid var(--border-1);
-    color: var(--fg-2);
-  }
-
-  .proposal-observation code {
-    display: block;
-    overflow: hidden;
-    color: var(--fg-3);
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-
-  .proposal-values > div,
-  .proposal-preview {
-    padding: 7px;
-    border: 1px solid var(--border-1);
-  }
-
-  .proposal-values strong,
-  .proposal-values span,
-  .proposal-preview strong {
-    display: block;
-    font-size: 10px;
-  }
-
-  .proposal-values span {
-    margin-top: 4px;
-    color: var(--fg-2);
-  }
-
-  .event .row {
-    justify-content: space-between;
   }
 
   .event-kind {
@@ -1651,7 +1360,6 @@
     gap: 13px;
   }
 
-  .settings > label,
   .settings-row label {
     display: flex;
     flex-direction: column;
@@ -1706,34 +1414,36 @@
     grid-template-columns: repeat(3, 1fr);
   }
 
-  .policy {
-    padding: 10px;
-    border: 1px solid var(--border-2);
-    background: var(--bg-1);
-  }
-
-  .policy .row {
-    justify-content: space-between;
-  }
-
-  .policy .row span {
-    color: var(--fg-3);
-    font-size: 10px;
-    text-transform: uppercase;
-  }
-
-  .policy p {
-    margin: 7px 0;
-    font-size: 11px;
-  }
-
-  .policy code {
-    color: var(--amber);
-    font-size: 10px;
-  }
-
   .save {
     align-self: flex-start;
+  }
+
+  .result-summary {
+    margin-top: 8px;
+    color: var(--fg-2);
+    line-height: 1.45;
+  }
+
+  .history-list,
+  .danger-zone {
+    margin-top: 12px;
+    border-top: 1px solid var(--border-1);
+    padding-top: 10px;
+  }
+
+  .history-run {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-1);
+  }
+
+  .history-run time {
+    float: right;
+  }
+
+  .history-run p {
+    margin-top: 5px;
+    color: var(--fg-2);
+    line-height: 1.4;
   }
 
   .error,

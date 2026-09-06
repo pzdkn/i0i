@@ -127,6 +127,7 @@ impl LibraryStore {
         migrate_vaults_to_projects(&mut conn)?;
         migrate_projects_to_harnesses(&mut conn)?;
         migrate_harness_authority_and_versions(&mut conn)?;
+        migrate_harnesses_to_simple_research(&mut conn)?;
         migrate_projects_to_research_state(&mut conn)?;
         // Legacy chat first (it guards on "no threads yet"), then notes — which
         // may reuse the whole-paper threads the chat migration just created.
@@ -1885,6 +1886,24 @@ impl LibraryStore {
         read_harness_configuration_versions(&conn, project_id)
     }
 
+    /// Removes superseded standalone configuration rows while preserving Runs.
+    pub fn clear_harness_configuration_history(&self, project_id: &str) -> StoreResult<usize> {
+        let conn = self.open_connection()?;
+        let current_version: i64 = conn
+            .query_row(
+                "select configuration_version from research_harnesses where project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| format!("Research Harness not found for Project: {project_id}"))?;
+        conn.execute(
+            "delete from harness_configuration_versions
+             where project_id = ?1 and version <> ?2",
+            params![project_id, current_version],
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// Loads the immutable effective instruction stack captured for one Run.
     pub fn get_harness_run_instructions(
         &self,
@@ -2750,6 +2769,17 @@ impl LibraryStore {
     /// Stops future claims and requests cancellation of any active Run.
     pub fn stop_research_harness(&self, project_id: &str) -> StoreResult<HarnessSnapshot> {
         let conn = self.open_connection()?;
+        let (status, requested_status): (String, String) = conn
+            .query_row(
+                "select status, requested_post_run_status from research_harnesses
+                 where project_id = ?1",
+                params![project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| format!("Research Harness not found for Project: {project_id}"))?;
+        if status == "stopped" && requested_status == "stopped" {
+            return self.get_harness_snapshot(project_id);
+        }
         let updated = conn
             .execute(
                 "update research_harnesses
@@ -10710,6 +10740,55 @@ fn migrate_harness_authority_and_versions(conn: &mut Connection) -> StoreResult<
     tx.commit().map_err(|error| error.to_string())
 }
 
+/// Collapses legacy researcher inputs into one instruction without adding history.
+fn migrate_harnesses_to_simple_research(conn: &mut Connection) -> StoreResult<()> {
+    let rows = {
+        let mut statement = conn
+            .prepare(
+                "select project_id, configuration_version, configuration_json
+                 from research_harnesses order by project_id",
+            )
+            .map_err(|error| error.to_string())?;
+        let mapped = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        mapped
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+    };
+
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    for (project_id, version, raw) in rows {
+        let configuration: HarnessConfiguration =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        let simple = configuration.into_simple_research();
+        let normalized = serde_json::to_string(&simple).map_err(|error| error.to_string())?;
+        if normalized == raw {
+            continue;
+        }
+        tx.execute(
+            "update research_harnesses
+             set configuration_json = ?2, updated_at = datetime('now')
+             where project_id = ?1",
+            params![project_id, normalized],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "update harness_configuration_versions set configuration_json = ?3
+             where project_id = ?1 and version = ?2",
+            params![project_id, version, normalized],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
 fn insert_initial_research_state(conn: &Connection, project_id: &str) -> StoreResult<()> {
     conn.execute(
         "insert into research_state_heads (project_id, current_revision)
@@ -10762,8 +10841,8 @@ fn normalize_document_title(input: &str) -> StoreResult<String> {
 }
 
 fn validate_harness_configuration(configuration: &HarnessConfiguration) -> StoreResult<()> {
-    if configuration.goal.trim().is_empty() {
-        return Err("Research goal cannot be empty".to_string());
+    if configuration.canonical_instructions().trim().is_empty() {
+        return Err("Research instructions cannot be empty".to_string());
     }
     for (name, value, limit) in [
         ("research goal", configuration.goal.as_str(), 1_000),
@@ -13062,8 +13141,7 @@ mod tests {
             },
         )?;
 
-        let (prior_run, _) =
-            ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
+        let (prior_run, _) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
         let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
         conn.execute(
             "update harness_reflections set next_direction = ?2 where run_id = ?1",
@@ -13141,8 +13219,7 @@ mod tests {
     {
         let db = test_db()?;
         for _ in 0..3 {
-            let (run, candidate) =
-                ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
+            let (run, candidate) = ready_reconciliation_run(&db, HarnessAutonomy::Manual, false)?;
             let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
             conn.execute(
                 "delete from harness_reflections where run_id = ?1",
@@ -13163,7 +13240,7 @@ mod tests {
                             .to_string(),
                     target: Some(HarnessImprovementTarget::PreferredConcepts),
                     proposed_value: Some(HarnessImprovementValue::Concepts(vec![
-                        "mechanistic".to_string(),
+                        "mechanistic".to_string()
                     ])),
                     proposal_eligible: true,
                 }],
@@ -13190,7 +13267,10 @@ mod tests {
                 .iter()
                 .filter(|event| {
                     event.kind == "operational_observation"
-                        && event.detail.as_ref().and_then(|detail| detail["kind"].as_str())
+                        && event
+                            .detail
+                            .as_ref()
+                            .and_then(|detail| detail["kind"].as_str())
                             == Some("query_quality")
                 })
                 .count(),
@@ -13284,7 +13364,10 @@ mod tests {
         );
         let reopened = LibraryStore::for_test(db.store.db_path.clone());
         let persisted = reopened.get_research_checkpoint(&run.id)?;
-        assert_eq!(persisted.applied_change_set_id, checkpoint.applied_change_set_id);
+        assert_eq!(
+            persisted.applied_change_set_id,
+            checkpoint.applied_change_set_id
+        );
         assert_eq!(persisted.next_direction, checkpoint.next_direction);
         Ok(())
     }
@@ -13520,20 +13603,22 @@ mod tests {
     }
 
     #[test]
-    fn harness_authority_is_conservative_and_project_bounded() -> StoreResult<()> {
+    fn harness_authority_defaults_to_project_enrichment_and_stays_project_bounded(
+    ) -> StoreResult<()> {
         let db = test_db()?;
         let defaults = db
             .store
             .get_harness_snapshot("project:attention")?
             .harness
             .configuration;
-        assert_eq!(defaults.autonomy, HarnessAutonomy::Manual);
+        assert_eq!(defaults.autonomy, HarnessAutonomy::Automatic);
         assert!(!defaults.schedule.enabled);
-        assert!(!defaults.may_add_papers);
+        assert!(defaults.may_add_papers);
         assert!(defaults.writable_document_ids.is_empty());
 
         let mut manual_schedule = HarnessConfiguration {
             goal: "Map mechanisms".to_string(),
+            autonomy: HarnessAutonomy::Manual,
             ..HarnessConfiguration::default()
         };
         manual_schedule.schedule.enabled = true;
@@ -13571,7 +13656,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_harness_authority_migrates_without_automatic_permissions() -> StoreResult<()> {
+    fn legacy_harness_authority_migrates_to_simple_project_enrichment() -> StoreResult<()> {
         let db = test_db()?;
         let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
         let raw: String = conn
@@ -13609,16 +13694,129 @@ mod tests {
 
         db.store.init()?;
         let migrated = db.store.get_harness_snapshot("project:attention")?.harness;
-        assert_eq!(migrated.configuration.autonomy, HarnessAutonomy::Manual);
+        assert_eq!(migrated.configuration.autonomy, HarnessAutonomy::Automatic);
         assert!(!migrated.configuration.schedule.enabled);
         assert!(migrated.next_run_at.is_none());
-        assert!(!migrated.configuration.may_add_papers);
+        assert!(migrated.configuration.may_add_papers);
         assert!(migrated.configuration.writable_document_ids.is_empty());
         let versions = db
             .store
             .list_harness_configuration_versions("project:attention")?;
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].actor, "migration");
+        Ok(())
+    }
+
+    #[test]
+    fn simple_research_migration_is_idempotent_and_preserves_all_instructions() -> StoreResult<()> {
+        let db = test_db()?;
+        let legacy = HarnessConfiguration {
+            goal: "Map LoRA mechanisms".to_string(),
+            research_instructions: "Prefer causal evidence".to_string(),
+            scope: "Transformer adapters".to_string(),
+            exclusions: "Benchmark-only studies".to_string(),
+            preferred_concepts: vec!["ablation".to_string()],
+            excluded_concepts: vec!["survey".to_string()],
+            autonomy: HarnessAutonomy::Manual,
+            may_add_papers: false,
+            ..HarnessConfiguration::default()
+        };
+        let raw = serde_json::to_string(&legacy).map_err(|error| error.to_string())?;
+        let conn = Connection::open(&db.store.db_path).map_err(|error| error.to_string())?;
+        conn.execute(
+            "update research_harnesses set configuration_json = ?1
+             where project_id = 'project:attention'",
+            params![raw],
+        )
+        .map_err(|error| error.to_string())?;
+        drop(conn);
+
+        db.store.init()?;
+        let first = db.store.get_harness_snapshot("project:attention")?;
+        let instructions = &first.harness.configuration.research_instructions;
+        for expected in [
+            "Map LoRA mechanisms",
+            "Prefer causal evidence",
+            "Transformer adapters",
+            "Benchmark-only studies",
+            "ablation",
+            "survey",
+        ] {
+            assert!(instructions.contains(expected));
+        }
+        assert!(first.harness.configuration.goal.is_empty());
+        assert_eq!(
+            first.harness.configuration.autonomy,
+            HarnessAutonomy::Automatic
+        );
+        assert!(first.harness.configuration.may_add_papers);
+        let event_count = first.events.len();
+        let version_count = db
+            .store
+            .list_harness_configuration_versions("project:attention")?
+            .len();
+
+        db.store.init()?;
+        let second = db.store.get_harness_snapshot("project:attention")?;
+        assert_eq!(second.harness.configuration, first.harness.configuration);
+        assert_eq!(second.events.len(), event_count);
+        assert_eq!(
+            db.store
+                .list_harness_configuration_versions("project:attention")?
+                .len(),
+            version_count
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clearing_configuration_history_keeps_current_version_and_run_snapshot() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut configuration = HarnessConfiguration::default();
+        configuration.research_instructions = "First direction".to_string();
+        db.store
+            .save_harness_configuration("project:attention", &configuration)?;
+        let search = db.store.create_search(&sample_search_draft())?;
+        let run = db
+            .store
+            .create_harness_run("project:attention", &search.id)?;
+        configuration.research_instructions = "Current direction".to_string();
+        let current = db
+            .store
+            .save_harness_configuration("project:attention", &configuration)?;
+
+        assert_eq!(
+            db.store
+                .clear_harness_configuration_history("project:attention")?,
+            2
+        );
+        let versions = db
+            .store
+            .list_harness_configuration_versions("project:attention")?;
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version, current.harness.configuration_version);
+        assert_eq!(
+            db.store.get_harness_run_instructions(&run.id)?,
+            run.effective_instructions
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_stop_does_not_append_control_activity() -> StoreResult<()> {
+        let db = test_db()?;
+        let first = db.store.stop_research_harness("project:attention")?;
+        let second = db.store.stop_research_harness("project:attention")?;
+
+        assert_eq!(first.events.len(), second.events.len());
+        assert_eq!(
+            second
+                .events
+                .iter()
+                .filter(|event| event.kind == "harness_stopped")
+                .count(),
+            1
+        );
         Ok(())
     }
 
@@ -13670,10 +13868,7 @@ mod tests {
             .map(|event| event.sequence)
             .collect();
         sequences.sort_unstable();
-        assert_eq!(
-            sequences,
-            (1..=sequences.len() as i64).collect::<Vec<_>>()
-        );
+        assert_eq!(sequences, (1..=sequences.len() as i64).collect::<Vec<_>>());
         assert!(snapshot.events.iter().any(|event| event.kind == "planning"));
         assert!(snapshot.events.iter().any(|event| event.kind == "ready"));
         assert!(snapshot
@@ -13719,10 +13914,11 @@ mod tests {
         let pending = db.store.get_harness_snapshot("project:attention")?;
         assert_eq!(pending.harness.status, "running");
         assert_eq!(pending.runs[0].status, "reconciling");
-        assert!(!db
-            .store
-            .get_research_checkpoint(&harness_run.id)?
-            .restore_available);
+        assert!(
+            !db.store
+                .get_research_checkpoint(&harness_run.id)?
+                .restore_available
+        );
         let second_search = db.store.create_search(&sample_search_draft())?;
         assert!(db
             .store
@@ -13803,10 +13999,11 @@ mod tests {
         assert!(recovered.events.iter().any(|event| {
             event.run_id == harness_run.id && event.kind == "reconciliation_recovered"
         }));
-        assert!(db
-            .store
-            .get_research_checkpoint(&harness_run.id)?
-            .restore_available);
+        assert!(
+            db.store
+                .get_research_checkpoint(&harness_run.id)?
+                .restore_available
+        );
         Ok(())
     }
 

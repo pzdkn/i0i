@@ -124,12 +124,70 @@ impl Default for HarnessConfiguration {
             sources: vec!["browser".into(), "open_alex".into(), "arxiv".into()],
             depth: Depth::Standard,
             paper_budget: 10,
-            autonomy: HarnessAutonomy::Manual,
-            may_add_papers: false,
+            autonomy: HarnessAutonomy::Automatic,
+            may_add_papers: true,
             writable_document_ids: Vec::new(),
             schedule: HarnessSchedule::default(),
             stop_conditions: HarnessStopConditions::default(),
         }
+    }
+}
+
+impl HarnessConfiguration {
+    /// Returns the single instruction presented by the simplified Research UI.
+    ///
+    /// Legacy fields are included so configurations created before RFC 0124 do
+    /// not lose intent when they are first opened or migrated.
+    pub fn canonical_instructions(&self) -> String {
+        let has_legacy_fields = !self.goal.trim().is_empty()
+            || !self.scope.trim().is_empty()
+            || !self.exclusions.trim().is_empty()
+            || !self.preferred_concepts.is_empty()
+            || !self.excluded_concepts.is_empty();
+        if !has_legacy_fields {
+            return self.research_instructions.trim().to_string();
+        }
+        let mut sections: Vec<String> = Vec::new();
+        for (heading, value) in [
+            ("Goal", self.goal.trim()),
+            ("Instructions", self.research_instructions.trim()),
+            ("Scope", self.scope.trim()),
+            ("Avoid", self.exclusions.trim()),
+        ] {
+            if !value.is_empty() {
+                sections.push(format!("{heading}:\n{value}"));
+            }
+        }
+        if !self.preferred_concepts.is_empty() {
+            sections.push(format!(
+                "Prioritize:\n{}",
+                self.preferred_concepts.join(", ")
+            ));
+        }
+        if !self.excluded_concepts.is_empty() {
+            sections.push(format!(
+                "Avoid concepts:\n{}",
+                self.excluded_concepts.join(", ")
+            ));
+        }
+        sections.join("\n\n")
+    }
+
+    /// Converts the current configuration to RFC 0124's simple persisted form.
+    pub fn into_simple_research(mut self) -> Self {
+        self.research_instructions = self.canonical_instructions();
+        self.goal.clear();
+        self.scope.clear();
+        self.exclusions.clear();
+        self.preferred_concepts.clear();
+        self.excluded_concepts.clear();
+        self.sources = vec!["browser".into(), "open_alex".into(), "arxiv".into()];
+        self.depth = Depth::Standard;
+        self.autonomy = HarnessAutonomy::Automatic;
+        self.may_add_papers = true;
+        self.writable_document_ids.clear();
+        self.stop_conditions = HarnessStopConditions::default();
+        self
     }
 }
 
@@ -275,13 +333,8 @@ pub fn render_harness_search_goal(stack: &EffectiveInstructionStack) -> Result<S
     let configuration = &stack.structured_settings;
     let context = &stack.run_context;
     let mut packet = format!(
-        "Research goal: {}\nScope: {}\nResearch exclusions: {}\nResearcher instructions: {}\nPreferred concepts: {}\nExcluded query concepts: {}\n\nEpistemic boundary: Research State is query-planning context, not source evidence. researcher_context entries, notes, chats, Project documents, prior assistant output, hypotheses, and experiment ideas may guide discovery but may not support factual claims or become citations.\n",
-        configuration.goal.trim(),
-        configuration.scope.trim(),
-        configuration.exclusions.trim(),
-        configuration.research_instructions.trim(),
-        configuration.preferred_concepts.join(", "),
-        configuration.excluded_concepts.join(", "),
+        "Research instructions:\n{}\n\nEpistemic boundary: Research State is query-planning context, not source evidence. researcher_context entries, notes, chats, Project documents, prior assistant output, hypotheses, and experiment ideas may guide discovery but may not support factual claims or become citations.\n",
+        configuration.canonical_instructions(),
     );
     if let Some(direction) = context.prior_next_direction.as_deref() {
         packet.push_str("\nPrevious Run next direction:\n");
@@ -413,7 +466,44 @@ pub struct DueHarnessClaim {
 mod tests {
     use chrono::{TimeZone, Timelike, Utc};
 
-    use super::{next_schedule_occurrence, HarnessSchedule, ScheduleCadence};
+    use super::{
+        next_schedule_occurrence, HarnessAutonomy, HarnessConfiguration, HarnessSchedule,
+        ScheduleCadence,
+    };
+
+    #[test]
+    fn legacy_configuration_composes_into_one_idempotent_instruction() {
+        let legacy = HarnessConfiguration {
+            goal: "Map LoRA mechanisms".to_string(),
+            research_instructions: "Prefer causal evidence".to_string(),
+            scope: "Transformer adapters".to_string(),
+            exclusions: "Benchmark-only studies".to_string(),
+            preferred_concepts: vec!["ablation".to_string()],
+            excluded_concepts: vec!["survey".to_string()],
+            ..HarnessConfiguration::default()
+        };
+
+        let simple = legacy.into_simple_research();
+
+        assert!(simple.research_instructions.contains("Map LoRA mechanisms"));
+        assert!(simple
+            .research_instructions
+            .contains("Prefer causal evidence"));
+        assert!(simple
+            .research_instructions
+            .contains("Transformer adapters"));
+        assert!(simple
+            .research_instructions
+            .contains("Benchmark-only studies"));
+        assert!(simple.research_instructions.contains("ablation"));
+        assert!(simple.research_instructions.contains("survey"));
+        assert_eq!(simple.autonomy, HarnessAutonomy::Automatic);
+        assert!(simple.may_add_papers);
+        assert_eq!(
+            simple.clone().into_simple_research().research_instructions,
+            simple.research_instructions
+        );
+    }
 
     #[test]
     fn daily_schedule_preserves_local_time_across_dst() {

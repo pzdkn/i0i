@@ -61,6 +61,10 @@ export async function listHarnessConfigurationVersions(
   });
 }
 
+export async function clearHarnessConfigurationHistory(projectId: string): Promise<number> {
+  return invoke<number>("clear_harness_configuration_history", { projectId });
+}
+
 export async function getHarnessRunInstructions(
   runId: string,
 ): Promise<EffectiveInstructionStack> {

@@ -3,14 +3,20 @@ import { test } from "node:test";
 import type { ResearchEntrySummary } from "../../domain/research-state.ts";
 import {
   allowedEpistemicStatuses,
+  canonicalResearchInstructions,
   changeSetReviewSummary,
   checkpointRestoreAvailability,
   documentGenerationAvailability,
   filterResearchEntries,
   researchEntryCounts,
+  simpleResearchConfiguration,
   sortResearchEntries,
 } from "./research-state-ui.ts";
-import type { HarnessChangeSet, ResearchCheckpoint } from "../../domain/research.ts";
+import type {
+  HarnessChangeSet,
+  HarnessConfiguration,
+  ResearchCheckpoint,
+} from "../../domain/research.ts";
 
 function entry(kind: ResearchEntrySummary["kind"], text: string): ResearchEntrySummary {
   return {
@@ -102,4 +108,39 @@ test("checkpoint restoration requires a resulting revision and the current State
   assert.equal(checkpointRestoreAvailability(checkpoint, true).enabled, false);
   checkpoint.resultingStateRevision = undefined;
   assert.equal(checkpointRestoreAvailability(checkpoint, false).enabled, false);
+});
+
+test("simple Research settings preserve legacy intent and enforce bounded enrichment", () => {
+  const legacy: HarnessConfiguration = {
+    goal: "Map LoRA mechanisms",
+    researchInstructions: "Prefer causal evidence",
+    scope: "Transformer adapters",
+    exclusions: "Benchmark-only studies",
+    preferredConcepts: ["ablation"],
+    excludedConcepts: ["survey"],
+    sources: ["arxiv"],
+    depth: "quick",
+    paperBudget: 10,
+    autonomy: "manual",
+    mayAddPapers: false,
+    writableDocumentIds: ["document:notes"],
+    schedule: {
+      enabled: false,
+      cadence: "daily",
+      localTime: "09:00",
+      timezone: "Europe/Berlin",
+    },
+    stopConditions: { maximumCycles: 2, stopOnConvergence: true },
+  };
+  const instructions = canonicalResearchInstructions(legacy);
+  const simple = simpleResearchConfiguration(legacy, instructions, 500, legacy.schedule);
+
+  for (const expected of ["Map LoRA", "causal", "Transformer", "Benchmark", "ablation", "survey"])
+    assert.match(instructions, new RegExp(expected));
+  assert.equal(simple.researchInstructions, instructions);
+  assert.equal(simple.paperBudget, 100);
+  assert.equal(simple.autonomy, "automatic");
+  assert.equal(simple.mayAddPapers, true);
+  assert.deepEqual(simple.writableDocumentIds, []);
+  assert.deepEqual(simple.stopConditions, { stopOnConvergence: false });
 });

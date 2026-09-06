@@ -99,6 +99,14 @@ pub fn list_harness_configuration_versions(
 }
 
 #[tauri::command]
+pub fn clear_harness_configuration_history(
+    store: tauri::State<'_, LibraryStore>,
+    project_id: String,
+) -> Result<usize, String> {
+    store.clear_harness_configuration_history(&project_id)
+}
+
+#[tauri::command]
 pub fn get_harness_run_instructions(
     store: tauri::State<'_, LibraryStore>,
     run_id: String,
@@ -195,7 +203,9 @@ pub(crate) fn start_project_research(
     trigger: HarnessRunTrigger,
     scheduled_for: Option<&str>,
 ) -> Result<HarnessRun, String> {
-    store.ensure_harness_can_start(project_id)?;
+    if trigger != HarnessRunTrigger::Manual {
+        store.ensure_harness_can_start(project_id)?;
+    }
     let snapshot = store.get_harness_snapshot(&project_id)?;
     if snapshot.runs.iter().any(|run| {
         matches!(
@@ -206,8 +216,9 @@ pub(crate) fn start_project_research(
         return Err("A Research Run is already active for this Project".to_string());
     }
     let configuration = snapshot.harness.configuration;
-    if configuration.goal.trim().is_empty() {
-        return Err("Research goal cannot be empty".to_string());
+    let instructions = configuration.canonical_instructions();
+    if instructions.trim().is_empty() {
+        return Err("Research instructions cannot be empty".to_string());
     }
     let mut strategy = configuration.depth.budget();
     if let Some(limit) = configuration.stop_conditions.maximum_provider_queries {
@@ -220,7 +231,11 @@ pub(crate) fn start_project_research(
     // those inside the Run ceiling rather than silently spending beyond it.
     strategy.max_llm_calls = strategy.max_llm_calls.saturating_sub(2);
     let search = store.create_search(&SearchDraft {
-        title: configuration.goal.trim().to_string(),
+        title: instructions
+            .lines()
+            .next()
+            .unwrap_or("Project research")
+            .to_string(),
         goal: effective_research_goal(&configuration),
         constraints: SearchConstraints {
             year_from: None,
@@ -325,13 +340,5 @@ fn configured_providers(sources: &[String]) -> Vec<DiscoveryProviderChoice> {
 }
 
 fn effective_research_goal(configuration: &HarnessConfiguration) -> String {
-    format!(
-        "Goal: {}\nScope: {}\nResearch exclusions: {}\nResearcher instructions: {}\nPreferred concepts: {}\nExcluded query concepts: {}",
-        configuration.goal.trim(),
-        configuration.scope.trim(),
-        configuration.exclusions.trim(),
-        configuration.research_instructions.trim(),
-        configuration.preferred_concepts.join(", "),
-        configuration.excluded_concepts.join(", ")
-    )
+    configuration.canonical_instructions()
 }

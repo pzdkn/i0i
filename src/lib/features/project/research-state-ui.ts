@@ -3,7 +3,62 @@ import type {
   ResearchEntryKind,
   ResearchEntrySummary,
 } from "../../domain/research-state.ts";
-import type { HarnessChangeSet, ResearchCheckpoint } from "../../domain/research.ts";
+import type {
+  HarnessChangeSet,
+  HarnessConfiguration,
+  HarnessSchedule,
+  ResearchCheckpoint,
+} from "../../domain/research.ts";
+
+/** Preserves every legacy researcher field in one readable instruction. */
+export function canonicalResearchInstructions(configuration: HarnessConfiguration): string {
+  const hasLegacyFields = Boolean(
+    configuration.goal.trim() ||
+      configuration.scope.trim() ||
+      configuration.exclusions.trim() ||
+      configuration.preferredConcepts.length ||
+      configuration.excludedConcepts.length,
+  );
+  if (!hasLegacyFields) return configuration.researchInstructions.trim();
+  const sections = [
+    ["Goal", configuration.goal.trim()],
+    ["Instructions", configuration.researchInstructions.trim()],
+    ["Scope", configuration.scope.trim()],
+    ["Avoid", configuration.exclusions.trim()],
+    ["Prioritize", configuration.preferredConcepts.join(", ")],
+    ["Avoid concepts", configuration.excludedConcepts.join(", ")],
+  ];
+  return sections
+    .filter(([, value]) => value)
+    .map(([heading, value]) => `${heading}:\n${value}`)
+    .join("\n\n");
+}
+
+/** Builds the bounded persisted configuration behind the simple controls. */
+export function simpleResearchConfiguration(
+  current: HarnessConfiguration,
+  instructions: string,
+  paperBudget: number,
+  schedule: HarnessSchedule,
+): HarnessConfiguration {
+  return {
+    ...current,
+    goal: "",
+    researchInstructions: instructions.trim(),
+    scope: "",
+    exclusions: "",
+    preferredConcepts: [],
+    excludedConcepts: [],
+    sources: ["browser", "open_alex", "arxiv"],
+    depth: "standard",
+    paperBudget: Math.min(100, Math.max(1, Math.round(paperBudget))),
+    autonomy: "automatic",
+    mayAddPapers: true,
+    writableDocumentIds: [],
+    schedule,
+    stopConditions: { stopOnConvergence: false },
+  };
+}
 
 /** Returns the epistemic statuses the editor may offer for one semantic kind. */
 export function allowedEpistemicStatuses(kind: ResearchEntryKind): EpistemicStatus[] {
