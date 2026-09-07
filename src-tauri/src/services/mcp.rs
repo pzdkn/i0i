@@ -14,6 +14,7 @@ use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use chrono::{SecondsFormat, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -42,7 +43,7 @@ use crate::pdf_ingestion::PdfDownloadManager;
 use crate::services::chat::evidence_question::{
     EvidenceMetadataMatch, EvidenceQuestionAnswer, EvidenceQuestionContext,
     EvidenceQuestionCoverage, EvidenceQuestionPassage, EvidenceQuestionService,
-    MAX_QUESTION_PASSAGES, MAX_QUESTION_SOURCE_CHARS,
+    MAX_QUESTION_PASSAGES, MAX_QUESTION_SOURCE_CHARS, MAX_SUMMARY_PAPERS,
 };
 use crate::services::research::manager::SearchManager;
 use crate::storage::library_store::{
@@ -63,6 +64,7 @@ pub const VAULT_LIST_PAPERS: &str = "vault_list_papers";
 pub const VAULT_GET_PAPER: &str = "vault_get_paper";
 pub const VAULT_ADD_PAPER: &str = "vault_add_paper";
 pub const VAULT_ASK: &str = "vault_ask";
+pub const VAULT_SUMMARY: &str = "vault_summary";
 pub const READER_READ: &str = "reader_read";
 pub const READER_ASK: &str = "reader_ask";
 pub const READER_ADD_NOTE: &str = "reader_add_note";
@@ -422,7 +424,9 @@ impl I0iMcpHandler {
     ) -> Result<EvidenceQuestionResult, rmcp::ErrorData> {
         let service = self.evidence_question_service()?;
         if !context.passages.is_empty() {
-            service.ensure_ready().map_err(service_unavailable_owned)?;
+            service
+                .ensure_ready()
+                .map_err(|error| evidence_question_failure(error, 0, &context.passages))?;
         }
         self.register_question_passages(grant_token, &mut context.passages)
             .await;
@@ -432,7 +436,7 @@ impl I0iMcpHandler {
         let answer = service
             .answer(question, &context.passages)
             .await
-            .map_err(internal_failure)?;
+            .map_err(|error| evidence_question_failure(error, 1, &context.passages))?;
         self.account_question_answer(grant, &answer)?;
         Ok(EvidenceQuestionResult::new(answer, context))
     }
@@ -709,6 +713,97 @@ impl I0iMcpHandler {
             VAULT_ASK,
             started,
             &result.coverage.kind,
+            result.citations.len(),
+        );
+        Ok(Json(result))
+    }
+
+    /// Summarize a stable, bounded sample of the authorized Vault.
+    #[tool(description = "Summarize an authorized i0i vault with explicit evidence coverage")]
+    async fn vault_summary(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<VaultSummaryInput>,
+    ) -> Result<Json<VaultSummaryResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, VAULT_SUMMARY)?;
+        if input.vault_id != grant.vault_id {
+            return Err(out_of_scope());
+        }
+
+        // Capture membership and papers together before any model work starts.
+        let snapshot = self.snapshot()?;
+        let vault = snapshot
+            .vaults
+            .iter()
+            .find(|vault| vault.id == grant.vault_id)
+            .ok_or_else(out_of_scope)?;
+        let captured_membership_revision = vault.membership_revision;
+        let mut paper_ids = snapshot
+            .vault_papers
+            .iter()
+            .filter(|membership| membership.vault_id == grant.vault_id)
+            .map(|membership| membership.paper_id.clone())
+            .collect::<Vec<_>>();
+        paper_ids.sort();
+        paper_ids.dedup();
+        let total_papers = paper_ids.len();
+        let sample_truncated = total_papers > MAX_SUMMARY_PAPERS;
+        paper_ids.truncate(MAX_SUMMARY_PAPERS);
+        let selected_papers = paper_ids
+            .iter()
+            .filter_map(|paper_id| snapshot.papers.iter().find(|paper| paper.id == *paper_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let service = self.evidence_question_service()?;
+        let mut summary_context = service
+            .collect_summary(&selected_papers)
+            .map_err(internal_failure)?;
+        let coverage =
+            VaultSummaryCoverage::new(total_papers, &paper_ids, &summary_context, sample_truncated);
+        self.register_question_passages(&grant_token, &mut summary_context.passages)
+            .await;
+
+        let answer = if summary_context.passages.is_empty() {
+            metadata_only_summary(&summary_context.metadata_matches)
+        } else {
+            service.ensure_ready().map_err(|error| {
+                vault_summary_failure(error, &coverage, 0, &summary_context.passages)
+            })?;
+            self.account_question_start(&grant, &summary_context.passages)?;
+            let answer = service
+                .summarize(
+                    &summary_context.passages,
+                    &summary_context.metadata_matches,
+                    sample_truncated,
+                )
+                .await
+                .map_err(|error| {
+                    vault_summary_failure(error, &coverage, 1, &summary_context.passages)
+                })?;
+            self.account_question_answer(&grant, &answer)?;
+            answer
+        };
+
+        let current_membership_revision = self
+            .snapshot()?
+            .vaults
+            .iter()
+            .find(|current| current.id == grant.vault_id)
+            .map(|current| current.membership_revision);
+        let result = VaultSummaryResult::new(
+            answer,
+            summary_context,
+            coverage,
+            captured_membership_revision,
+            current_membership_revision,
+        );
+        trace_tool(
+            &grant,
+            VAULT_SUMMARY,
+            started,
+            &result.coverage.evidence_kind,
             result.citations.len(),
         );
         Ok(Json(result))
@@ -2311,8 +2406,74 @@ fn service_unavailable(message: &str) -> rmcp::ErrorData {
 }
 
 /// Adapt an owned service failure into the MCP unavailable error shape.
-fn service_unavailable_owned(message: String) -> rmcp::ErrorData {
-    service_unavailable(&message)
+/// Report evidence-question usage when readiness or completion fails.
+fn evidence_question_failure(
+    message: String,
+    llm_calls: u32,
+    passages: &[EvidenceQuestionPassage],
+) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(
+        message,
+        Some(serde_json::json!({
+            "code": "question_unavailable",
+            "usage": failed_evidence_usage(llm_calls, passages),
+        })),
+    )
+}
+
+/// Preserve summary coverage and incurred usage when its model cannot answer.
+fn vault_summary_failure(
+    message: String,
+    coverage: &VaultSummaryCoverage,
+    llm_calls: u32,
+    passages: &[EvidenceQuestionPassage],
+) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(
+        message,
+        Some(serde_json::json!({
+            "code": "summary_unavailable",
+            "coverage": coverage,
+            "usage": failed_evidence_usage(llm_calls, passages),
+        })),
+    )
+}
+
+/// Describe bounded evidence delivered before a failed delegated call.
+fn failed_evidence_usage(
+    llm_calls: u32,
+    passages: &[EvidenceQuestionPassage],
+) -> serde_json::Value {
+    serde_json::json!({
+        "llmCalls": llm_calls,
+        "inspectedPassages": passages.len(),
+        "inspectedSourceChars": passages
+            .iter()
+            .map(|passage| passage.text.chars().count())
+            .sum::<usize>(),
+    })
+}
+
+/// Return an honest catalog overview when no source text can be inspected.
+fn metadata_only_summary(metadata: &[EvidenceMetadataMatch]) -> EvidenceQuestionAnswer {
+    let answer = if metadata.is_empty() {
+        "The Vault is empty.".to_string()
+    } else {
+        let titles = metadata
+            .iter()
+            .map(|paper| format!("\"{}\"", paper.title))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Metadata-only overview: the sampled collection contains {titles}. No abstracts or full text were available, so its themes and findings cannot be assessed."
+        )
+    };
+    EvidenceQuestionAnswer {
+        answer,
+        cited_passages: Vec::new(),
+        insufficient_evidence: !metadata.is_empty(),
+        model: None,
+        llm_calls: 0,
+    }
 }
 
 /// Confirm that an in-memory passage still names the currently persisted source.
@@ -2614,6 +2775,11 @@ struct GetPaperInput {
 struct VaultAskInput {
     vault_id: String,
     question: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct VaultSummaryInput {
+    vault_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2921,6 +3087,132 @@ impl EvidenceQuestionResult {
             relevant_paper_ids,
             metadata_matches: context.metadata_matches,
             coverage: context.coverage,
+            insufficient_evidence: answer.insufficient_evidence,
+            usage: EvidenceQuestionUsage {
+                model: answer.model,
+                llm_calls: answer.llm_calls,
+                inspected_passages,
+                inspected_source_chars,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct VaultSummaryCoverage {
+    total_papers: usize,
+    metadata_considered: usize,
+    abstracts_inspected: usize,
+    full_text_papers_inspected: usize,
+    unavailable_text: usize,
+    selected_paper_ids: Vec<String>,
+    sample_truncated: bool,
+    evidence_kind: String,
+}
+
+impl VaultSummaryCoverage {
+    /// Project the captured sample and inspected evidence into public counts.
+    fn new(
+        total_papers: usize,
+        selected_paper_ids: &[String],
+        context: &EvidenceQuestionContext,
+        sample_truncated: bool,
+    ) -> Self {
+        Self {
+            total_papers,
+            metadata_considered: context.metadata_matches.len(),
+            abstracts_inspected: context.coverage.abstract_paper_ids.len(),
+            full_text_papers_inspected: context.coverage.full_text_paper_ids.len(),
+            unavailable_text: context.coverage.unavailable_paper_ids.len(),
+            selected_paper_ids: selected_paper_ids.to_vec(),
+            sample_truncated,
+            evidence_kind: context.coverage.kind.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct VaultSummaryPaper {
+    paper_id: String,
+    title: String,
+    evidence_kind: String,
+    passage_ref: Option<String>,
+    source_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct VaultSummaryFreshness {
+    captured_membership_revision: i64,
+    current_membership_revision: Option<i64>,
+    newer_membership_available: bool,
+    generated_at: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct VaultSummaryResult {
+    summary: String,
+    citations: Vec<McpQuestionCitation>,
+    papers: Vec<VaultSummaryPaper>,
+    coverage: VaultSummaryCoverage,
+    freshness: VaultSummaryFreshness,
+    insufficient_evidence: bool,
+    usage: EvidenceQuestionUsage,
+}
+
+impl VaultSummaryResult {
+    /// Assemble a summary without persisting it or changing Research State.
+    fn new(
+        answer: EvidenceQuestionAnswer,
+        context: EvidenceQuestionContext,
+        coverage: VaultSummaryCoverage,
+        captured_membership_revision: i64,
+        current_membership_revision: Option<i64>,
+    ) -> Self {
+        let inspected_source_chars = context
+            .passages
+            .iter()
+            .map(|passage| passage.text.chars().count())
+            .sum();
+        let inspected_passages = context.passages.len();
+        let papers = context
+            .metadata_matches
+            .iter()
+            .map(|metadata| {
+                let passage = context
+                    .passages
+                    .iter()
+                    .find(|passage| passage.paper_id == metadata.paper_id);
+                VaultSummaryPaper {
+                    paper_id: metadata.paper_id.clone(),
+                    title: metadata.title.clone(),
+                    evidence_kind: passage
+                        .map(|passage| passage.evidence_kind.clone())
+                        .unwrap_or_else(|| "metadata".to_string()),
+                    passage_ref: passage.and_then(|passage| passage.passage_ref.clone()),
+                    source_id: passage.map(|passage| passage.source_id.clone()),
+                }
+            })
+            .collect();
+        Self {
+            summary: answer.answer,
+            citations: answer
+                .cited_passages
+                .into_iter()
+                .map(McpQuestionCitation::from_passage)
+                .collect(),
+            papers,
+            coverage,
+            freshness: VaultSummaryFreshness {
+                captured_membership_revision,
+                current_membership_revision,
+                newer_membership_available: current_membership_revision
+                    != Some(captured_membership_revision),
+                generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            },
             insufficient_evidence: answer.insufficient_evidence,
             usage: EvidenceQuestionUsage {
                 model: answer.model,
@@ -3367,9 +3659,13 @@ struct VaultPapersResult {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use crate::domain::discovery::{CandidateMatch, PaperCandidate};
     use crate::domain::harness::{AgentRunLimits, HarnessRun};
-    use crate::domain::library::{DocumentBlock, DocumentPage, PaperDraft, PaperSourceDraft};
+    use crate::domain::library::{
+        DocumentBlock, DocumentPage, PaperDraft, PaperSourceDraft, ProjectDraft,
+    };
     use crate::domain::research::{Depth, SearchConstraints, SearchDraft};
     use crate::domain::research_state::{EpistemicStatus, ResearchEntryDraft, ResearchEntryKind};
     use crate::services::chat::evidence_question::EvidenceAnswerModel;
@@ -3384,6 +3680,15 @@ mod tests {
 
     struct FixtureEvidenceModel {
         response: String,
+    }
+
+    struct PanicEvidenceModel;
+
+    struct MembershipMutatingModel {
+        response: String,
+        store: LibraryStore,
+        vault_id: String,
+        called: AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -3401,6 +3706,42 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl EvidenceAnswerModel for PanicEvidenceModel {
+        fn model_id(&self) -> &str {
+            "panic-if-called"
+        }
+
+        fn ensure_ready(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String, String> {
+            panic!("metadata-only summaries must not call a model")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EvidenceAnswerModel for MembershipMutatingModel {
+        fn model_id(&self) -> &str {
+            "membership-mutating-model"
+        }
+
+        fn ensure_ready(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String, String> {
+            if !self.called.swap(true, Ordering::SeqCst) {
+                self.store.add_paper_to_vaults(
+                    &paper_draft("paper:added-during-summary", None),
+                    std::slice::from_ref(&self.vault_id),
+                )?;
+            }
+            Ok(self.response.clone())
+        }
+    }
+
     fn attach_fixture_questions(server: &LocalMcpServer, store: &LibraryStore, response: &str) {
         server.attach_evidence_questions(EvidenceQuestionService::with_model(
             store.clone(),
@@ -3411,12 +3752,70 @@ mod tests {
         ));
     }
 
+    fn attach_panic_questions(server: &LocalMcpServer, store: &LibraryStore) {
+        server.attach_evidence_questions(EvidenceQuestionService::with_model(
+            store.clone(),
+            SearchService::new(store.clone(), None),
+            Arc::new(PanicEvidenceModel),
+        ));
+    }
+
+    #[test]
+    fn vault_summary_model_failures_retain_captured_coverage() {
+        let coverage = VaultSummaryCoverage {
+            total_papers: 2,
+            metadata_considered: 2,
+            abstracts_inspected: 1,
+            full_text_papers_inspected: 0,
+            unavailable_text: 1,
+            selected_paper_ids: vec!["paper:a".to_string(), "paper:b".to_string()],
+            sample_truncated: false,
+            evidence_kind: "abstract_only".to_string(),
+        };
+        let evidence = EvidenceQuestionPassage {
+            passage_ref: None,
+            paper_id: "paper:a".to_string(),
+            paper_title: "A".to_string(),
+            source_id: "source:a".to_string(),
+            extraction_id: None,
+            chunk_id: None,
+            page_start: None,
+            page_end: None,
+            source_start: 0,
+            source_end: 8,
+            text: "evidence".to_string(),
+            evidence_kind: "abstract".to_string(),
+        };
+        let error =
+            vault_summary_failure("model unavailable".to_string(), &coverage, 1, &[evidence]);
+        let data = error.data.expect("structured failure details");
+        assert_eq!(data["code"], "summary_unavailable");
+        assert_eq!(data["coverage"]["totalPapers"], 2);
+        assert_eq!(data["coverage"]["abstractsInspected"], 1);
+        assert_eq!(data["usage"]["llmCalls"], 1);
+        assert_eq!(data["usage"]["inspectedSourceChars"], 8);
+    }
+
     fn test_store(name: &str) -> LibraryStore {
         let path =
             std::env::temp_dir().join(format!("i0i-mcp-{name}-{}.sqlite", Uuid::new_v4().simple()));
         let store = LibraryStore::for_test(path);
         store.init().expect("initialize test library");
         store
+    }
+
+    fn empty_project_vault(store: &LibraryStore, name: &str) -> Vault {
+        let snapshot = store
+            .create_project(&ProjectDraft {
+                title: format!("Summary {name}"),
+                goal: None,
+            })
+            .expect("create summary project");
+        snapshot
+            .vaults
+            .into_iter()
+            .find(|vault| vault.title == format!("Summary {name}"))
+            .expect("created summary vault")
     }
 
     fn managed_run(store: &LibraryStore, project_id: &str) -> HarnessRun {
@@ -4271,6 +4670,343 @@ mod tests {
             store.list_searches().expect("list searches").len(),
             initial_search_count,
             "vault_ask must use local retrieval without launching another search"
+        );
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn vault_summary_handles_empty_and_metadata_only_vaults_without_a_model() {
+        let store = test_store("vault-summary-metadata");
+        let vault = empty_project_vault(&store, "Metadata");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        attach_panic_questions(&server, &store);
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [VAULT_SUMMARY],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+
+        let empty = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_SUMMARY).with_arguments(
+                    serde_json::json!({"vault_id": vault.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("summarize empty Vault")
+            .structured_content
+            .expect("empty summary");
+        assert_eq!(empty["summary"], "The Vault is empty.");
+        assert_eq!(empty["coverage"]["totalPapers"], 0);
+        assert_eq!(empty["usage"]["llmCalls"], 0);
+
+        store
+            .add_paper_to_vaults(
+                &paper_draft("paper:metadata-summary", None),
+                std::slice::from_ref(&vault.id),
+            )
+            .expect("add metadata-only paper");
+        let metadata = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_SUMMARY).with_arguments(
+                    serde_json::json!({"vault_id": vault.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("summarize metadata-only Vault")
+            .structured_content
+            .expect("metadata summary");
+        assert_eq!(metadata["coverage"]["evidenceKind"], "metadata_only");
+        assert_eq!(metadata["coverage"]["metadataConsidered"], 1);
+        assert_eq!(metadata["coverage"]["unavailableText"], 1);
+        assert_eq!(metadata["usage"]["llmCalls"], 0);
+        assert_eq!(metadata["insufficientEvidence"], true);
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn vault_summary_reports_mixed_coverage_resolvable_refs_and_no_hidden_writes() {
+        let store = test_store("vault-summary-mixed");
+        let vault = empty_project_vault(&store, "Mixed");
+        add_extracted_pdf(
+            &store,
+            &vault.id,
+            "paper:a-full-summary",
+            "The full paper evaluates a robust adaptation method.",
+        );
+        store
+            .add_paper_to_vaults(
+                &paper_draft(
+                    "paper:b-abstract-summary",
+                    Some("The abstract reports a complementary benchmark."),
+                ),
+                std::slice::from_ref(&vault.id),
+            )
+            .expect("add abstract paper");
+        store
+            .add_paper_to_vaults(
+                &paper_draft("paper:c-metadata-summary", None),
+                std::slice::from_ref(&vault.id),
+            )
+            .expect("add metadata paper");
+        let state_revision = store
+            .get_research_state(&vault.project_id, None)
+            .expect("read State")
+            .current_revision;
+        let document_count = store
+            .get_library()
+            .expect("read library")
+            .project_documents
+            .len();
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        attach_fixture_questions(
+            &server,
+            &store,
+            r#"{"answer":"The sample includes an adaptation method [E1] and a complementary benchmark [E2].","citedPassages":["E1","E2"],"insufficientEvidence":false}"#,
+        );
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [VAULT_SUMMARY],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_SUMMARY).with_arguments(
+                    serde_json::json!({"vault_id": vault.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("summarize mixed Vault")
+            .structured_content
+            .expect("mixed summary");
+
+        assert_eq!(result["coverage"]["totalPapers"], 3);
+        assert_eq!(result["coverage"]["fullTextPapersInspected"], 1);
+        assert_eq!(result["coverage"]["abstractsInspected"], 1);
+        assert_eq!(result["coverage"]["unavailableText"], 1);
+        assert_eq!(result["citations"].as_array().unwrap().len(), 2);
+        for citation in result["citations"].as_array().unwrap() {
+            assert!(server
+                .resolve_passage(citation["passageRef"].as_str().unwrap())
+                .await
+                .is_some());
+        }
+        for paper in result["papers"].as_array().unwrap() {
+            if paper["evidenceKind"] != "metadata" {
+                assert!(server
+                    .resolve_passage(paper["passageRef"].as_str().unwrap())
+                    .await
+                    .is_some());
+                assert!(paper["sourceId"].as_str().is_some());
+            }
+        }
+        assert_eq!(
+            store
+                .get_research_state(&vault.project_id, None)
+                .expect("read unchanged State")
+                .current_revision,
+            state_revision
+        );
+        assert_eq!(
+            store
+                .get_library()
+                .expect("read unchanged library")
+                .project_documents
+                .len(),
+            document_count
+        );
+        for paper_id in [
+            "paper:a-full-summary",
+            "paper:b-abstract-summary",
+            "paper:c-metadata-summary",
+        ] {
+            assert!(store
+                .list_chat_threads("paper", paper_id)
+                .expect("list unchanged threads")
+                .is_empty());
+        }
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn vault_summary_uses_a_stable_bounded_sample() {
+        let store = test_store("vault-summary-truncated");
+        let vault = empty_project_vault(&store, "Truncated");
+        for index in (0..26).rev() {
+            store
+                .add_paper_to_vaults(
+                    &paper_draft(&format!("paper:summary-{index:02}"), None),
+                    std::slice::from_ref(&vault.id),
+                )
+                .expect("add sampled paper");
+        }
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        attach_panic_questions(&server, &store);
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [VAULT_SUMMARY],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_SUMMARY).with_arguments(
+                    serde_json::json!({"vault_id": vault.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("summarize truncated Vault")
+            .structured_content
+            .expect("truncated summary");
+        let selected = result["coverage"]["selectedPaperIds"]
+            .as_array()
+            .expect("selected papers");
+        assert_eq!(result["coverage"]["totalPapers"], 26);
+        assert_eq!(result["coverage"]["sampleTruncated"], true);
+        assert_eq!(selected.len(), MAX_SUMMARY_PAPERS);
+        assert_eq!(selected.first().unwrap(), "paper:summary-00");
+        assert_eq!(selected.last().unwrap(), "paper:summary-24");
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn vault_summary_reports_membership_that_changed_during_generation() {
+        let store = test_store("vault-summary-freshness");
+        let vault = empty_project_vault(&store, "Freshness");
+        store
+            .add_paper_to_vaults(
+                &paper_draft(
+                    "paper:initial-summary",
+                    Some("The abstract supplies initial evidence."),
+                ),
+                std::slice::from_ref(&vault.id),
+            )
+            .expect("add initial paper");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        server.attach_evidence_questions(EvidenceQuestionService::with_model(
+            store.clone(),
+            SearchService::new(store.clone(), None),
+            Arc::new(MembershipMutatingModel {
+                response: r#"{"answer":"Initial evidence was available [E1].","citedPassages":["E1"],"insufficientEvidence":false}"#.to_string(),
+                store: store.clone(),
+                vault_id: vault.id.clone(),
+                called: AtomicBool::new(false),
+            }),
+        ));
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [VAULT_SUMMARY],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_SUMMARY).with_arguments(
+                    serde_json::json!({"vault_id": vault.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("summarize changing Vault")
+            .structured_content
+            .expect("freshness result");
+
+        assert_eq!(result["coverage"]["totalPapers"], 1);
+        assert_eq!(
+            result["coverage"]["selectedPaperIds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(result["freshness"]["newerMembershipAvailable"], true);
+        assert!(
+            result["freshness"]["currentMembershipRevision"]
+                .as_i64()
+                .unwrap()
+                > result["freshness"]["capturedMembershipRevision"]
+                    .as_i64()
+                    .unwrap()
         );
 
         client.cancel().await.expect("stop client");

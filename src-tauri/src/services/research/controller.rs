@@ -24,7 +24,7 @@ use crate::services::codex_runtime::{CodexEvent, CodexRuntime, CodexRuntimeConfi
 use crate::services::mcp::{
     LocalMcpServer, READER_ADD_NOTE, READER_ASK, READER_LIST_NOTES, READER_READ, SEARCH_CANCEL,
     SEARCH_GET, SEARCH_START, STATE_READ, STATE_UPDATE, VAULT_ADD_PAPER, VAULT_ASK,
-    VAULT_GET_PAPER, VAULT_LIST, VAULT_LIST_PAPERS,
+    VAULT_GET_PAPER, VAULT_LIST, VAULT_LIST_PAPERS, VAULT_SUMMARY,
 };
 use crate::services::research::manager::SearchManager;
 use crate::storage::library_store::LibraryStore;
@@ -308,6 +308,7 @@ impl ProjectResearchController {
                     VAULT_GET_PAPER,
                     VAULT_ADD_PAPER,
                     VAULT_ASK,
+                    VAULT_SUMMARY,
                     READER_READ,
                     READER_ASK,
                     READER_ADD_NOTE,
@@ -492,7 +493,7 @@ impl ProjectResearchController {
     }
 }
 
-const RESEARCH_AGENT_INSTRUCTIONS: &str = r#"You are i0i's bounded literature research agent. Work only through the i0i MCP tools. Do not use shell, filesystem, built-in web search, or unrelated MCP servers. Inspect Research State and the Vault before choosing work. State the purpose of each focused search. Save useful candidates, wait for acquisition when needed, and read relevant passages before citing them. You may delegate a bounded evidence question to reader_ask or vault_ask, but direct reading remains the primary path. Compare evidence with existing entries and actively look for conflicting results and conditions. Update Research State only with passage references actually returned by reader_read, reader_ask, or vault_ask. Distinguish source claims, model interpretation, speculation, abstract-only coverage, and unavailable full text. Continue only while another step can materially improve the project; otherwise finish with a concise summary and remaining questions."#;
+const RESEARCH_AGENT_INSTRUCTIONS: &str = r#"You are i0i's bounded literature research agent. Work only through the i0i MCP tools. Do not use shell, filesystem, built-in web search, or unrelated MCP servers. Inspect Research State and the Vault before choosing work. Use vault_summary only when a collection overview is useful; it is sampled context, not proof that every paper was read. State the purpose of each focused search. Save useful candidates, wait for acquisition when needed, and read relevant passages before citing them. You may delegate a bounded evidence question to reader_ask or vault_ask, but direct reading remains the primary path. Compare evidence with existing entries and actively look for conflicting results and conditions. Update Research State only with passage references actually returned by reader_read, reader_ask, vault_ask, or vault_summary. Distinguish source claims, model interpretation, speculation, abstract-only coverage, and unavailable full text. Continue only while another step can materially improve the project; otherwise finish with a concise summary and remaining questions."#;
 
 fn effective_agent_limits(configuration: &HarnessConfiguration) -> AgentRunLimits {
     let mut limits = AgentRunLimits::default();
