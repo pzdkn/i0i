@@ -1,6 +1,6 @@
 # RFC 0126: On-Demand Research Loop End-to-End Evaluation
 
-- Status: Implemented; final milestone acceptance pending
+- Status: Complete
 - Date: 2026-09-06
 - Area: Projects / Research Harness / Evaluation
 - Parent: [Milestone 00, M00-01](../../../milestones/milestone_00.md)
@@ -200,3 +200,22 @@ rerunning the affected acceptance checks.
 
 No agent runtime, MCP capability, or production State migration is authorized by
 approval of this evaluation RFC; those belong to their focused milestone RFCs.
+
+## Acceptance Record
+
+The complete suite passed on 2026-09-07 against clean revision
+`d192b69211a6db6ec7c812c9106a090a9fa0e9a3`, codex-cli 0.153.4,
+agent model `gpt-5.6-sol`, and independent judge model `gpt-5.5`. All four
+scenarios passed their deterministic checks and applicable judge dimensions:
+
+- One iteration completed in 231.8 seconds.
+- Multiple iterations completed in 253.1 seconds.
+- New-run continuation completed in 301.3 seconds.
+- Live discovery completed in 171.4 seconds.
+
+The suite verified real Codex/MCP calls, query-sensitive fixed-corpus search,
+live discovery, PDF acquisition and extraction, passage-before-update ordering,
+revision history after reopening SQLite, source hashes, limits, and temporary
+data cleanup. The retained aggregate report is
+`artifacts/research-eval/20260907T194242Z-suite.md`. RFC 0138's native desktop
+acceptance remains a separate Milestone 00 completion gate.

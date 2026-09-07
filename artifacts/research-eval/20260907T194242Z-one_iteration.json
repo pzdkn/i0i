@@ -1,0 +1,2773 @@
+{
+  "schemaVersion": 1,
+  "scenario": "one_iteration",
+  "status": "pass",
+  "startedAt": "2026-09-07T19:42:43.241809+00:00",
+  "elapsedMs": 231761,
+  "corpusVersion": 1,
+  "corpusHashes": {
+    "fixture:marine-clipping-irrelevant": "7d17afb8d7823d2c490977de5cd0147ee0cacaca0fcc4526f24914741b452a64",
+    "fixture:adaptive-clipping-support": "8d5b212151981d3b6f7165f1bee8b213e96c3898c1d000fa39cbf28872ee51d9",
+    "fixture:adaptive-clipping-conflict": "d4d1acc43f26fe03b0ebbe9465b6e7a252aa5f947d2ce412810ac3696dc094e3"
+  },
+  "sourceHashes": {
+    "pdf:fixture:adaptive-clipping-support:ade6245cbcaa": "8d5b212151981d3b6f7165f1bee8b213e96c3898c1d000fa39cbf28872ee51d9",
+    "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd": "d4d1acc43f26fe03b0ebbe9465b6e7a252aa5f947d2ce412810ac3696dc094e3"
+  },
+  "instruction": "Assess whether adaptive gradient clipping reduces optimizer instability in noisy small-batch training, and identify conditions that limit the claim.",
+  "executionLimits": {
+    "maximumRunSeconds": 420,
+    "maximumProviderQueries": 10,
+    "maximumLlmCalls": 20,
+    "judgeTimeoutSeconds": 180,
+    "scenarioProcessSeconds": 1200
+  },
+  "agentModel": "gpt-5.6-sol",
+  "judgeModel": "gpt-5.5",
+  "runIds": [
+    "harness_run_1788810163900337000"
+  ],
+  "initialState": {
+    "currentRevision": 1,
+    "entries": [
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:42:43",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788810163367424000",
+        "kind": "hypothesis",
+        "lastRevision": 1,
+        "lifecycle": "active",
+        "originRunId": null,
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 0,
+        "text": "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training.",
+        "updatedAt": "2026-09-07 19:42:43"
+      }
+    ],
+    "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+    "revision": 1,
+    "revisions": [
+      {
+        "createdAt": "2026-09-07 19:42:43",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "reason": "Initial evaluation hypothesis",
+        "revision": 1,
+        "runId": null
+      },
+      {
+        "createdAt": "2026-09-07 19:42:43",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "reason": "Initial empty Research State",
+        "revision": 0,
+        "runId": null
+      }
+    ]
+  },
+  "finalState": {
+    "currentRevision": 3,
+    "entries": [
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:42:43",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788810163367424000",
+        "kind": "hypothesis",
+        "lastRevision": 3,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 2,
+        "text": "Adaptive gradient clipping can reduce optimizer divergence in noisy small-batch training under the tested conditions (one convolutional architecture, batch sizes 8\u201316, and synthetic label noise), but the benefit is not universal and may disappear under high momentum with temporally correlated noise.",
+        "updatedAt": "2026-09-07 19:45:27"
+      },
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:45:11",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788810311801595000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 1,
+        "text": "In 120 matched trials using batch size 8 with injected label noise, moving-percentile adaptive gradient clipping reduced divergent runs from 18% to 4% versus preregistered fixed-clipping and no-clipping conditions, while median validation accuracy among converged runs changed by less than one percentage point.",
+        "updatedAt": "2026-09-07 19:45:11"
+      },
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:45:11",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788810311801653000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 1,
+        "text": "Under momentum 0.95 and temporally correlated gradient noise, adaptive clipping did not improve divergence over fixed clipping (11% versus 10%, not statistically distinguishable) and required 7% more optimization steps to target loss.",
+        "updatedAt": "2026-09-07 19:45:11"
+      },
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:45:11",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788810311801701000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 1,
+        "text": "A federated-learning pilot abstract reports fewer unstable client updates with adaptive clipping, but its full text and statistical protocol are unavailable, so the result is only abstract-level and cannot substantiate the ordinary small-batch optimizer claim.",
+        "updatedAt": "2026-09-07 19:45:11"
+      }
+    ],
+    "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+    "revision": 3,
+    "revisions": [
+      {
+        "createdAt": "2026-09-07 19:45:27",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "reason": "Agent Research State update",
+        "revision": 3,
+        "runId": "harness_run_1788810163900337000"
+      },
+      {
+        "createdAt": "2026-09-07 19:45:11",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "reason": "Agent Research State update",
+        "revision": 2,
+        "runId": "harness_run_1788810163900337000"
+      },
+      {
+        "createdAt": "2026-09-07 19:42:43",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "reason": "Initial evaluation hypothesis",
+        "revision": 1,
+        "runId": null
+      },
+      {
+        "createdAt": "2026-09-07 19:42:43",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "reason": "Initial empty Research State",
+        "revision": 0,
+        "runId": null
+      }
+    ]
+  },
+  "stateDetails": [
+    {
+      "context": [],
+      "entry": {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:42:43",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788810163367424000",
+        "kind": "hypothesis",
+        "lastRevision": 3,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 2,
+        "text": "Adaptive gradient clipping can reduce optimizer divergence in noisy small-batch training under the tested conditions (one convolutional architecture, batch sizes 8\u201316, and synthetic label noise), but the benefit is not universal and may disappear under high momentum with temporally correlated noise.",
+        "updatedAt": "2026-09-07 19:45:27"
+      },
+      "evidence": [],
+      "history": [
+        {
+          "createdAt": "2026-09-07 19:45:27",
+          "entryId": "research_entry_1788810163367424000",
+          "epistemicStatus": "speculative",
+          "kind": "hypothesis",
+          "lifecycle": "active",
+          "originRunId": "harness_run_1788810163900337000",
+          "reason": "Narrow the hypothesis to the directly tested regime and incorporate the full-text boundary-condition result; passage evidence remains on the related source-supported findings.",
+          "stateRevision": 3,
+          "text": "Adaptive gradient clipping can reduce optimizer divergence in noisy small-batch training under the tested conditions (one convolutional architecture, batch sizes 8\u201316, and synthetic label noise), but the benefit is not universal and may disappear under high momentum with temporally correlated noise."
+        },
+        {
+          "createdAt": "2026-09-07 19:42:43",
+          "entryId": "research_entry_1788810163367424000",
+          "epistemicStatus": "speculative",
+          "kind": "hypothesis",
+          "lifecycle": "active",
+          "originRunId": null,
+          "reason": "Initial evaluation hypothesis",
+          "stateRevision": 1,
+          "text": "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training."
+        }
+      ],
+      "relations": [
+        {
+          "entryId": "research_entry_1788810163367424000",
+          "id": "research_entry_1788810163367424000:r3:relation:0",
+          "kind": "derived_from",
+          "stateRevision": 3,
+          "targetEntryId": "research_entry_1788810311801595000"
+        },
+        {
+          "entryId": "research_entry_1788810163367424000",
+          "id": "research_entry_1788810163367424000:r3:relation:1",
+          "kind": "derived_from",
+          "stateRevision": 3,
+          "targetEntryId": "research_entry_1788810311801653000"
+        }
+      ]
+    },
+    {
+      "context": [],
+      "entry": {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:45:11",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788810311801595000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 1,
+        "text": "In 120 matched trials using batch size 8 with injected label noise, moving-percentile adaptive gradient clipping reduced divergent runs from 18% to 4% versus preregistered fixed-clipping and no-clipping conditions, while median validation accuracy among converged runs changed by less than one percentage point.",
+        "updatedAt": "2026-09-07 19:45:11"
+      },
+      "evidence": [
+        {
+          "chunkId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa:chunk:0",
+          "entryId": "research_entry_1788810311801595000",
+          "excerpt": "Adaptive Gradient Clipping for Noisy Small-Batch Optimization\n\nMethods. We ran 120 matched training trials with batch size eight and injected label noise. The adaptive threshold used a moving percentile of recent gradient norms. Fixed clipping and no clipping were preregistered comparison conditions.\n\nResults. Adaptive gradient clipping reduced divergent runs from 18 percent to 4 percent. Median validation accuracy among converged runs changed by less than one percentage point. The result therefore supports improved stability, not a general accuracy gain.\n\nLimitations. The experiment covered one convolutional architecture, batch sizes from eight to sixteen, and synthetic label noise. We did not test large-batch training or transformer pretraining.",
+          "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+          "id": "research_entry_1788810311801595000:r2:e0",
+          "pageEnd": 0,
+          "pageStart": 0,
+          "paperId": "fixture:adaptive-clipping-support",
+          "relationship": "supports",
+          "sourceEnd": 757,
+          "sourceId": "pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+          "sourceStart": 0,
+          "stateRevision": 2,
+          "supportNote": "Full-text methods and results directly report the small-batch setup, comparator conditions, divergence reduction, and lack of a general accuracy gain."
+        }
+      ],
+      "history": [
+        {
+          "createdAt": "2026-09-07 19:45:11",
+          "entryId": "research_entry_1788810311801595000",
+          "epistemicStatus": "source_supported",
+          "kind": "finding",
+          "lifecycle": "active",
+          "originRunId": "harness_run_1788810163900337000",
+          "reason": "Record direct experimental support separately from the speculative hypothesis.",
+          "stateRevision": 2,
+          "text": "In 120 matched trials using batch size 8 with injected label noise, moving-percentile adaptive gradient clipping reduced divergent runs from 18% to 4% versus preregistered fixed-clipping and no-clipping conditions, while median validation accuracy among converged runs changed by less than one percentage point."
+        }
+      ],
+      "relations": [
+        {
+          "entryId": "research_entry_1788810311801595000",
+          "id": "research_entry_1788810311801595000:r2:relation:0",
+          "kind": "motivated_by",
+          "stateRevision": 2,
+          "targetEntryId": "research_entry_1788810163367424000"
+        }
+      ]
+    },
+    {
+      "context": [],
+      "entry": {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:45:11",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788810311801653000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 1,
+        "text": "Under momentum 0.95 and temporally correlated gradient noise, adaptive clipping did not improve divergence over fixed clipping (11% versus 10%, not statistically distinguishable) and required 7% more optimization steps to target loss.",
+        "updatedAt": "2026-09-07 19:45:11"
+      },
+      "evidence": [
+        {
+          "chunkId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd:chunk:0",
+          "entryId": "research_entry_1788810311801653000",
+          "excerpt": "Boundary Conditions for Adaptive Clipping under Momentum\n\nMethods. We repeated the small-batch protocol with momentum 0.95 and temporally correlated gradient noise across 80 matched trials.\n\nResults. Divergence was 11 percent with adaptive clipping and 10 percent with fixed clipping, a difference that was not statistically distinguishable. Adaptive clipping also required 7 percent more optimization steps to reach the target loss.\n\nInterpretation. These results contradict a universal stability benefit. They do not refute the earlier result under independent noise; instead they identify momentum and correlated noise as boundary conditions.",
+          "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+          "id": "research_entry_1788810311801653000:r2:e0",
+          "pageEnd": 0,
+          "pageStart": 0,
+          "paperId": "fixture:adaptive-clipping-conflict",
+          "relationship": "contradicts",
+          "sourceEnd": 645,
+          "sourceId": "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+          "sourceStart": 0,
+          "stateRevision": 2,
+          "supportNote": "Full-text replication directly limits any universal stability claim and identifies high momentum plus correlated noise as boundary conditions."
+        }
+      ],
+      "history": [
+        {
+          "createdAt": "2026-09-07 19:45:11",
+          "entryId": "research_entry_1788810311801653000",
+          "epistemicStatus": "source_supported",
+          "kind": "finding",
+          "lifecycle": "active",
+          "originRunId": "harness_run_1788810163900337000",
+          "reason": "Record conflicting experimental evidence and the tested boundary condition.",
+          "stateRevision": 2,
+          "text": "Under momentum 0.95 and temporally correlated gradient noise, adaptive clipping did not improve divergence over fixed clipping (11% versus 10%, not statistically distinguishable) and required 7% more optimization steps to target loss."
+        }
+      ],
+      "relations": [
+        {
+          "entryId": "research_entry_1788810311801653000",
+          "id": "research_entry_1788810311801653000:r2:relation:0",
+          "kind": "contests",
+          "stateRevision": 2,
+          "targetEntryId": "research_entry_1788810163367424000"
+        }
+      ]
+    },
+    {
+      "context": [],
+      "entry": {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:45:11",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788810311801701000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810163900337000",
+        "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+        "relationCount": 1,
+        "text": "A federated-learning pilot abstract reports fewer unstable client updates with adaptive clipping, but its full text and statistical protocol are unavailable, so the result is only abstract-level and cannot substantiate the ordinary small-batch optimizer claim.",
+        "updatedAt": "2026-09-07 19:45:11"
+      },
+      "evidence": [
+        {
+          "chunkId": "metadata_abstract_chunk:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+          "entryId": "research_entry_1788810311801701000",
+          "excerpt": "A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.",
+          "extractionId": "metadata_abstract_extraction:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+          "id": "research_entry_1788810311801701000:r2:e0",
+          "pageEnd": 0,
+          "pageStart": 0,
+          "paperId": "fixture:federated-clipping-abstract",
+          "relationship": "context",
+          "sourceEnd": 129,
+          "sourceId": "metadata_abstract:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+          "sourceStart": 0,
+          "stateRevision": 2,
+          "supportNote": "The only readable passage is the metadata abstract, which explicitly notes that full text and statistical protocol are unavailable."
+        }
+      ],
+      "history": [
+        {
+          "createdAt": "2026-09-07 19:45:11",
+          "entryId": "research_entry_1788810311801701000",
+          "epistemicStatus": "source_supported",
+          "kind": "finding",
+          "lifecycle": "active",
+          "originRunId": "harness_run_1788810163900337000",
+          "reason": "Document the suggestive candidate and its evidence limitation honestly.",
+          "stateRevision": 2,
+          "text": "A federated-learning pilot abstract reports fewer unstable client updates with adaptive clipping, but its full text and statistical protocol are unavailable, so the result is only abstract-level and cannot substantiate the ordinary small-batch optimizer claim."
+        }
+      ],
+      "relations": [
+        {
+          "entryId": "research_entry_1788810311801701000",
+          "id": "research_entry_1788810311801701000:r2:relation:0",
+          "kind": "motivated_by",
+          "stateRevision": 2,
+          "targetEntryId": "research_entry_1788810163367424000"
+        }
+      ]
+    }
+  ],
+  "addedPaperIds": [
+    "fixture:long-horizon-unavailable",
+    "fixture:adaptive-clipping-support",
+    "fixture:adaptive-clipping-conflict",
+    "fixture:federated-clipping-abstract"
+  ],
+  "toolTrace": [
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-7a1d7783-dcfe-4796-82f4-967b77c28042",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_list",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20
+        },
+        "durationMs": 15,
+        "error": null,
+        "id": "exec-7a1d7783-dcfe-4796-82f4-967b77c28042",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"nextCursor\":null,\"vaults\":[{\"id\":\"research-evaluation-862553548c784a418adcbf572ba60f69\",\"membershipRevision\":0,\"name\":\"Research evaluation 862553548c784a418adcbf572ba60f69\",\"projectId\":\"project:research-evaluation-862553548c784a418adcbf572ba60f69\"}]}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "nextCursor": null,
+            "vaults": [
+              {
+                "id": "research-evaluation-862553548c784a418adcbf572ba60f69",
+                "membershipRevision": 0,
+                "name": "Research evaluation 862553548c784a418adcbf572ba60f69",
+                "projectId": "project:research-evaluation-862553548c784a418adcbf572ba60f69"
+              }
+            ]
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_list",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-2101f526-4b5b-41a5-91c2-9e6cafd2a53a",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 7,
+        "error": null,
+        "id": "exec-2101f526-4b5b-41a5-91c2-9e6cafd2a53a",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"currentRevision\":1,\"entries\":[{\"context\":[],\"epistemicStatus\":\"speculative\",\"evidence\":[],\"firstRevision\":1,\"id\":\"research_entry_1788810163367424000\",\"kind\":\"hypothesis\",\"lastRevision\":1,\"lifecycle\":\"active\",\"originRunId\":null,\"originalKind\":\"hypothesis\",\"relatedEntries\":[],\"revisionRunId\":null,\"statement\":\"Adaptive gradient clipping reduces optimizer instability in noisy small-batch training.\"}],\"nextCursor\":null,\"revision\":1}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "currentRevision": 1,
+            "entries": [
+              {
+                "context": [],
+                "epistemicStatus": "speculative",
+                "evidence": [],
+                "firstRevision": 1,
+                "id": "research_entry_1788810163367424000",
+                "kind": "hypothesis",
+                "lastRevision": 1,
+                "lifecycle": "active",
+                "originRunId": null,
+                "originalKind": "hypothesis",
+                "relatedEntries": [],
+                "revisionRunId": null,
+                "statement": "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training."
+              }
+            ],
+            "nextCursor": null,
+            "revision": 1
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-886cccc0-d197-46f4-b81e-3b0c61cb52fe",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_list_papers",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 3,
+        "error": null,
+        "id": "exec-886cccc0-d197-46f4-b81e-3b0c61cb52fe",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"membershipRevision\":0,\"nextCursor\":null,\"papers\":[]}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "membershipRevision": 0,
+            "nextCursor": null,
+            "papers": []
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_list_papers",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Purpose: find direct experimental evidence that adaptive gradient clipping (AGC; clipping relative to parameter norms, including unit-wise adaptive clipping) reduces training or optimizer instability specifically under noisy gradients or small mini-batches. Prioritize full-text empirical papers with comparisons to no clipping or fixed/global clipping, reporting divergence, loss spikes, gradient norms, robustness, convergence, or stable trainability. Also surface relevant null results if encountered.",
+          "request_id": "run-direct-evidence-20260907-01",
+          "result_limit": 8,
+          "state_entry_ids": [
+            "research_entry_1788810163367424000"
+          ]
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-64a074c1-e2a7-4b72-a291-ecf4c7e6c700",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Purpose: find direct experimental evidence that adaptive gradient clipping (AGC; clipping relative to parameter norms, including unit-wise adaptive clipping) reduces training or optimizer instability specifically under noisy gradients or small mini-batches. Prioritize full-text empirical papers with comparisons to no clipping or fixed/global clipping, reporting divergence, loss spikes, gradient norms, robustness, convergence, or stable trainability. Also surface relevant null results if encountered.",
+          "request_id": "run-direct-evidence-20260907-01",
+          "result_limit": 8,
+          "state_entry_ids": [
+            "research_entry_1788810163367424000"
+          ]
+        },
+        "durationMs": 8,
+        "error": null,
+        "id": "exec-64a074c1-e2a7-4b72-a291-ecf4c7e6c700",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"runId\":\"run_1788810199218577000\",\"searchId\":\"search_1788810199218576000\",\"status\":\"queued\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "runId": "run_1788810199218577000",
+            "searchId": "search_1788810199218576000",
+            "status": "queued"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Purpose: identify conditions that limit the claim that adaptive gradient clipping reduces optimizer instability in noisy small-batch training. Seek empirical comparisons, ablations, failures, or theory on batch size/noise, clipping aggressiveness, epsilon/parameter-norm edge cases, optimizer choice, architecture, normalization, convergence bias, and distinction between per-example DP adaptive clipping versus optimizer AGC. Prefer full text; include abstract-only or unavailable relevant candidates so their evidence limitation can be documented.",
+          "request_id": "run-limitations-20260907-02",
+          "result_limit": 8,
+          "state_entry_ids": [
+            "research_entry_1788810163367424000"
+          ]
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-e127c11b-ae48-4eb4-8b2e-7948a7d619f8",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Purpose: identify conditions that limit the claim that adaptive gradient clipping reduces optimizer instability in noisy small-batch training. Seek empirical comparisons, ablations, failures, or theory on batch size/noise, clipping aggressiveness, epsilon/parameter-norm edge cases, optimizer choice, architecture, normalization, convergence bias, and distinction between per-example DP adaptive clipping versus optimizer AGC. Prefer full text; include abstract-only or unavailable relevant candidates so their evidence limitation can be documented.",
+          "request_id": "run-limitations-20260907-02",
+          "result_limit": 8,
+          "state_entry_ids": [
+            "research_entry_1788810163367424000"
+          ]
+        },
+        "durationMs": 12,
+        "error": null,
+        "id": "exec-e127c11b-ae48-4eb4-8b2e-7948a7d619f8",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"runId\":\"run_1788810199231547000\",\"searchId\":\"search_1788810199231546000\",\"status\":\"queued\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "runId": "run_1788810199231547000",
+            "searchId": "search_1788810199231546000",
+            "status": "queued"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810199231547000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-8cfeb120-32ff-4269-9e5c-3b935de69eb9",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810199231547000"
+        },
+        "durationMs": 17,
+        "error": null,
+        "id": "exec-8cfeb120-32ff-4269-9e5c-3b935de69eb9",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":1},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching fixed_corpus\",\"sequence\":3},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"fixed_corpus returned 1 candidates\",\"sequence\":5},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"fixed_corpus returned 1 candidates\",\"sequence\":8},{\"error\":null,\"kind\":\"candidates_deduplicated\",\"message\":\"Retained 1 unique candidates\",\"sequence\":9},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 1 candidates\",\"sequence\":10},{\"error\":null,\"kind\":\"coverage_assessing\",\"message\":\"Assessing research coverage\",\"sequence\":14},{\"error\":null,\"kind\":\"candidates_ranking\",\"message\":\"Ranking 1 candidates\",\"sequence\":15}],\"cancelRequested\":false,\"candidates\":[{\"candidate\":{\"abstract\":\"A replication examines adaptive clipping when high momentum and correlated gradient noise are present.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Sofia Reyes\",\"Tariq Okafor\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict\",\"id\":\"fixture:adaptive-clipping-conflict\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Boundary Conditions for Adaptive Clipping under Momentum\",\"venue\":\"Reproducible Learning Systems\",\"year\":2025},\"phase\":\"preview\",\"sequence\":4},{\"candidate\":{\"abstract\":\"A replication examines adaptive clipping when high momentum and correlated gradient noise are present.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Sofia Reyes\",\"Tariq Okafor\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict\",\"id\":\"fixture:adaptive-clipping-conflict\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Boundary Conditions for Adaptive Clipping under Momentum\",\"venue\":\"Reproducible Learning Systems\",\"year\":2025},\"phase\":\"ranked\",\"sequence\":8}],\"errors\":[],\"nextCursor\":null,\"status\":\"ready\",\"stopReason\":\"converged\",\"usage\":{\"inspectedCandidates\":1,\"llmCalls\":2,\"providerQueries\":1}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 1
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching fixed_corpus",
+                "sequence": 3
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "fixed_corpus returned 1 candidates",
+                "sequence": 5
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "fixed_corpus returned 1 candidates",
+                "sequence": 8
+              },
+              {
+                "error": null,
+                "kind": "candidates_deduplicated",
+                "message": "Retained 1 unique candidates",
+                "sequence": 9
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 1 candidates",
+                "sequence": 10
+              },
+              {
+                "error": null,
+                "kind": "coverage_assessing",
+                "message": "Assessing research coverage",
+                "sequence": 14
+              },
+              {
+                "error": null,
+                "kind": "candidates_ranking",
+                "message": "Ranking 1 candidates",
+                "sequence": 15
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [
+              {
+                "candidate": {
+                  "abstract": "A replication examines adaptive clipping when high momentum and correlated gradient noise are present.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Sofia Reyes",
+                    "Tariq Okafor"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict",
+                  "id": "fixture:adaptive-clipping-conflict",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Boundary Conditions for Adaptive Clipping under Momentum",
+                  "venue": "Reproducible Learning Systems",
+                  "year": 2025
+                },
+                "phase": "preview",
+                "sequence": 4
+              },
+              {
+                "candidate": {
+                  "abstract": "A replication examines adaptive clipping when high momentum and correlated gradient noise are present.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Sofia Reyes",
+                    "Tariq Okafor"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict",
+                  "id": "fixture:adaptive-clipping-conflict",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Boundary Conditions for Adaptive Clipping under Momentum",
+                  "venue": "Reproducible Learning Systems",
+                  "year": 2025
+                },
+                "phase": "ranked",
+                "sequence": 8
+              }
+            ],
+            "errors": [],
+            "nextCursor": null,
+            "status": "ready",
+            "stopReason": "converged",
+            "usage": {
+              "inspectedCandidates": 1,
+              "llmCalls": 2,
+              "providerQueries": 1
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810199218577000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-7695a1b0-23ba-416d-8218-f1512351ef7f",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810199218577000"
+        },
+        "durationMs": 12,
+        "error": null,
+        "id": "exec-7695a1b0-23ba-416d-8218-f1512351ef7f",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":2},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching fixed_corpus\",\"sequence\":4},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"fixed_corpus returned 3 candidates\",\"sequence\":6},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"fixed_corpus returned 3 candidates\",\"sequence\":7},{\"error\":null,\"kind\":\"candidates_deduplicated\",\"message\":\"Retained 3 unique candidates\",\"sequence\":11},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 3 candidates\",\"sequence\":12},{\"error\":null,\"kind\":\"coverage_assessing\",\"message\":\"Assessing research coverage\",\"sequence\":13},{\"error\":null,\"kind\":\"candidates_ranking\",\"message\":\"Ranking 3 candidates\",\"sequence\":16}],\"cancelRequested\":false,\"candidates\":[{\"candidate\":{\"abstract\":\"A controlled study compares adaptive clipping with fixed clipping in noisy small-batch optimization.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Mira Chen\",\"Jon Bell\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-support\",\"id\":\"fixture:adaptive-clipping-support\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-support.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Adaptive Gradient Clipping for Noisy Small-Batch Optimization\",\"venue\":\"Controlled Optimization Studies\",\"year\":2024},\"phase\":\"preview\",\"sequence\":1},{\"candidate\":{\"abstract\":\"A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Priya Nair\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:federated-clipping-abstract\",\"id\":\"fixture:federated-clipping-abstract\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"fixed_corpus\",\"title\":\"Adaptive Clipping in Federated Optimization: A Pilot Study\",\"venue\":\"Federated Learning Workshop\",\"year\":2025},\"phase\":\"preview\",\"sequence\":2},{\"candidate\":{\"abstract\":null,\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Amir Haddad\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:long-horizon-unavailable\",\"id\":\"fixture:long-horizon-unavailable\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/missing.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Long-Horizon Behavior of Dynamic Gradient Thresholds\",\"venue\":\"Archived Optimization Results\",\"year\":2022},\"phase\":\"preview\",\"sequence\":3},{\"candidate\":{\"abstract\":\"A controlled study compares adaptive clipping with fixed clipping in noisy small-batch optimization.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Mira Chen\",\"Jon Bell\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-support\",\"id\":\"fixture:adaptive-clipping-support\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-support.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Adaptive Gradient Clipping for Noisy Small-Batch Optimization\",\"venue\":\"Controlled Optimization Studies\",\"year\":2024},\"phase\":\"ranked\",\"sequence\":5},{\"candidate\":{\"abstract\":null,\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Amir Haddad\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:long-horizon-unavailable\",\"id\":\"fixture:long-horizon-unavailable\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/missing.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Long-Horizon Behavior of Dynamic Gradient Thresholds\",\"venue\":\"Archived Optimization Results\",\"year\":2022},\"phase\":\"ranked\",\"sequence\":6},{\"candidate\":{\"abstract\":\"A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Priya Nair\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:federated-clipping-abstract\",\"id\":\"fixture:federated-clipping-abstract\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"fixed_corpus\",\"title\":\"Adaptive Clipping in Federated Optimization: A Pilot Study\",\"venue\":\"Federated Learning Workshop\",\"year\":2025},\"phase\":\"ranked\",\"sequence\":7}],\"errors\":[],\"nextCursor\":null,\"status\":\"ready\",\"stopReason\":\"converged\",\"usage\":{\"inspectedCandidates\":3,\"llmCalls\":2,\"providerQueries\":1}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 2
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching fixed_corpus",
+                "sequence": 4
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "fixed_corpus returned 3 candidates",
+                "sequence": 6
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "fixed_corpus returned 3 candidates",
+                "sequence": 7
+              },
+              {
+                "error": null,
+                "kind": "candidates_deduplicated",
+                "message": "Retained 3 unique candidates",
+                "sequence": 11
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 3 candidates",
+                "sequence": 12
+              },
+              {
+                "error": null,
+                "kind": "coverage_assessing",
+                "message": "Assessing research coverage",
+                "sequence": 13
+              },
+              {
+                "error": null,
+                "kind": "candidates_ranking",
+                "message": "Ranking 3 candidates",
+                "sequence": 16
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [
+              {
+                "candidate": {
+                  "abstract": "A controlled study compares adaptive clipping with fixed clipping in noisy small-batch optimization.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Mira Chen",
+                    "Jon Bell"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-support",
+                  "id": "fixture:adaptive-clipping-support",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-support.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Adaptive Gradient Clipping for Noisy Small-Batch Optimization",
+                  "venue": "Controlled Optimization Studies",
+                  "year": 2024
+                },
+                "phase": "preview",
+                "sequence": 1
+              },
+              {
+                "candidate": {
+                  "abstract": "A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Priya Nair"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:federated-clipping-abstract",
+                  "id": "fixture:federated-clipping-abstract",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Adaptive Clipping in Federated Optimization: A Pilot Study",
+                  "venue": "Federated Learning Workshop",
+                  "year": 2025
+                },
+                "phase": "preview",
+                "sequence": 2
+              },
+              {
+                "candidate": {
+                  "abstract": null,
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Amir Haddad"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:long-horizon-unavailable",
+                  "id": "fixture:long-horizon-unavailable",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/missing.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Long-Horizon Behavior of Dynamic Gradient Thresholds",
+                  "venue": "Archived Optimization Results",
+                  "year": 2022
+                },
+                "phase": "preview",
+                "sequence": 3
+              },
+              {
+                "candidate": {
+                  "abstract": "A controlled study compares adaptive clipping with fixed clipping in noisy small-batch optimization.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Mira Chen",
+                    "Jon Bell"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-support",
+                  "id": "fixture:adaptive-clipping-support",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-support.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Adaptive Gradient Clipping for Noisy Small-Batch Optimization",
+                  "venue": "Controlled Optimization Studies",
+                  "year": 2024
+                },
+                "phase": "ranked",
+                "sequence": 5
+              },
+              {
+                "candidate": {
+                  "abstract": null,
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Amir Haddad"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:long-horizon-unavailable",
+                  "id": "fixture:long-horizon-unavailable",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/missing.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Long-Horizon Behavior of Dynamic Gradient Thresholds",
+                  "venue": "Archived Optimization Results",
+                  "year": 2022
+                },
+                "phase": "ranked",
+                "sequence": 6
+              },
+              {
+                "candidate": {
+                  "abstract": "A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Priya Nair"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:federated-clipping-abstract",
+                  "id": "fixture:federated-clipping-abstract",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Adaptive Clipping in Federated Optimization: A Pilot Study",
+                  "venue": "Federated Learning Workshop",
+                  "year": 2025
+                },
+                "phase": "ranked",
+                "sequence": 7
+              }
+            ],
+            "errors": [],
+            "nextCursor": null,
+            "status": "ready",
+            "stopReason": "converged",
+            "usage": {
+              "inspectedCandidates": 3,
+              "llmCalls": 2,
+              "providerQueries": 1
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:adaptive-clipping-support",
+          "request_id": "add-1-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-df7f824a-13e1-4631-81da-c0a7f783d42f",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:adaptive-clipping-support",
+          "request_id": "add-1-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 7,
+        "error": null,
+        "id": "exec-df7f824a-13e1-4631-81da-c0a7f783d42f",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"acquisitionStatus\":\"pending\",\"membershipStatus\":\"added\",\"paperId\":\"fixture:adaptive-clipping-support\",\"sourceIds\":[\"pdf:fixture:adaptive-clipping-support:ade6245cbcaa\"],\"sourceUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-support\",\"textStatus\":\"abstract_available\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "acquisitionStatus": "pending",
+            "membershipStatus": "added",
+            "paperId": "fixture:adaptive-clipping-support",
+            "sourceIds": [
+              "pdf:fixture:adaptive-clipping-support:ade6245cbcaa"
+            ],
+            "sourceUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-support",
+            "textStatus": "abstract_available"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:adaptive-clipping-conflict",
+          "request_id": "add-2-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-7ff4ffdf-3aa2-44ad-94b2-723c6e456b0c",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:adaptive-clipping-conflict",
+          "request_id": "add-2-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 18,
+        "error": null,
+        "id": "exec-7ff4ffdf-3aa2-44ad-94b2-723c6e456b0c",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"acquisitionStatus\":\"pending\",\"membershipStatus\":\"added\",\"paperId\":\"fixture:adaptive-clipping-conflict\",\"sourceIds\":[\"pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\"],\"sourceUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict\",\"textStatus\":\"abstract_available\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "acquisitionStatus": "pending",
+            "membershipStatus": "added",
+            "paperId": "fixture:adaptive-clipping-conflict",
+            "sourceIds": [
+              "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd"
+            ],
+            "sourceUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict",
+            "textStatus": "abstract_available"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:federated-clipping-abstract",
+          "request_id": "add-3-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-fcc7db49-07b4-4e65-b279-70a05a3b9f9d",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:federated-clipping-abstract",
+          "request_id": "add-3-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 19,
+        "error": null,
+        "id": "exec-fcc7db49-07b4-4e65-b279-70a05a3b9f9d",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"acquisitionStatus\":\"unavailable\",\"membershipStatus\":\"added\",\"paperId\":\"fixture:federated-clipping-abstract\",\"sourceIds\":[],\"sourceUrl\":\"http://127.0.0.1:52387/landing/fixture:federated-clipping-abstract\",\"textStatus\":\"abstract_available\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "acquisitionStatus": "unavailable",
+            "membershipStatus": "added",
+            "paperId": "fixture:federated-clipping-abstract",
+            "sourceIds": [],
+            "sourceUrl": "http://127.0.0.1:52387/landing/fixture:federated-clipping-abstract",
+            "textStatus": "abstract_available"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:long-horizon-unavailable",
+          "request_id": "add-4-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-43362d89-9c9b-4ed0-b589-68d71dde8153",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "fixture:long-horizon-unavailable",
+          "request_id": "add-4-20260907",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 38,
+        "error": null,
+        "id": "exec-43362d89-9c9b-4ed0-b589-68d71dde8153",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"acquisitionStatus\":\"pending\",\"membershipStatus\":\"added\",\"paperId\":\"fixture:long-horizon-unavailable\",\"sourceIds\":[\"pdf:fixture:long-horizon-unavailable:a36e0b461143\"],\"sourceUrl\":\"http://127.0.0.1:52387/landing/fixture:long-horizon-unavailable\",\"textStatus\":\"pending\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "acquisitionStatus": "pending",
+            "membershipStatus": "added",
+            "paperId": "fixture:long-horizon-unavailable",
+            "sourceIds": [
+              "pdf:fixture:long-horizon-unavailable:a36e0b461143"
+            ],
+            "sourceUrl": "http://127.0.0.1:52387/landing/fixture:long-horizon-unavailable",
+            "textStatus": "pending"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-support",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-383acd0c-9316-4f57-a196-e0c067c3e7e0",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-support",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 11,
+        "error": null,
+        "id": "exec-383acd0c-9316-4f57-a196-e0c067c3e7e0",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"paper\":{\"authors\":[\"Mira Chen\",\"Jon Bell\"],\"citations\":0,\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"hasAbstract\":true,\"id\":\"fixture:adaptive-clipping-support\",\"sourceId\":\"pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"status\":\"UNREAD\",\"title\":\"Adaptive Gradient Clipping for Noisy Small-Batch Optimization\",\"venue\":\"Controlled Optimization Studies\",\"year\":2024},\"reason\":null,\"source\":{\"error\":null,\"id\":\"pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"kind\":\"pdf\",\"sourceUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-support.pdf\",\"status\":\"cached\"},\"textAvailability\":\"full_text\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+            "paper": {
+              "authors": [
+                "Mira Chen",
+                "Jon Bell"
+              ],
+              "citations": 0,
+              "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+              "hasAbstract": true,
+              "id": "fixture:adaptive-clipping-support",
+              "sourceId": "pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+              "status": "UNREAD",
+              "title": "Adaptive Gradient Clipping for Noisy Small-Batch Optimization",
+              "venue": "Controlled Optimization Studies",
+              "year": 2024
+            },
+            "reason": null,
+            "source": {
+              "error": null,
+              "id": "pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+              "kind": "pdf",
+              "sourceUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-support.pdf",
+              "status": "cached"
+            },
+            "textAvailability": "full_text"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-conflict",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-cee29950-38df-4b56-a4ca-00ad6f60c3d8",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-conflict",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 4,
+        "error": null,
+        "id": "exec-cee29950-38df-4b56-a4ca-00ad6f60c3d8",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"paper\":{\"authors\":[\"Sofia Reyes\",\"Tariq Okafor\"],\"citations\":0,\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"hasAbstract\":true,\"id\":\"fixture:adaptive-clipping-conflict\",\"sourceId\":\"pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"status\":\"UNREAD\",\"title\":\"Boundary Conditions for Adaptive Clipping under Momentum\",\"venue\":\"Reproducible Learning Systems\",\"year\":2025},\"reason\":null,\"source\":{\"error\":null,\"id\":\"pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"kind\":\"pdf\",\"sourceUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf\",\"status\":\"cached\"},\"textAvailability\":\"full_text\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+            "paper": {
+              "authors": [
+                "Sofia Reyes",
+                "Tariq Okafor"
+              ],
+              "citations": 0,
+              "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+              "hasAbstract": true,
+              "id": "fixture:adaptive-clipping-conflict",
+              "sourceId": "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+              "status": "UNREAD",
+              "title": "Boundary Conditions for Adaptive Clipping under Momentum",
+              "venue": "Reproducible Learning Systems",
+              "year": 2025
+            },
+            "reason": null,
+            "source": {
+              "error": null,
+              "id": "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+              "kind": "pdf",
+              "sourceUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf",
+              "status": "cached"
+            },
+            "textAvailability": "full_text"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:federated-clipping-abstract",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-c9bc4b65-05fc-4f83-b685-cc90cb9c3c45",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:federated-clipping-abstract",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 7,
+        "error": null,
+        "id": "exec-c9bc4b65-05fc-4f83-b685-cc90cb9c3c45",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"extractionId\":null,\"paper\":{\"authors\":[\"Priya Nair\"],\"citations\":0,\"extractionId\":null,\"hasAbstract\":true,\"id\":\"fixture:federated-clipping-abstract\",\"sourceId\":null,\"status\":\"UNREAD\",\"title\":\"Adaptive Clipping in Federated Optimization: A Pilot Study\",\"venue\":\"Federated Learning Workshop\",\"year\":2025},\"reason\":null,\"source\":null,\"textAvailability\":\"abstract_only\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "extractionId": null,
+            "paper": {
+              "authors": [
+                "Priya Nair"
+              ],
+              "citations": 0,
+              "extractionId": null,
+              "hasAbstract": true,
+              "id": "fixture:federated-clipping-abstract",
+              "sourceId": null,
+              "status": "UNREAD",
+              "title": "Adaptive Clipping in Federated Optimization: A Pilot Study",
+              "venue": "Federated Learning Workshop",
+              "year": 2025
+            },
+            "reason": null,
+            "source": null,
+            "textAvailability": "abstract_only"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:long-horizon-unavailable",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-574af37c-8b26-48da-8058-6b9261d9e0b8",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:long-horizon-unavailable",
+          "vault_id": "research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 3,
+        "error": null,
+        "id": "exec-574af37c-8b26-48da-8058-6b9261d9e0b8",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"extractionId\":null,\"paper\":{\"authors\":[\"Amir Haddad\"],\"citations\":0,\"extractionId\":null,\"hasAbstract\":false,\"id\":\"fixture:long-horizon-unavailable\",\"sourceId\":null,\"status\":\"UNREAD\",\"title\":\"Long-Horizon Behavior of Dynamic Gradient Thresholds\",\"venue\":\"Archived Optimization Results\",\"year\":2022},\"reason\":\"http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: \",\"source\":{\"error\":\"http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: \",\"id\":\"pdf:fixture:long-horizon-unavailable:a36e0b461143\",\"kind\":\"pdf\",\"sourceUrl\":\"http://127.0.0.1:52387/missing.pdf\",\"status\":\"failed\"},\"textAvailability\":\"unavailable\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "extractionId": null,
+            "paper": {
+              "authors": [
+                "Amir Haddad"
+              ],
+              "citations": 0,
+              "extractionId": null,
+              "hasAbstract": false,
+              "id": "fixture:long-horizon-unavailable",
+              "sourceId": null,
+              "status": "UNREAD",
+              "title": "Long-Horizon Behavior of Dynamic Gradient Thresholds",
+              "venue": "Archived Optimization Results",
+              "year": 2022
+            },
+            "reason": "http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: ",
+            "source": {
+              "error": "http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: ",
+              "id": "pdf:fixture:long-horizon-unavailable:a36e0b461143",
+              "kind": "pdf",
+              "sourceUrl": "http://127.0.0.1:52387/missing.pdf",
+              "status": "failed"
+            },
+            "textAvailability": "unavailable"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-support"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-debaaa24-9624-4b26-a285-4cc8e383cba4",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-support"
+        },
+        "durationMs": 7,
+        "error": null,
+        "id": "exec-debaaa24-9624-4b26-a285-4cc8e383cba4",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"availability\":\"available\",\"coverage\":\"full_text\",\"hasMore\":false,\"nextCursor\":null,\"passages\":[{\"chunkId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa:chunk:0\",\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"pageEnd\":1,\"pageStart\":1,\"paperId\":\"fixture:adaptive-clipping-support\",\"passageRef\":\"passage_755d0e908dd344e7ab0119502178ae76\",\"sourceEnd\":757,\"sourceId\":\"pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"sourceStart\":0,\"text\":\"Adaptive Gradient Clipping for Noisy Small-Batch Optimization\\n\\nMethods. We ran 120 matched training trials with batch size eight and injected label noise. The adaptive threshold used a moving percentile of recent gradient norms. Fixed clipping and no clipping were preregistered comparison conditions.\\n\\nResults. Adaptive gradient clipping reduced divergent runs from 18 percent to 4 percent. Median validation accuracy among converged runs changed by less than one percentage point. The result therefore supports improved stability, not a general accuracy gain.\\n\\nLimitations. The experiment covered one convolutional architecture, batch sizes from eight to sixteen, and synthetic label noise. We did not test large-batch training or transformer pretraining.\"}],\"reason\":null,\"sourceUrl\":null,\"sourceVersion\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "availability": "available",
+            "coverage": "full_text",
+            "hasMore": false,
+            "nextCursor": null,
+            "passages": [
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa:chunk:0",
+                "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+                "pageEnd": 1,
+                "pageStart": 1,
+                "paperId": "fixture:adaptive-clipping-support",
+                "passageRef": "passage_755d0e908dd344e7ab0119502178ae76",
+                "sourceEnd": 757,
+                "sourceId": "pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+                "sourceStart": 0,
+                "text": "Adaptive Gradient Clipping for Noisy Small-Batch Optimization\n\nMethods. We ran 120 matched training trials with batch size eight and injected label noise. The adaptive threshold used a moving percentile of recent gradient norms. Fixed clipping and no clipping were preregistered comparison conditions.\n\nResults. Adaptive gradient clipping reduced divergent runs from 18 percent to 4 percent. Median validation accuracy among converged runs changed by less than one percentage point. The result therefore supports improved stability, not a general accuracy gain.\n\nLimitations. The experiment covered one convolutional architecture, batch sizes from eight to sixteen, and synthetic label noise. We did not test large-batch training or transformer pretraining."
+              }
+            ],
+            "reason": null,
+            "sourceUrl": null,
+            "sourceVersion": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-conflict"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-c2057865-5f20-4088-b8ff-090843536957",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:adaptive-clipping-conflict"
+        },
+        "durationMs": 11,
+        "error": null,
+        "id": "exec-c2057865-5f20-4088-b8ff-090843536957",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"availability\":\"available\",\"coverage\":\"full_text\",\"hasMore\":false,\"nextCursor\":null,\"passages\":[{\"chunkId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd:chunk:0\",\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"pageEnd\":1,\"pageStart\":1,\"paperId\":\"fixture:adaptive-clipping-conflict\",\"passageRef\":\"passage_e062f8cccdeb44d3914c5fca8ada128c\",\"sourceEnd\":645,\"sourceId\":\"pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"sourceStart\":0,\"text\":\"Boundary Conditions for Adaptive Clipping under Momentum\\n\\nMethods. We repeated the small-batch protocol with momentum 0.95 and temporally correlated gradient noise across 80 matched trials.\\n\\nResults. Divergence was 11 percent with adaptive clipping and 10 percent with fixed clipping, a difference that was not statistically distinguishable. Adaptive clipping also required 7 percent more optimization steps to reach the target loss.\\n\\nInterpretation. These results contradict a universal stability benefit. They do not refute the earlier result under independent noise; instead they identify momentum and correlated noise as boundary conditions.\"}],\"reason\":null,\"sourceUrl\":null,\"sourceVersion\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "availability": "available",
+            "coverage": "full_text",
+            "hasMore": false,
+            "nextCursor": null,
+            "passages": [
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd:chunk:0",
+                "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+                "pageEnd": 1,
+                "pageStart": 1,
+                "paperId": "fixture:adaptive-clipping-conflict",
+                "passageRef": "passage_e062f8cccdeb44d3914c5fca8ada128c",
+                "sourceEnd": 645,
+                "sourceId": "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+                "sourceStart": 0,
+                "text": "Boundary Conditions for Adaptive Clipping under Momentum\n\nMethods. We repeated the small-batch protocol with momentum 0.95 and temporally correlated gradient noise across 80 matched trials.\n\nResults. Divergence was 11 percent with adaptive clipping and 10 percent with fixed clipping, a difference that was not statistically distinguishable. Adaptive clipping also required 7 percent more optimization steps to reach the target loss.\n\nInterpretation. These results contradict a universal stability benefit. They do not refute the earlier result under independent noise; instead they identify momentum and correlated noise as boundary conditions."
+              }
+            ],
+            "reason": null,
+            "sourceUrl": null,
+            "sourceVersion": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:federated-clipping-abstract"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-401402a4-7e3e-48ae-a533-cc5267f3999d",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:federated-clipping-abstract"
+        },
+        "durationMs": 10,
+        "error": null,
+        "id": "exec-401402a4-7e3e-48ae-a533-cc5267f3999d",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"availability\":\"available\",\"coverage\":\"abstract_only\",\"hasMore\":false,\"nextCursor\":null,\"passages\":[{\"chunkId\":\"metadata_abstract_chunk:fixture:federated-clipping-abstract:24691e1d0481ce0d\",\"extractionId\":\"metadata_abstract_extraction:fixture:federated-clipping-abstract:24691e1d0481ce0d\",\"pageEnd\":1,\"pageStart\":1,\"paperId\":\"fixture:federated-clipping-abstract\",\"passageRef\":\"passage_19f08b5b3b174e298e2ef09fea0f0211\",\"sourceEnd\":129,\"sourceId\":\"metadata_abstract:fixture:federated-clipping-abstract:24691e1d0481ce0d\",\"sourceStart\":0,\"text\":\"A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.\"}],\"reason\":null,\"sourceUrl\":null,\"sourceVersion\":\"metadata_abstract_extraction:fixture:federated-clipping-abstract:24691e1d0481ce0d\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "availability": "available",
+            "coverage": "abstract_only",
+            "hasMore": false,
+            "nextCursor": null,
+            "passages": [
+              {
+                "chunkId": "metadata_abstract_chunk:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+                "extractionId": "metadata_abstract_extraction:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+                "pageEnd": 1,
+                "pageStart": 1,
+                "paperId": "fixture:federated-clipping-abstract",
+                "passageRef": "passage_19f08b5b3b174e298e2ef09fea0f0211",
+                "sourceEnd": 129,
+                "sourceId": "metadata_abstract:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+                "sourceStart": 0,
+                "text": "A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable."
+              }
+            ],
+            "reason": null,
+            "sourceUrl": null,
+            "sourceVersion": "metadata_abstract_extraction:fixture:federated-clipping-abstract:24691e1d0481ce0d"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:long-horizon-unavailable"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-1ed0f5e5-010d-4db5-a3cf-4c50dd853974",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "fixture:long-horizon-unavailable"
+        },
+        "durationMs": 3,
+        "error": null,
+        "id": "exec-1ed0f5e5-010d-4db5-a3cf-4c50dd853974",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"availability\":\"unavailable\",\"coverage\":\"none\",\"hasMore\":false,\"nextCursor\":null,\"passages\":[],\"reason\":\"http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: \",\"sourceUrl\":\"http://127.0.0.1:52387/missing.pdf\",\"sourceVersion\":null}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "availability": "unavailable",
+            "coverage": "none",
+            "hasMore": false,
+            "nextCursor": null,
+            "passages": [],
+            "reason": "http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: ",
+            "sourceUrl": "http://127.0.0.1:52387/missing.pdf",
+            "sourceVersion": null
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Purpose: broaden coverage beyond the already found single-CNN synthetic-label-noise experiment and high-momentum correlated-noise replication. Find independent empirical full-text studies of optimizer adaptive gradient clipping in small-batch training across other architectures, real-world/noise sources, or optimizers, with divergence or stability outcomes. Exclude differential-privacy-only per-example clipping and federated-only studies unless they directly test ordinary optimizer instability. Prefer comparisons against both fixed clipping and no clipping, and report null/negative results.",
+          "request_id": "run-generalization-20260907-03",
+          "result_limit": 6,
+          "seed_paper_ids": [
+            "fixture:adaptive-clipping-support",
+            "fixture:adaptive-clipping-conflict"
+          ],
+          "state_entry_ids": [
+            "research_entry_1788810163367424000"
+          ]
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-4c1d6ee2-0706-492d-bbfc-38c51e2d717a",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Purpose: broaden coverage beyond the already found single-CNN synthetic-label-noise experiment and high-momentum correlated-noise replication. Find independent empirical full-text studies of optimizer adaptive gradient clipping in small-batch training across other architectures, real-world/noise sources, or optimizers, with divergence or stability outcomes. Exclude differential-privacy-only per-example clipping and federated-only studies unless they directly test ordinary optimizer instability. Prefer comparisons against both fixed clipping and no clipping, and report null/negative results.",
+          "request_id": "run-generalization-20260907-03",
+          "result_limit": 6,
+          "seed_paper_ids": [
+            "fixture:adaptive-clipping-support",
+            "fixture:adaptive-clipping-conflict"
+          ],
+          "state_entry_ids": [
+            "research_entry_1788810163367424000"
+          ]
+        },
+        "durationMs": 22,
+        "error": null,
+        "id": "exec-4c1d6ee2-0706-492d-bbfc-38c51e2d717a",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"runId\":\"run_1788810275396929000\",\"searchId\":\"search_1788810275396925000\",\"status\":\"queued\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "runId": "run_1788810275396929000",
+            "searchId": "search_1788810275396925000",
+            "status": "queued"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810275396929000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-d3a4561d-d110-430b-b1a7-7004593e4552",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810275396929000"
+        },
+        "durationMs": 21,
+        "error": null,
+        "id": "exec-d3a4561d-d110-430b-b1a7-7004593e4552",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":17},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching fixed_corpus\",\"sequence\":18},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"fixed_corpus returned 1 candidates\",\"sequence\":19},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"fixed_corpus returned 1 candidates\",\"sequence\":20},{\"error\":null,\"kind\":\"candidates_deduplicated\",\"message\":\"Retained 1 unique candidates\",\"sequence\":21},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 1 candidates\",\"sequence\":22},{\"error\":null,\"kind\":\"coverage_assessing\",\"message\":\"Assessing research coverage\",\"sequence\":23},{\"error\":null,\"kind\":\"candidates_ranking\",\"message\":\"Ranking 1 candidates\",\"sequence\":24}],\"cancelRequested\":false,\"candidates\":[{\"candidate\":{\"abstract\":\"A replication examines adaptive clipping when high momentum and correlated gradient noise are present.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Sofia Reyes\",\"Tariq Okafor\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict\",\"id\":\"fixture:adaptive-clipping-conflict\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Boundary Conditions for Adaptive Clipping under Momentum\",\"venue\":\"Reproducible Learning Systems\",\"year\":2025},\"phase\":\"preview\",\"sequence\":9},{\"candidate\":{\"abstract\":\"A replication examines adaptive clipping when high momentum and correlated gradient noise are present.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[\"Sofia Reyes\",\"Tariq Okafor\"],\"citationCount\":0,\"doi\":null,\"externalUrl\":\"http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict\",\"id\":\"fixture:adaptive-clipping-conflict\",\"openalexId\":null,\"pdfUrl\":\"http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf\",\"sourceProvider\":\"fixed_corpus\",\"title\":\"Boundary Conditions for Adaptive Clipping under Momentum\",\"venue\":\"Reproducible Learning Systems\",\"year\":2025},\"phase\":\"ranked\",\"sequence\":10}],\"errors\":[],\"nextCursor\":null,\"status\":\"ready\",\"stopReason\":\"converged\",\"usage\":{\"inspectedCandidates\":1,\"llmCalls\":2,\"providerQueries\":1}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 17
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching fixed_corpus",
+                "sequence": 18
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "fixed_corpus returned 1 candidates",
+                "sequence": 19
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "fixed_corpus returned 1 candidates",
+                "sequence": 20
+              },
+              {
+                "error": null,
+                "kind": "candidates_deduplicated",
+                "message": "Retained 1 unique candidates",
+                "sequence": 21
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 1 candidates",
+                "sequence": 22
+              },
+              {
+                "error": null,
+                "kind": "coverage_assessing",
+                "message": "Assessing research coverage",
+                "sequence": 23
+              },
+              {
+                "error": null,
+                "kind": "candidates_ranking",
+                "message": "Ranking 1 candidates",
+                "sequence": 24
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [
+              {
+                "candidate": {
+                  "abstract": "A replication examines adaptive clipping when high momentum and correlated gradient noise are present.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Sofia Reyes",
+                    "Tariq Okafor"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict",
+                  "id": "fixture:adaptive-clipping-conflict",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Boundary Conditions for Adaptive Clipping under Momentum",
+                  "venue": "Reproducible Learning Systems",
+                  "year": 2025
+                },
+                "phase": "preview",
+                "sequence": 9
+              },
+              {
+                "candidate": {
+                  "abstract": "A replication examines adaptive clipping when high momentum and correlated gradient noise are present.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [
+                    "Sofia Reyes",
+                    "Tariq Okafor"
+                  ],
+                  "citationCount": 0,
+                  "doi": null,
+                  "externalUrl": "http://127.0.0.1:52387/landing/fixture:adaptive-clipping-conflict",
+                  "id": "fixture:adaptive-clipping-conflict",
+                  "openalexId": null,
+                  "pdfUrl": "http://127.0.0.1:52387/fixture:adaptive-clipping-conflict.pdf",
+                  "sourceProvider": "fixed_corpus",
+                  "title": "Boundary Conditions for Adaptive Clipping under Momentum",
+                  "venue": "Reproducible Learning Systems",
+                  "year": 2025
+                },
+                "phase": "ranked",
+                "sequence": 10
+              }
+            ],
+            "errors": [],
+            "nextCursor": null,
+            "status": "ready",
+            "stopReason": "converged",
+            "usage": {
+              "inspectedCandidates": 1,
+              "llmCalls": 2,
+              "providerQueries": 1
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "base_revision": 1,
+          "changes": [
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "Full-text methods and results directly report the small-batch setup, comparator conditions, divergence reduction, and lack of a general accuracy gain.",
+                  "passage_ref": "passage_755d0e908dd344e7ab0119502178ae76",
+                  "relationship": "supports",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "supporting_small_batch_result",
+              "reason": "Record direct experimental support separately from the speculative hypothesis.",
+              "relationships": [
+                {
+                  "kind": "motivated_by",
+                  "target_entry_id": "research_entry_1788810163367424000"
+                }
+              ],
+              "statement": "In 120 matched trials using batch size 8 with injected label noise, moving-percentile adaptive gradient clipping reduced divergent runs from 18% to 4% versus preregistered fixed-clipping and no-clipping conditions, while median validation accuracy among converged runs changed by less than one percentage point."
+            },
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "Full-text replication directly limits any universal stability claim and identifies high momentum plus correlated noise as boundary conditions.",
+                  "passage_ref": "passage_e062f8cccdeb44d3914c5fca8ada128c",
+                  "relationship": "contradicts",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "momentum_boundary_result",
+              "reason": "Record conflicting experimental evidence and the tested boundary condition.",
+              "relationships": [
+                {
+                  "kind": "contests",
+                  "target_entry_id": "research_entry_1788810163367424000"
+                }
+              ],
+              "statement": "Under momentum 0.95 and temporally correlated gradient noise, adaptive clipping did not improve divergence over fixed clipping (11% versus 10%, not statistically distinguishable) and required 7% more optimization steps to target loss."
+            },
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "The only readable passage is the metadata abstract, which explicitly notes that full text and statistical protocol are unavailable.",
+                  "passage_ref": "passage_19f08b5b3b174e298e2ef09fea0f0211",
+                  "relationship": "context",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "abstract_only_pilot_limitation",
+              "reason": "Document the suggestive candidate and its evidence limitation honestly.",
+              "relationships": [
+                {
+                  "kind": "motivated_by",
+                  "target_entry_id": "research_entry_1788810163367424000"
+                }
+              ],
+              "statement": "A federated-learning pilot abstract reports fewer unstable client updates with adaptive clipping, but its full text and statistical protocol are unavailable, so the result is only abstract-level and cannot substantiate the ordinary small-batch optimizer claim."
+            }
+          ],
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+          "request_id": "state-findings-20260907-01"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-7a5189cd-5841-4b72-842b-d633db164dcb",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "state_update",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "base_revision": 1,
+          "changes": [
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "Full-text methods and results directly report the small-batch setup, comparator conditions, divergence reduction, and lack of a general accuracy gain.",
+                  "passage_ref": "passage_755d0e908dd344e7ab0119502178ae76",
+                  "relationship": "supports",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "supporting_small_batch_result",
+              "reason": "Record direct experimental support separately from the speculative hypothesis.",
+              "relationships": [
+                {
+                  "kind": "motivated_by",
+                  "target_entry_id": "research_entry_1788810163367424000"
+                }
+              ],
+              "statement": "In 120 matched trials using batch size 8 with injected label noise, moving-percentile adaptive gradient clipping reduced divergent runs from 18% to 4% versus preregistered fixed-clipping and no-clipping conditions, while median validation accuracy among converged runs changed by less than one percentage point."
+            },
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "Full-text replication directly limits any universal stability claim and identifies high momentum plus correlated noise as boundary conditions.",
+                  "passage_ref": "passage_e062f8cccdeb44d3914c5fca8ada128c",
+                  "relationship": "contradicts",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "momentum_boundary_result",
+              "reason": "Record conflicting experimental evidence and the tested boundary condition.",
+              "relationships": [
+                {
+                  "kind": "contests",
+                  "target_entry_id": "research_entry_1788810163367424000"
+                }
+              ],
+              "statement": "Under momentum 0.95 and temporally correlated gradient noise, adaptive clipping did not improve divergence over fixed clipping (11% versus 10%, not statistically distinguishable) and required 7% more optimization steps to target loss."
+            },
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "The only readable passage is the metadata abstract, which explicitly notes that full text and statistical protocol are unavailable.",
+                  "passage_ref": "passage_19f08b5b3b174e298e2ef09fea0f0211",
+                  "relationship": "context",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "abstract_only_pilot_limitation",
+              "reason": "Document the suggestive candidate and its evidence limitation honestly.",
+              "relationships": [
+                {
+                  "kind": "motivated_by",
+                  "target_entry_id": "research_entry_1788810163367424000"
+                }
+              ],
+              "statement": "A federated-learning pilot abstract reports fewer unstable client updates with adaptive clipping, but its full text and statistical protocol are unavailable, so the result is only abstract-level and cannot substantiate the ordinary small-batch optimizer claim."
+            }
+          ],
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+          "request_id": "state-findings-20260907-01"
+        },
+        "durationMs": 12,
+        "error": null,
+        "id": "exec-7a5189cd-5841-4b72-842b-d633db164dcb",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"affectedEntryIds\":[\"research_entry_1788810311801595000\",\"research_entry_1788810311801653000\",\"research_entry_1788810311801701000\"],\"createdEntryIds\":{\"abstract_only_pilot_limitation\":\"research_entry_1788810311801701000\",\"momentum_boundary_result\":\"research_entry_1788810311801653000\",\"supporting_small_batch_result\":\"research_entry_1788810311801595000\"},\"revision\":2}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "affectedEntryIds": [
+              "research_entry_1788810311801595000",
+              "research_entry_1788810311801653000",
+              "research_entry_1788810311801701000"
+            ],
+            "createdEntryIds": {
+              "abstract_only_pilot_limitation": "research_entry_1788810311801701000",
+              "momentum_boundary_result": "research_entry_1788810311801653000",
+              "supporting_small_batch_result": "research_entry_1788810311801595000"
+            },
+            "revision": 2
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "state_update",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "base_revision": 2,
+          "changes": [
+            {
+              "entry_id": "research_entry_1788810163367424000",
+              "epistemic_status": "speculative",
+              "evidence": [],
+              "operation": "revise",
+              "reason": "Narrow the hypothesis to the directly tested regime and incorporate the full-text boundary-condition result; passage evidence remains on the related source-supported findings.",
+              "relationships": [
+                {
+                  "kind": "derived_from",
+                  "target_entry_id": "research_entry_1788810311801595000"
+                },
+                {
+                  "kind": "derived_from",
+                  "target_entry_id": "research_entry_1788810311801653000"
+                }
+              ],
+              "statement": "Adaptive gradient clipping can reduce optimizer divergence in noisy small-batch training under the tested conditions (one convolutional architecture, batch sizes 8\u201316, and synthetic label noise), but the benefit is not universal and may disappear under high momentum with temporally correlated noise."
+            }
+          ],
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+          "request_id": "state-revise-hypothesis-20260907-02"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-0aa56d7b-5c17-47ad-8d30-06d367efd87b",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "state_update",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "base_revision": 2,
+          "changes": [
+            {
+              "entry_id": "research_entry_1788810163367424000",
+              "epistemic_status": "speculative",
+              "evidence": [],
+              "operation": "revise",
+              "reason": "Narrow the hypothesis to the directly tested regime and incorporate the full-text boundary-condition result; passage evidence remains on the related source-supported findings.",
+              "relationships": [
+                {
+                  "kind": "derived_from",
+                  "target_entry_id": "research_entry_1788810311801595000"
+                },
+                {
+                  "kind": "derived_from",
+                  "target_entry_id": "research_entry_1788810311801653000"
+                }
+              ],
+              "statement": "Adaptive gradient clipping can reduce optimizer divergence in noisy small-batch training under the tested conditions (one convolutional architecture, batch sizes 8\u201316, and synthetic label noise), but the benefit is not universal and may disappear under high momentum with temporally correlated noise."
+            }
+          ],
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69",
+          "request_id": "state-revise-hypothesis-20260907-02"
+        },
+        "durationMs": 25,
+        "error": null,
+        "id": "exec-0aa56d7b-5c17-47ad-8d30-06d367efd87b",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"affectedEntryIds\":[\"research_entry_1788810163367424000\"],\"createdEntryIds\":{},\"revision\":3}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "affectedEntryIds": [
+              "research_entry_1788810163367424000"
+            ],
+            "createdEntryIds": {},
+            "revision": 3
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "state_update",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "entry_ids": [
+            "research_entry_1788810163367424000",
+            "research_entry_1788810311801595000",
+            "research_entry_1788810311801653000",
+            "research_entry_1788810311801701000"
+          ],
+          "limit": 10,
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-519a0326-75ed-4647-bf43-094d6a1f1c9c",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "entry_ids": [
+            "research_entry_1788810163367424000",
+            "research_entry_1788810311801595000",
+            "research_entry_1788810311801653000",
+            "research_entry_1788810311801701000"
+          ],
+          "limit": 10,
+          "project_id": "project:research-evaluation-862553548c784a418adcbf572ba60f69"
+        },
+        "durationMs": 18,
+        "error": null,
+        "id": "exec-519a0326-75ed-4647-bf43-094d6a1f1c9c",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"currentRevision\":3,\"entries\":[{\"context\":[],\"epistemicStatus\":\"speculative\",\"evidence\":[],\"firstRevision\":1,\"id\":\"research_entry_1788810163367424000\",\"kind\":\"hypothesis\",\"lastRevision\":3,\"lifecycle\":\"active\",\"originRunId\":\"harness_run_1788810163900337000\",\"originalKind\":\"hypothesis\",\"relatedEntries\":[{\"kind\":\"derived_from\",\"targetEntryId\":\"research_entry_1788810311801595000\"},{\"kind\":\"derived_from\",\"targetEntryId\":\"research_entry_1788810311801653000\"}],\"revisionRunId\":\"harness_run_1788810163900337000\",\"statement\":\"Adaptive gradient clipping can reduce optimizer divergence in noisy small-batch training under the tested conditions (one convolutional architecture, batch sizes 8\u201316, and synthetic label noise), but the benefit is not universal and may disappear under high momentum with temporally correlated noise.\"},{\"context\":[],\"epistemicStatus\":\"source_supported\",\"evidence\":[{\"chunkId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa:chunk:0\",\"excerpt\":\"Adaptive Gradient Clipping for Noisy Small-Batch Optimization\\n\\nMethods. We ran 120 matched training trials with batch size eight and injected label noise. The adaptive threshold used a moving percentile of recent gradient norms. Fixed clipping and no clipping were preregistered comparison conditions.\\n\\nResults. Adaptive gradient clipping reduced divergent runs from 18 percent to 4 percent. Median validation accuracy among converged runs changed by less than one percentage point. The result therefore supports improved stability, not a general accuracy gain.\\n\\nLimitations. The experiment covered one convolutional architecture, batch sizes from eight to sixteen, and synthetic label noise. We did not test large-batch training or transformer pretraining.\",\"explanation\":\"Full-text methods and results directly report the small-batch setup, comparator conditions, divergence reduction, and lack of a general accuracy gain.\",\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"id\":\"research_entry_1788810311801595000:r2:e0\",\"pageEnd\":0,\"pageStart\":0,\"paperId\":\"fixture:adaptive-clipping-support\",\"relationship\":\"supports\",\"sourceEnd\":757,\"sourceId\":\"pdf:fixture:adaptive-clipping-support:ade6245cbcaa\",\"sourceStart\":0}],\"firstRevision\":2,\"id\":\"research_entry_1788810311801595000\",\"kind\":\"finding\",\"lastRevision\":2,\"lifecycle\":\"active\",\"originRunId\":\"harness_run_1788810163900337000\",\"originalKind\":\"finding\",\"relatedEntries\":[{\"kind\":\"motivated_by\",\"targetEntryId\":\"research_entry_1788810163367424000\"}],\"revisionRunId\":\"harness_run_1788810163900337000\",\"statement\":\"In 120 matched trials using batch size 8 with injected label noise, moving-percentile adaptive gradient clipping reduced divergent runs from 18% to 4% versus preregistered fixed-clipping and no-clipping conditions, while median validation accuracy among converged runs changed by less than one percentage point.\"},{\"context\":[],\"epistemicStatus\":\"source_supported\",\"evidence\":[{\"chunkId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd:chunk:0\",\"excerpt\":\"Boundary Conditions for Adaptive Clipping under Momentum\\n\\nMethods. We repeated the small-batch protocol with momentum 0.95 and temporally correlated gradient noise across 80 matched trials.\\n\\nResults. Divergence was 11 percent with adaptive clipping and 10 percent with fixed clipping, a difference that was not statistically distinguishable. Adaptive clipping also required 7 percent more optimization steps to reach the target loss.\\n\\nInterpretation. These results contradict a universal stability benefit. They do not refute the earlier result under independent noise; instead they identify momentum and correlated noise as boundary conditions.\",\"explanation\":\"Full-text replication directly limits any universal stability claim and identifies high momentum plus correlated noise as boundary conditions.\",\"extractionId\":\"extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"id\":\"research_entry_1788810311801653000:r2:e0\",\"pageEnd\":0,\"pageStart\":0,\"paperId\":\"fixture:adaptive-clipping-conflict\",\"relationship\":\"contradicts\",\"sourceEnd\":645,\"sourceId\":\"pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\",\"sourceStart\":0}],\"firstRevision\":2,\"id\":\"research_entry_1788810311801653000\",\"kind\":\"finding\",\"lastRevision\":2,\"lifecycle\":\"active\",\"originRunId\":\"harness_run_1788810163900337000\",\"originalKind\":\"finding\",\"relatedEntries\":[{\"kind\":\"contests\",\"targetEntryId\":\"research_entry_1788810163367424000\"}],\"revisionRunId\":\"harness_run_1788810163900337000\",\"statement\":\"Under momentum 0.95 and temporally correlated gradient noise, adaptive clipping did not improve divergence over fixed clipping (11% versus 10%, not statistically distinguishable) and required 7% more optimization steps to target loss.\"},{\"context\":[],\"epistemicStatus\":\"source_supported\",\"evidence\":[{\"chunkId\":\"metadata_abstract_chunk:fixture:federated-clipping-abstract:24691e1d0481ce0d\",\"excerpt\":\"A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.\",\"explanation\":\"The only readable passage is the metadata abstract, which explicitly notes that full text and statistical protocol are unavailable.\",\"extractionId\":\"metadata_abstract_extraction:fixture:federated-clipping-abstract:24691e1d0481ce0d\",\"id\":\"research_entry_1788810311801701000:r2:e0\",\"pageEnd\":0,\"pageStart\":0,\"paperId\":\"fixture:federated-clipping-abstract\",\"relationship\":\"context\",\"sourceEnd\":129,\"sourceId\":\"metadata_abstract:fixture:federated-clipping-abstract:24691e1d0481ce0d\",\"sourceStart\":0}],\"firstRevision\":2,\"id\":\"research_entry_1788810311801701000\",\"kind\":\"finding\",\"lastRevision\":2,\"lifecycle\":\"active\",\"originRunId\":\"harness_run_1788810163900337000\",\"originalKind\":\"finding\",\"relatedEntries\":[{\"kind\":\"motivated_by\",\"targetEntryId\":\"research_entry_1788810163367424000\"}],\"revisionRunId\":\"harness_run_1788810163900337000\",\"statement\":\"A federated-learning pilot abstract reports fewer unstable client updates with adaptive clipping, but its full text and statistical protocol are unavailable, so the result is only abstract-level and cannot substantiate the ordinary small-batch optimizer claim.\"}],\"nextCursor\":null,\"revision\":3}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "currentRevision": 3,
+            "entries": [
+              {
+                "context": [],
+                "epistemicStatus": "speculative",
+                "evidence": [],
+                "firstRevision": 1,
+                "id": "research_entry_1788810163367424000",
+                "kind": "hypothesis",
+                "lastRevision": 3,
+                "lifecycle": "active",
+                "originRunId": "harness_run_1788810163900337000",
+                "originalKind": "hypothesis",
+                "relatedEntries": [
+                  {
+                    "kind": "derived_from",
+                    "targetEntryId": "research_entry_1788810311801595000"
+                  },
+                  {
+                    "kind": "derived_from",
+                    "targetEntryId": "research_entry_1788810311801653000"
+                  }
+                ],
+                "revisionRunId": "harness_run_1788810163900337000",
+                "statement": "Adaptive gradient clipping can reduce optimizer divergence in noisy small-batch training under the tested conditions (one convolutional architecture, batch sizes 8\u201316, and synthetic label noise), but the benefit is not universal and may disappear under high momentum with temporally correlated noise."
+              },
+              {
+                "context": [],
+                "epistemicStatus": "source_supported",
+                "evidence": [
+                  {
+                    "chunkId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa:chunk:0",
+                    "excerpt": "Adaptive Gradient Clipping for Noisy Small-Batch Optimization\n\nMethods. We ran 120 matched training trials with batch size eight and injected label noise. The adaptive threshold used a moving percentile of recent gradient norms. Fixed clipping and no clipping were preregistered comparison conditions.\n\nResults. Adaptive gradient clipping reduced divergent runs from 18 percent to 4 percent. Median validation accuracy among converged runs changed by less than one percentage point. The result therefore supports improved stability, not a general accuracy gain.\n\nLimitations. The experiment covered one convolutional architecture, batch sizes from eight to sixteen, and synthetic label noise. We did not test large-batch training or transformer pretraining.",
+                    "explanation": "Full-text methods and results directly report the small-batch setup, comparator conditions, divergence reduction, and lack of a general accuracy gain.",
+                    "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+                    "id": "research_entry_1788810311801595000:r2:e0",
+                    "pageEnd": 0,
+                    "pageStart": 0,
+                    "paperId": "fixture:adaptive-clipping-support",
+                    "relationship": "supports",
+                    "sourceEnd": 757,
+                    "sourceId": "pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+                    "sourceStart": 0
+                  }
+                ],
+                "firstRevision": 2,
+                "id": "research_entry_1788810311801595000",
+                "kind": "finding",
+                "lastRevision": 2,
+                "lifecycle": "active",
+                "originRunId": "harness_run_1788810163900337000",
+                "originalKind": "finding",
+                "relatedEntries": [
+                  {
+                    "kind": "motivated_by",
+                    "targetEntryId": "research_entry_1788810163367424000"
+                  }
+                ],
+                "revisionRunId": "harness_run_1788810163900337000",
+                "statement": "In 120 matched trials using batch size 8 with injected label noise, moving-percentile adaptive gradient clipping reduced divergent runs from 18% to 4% versus preregistered fixed-clipping and no-clipping conditions, while median validation accuracy among converged runs changed by less than one percentage point."
+              },
+              {
+                "context": [],
+                "epistemicStatus": "source_supported",
+                "evidence": [
+                  {
+                    "chunkId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd:chunk:0",
+                    "excerpt": "Boundary Conditions for Adaptive Clipping under Momentum\n\nMethods. We repeated the small-batch protocol with momentum 0.95 and temporally correlated gradient noise across 80 matched trials.\n\nResults. Divergence was 11 percent with adaptive clipping and 10 percent with fixed clipping, a difference that was not statistically distinguishable. Adaptive clipping also required 7 percent more optimization steps to reach the target loss.\n\nInterpretation. These results contradict a universal stability benefit. They do not refute the earlier result under independent noise; instead they identify momentum and correlated noise as boundary conditions.",
+                    "explanation": "Full-text replication directly limits any universal stability claim and identifies high momentum plus correlated noise as boundary conditions.",
+                    "extractionId": "extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+                    "id": "research_entry_1788810311801653000:r2:e0",
+                    "pageEnd": 0,
+                    "pageStart": 0,
+                    "paperId": "fixture:adaptive-clipping-conflict",
+                    "relationship": "contradicts",
+                    "sourceEnd": 645,
+                    "sourceId": "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd",
+                    "sourceStart": 0
+                  }
+                ],
+                "firstRevision": 2,
+                "id": "research_entry_1788810311801653000",
+                "kind": "finding",
+                "lastRevision": 2,
+                "lifecycle": "active",
+                "originRunId": "harness_run_1788810163900337000",
+                "originalKind": "finding",
+                "relatedEntries": [
+                  {
+                    "kind": "contests",
+                    "targetEntryId": "research_entry_1788810163367424000"
+                  }
+                ],
+                "revisionRunId": "harness_run_1788810163900337000",
+                "statement": "Under momentum 0.95 and temporally correlated gradient noise, adaptive clipping did not improve divergence over fixed clipping (11% versus 10%, not statistically distinguishable) and required 7% more optimization steps to target loss."
+              },
+              {
+                "context": [],
+                "epistemicStatus": "source_supported",
+                "evidence": [
+                  {
+                    "chunkId": "metadata_abstract_chunk:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+                    "excerpt": "A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.",
+                    "explanation": "The only readable passage is the metadata abstract, which explicitly notes that full text and statistical protocol are unavailable.",
+                    "extractionId": "metadata_abstract_extraction:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+                    "id": "research_entry_1788810311801701000:r2:e0",
+                    "pageEnd": 0,
+                    "pageStart": 0,
+                    "paperId": "fixture:federated-clipping-abstract",
+                    "relationship": "context",
+                    "sourceEnd": 129,
+                    "sourceId": "metadata_abstract:fixture:federated-clipping-abstract:24691e1d0481ce0d",
+                    "sourceStart": 0
+                  }
+                ],
+                "firstRevision": 2,
+                "id": "research_entry_1788810311801701000",
+                "kind": "finding",
+                "lastRevision": 2,
+                "lifecycle": "active",
+                "originRunId": "harness_run_1788810163900337000",
+                "originalKind": "finding",
+                "relatedEntries": [
+                  {
+                    "kind": "motivated_by",
+                    "targetEntryId": "research_entry_1788810163367424000"
+                  }
+                ],
+                "revisionRunId": "harness_run_1788810163900337000",
+                "statement": "A federated-learning pilot abstract reports fewer unstable client updates with adaptive clipping, but its full text and statistical protocol are unavailable, so the result is only abstract-level and cannot substantiate the ordinary small-batch optimizer claim."
+              }
+            ],
+            "nextCursor": null,
+            "revision": 3
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "production_run_terminal",
+      "status": "pass",
+      "detail": "1 Run(s): harness_run_1788810163900337000=ready"
+    },
+    {
+      "name": "new_paper_collected",
+      "status": "pass",
+      "detail": "Added papers: fixture:long-horizon-unavailable, fixture:adaptive-clipping-support, fixture:adaptive-clipping-conflict, fixture:federated-clipping-abstract"
+    },
+    {
+      "name": "no_duplicate_membership",
+      "status": "pass",
+      "detail": "4 unique membership rows"
+    },
+    {
+      "name": "state_revision_advanced",
+      "status": "pass",
+      "detail": "State revision 1 -> 3"
+    },
+    {
+      "name": "evidence_references_resolve",
+      "status": "pass",
+      "detail": "Resolved 3 new evidence link(s) against stored chunks"
+    },
+    {
+      "name": "state_persists_after_reopen",
+      "status": "pass",
+      "detail": "Reopened current revision 3; historical revision 1 readable=true"
+    },
+    {
+      "name": "passage_read_before_state_update",
+      "status": "pass",
+      "detail": "Completed tool order: vault_list -> state_read -> vault_list_papers -> search_start -> search_start -> search_get -> search_get -> vault_add_paper -> vault_add_paper -> vault_add_paper -> vault_add_paper -> vault_get_paper -> vault_get_paper -> vault_get_paper -> vault_get_paper -> reader_read -> reader_read -> reader_read -> reader_read -> search_start -> search_get -> state_update -> state_update -> state_read"
+    },
+    {
+      "name": "run_within_limits",
+      "status": "pass",
+      "detail": "Persisted usage stayed within each Run's captured limits"
+    },
+    {
+      "name": "full_text_read",
+      "status": "pass",
+      "detail": "Reader coverage observed: {\"full_text\", \"abstract_only\", \"none\"}"
+    },
+    {
+      "name": "limited_coverage_reported_honestly",
+      "status": "pass",
+      "detail": "Reader coverage observed: {\"full_text\", \"abstract_only\", \"none\"}"
+    },
+    {
+      "name": "evaluation_data_cleaned_up",
+      "status": "pass",
+      "detail": "Removed isolated evaluation root /var/folders/7x/_h0bp8250hdg_jcb_wsy6zlr0000gp/T/i0i-research-eval-2af5b63010034d8c924a89aaa13459f5"
+    }
+  ],
+  "judge": {
+    "dimensions": {
+      "state_improvement": {
+        "score": 3,
+        "explanation": "The final state materially improves the initial speculative hypothesis by adding three sourced findings and revising the hypothesis to a more accurate, bounded claim. Relations connect the revised hypothesis to supporting and contesting findings, preserving how the conclusion was derived.",
+        "references": [
+          "initialState.entries[0]",
+          "research_entry_1788810163367424000",
+          "research_entry_1788810311801595000",
+          "research_entry_1788810311801653000",
+          "research_entry_1788810311801701000",
+          "exec-7a5189cd-5841-4b72-842b-d633db164dcb",
+          "exec-0aa56d7b-5c17-47ad-8d30-06d367efd87b"
+        ]
+      },
+      "epistemic_care": {
+        "score": 3,
+        "explanation": "Strong caution and scope control: the final hypothesis narrows the original universal claim to tested conditions and explicitly limits generality. It distinguishes full-text support (`fixture:adaptive-clipping-support`, `passage_755d0e908dd344e7ab0119502178ae76`), full-text conflicting evidence (`fixture:adaptive-clipping-conflict`, `passage_e062f8cccdeb44d3914c5fca8ada128c`), abstract-only evidence (`fixture:federated-clipping-abstract`, `passage_19f08b5b3b174e298e2ef09fea0f0211`), and unavailable content (`fixture:long-horizon-unavailable`, `exec-1ed0f5e5-010d-4db5-a3cf-4c50dd853974`).",
+        "references": [
+          "passage_755d0e908dd344e7ab0119502178ae76",
+          "passage_e062f8cccdeb44d3914c5fca8ada128c",
+          "passage_19f08b5b3b174e298e2ef09fea0f0211",
+          "exec-1ed0f5e5-010d-4db5-a3cf-4c50dd853974"
+        ]
+      },
+      "relevance": {
+        "score": 3,
+        "explanation": "The result directly answers the research instruction by identifying direct stability evidence, tested conditions, and limiting conditions. It also handled evidence-status distinctions relevant to the reference questions, including abstract-only and unavailable candidates. The irrelevant marine clipping fixture was not included in the final state, which is appropriate.",
+        "references": [
+          "research_entry_1788810311801595000",
+          "research_entry_1788810311801653000",
+          "research_entry_1788810311801701000",
+          "exec-7695a1b0-23ba-416d-8218-f1512351ef7f",
+          "exec-574af37c-8b26-48da-8058-6b9261d9e0b8"
+        ]
+      },
+      "grounding": {
+        "score": 3,
+        "explanation": "The source-supported findings closely track the supplied passages: 120 matched trials, batch size eight, label noise, 18% to 4% divergence reduction, and no broad accuracy gain are grounded in `fixture:adaptive-clipping-support`; the 11% vs 10% null divergence result and 7% more steps are grounded in `fixture:adaptive-clipping-conflict`. The abstract-only finding is also accurately constrained to the metadata abstract.",
+        "references": [
+          "research_entry_1788810311801595000:r2:e0",
+          "research_entry_1788810311801653000:r2:e0",
+          "research_entry_1788810311801701000:r2:e0",
+          "pdf:fixture:adaptive-clipping-support:ade6245cbcaa",
+          "pdf:fixture:adaptive-clipping-conflict:d463a653d4bd"
+        ]
+      },
+      "iterative_adaptation": {
+        "score": null,
+        "explanation": "Not applicable under the supplied one-iteration rule for `one_iteration`; the score must be null.",
+        "references": [
+          "oneIterationRule",
+          "scenario:one_iteration"
+        ]
+      }
+    },
+    "materialFabrication": false,
+    "summary": "Strong result: the research state moved from a broad speculative claim to a bounded, evidence-aware conclusion with direct support, a clear boundary-condition conflict, and honest treatment of abstract-only and unavailable evidence."
+  },
+  "errors": [],
+  "cleanupComplete": true,
+  "process": {
+    "exitCode": 0,
+    "stdoutTail": "\nrunning 1 test\ntest services::research::research_eval::tests::explicit_scenario ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 618 filtered out; finished in 231.77s\n\n",
+    "stderrTail": "xture:adaptive-clipping-support:ade6245cbcaa paper_id=fixture:adaptive-clipping-support extraction_id=extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa\n[pdf-ingestion 1788810220025] queued source_id=pdf:fixture:long-horizon-unavailable:a36e0b461143\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=vault_add_paper elapsed_ms=11 outcome=ok results=1\n[pdf-ingestion 1788810220027] start source_id=pdf:fixture:long-horizon-unavailable:a36e0b461143 paper_id=fixture:long-horizon-unavailable url=http://127.0.0.1:52387/missing.pdf\n[pdf-ingestion 1788810220030] attempt 1/1 source_id=pdf:fixture:long-horizon-unavailable:a36e0b461143 url=http://127.0.0.1:52387/missing.pdf\n[pdf-ingestion 1788810220032] attempt failed source_id=pdf:fixture:long-horizon-unavailable:a36e0b461143 attempt=1 error=http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: \n[pdf-ingestion 1788810220033] failed source_id=pdf:fixture:long-horizon-unavailable:a36e0b461143 error=http_error: 404 Not Found from http://127.0.0.1:52387/missing.pdf: \n[pdf-extraction 1788810220035] bound pdfium path=/Users/pzhao/Projects/i0i/src-tauri/resources/pdfium/libpdfium.dylib\n[pdf-extraction 1788810220142] ready source_id=pdf:fixture:adaptive-clipping-support:ade6245cbcaa extraction_id=extraction:pdfium_basic:pdf:fixture:adaptive-clipping-support:ade6245cbcaa pages=1 blocks=4\n[pdf-extraction 1788810220147] start source_id=pdf:fixture:adaptive-clipping-conflict:d463a653d4bd paper_id=fixture:adaptive-clipping-conflict extraction_id=extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd\n[pdf-extraction 1788810220147] bound pdfium path=/Users/pzhao/Projects/i0i/src-tauri/resources/pdfium/libpdfium.dylib\n[pdf-extraction 1788810220151] ready source_id=pdf:fixture:adaptive-clipping-conflict:d463a653d4bd extraction_id=extraction:pdfium_basic:pdf:fixture:adaptive-clipping-conflict:d463a653d4bd pages=1 blocks=4\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=vault_get_paper elapsed_ms=7 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=vault_get_paper elapsed_ms=2 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=vault_get_paper elapsed_ms=6 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=vault_get_paper elapsed_ms=2 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=reader_read elapsed_ms=5 outcome=available results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=reader_read elapsed_ms=10 outcome=available results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=reader_read elapsed_ms=9 outcome=available results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=reader_read elapsed_ms=3 outcome=unavailable results=0\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=search_start elapsed_ms=17 outcome=queued results=0\n[research] run start search_id=search_1788810275396925000 run_id=run_1788810275396929000\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=search_get elapsed_ms=16 outcome=ready results=2\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=state_update elapsed_ms=9 outcome=ok results=3\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=state_update elapsed_ms=20 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810163900337000 run=harness_run_1788810163900337000 tool=state_read elapsed_ms=13 outcome=ok results=4\n"
+  },
+  "git": {
+    "revision": "d192b69211a6db6ec7c812c9106a090a9fa0e9a3",
+    "dirty": false
+  },
+  "runtime": {
+    "codexVersion": "codex-cli 0.153.4"
+  },
+  "models": {
+    "agent": "gpt-5.6-sol",
+    "judge": "gpt-5.5"
+  },
+  "manifest": {
+    "version": 1,
+    "sha256": "0f0907cfa4a3bf2063414c8f821289724a9a99d593cec2e2713f3cce1e72c0f4"
+  }
+}

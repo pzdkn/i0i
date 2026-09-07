@@ -1,0 +1,2201 @@
+{
+  "schemaVersion": 1,
+  "scenario": "live_discovery_smoke",
+  "status": "pass",
+  "startedAt": "2026-09-07T19:55:50.948381+00:00",
+  "elapsedMs": 171390,
+  "corpusVersion": 1,
+  "corpusHashes": {
+    "fixture:adaptive-clipping-support": "8d5b212151981d3b6f7165f1bee8b213e96c3898c1d000fa39cbf28872ee51d9",
+    "fixture:adaptive-clipping-conflict": "d4d1acc43f26fe03b0ebbe9465b6e7a252aa5f947d2ce412810ac3696dc094e3",
+    "fixture:marine-clipping-irrelevant": "7d17afb8d7823d2c490977de5cd0147ee0cacaca0fcc4526f24914741b452a64"
+  },
+  "sourceHashes": {
+    "pdf:web:a7468c685165:c3ab01e47e61": "bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697"
+  },
+  "instruction": "Find the original Attention Is All You Need paper, inspect its full text, and record a cited finding that explains the Transformer architecture.",
+  "executionLimits": {
+    "maximumRunSeconds": 420,
+    "maximumProviderQueries": 10,
+    "maximumLlmCalls": 20,
+    "judgeTimeoutSeconds": 180,
+    "scenarioProcessSeconds": 1200
+  },
+  "agentModel": "gpt-5.6-sol",
+  "judgeModel": "gpt-5.5",
+  "runIds": [
+    "harness_run_1788810951492154000"
+  ],
+  "initialState": {
+    "currentRevision": 1,
+    "entries": [
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:55:51",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788810951001537000",
+        "kind": "question",
+        "lastRevision": 1,
+        "lifecycle": "active",
+        "originRunId": null,
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "relationCount": 0,
+        "text": "What architecture does the original Attention Is All You Need paper describe?",
+        "updatedAt": "2026-09-07 19:55:51"
+      }
+    ],
+    "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+    "revision": 1,
+    "revisions": [
+      {
+        "createdAt": "2026-09-07 19:55:51",
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "reason": "Initial evaluation hypothesis",
+        "revision": 1,
+        "runId": null
+      },
+      {
+        "createdAt": "2026-09-07 19:55:50",
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "reason": "Initial empty Research State",
+        "revision": 0,
+        "runId": null
+      }
+    ]
+  },
+  "finalState": {
+    "currentRevision": 2,
+    "entries": [
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:57:45",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788811065114223000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810951492154000",
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "relationCount": 1,
+        "text": "The original Transformer is an encoder-decoder sequence transduction architecture built from stacked self-attention and position-wise fully connected layers: its encoder uses six identical layers with multi-head self-attention and feed-forward sublayers, with residual connections and layer normalization.",
+        "updatedAt": "2026-09-07 19:57:45"
+      },
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:55:51",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788810951001537000",
+        "kind": "question",
+        "lastRevision": 1,
+        "lifecycle": "active",
+        "originRunId": null,
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "relationCount": 0,
+        "text": "What architecture does the original Attention Is All You Need paper describe?",
+        "updatedAt": "2026-09-07 19:55:51"
+      }
+    ],
+    "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+    "revision": 2,
+    "revisions": [
+      {
+        "createdAt": "2026-09-07 19:57:45",
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "reason": "Agent Research State update",
+        "revision": 2,
+        "runId": "harness_run_1788810951492154000"
+      },
+      {
+        "createdAt": "2026-09-07 19:55:51",
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "reason": "Initial evaluation hypothesis",
+        "revision": 1,
+        "runId": null
+      },
+      {
+        "createdAt": "2026-09-07 19:55:50",
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "reason": "Initial empty Research State",
+        "revision": 0,
+        "runId": null
+      }
+    ]
+  },
+  "stateDetails": [
+    {
+      "context": [],
+      "entry": {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:57:45",
+        "epistemicStatus": "source_supported",
+        "evidenceCount": 1,
+        "firstRevision": 2,
+        "id": "research_entry_1788811065114223000",
+        "kind": "finding",
+        "lastRevision": 2,
+        "lifecycle": "active",
+        "originRunId": "harness_run_1788810951492154000",
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "relationCount": 1,
+        "text": "The original Transformer is an encoder-decoder sequence transduction architecture built from stacked self-attention and position-wise fully connected layers: its encoder uses six identical layers with multi-head self-attention and feed-forward sublayers, with residual connections and layer normalization.",
+        "updatedAt": "2026-09-07 19:57:45"
+      },
+      "evidence": [
+        {
+          "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:5",
+          "entryId": "research_entry_1788811065114223000",
+          "excerpt": "3 Model Architecture\n\nMost competitive neural sequence transduction models have an encoder-decoder structure [5, 2, 35]. Here, the encoder maps an input sequence of symbol representations (x1, ..., xn) to a sequence of continuous representations z = (z1, ..., zn). Given z, the decoder then generates an output sequence (y1, ..., ym) of symbols one element at a time. At each step the model is auto-regressive [10], consuming the previously generated symbols as additional input when generating the next.\n\n2\n\nFigure 1: The Transformer - model architecture.\n\nThe Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1, respectively.\n\n3.1 Encoder and Decoder Stacks\n\nEncoder: The encoder is composed of a stack of N = 6 identical layers. Each layer has two sub-layers. The first is a multi-head self-attention mechanism, and the second is a simple, position\u0002 wise fully connected feed-forward network. We employ a residual connection [11] around each of the two sub-layers, followed by layer normalization [1]. That is, the output of each sub-layer is LayerNorm(x + Sublayer(x)), where Sublayer(x) is the function implemented by the sub-layer itself. To facilitate these residual connections, all sub-layers in the model, as well as the embedding layers, produce outputs of dimension dmodel = 512.",
+          "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+          "id": "research_entry_1788811065114223000:r2:e0",
+          "pageEnd": 2,
+          "pageStart": 1,
+          "paperId": "web:a7468c685165",
+          "relationship": "supports",
+          "sourceEnd": 8029,
+          "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+          "sourceStart": 6594,
+          "stateRevision": 2,
+          "supportNote": "The paper\u2019s Model Architecture section directly describes the encoder-decoder structure, stacked self-attention and point-wise fully connected layers, and the six-layer encoder with its sublayers, residual connections, and layer normalization."
+        }
+      ],
+      "history": [
+        {
+          "createdAt": "2026-09-07 19:57:45",
+          "entryId": "research_entry_1788811065114223000",
+          "epistemicStatus": "source_supported",
+          "kind": "finding",
+          "lifecycle": "active",
+          "originRunId": "harness_run_1788810951492154000",
+          "reason": "Answer the active architecture question with directly verified full-text evidence from the original 2017 paper.",
+          "stateRevision": 2,
+          "text": "The original Transformer is an encoder-decoder sequence transduction architecture built from stacked self-attention and position-wise fully connected layers: its encoder uses six identical layers with multi-head self-attention and feed-forward sublayers, with residual connections and layer normalization."
+        }
+      ],
+      "relations": [
+        {
+          "entryId": "research_entry_1788811065114223000",
+          "id": "research_entry_1788811065114223000:r2:relation:0",
+          "kind": "motivated_by",
+          "stateRevision": 2,
+          "targetEntryId": "research_entry_1788810951001537000"
+        }
+      ]
+    },
+    {
+      "context": [],
+      "entry": {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 19:55:51",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788810951001537000",
+        "kind": "question",
+        "lastRevision": 1,
+        "lifecycle": "active",
+        "originRunId": null,
+        "projectId": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+        "relationCount": 0,
+        "text": "What architecture does the original Attention Is All You Need paper describe?",
+        "updatedAt": "2026-09-07 19:55:51"
+      },
+      "evidence": [],
+      "history": [
+        {
+          "createdAt": "2026-09-07 19:55:51",
+          "entryId": "research_entry_1788810951001537000",
+          "epistemicStatus": "speculative",
+          "kind": "question",
+          "lifecycle": "active",
+          "originRunId": null,
+          "reason": "Initial evaluation hypothesis",
+          "stateRevision": 1,
+          "text": "What architecture does the original Attention Is All You Need paper describe?"
+        }
+      ],
+      "relations": []
+    }
+  ],
+  "addedPaperIds": [
+    "web:a7468c685165"
+  ],
+  "toolTrace": [
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "project_id": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-6d4a3156-e16a-4b00-85eb-248eeb3fc330",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "project_id": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": 5,
+        "error": null,
+        "id": "exec-6d4a3156-e16a-4b00-85eb-248eeb3fc330",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"currentRevision\":1,\"entries\":[{\"context\":[],\"epistemicStatus\":\"speculative\",\"evidence\":[],\"firstRevision\":1,\"id\":\"research_entry_1788810951001537000\",\"kind\":\"question\",\"lastRevision\":1,\"lifecycle\":\"active\",\"originRunId\":null,\"originalKind\":\"question\",\"relatedEntries\":[],\"revisionRunId\":null,\"statement\":\"What architecture does the original Attention Is All You Need paper describe?\"}],\"nextCursor\":null,\"revision\":1}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "currentRevision": 1,
+            "entries": [
+              {
+                "context": [],
+                "epistemicStatus": "speculative",
+                "evidence": [],
+                "firstRevision": 1,
+                "id": "research_entry_1788810951001537000",
+                "kind": "question",
+                "lastRevision": 1,
+                "lifecycle": "active",
+                "originRunId": null,
+                "originalKind": "question",
+                "relatedEntries": [],
+                "revisionRunId": null,
+                "statement": "What architecture does the original Attention Is All You Need paper describe?"
+              }
+            ],
+            "nextCursor": null,
+            "revision": 1
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-778cf8f1-c097-4542-97dd-4e48c8783285",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_list_papers",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 100,
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": 4,
+        "error": null,
+        "id": "exec-778cf8f1-c097-4542-97dd-4e48c8783285",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"membershipRevision\":0,\"nextCursor\":null,\"papers\":[]}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "membershipRevision": 0,
+            "nextCursor": null,
+            "papers": []
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_list_papers",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Find the original paper titled \"Attention Is All You Need\" by Ashish Vaswani and coauthors, first published in 2017 (arXiv:1706.03762 / NeurIPS 2017). Prioritize the canonical original record and an accessible full-text PDF suitable for passage-level verification. Exclude later papers that merely cite, reproduce, review, or share a similar title.",
+          "request_id": "run-fce68e35-search-original-aiayn-1",
+          "result_limit": 5,
+          "seed_paper_ids": [],
+          "state_entry_ids": [
+            "research_entry_1788810951001537000"
+          ],
+          "year_from": 2017,
+          "year_to": 2017
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-03f0f911-aa1b-4966-88b2-2956fa832d05",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Find the original paper titled \"Attention Is All You Need\" by Ashish Vaswani and coauthors, first published in 2017 (arXiv:1706.03762 / NeurIPS 2017). Prioritize the canonical original record and an accessible full-text PDF suitable for passage-level verification. Exclude later papers that merely cite, reproduce, review, or share a similar title.",
+          "request_id": "run-fce68e35-search-original-aiayn-1",
+          "result_limit": 5,
+          "seed_paper_ids": [],
+          "state_entry_ids": [
+            "research_entry_1788810951001537000"
+          ],
+          "year_from": 2017,
+          "year_to": 2017
+        },
+        "durationMs": 22,
+        "error": null,
+        "id": "exec-03f0f911-aa1b-4966-88b2-2956fa832d05",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"runId\":\"run_1788810982856578000\",\"searchId\":\"search_1788810982856574000\",\"status\":\"queued\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "runId": "run_1788810982856578000",
+            "searchId": "search_1788810982856574000",
+            "status": "queued"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810982856578000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-79cd4314-6259-4312-bcfb-a263fd6db6d3",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788810982856578000"
+        },
+        "durationMs": 7,
+        "error": null,
+        "id": "exec-79cd4314-6259-4312-bcfb-a263fd6db6d3",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":1},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching web\",\"sequence\":2},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 1 candidates\",\"sequence\":3},{\"error\":null,\"kind\":\"candidates_filtered\",\"message\":\"Excluded 1 candidates that did not satisfy required metadata filters\",\"sequence\":4},{\"error\":null,\"kind\":\"candidate_metadata_resolving\",\"message\":\"Resolving metadata for 1 candidates\",\"sequence\":5},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"web returned 1 candidates\",\"sequence\":6},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"web returned 0 candidates\",\"sequence\":7},{\"error\":null,\"kind\":\"candidates_deduplicated\",\"message\":\"Retained 0 unique candidates\",\"sequence\":8},{\"error\":null,\"kind\":\"coverage_assessing\",\"message\":\"Assessing research coverage\",\"sequence\":9},{\"error\":null,\"kind\":\"candidates_ranking\",\"message\":\"Ranking 0 candidates\",\"sequence\":10}],\"cancelRequested\":false,\"candidates\":[],\"errors\":[],\"nextCursor\":null,\"status\":\"ready\",\"stopReason\":\"converged\",\"usage\":{\"inspectedCandidates\":0,\"llmCalls\":2,\"providerQueries\":1}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 1
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching web",
+                "sequence": 2
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 1 candidates",
+                "sequence": 3
+              },
+              {
+                "error": null,
+                "kind": "candidates_filtered",
+                "message": "Excluded 1 candidates that did not satisfy required metadata filters",
+                "sequence": 4
+              },
+              {
+                "error": null,
+                "kind": "candidate_metadata_resolving",
+                "message": "Resolving metadata for 1 candidates",
+                "sequence": 5
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "web returned 1 candidates",
+                "sequence": 6
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "web returned 0 candidates",
+                "sequence": 7
+              },
+              {
+                "error": null,
+                "kind": "candidates_deduplicated",
+                "message": "Retained 0 unique candidates",
+                "sequence": 8
+              },
+              {
+                "error": null,
+                "kind": "coverage_assessing",
+                "message": "Assessing research coverage",
+                "sequence": 9
+              },
+              {
+                "error": null,
+                "kind": "candidates_ranking",
+                "message": "Ranking 0 candidates",
+                "sequence": 10
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [],
+            "errors": [],
+            "nextCursor": null,
+            "status": "ready",
+            "stopReason": "converged",
+            "usage": {
+              "inspectedCandidates": 0,
+              "llmCalls": 2,
+              "providerQueries": 1
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Locate the canonical original record for arXiv:1706.03762, DOI 10.48550/arXiv.1706.03762, titled \"Attention Is All You Need\" by Vaswani et al. Return the original paper itself with a usable arXiv or publisher full-text source. Do not substitute reviews, implementations, derivative explainers, or later similarly titled works.",
+          "request_id": "run-fce68e35-search-canonical-id-2",
+          "result_limit": 5,
+          "seed_paper_ids": [],
+          "state_entry_ids": [
+            "research_entry_1788810951001537000"
+          ]
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-5e685f74-d45f-495f-abc3-62f2ad5ca63d",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "instructions": "Locate the canonical original record for arXiv:1706.03762, DOI 10.48550/arXiv.1706.03762, titled \"Attention Is All You Need\" by Vaswani et al. Return the original paper itself with a usable arXiv or publisher full-text source. Do not substitute reviews, implementations, derivative explainers, or later similarly titled works.",
+          "request_id": "run-fce68e35-search-canonical-id-2",
+          "result_limit": 5,
+          "seed_paper_ids": [],
+          "state_entry_ids": [
+            "research_entry_1788810951001537000"
+          ]
+        },
+        "durationMs": 16,
+        "error": null,
+        "id": "exec-5e685f74-d45f-495f-abc3-62f2ad5ca63d",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"runId\":\"run_1788811004038012000\",\"searchId\":\"search_1788811004038010000\",\"status\":\"queued\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "runId": "run_1788811004038012000",
+            "searchId": "search_1788811004038010000",
+            "status": "queued"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_start",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-f2d10338-6a46-4abe-b94a-8066875a9e65",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": 19,
+        "error": null,
+        "id": "exec-f2d10338-6a46-4abe-b94a-8066875a9e65",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":11},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching web\",\"sequence\":12},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 5 candidates\",\"sequence\":13},{\"error\":null,\"kind\":\"candidate_metadata_resolving\",\"message\":\"Resolving metadata for 5 candidates\",\"sequence\":14}],\"cancelRequested\":false,\"candidates\":[{\"candidate\":{\"abstract\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://www.scirp.org/reference/referencespapers?referenceid=3700044\",\"id\":\"web:017985d45c84\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":1},{\"candidate\":{\"abstract\":\"August 2, 2023 - Authors:Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin \u00b7 View a PDF of the paper titled Attention Is All You Need, by Ashish Vaswani and 7 other authors View PDF HTML (experimental)\",\"alreadyInLibrary\":false,\"arxivId\":\"1706.03762\",\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://arxiv.org/abs/1706.03762\",\"id\":\"web:a7468c685165\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"[1706.03762] Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":2},{\"candidate\":{\"abstract\":\"October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/\",\"id\":\"web:78fe0f981b36\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"The Groundbreaking Transformer Paper: \\\"Attention is All You Need\\\" - The Brian Carter Group\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":3},{\"candidate\":{\"abstract\":\"The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://huggingface.co/papers/1706.03762\",\"id\":\"web:9f4a03c31c61\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Paper page - Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":4},{\"candidate\":{\"abstract\":\"August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827\",\"id\":\"web:c4b911c31bd8\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":5}],\"errors\":[],\"nextCursor\":\"15ade21eb65e491581bf7eea5f34e6ff\",\"status\":\"planning\",\"stopReason\":null,\"usage\":{\"inspectedCandidates\":0,\"llmCalls\":0,\"providerQueries\":0}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 11
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching web",
+                "sequence": 12
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 5 candidates",
+                "sequence": 13
+              },
+              {
+                "error": null,
+                "kind": "candidate_metadata_resolving",
+                "message": "Resolving metadata for 5 candidates",
+                "sequence": 14
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [
+              {
+                "candidate": {
+                  "abstract": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://www.scirp.org/reference/referencespapers?referenceid=3700044",
+                  "id": "web:017985d45c84",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 1
+              },
+              {
+                "candidate": {
+                  "abstract": "August 2, 2023 - Authors:Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin \u00b7 View a PDF of the paper titled Attention Is All You Need, by Ashish Vaswani and 7 other authors View PDF HTML (experimental)",
+                  "alreadyInLibrary": false,
+                  "arxivId": "1706.03762",
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://arxiv.org/abs/1706.03762",
+                  "id": "web:a7468c685165",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "[1706.03762] Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 2
+              },
+              {
+                "candidate": {
+                  "abstract": "October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/",
+                  "id": "web:78fe0f981b36",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "The Groundbreaking Transformer Paper: \"Attention is All You Need\" - The Brian Carter Group",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 3
+              },
+              {
+                "candidate": {
+                  "abstract": "The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://huggingface.co/papers/1706.03762",
+                  "id": "web:9f4a03c31c61",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Paper page - Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 4
+              },
+              {
+                "candidate": {
+                  "abstract": "August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827",
+                  "id": "web:c4b911c31bd8",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 5
+              }
+            ],
+            "errors": [],
+            "nextCursor": "15ade21eb65e491581bf7eea5f34e6ff",
+            "status": "planning",
+            "stopReason": null,
+            "usage": {
+              "inspectedCandidates": 0,
+              "llmCalls": 0,
+              "providerQueries": 0
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "cursor": "15ade21eb65e491581bf7eea5f34e6ff",
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-90722a0a-ce9e-43a6-b561-72e67e6e6761",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "cursor": "15ade21eb65e491581bf7eea5f34e6ff",
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": 27,
+        "error": null,
+        "id": "exec-90722a0a-ce9e-43a6-b561-72e67e6e6761",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":11},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching web\",\"sequence\":12},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 5 candidates\",\"sequence\":13},{\"error\":null,\"kind\":\"candidate_metadata_resolving\",\"message\":\"Resolving metadata for 5 candidates\",\"sequence\":14}],\"cancelRequested\":false,\"candidates\":[],\"errors\":[],\"nextCursor\":\"45a24ece23224b50b32f5b917b8cf10a\",\"status\":\"planning\",\"stopReason\":null,\"usage\":{\"inspectedCandidates\":0,\"llmCalls\":0,\"providerQueries\":0}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 11
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching web",
+                "sequence": 12
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 5 candidates",
+                "sequence": 13
+              },
+              {
+                "error": null,
+                "kind": "candidate_metadata_resolving",
+                "message": "Resolving metadata for 5 candidates",
+                "sequence": 14
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [],
+            "errors": [],
+            "nextCursor": "45a24ece23224b50b32f5b917b8cf10a",
+            "status": "planning",
+            "stopReason": null,
+            "usage": {
+              "inspectedCandidates": 0,
+              "llmCalls": 0,
+              "providerQueries": 0
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-aeceeb5c-2241-48eb-82db-d77b2b70e848",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": 20,
+        "error": null,
+        "id": "exec-aeceeb5c-2241-48eb-82db-d77b2b70e848",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":11},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching web\",\"sequence\":12},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 5 candidates\",\"sequence\":13},{\"error\":null,\"kind\":\"candidate_metadata_resolving\",\"message\":\"Resolving metadata for 5 candidates\",\"sequence\":14}],\"cancelRequested\":false,\"candidates\":[{\"candidate\":{\"abstract\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://www.scirp.org/reference/referencespapers?referenceid=3700044\",\"id\":\"web:017985d45c84\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":1},{\"candidate\":{\"abstract\":\"August 2, 2023 - Authors:Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin \u00b7 View a PDF of the paper titled Attention Is All You Need, by Ashish Vaswani and 7 other authors View PDF HTML (experimental)\",\"alreadyInLibrary\":false,\"arxivId\":\"1706.03762\",\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://arxiv.org/abs/1706.03762\",\"id\":\"web:a7468c685165\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"[1706.03762] Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":2},{\"candidate\":{\"abstract\":\"October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/\",\"id\":\"web:78fe0f981b36\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"The Groundbreaking Transformer Paper: \\\"Attention is All You Need\\\" - The Brian Carter Group\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":3},{\"candidate\":{\"abstract\":\"The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://huggingface.co/papers/1706.03762\",\"id\":\"web:9f4a03c31c61\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Paper page - Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":4},{\"candidate\":{\"abstract\":\"August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827\",\"id\":\"web:c4b911c31bd8\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":5}],\"errors\":[],\"nextCursor\":\"8ef43d64f3a442ce88fe8d4d35eba46e\",\"status\":\"planning\",\"stopReason\":null,\"usage\":{\"inspectedCandidates\":0,\"llmCalls\":0,\"providerQueries\":0}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 11
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching web",
+                "sequence": 12
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 5 candidates",
+                "sequence": 13
+              },
+              {
+                "error": null,
+                "kind": "candidate_metadata_resolving",
+                "message": "Resolving metadata for 5 candidates",
+                "sequence": 14
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [
+              {
+                "candidate": {
+                  "abstract": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://www.scirp.org/reference/referencespapers?referenceid=3700044",
+                  "id": "web:017985d45c84",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 1
+              },
+              {
+                "candidate": {
+                  "abstract": "August 2, 2023 - Authors:Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin \u00b7 View a PDF of the paper titled Attention Is All You Need, by Ashish Vaswani and 7 other authors View PDF HTML (experimental)",
+                  "alreadyInLibrary": false,
+                  "arxivId": "1706.03762",
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://arxiv.org/abs/1706.03762",
+                  "id": "web:a7468c685165",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "[1706.03762] Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 2
+              },
+              {
+                "candidate": {
+                  "abstract": "October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/",
+                  "id": "web:78fe0f981b36",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "The Groundbreaking Transformer Paper: \"Attention is All You Need\" - The Brian Carter Group",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 3
+              },
+              {
+                "candidate": {
+                  "abstract": "The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://huggingface.co/papers/1706.03762",
+                  "id": "web:9f4a03c31c61",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Paper page - Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 4
+              },
+              {
+                "candidate": {
+                  "abstract": "August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827",
+                  "id": "web:c4b911c31bd8",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 5
+              }
+            ],
+            "errors": [],
+            "nextCursor": "8ef43d64f3a442ce88fe8d4d35eba46e",
+            "status": "planning",
+            "stopReason": null,
+            "usage": {
+              "inspectedCandidates": 0,
+              "llmCalls": 0,
+              "providerQueries": 0
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "web:a7468c685165",
+          "request_id": "run-fce68e35-save-aiayn-original-1",
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-316d13bf-a75f-4e13-94df-92e601515b86",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "candidate_id": "web:a7468c685165",
+          "request_id": "run-fce68e35-save-aiayn-original-1",
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": 7,
+        "error": null,
+        "id": "exec-316d13bf-a75f-4e13-94df-92e601515b86",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"acquisitionStatus\":\"pending\",\"membershipStatus\":\"added\",\"paperId\":\"web:a7468c685165\",\"sourceIds\":[\"pdf:web:a7468c685165:c3ab01e47e61\"],\"sourceUrl\":\"https://arxiv.org/abs/1706.03762\",\"textStatus\":\"abstract_available\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "acquisitionStatus": "pending",
+            "membershipStatus": "added",
+            "paperId": "web:a7468c685165",
+            "sourceIds": [
+              "pdf:web:a7468c685165:c3ab01e47e61"
+            ],
+            "sourceUrl": "https://arxiv.org/abs/1706.03762",
+            "textStatus": "abstract_available"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_add_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "web:a7468c685165",
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-45c2d03f-04d6-40ff-8343-36084f7303a1",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "web:a7468c685165",
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": 5,
+        "error": null,
+        "id": "exec-45c2d03f-04d6-40ff-8343-36084f7303a1",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"paper\":{\"authors\":[\"Ashish Vaswani\",\"Noam Shazeer\",\"Niki Parmar\",\"Jakob Uszkoreit\",\"Llion Jones\",\"Aidan N. Gomez\",\"Lukasz Kaiser\",\"Illia Polosukhin\"],\"citations\":0,\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"hasAbstract\":true,\"id\":\"web:a7468c685165\",\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"status\":\"UNREAD\",\"title\":\"Attention Is All You Need\",\"venue\":\"cs.CL\",\"year\":2017},\"reason\":null,\"source\":{\"error\":null,\"id\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"kind\":\"pdf\",\"sourceUrl\":\"https://arxiv.org/pdf/1706.03762\",\"status\":\"cached\"},\"textAvailability\":\"full_text\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+            "paper": {
+              "authors": [
+                "Ashish Vaswani",
+                "Noam Shazeer",
+                "Niki Parmar",
+                "Jakob Uszkoreit",
+                "Llion Jones",
+                "Aidan N. Gomez",
+                "Lukasz Kaiser",
+                "Illia Polosukhin"
+              ],
+              "citations": 0,
+              "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+              "hasAbstract": true,
+              "id": "web:a7468c685165",
+              "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+              "status": "UNREAD",
+              "title": "Attention Is All You Need",
+              "venue": "cs.CL",
+              "year": 2017
+            },
+            "reason": null,
+            "source": {
+              "error": null,
+              "id": "pdf:web:a7468c685165:c3ab01e47e61",
+              "kind": "pdf",
+              "sourceUrl": "https://arxiv.org/pdf/1706.03762",
+              "status": "cached"
+            },
+            "textAvailability": "full_text"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "page_end": 4,
+          "page_start": 2,
+          "paper_id": "web:a7468c685165"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-00f75af2-4f63-4ee5-9c54-6e20ba162bb4",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "page_end": 4,
+          "page_start": 2,
+          "paper_id": "web:a7468c685165"
+        },
+        "durationMs": 23,
+        "error": null,
+        "id": "exec-00f75af2-4f63-4ee5-9c54-6e20ba162bb4",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"availability\":\"available\",\"coverage\":\"full_text\",\"hasMore\":false,\"nextCursor\":null,\"passages\":[{\"chunkId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:3\",\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"pageEnd\":2,\"pageStart\":2,\"paperId\":\"web:a7468c685165\",\"passageRef\":\"passage_7307a44662454abd8bcffeb5dbd8ec10\",\"sourceEnd\":4758,\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"sourceStart\":2834,\"text\":\"1 Introduction\\n\\nRecurrent neural networks, long short-term memory [13] and gated recurrent [7] neural networks in particular, have been firmly established as state of the art approaches in sequence modeling and transduction problems such as language modeling and machine translation [35, 2, 5]. Numerous efforts have since continued to push the boundaries of recurrent language models and encoder-decoder architectures [38, 24, 15].\\n\\nRecurrent models typically factor computation along the symbol positions of the input and output sequences. Aligning the positions to steps in computation time, they generate a sequence of hidden states ht, as a function of the previous hidden state ht\u22121 and the input for position t. This inherently sequential nature precludes parallelization within training examples, which becomes critical at longer sequence lengths, as memory constraints limit batching across examples. Recent work has achieved significant improvements in computational efficiency through factorization tricks [21] and conditional computation [32], while also improving model performance in case of the latter. The fundamental constraint of sequential computation, however, remains.\\n\\nAttention mechanisms have become an integral part of compelling sequence modeling and transduc\\u0002 tion models in various tasks, allowing modeling of dependencies without regard to their distance in the input or output sequences [2, 19]. In all but a few cases [27], however, such attention mechanisms are used in conjunction with a recurrent network.\\n\\nIn this work we propose the Transformer, a model architecture eschewing recurrence and instead relying entirely on an attention mechanism to draw global dependencies between input and output. The Transformer allows for significantly more parallelization and can reach a new state of the art in translation quality after being trained for as little as twelve hours on eight P100 GPUs.\"},{\"chunkId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:4\",\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"pageEnd\":2,\"pageStart\":2,\"paperId\":\"web:a7468c685165\",\"passageRef\":\"passage_8c5078f317234ab8bcfa10e97edf6525\",\"sourceEnd\":6592,\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"sourceStart\":4760,\"text\":\"2 Background\\n\\nThe goal of reducing sequential computation also forms the foundation of the Extended Neural GPU [16], ByteNet [18] and ConvS2S [9], all of which use convolutional neural networks as basic building block, computing hidden representations in parallel for all input and output positions. In these models, the number of operations required to relate signals from two arbitrary input or output positions grows in the distance between positions, linearly for ConvS2S and logarithmically for ByteNet. This makes it more difficult to learn dependencies between distant positions [12]. In the Transformer this is reduced to a constant number of operations, albeit at the cost of reduced effective resolution due to averaging attention-weighted positions, an effect we counteract with Multi-Head Attention as described in section 3.2.\\n\\nSelf-attention, sometimes called intra-attention is an attention mechanism relating different positions of a single sequence in order to compute a representation of the sequence. Self-attention has been used successfully in a variety of tasks including reading comprehension, abstractive summarization, textual entailment and learning task-independent sentence representations [4, 27, 28, 22].\\n\\nEnd-to-end memory networks are based on a recurrent attention mechanism instead of sequence\\u0002 aligned recurrence and have been shown to perform well on simple-language question answering and language modeling tasks [34].\\n\\nTo the best of our knowledge, however, the Transformer is the first transduction model relying entirely on self-attention to compute representations of its input and output without using sequence\\u0002 aligned RNNs or convolution. In the following sections, we will describe the Transformer, motivate self-attention and discuss its advantages over models such as [17, 18] and [9].\"},{\"chunkId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:5\",\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"pageEnd\":3,\"pageStart\":2,\"paperId\":\"web:a7468c685165\",\"passageRef\":\"passage_1e1feb95064042b8a44ad3b4e391d1b9\",\"sourceEnd\":8029,\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"sourceStart\":6594,\"text\":\"3 Model Architecture\\n\\nMost competitive neural sequence transduction models have an encoder-decoder structure [5, 2, 35]. Here, the encoder maps an input sequence of symbol representations (x1, ..., xn) to a sequence of continuous representations z = (z1, ..., zn). Given z, the decoder then generates an output sequence (y1, ..., ym) of symbols one element at a time. At each step the model is auto-regressive [10], consuming the previously generated symbols as additional input when generating the next.\\n\\n2\\n\\nFigure 1: The Transformer - model architecture.\\n\\nThe Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1, respectively.\\n\\n3.1 Encoder and Decoder Stacks\\n\\nEncoder: The encoder is composed of a stack of N = 6 identical layers. Each layer has two sub-layers. The first is a multi-head self-attention mechanism, and the second is a simple, position\\u0002 wise fully connected feed-forward network. We employ a residual connection [11] around each of the two sub-layers, followed by layer normalization [1]. That is, the output of each sub-layer is LayerNorm(x + Sublayer(x)), where Sublayer(x) is the function implemented by the sub-layer itself. To facilitate these residual connections, all sub-layers in the model, as well as the embedding layers, produce outputs of dimension dmodel = 512.\"},{\"chunkId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:6\",\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"pageEnd\":3,\"pageStart\":3,\"paperId\":\"web:a7468c685165\",\"passageRef\":\"passage_b389aec252bc411aa63bb996a240ffcf\",\"sourceEnd\":8935,\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"sourceStart\":8031,\"text\":\"Decoder: The decoder is also composed of a stack ofN = 6 identical layers. In addition to the two sub-layers in each encoder layer, the decoder inserts a third sub-layer, which performs multi-head attention over the output of the encoder stack. Similar to the encoder, we employ residual connections around each of the sub-layers, followed by layer normalization. We also modify the self-attention sub-layer in the decoder stack to prevent positions from attending to subsequent positions. This masking, combined with fact that the output embeddings are offset by one position, ensures that the predictions for position i can depend only on the known outputs at positions less than i.\\n\\n3.2 Attention\\n\\nAn attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is computed as a weighted sum\\n\\n3\"},{\"chunkId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:7\",\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"pageEnd\":4,\"pageStart\":4,\"paperId\":\"web:a7468c685165\",\"passageRef\":\"passage_85f9d8aa4ea84ab88b0afcbb474dc00e\",\"sourceEnd\":10794,\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"sourceStart\":8937,\"text\":\"Scaled Dot-Product Attention Multi-Head Attention\\n\\nFigure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several attention layers running in parallel.\\n\\nof the values, where the weight assigned to each value is computed by a compatibility function of the query with the corresponding key.\\n\\n3.2.1 Scaled Dot-Product Attention\\n\\nWe call our particular attention \\\"Scaled Dot-Product Attention\\\" (Figure 2). The input consists of queries and keys of dimension dk, and values of dimension dv. We compute the dot products of the query with all keys, divide each by \u221adk, and apply a softmax function to obtain the weights on the values.\\n\\nIn practice, we compute the attention function on a set of queries simultaneously, packed together into a matrix Q. The keys and values are also packed together into matrices K and V. We compute the matrix of outputs as:\\n\\nQKT\\n\\nAttention(Q, K, V) = softmax( )V (1)\\n\\n\u221adk\\n\\nThe two most commonly used attention functions are additive attention [2], and dot-product (multi\\u0002 plicative) attention. Dot-product attention is identical to our algorithm, except for the scaling factor of \u221a1dk . Additive attention computes the compatibility function using a feed-forward network with a single hidden layer. While the two are similar in theoretical complexity, dot-product attention is much faster and more space-efficient in practice, since it can be implemented using highly optimized matrix multiplication code.\\n\\nWhile for small values ofdk the two mechanisms perform similarly, additive attention outperforms dot product attention without scaling for larger values ofdk [3]. We suspect that for large values of dk, the dot products grow large in magnitude, pushing the softmax function into regions where it has extremely small gradients 4. To counteract this effect, we scale the dot products by \u221a1dk .\"},{\"chunkId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:8\",\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"pageEnd\":4,\"pageStart\":4,\"paperId\":\"web:a7468c685165\",\"passageRef\":\"passage_9996bed8b92c4f37baedb198b2bbbd0b\",\"sourceEnd\":11451,\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"sourceStart\":10796,\"text\":\"3.2.2 Multi-Head Attention\\n\\nInstead of performing a single attention function with dmodel-dimensional keys, values and queries, we found it beneficial to linearly project the queries, keys and values h times with different, learned linear projections to dk, dk and dv dimensions, respectively. On each of these projected versions of queries, keys and values we then perform the attention function in parallel, yielding dv-dimensional\\n\\n4To illustrate why the dot products get large, assume that the components ofq and k are independent random variables with mean 0 and variance 1. Then their dot product, q \u00b7 k = Pid=1k qiki, has mean 0 and variance dk.\\n\\n4\"}],\"reason\":null,\"sourceUrl\":null,\"sourceVersion\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "availability": "available",
+            "coverage": "full_text",
+            "hasMore": false,
+            "nextCursor": null,
+            "passages": [
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:3",
+                "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+                "pageEnd": 2,
+                "pageStart": 2,
+                "paperId": "web:a7468c685165",
+                "passageRef": "passage_7307a44662454abd8bcffeb5dbd8ec10",
+                "sourceEnd": 4758,
+                "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+                "sourceStart": 2834,
+                "text": "1 Introduction\n\nRecurrent neural networks, long short-term memory [13] and gated recurrent [7] neural networks in particular, have been firmly established as state of the art approaches in sequence modeling and transduction problems such as language modeling and machine translation [35, 2, 5]. Numerous efforts have since continued to push the boundaries of recurrent language models and encoder-decoder architectures [38, 24, 15].\n\nRecurrent models typically factor computation along the symbol positions of the input and output sequences. Aligning the positions to steps in computation time, they generate a sequence of hidden states ht, as a function of the previous hidden state ht\u22121 and the input for position t. This inherently sequential nature precludes parallelization within training examples, which becomes critical at longer sequence lengths, as memory constraints limit batching across examples. Recent work has achieved significant improvements in computational efficiency through factorization tricks [21] and conditional computation [32], while also improving model performance in case of the latter. The fundamental constraint of sequential computation, however, remains.\n\nAttention mechanisms have become an integral part of compelling sequence modeling and transduc\u0002 tion models in various tasks, allowing modeling of dependencies without regard to their distance in the input or output sequences [2, 19]. In all but a few cases [27], however, such attention mechanisms are used in conjunction with a recurrent network.\n\nIn this work we propose the Transformer, a model architecture eschewing recurrence and instead relying entirely on an attention mechanism to draw global dependencies between input and output. The Transformer allows for significantly more parallelization and can reach a new state of the art in translation quality after being trained for as little as twelve hours on eight P100 GPUs."
+              },
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:4",
+                "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+                "pageEnd": 2,
+                "pageStart": 2,
+                "paperId": "web:a7468c685165",
+                "passageRef": "passage_8c5078f317234ab8bcfa10e97edf6525",
+                "sourceEnd": 6592,
+                "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+                "sourceStart": 4760,
+                "text": "2 Background\n\nThe goal of reducing sequential computation also forms the foundation of the Extended Neural GPU [16], ByteNet [18] and ConvS2S [9], all of which use convolutional neural networks as basic building block, computing hidden representations in parallel for all input and output positions. In these models, the number of operations required to relate signals from two arbitrary input or output positions grows in the distance between positions, linearly for ConvS2S and logarithmically for ByteNet. This makes it more difficult to learn dependencies between distant positions [12]. In the Transformer this is reduced to a constant number of operations, albeit at the cost of reduced effective resolution due to averaging attention-weighted positions, an effect we counteract with Multi-Head Attention as described in section 3.2.\n\nSelf-attention, sometimes called intra-attention is an attention mechanism relating different positions of a single sequence in order to compute a representation of the sequence. Self-attention has been used successfully in a variety of tasks including reading comprehension, abstractive summarization, textual entailment and learning task-independent sentence representations [4, 27, 28, 22].\n\nEnd-to-end memory networks are based on a recurrent attention mechanism instead of sequence\u0002 aligned recurrence and have been shown to perform well on simple-language question answering and language modeling tasks [34].\n\nTo the best of our knowledge, however, the Transformer is the first transduction model relying entirely on self-attention to compute representations of its input and output without using sequence\u0002 aligned RNNs or convolution. In the following sections, we will describe the Transformer, motivate self-attention and discuss its advantages over models such as [17, 18] and [9]."
+              },
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:5",
+                "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+                "pageEnd": 3,
+                "pageStart": 2,
+                "paperId": "web:a7468c685165",
+                "passageRef": "passage_1e1feb95064042b8a44ad3b4e391d1b9",
+                "sourceEnd": 8029,
+                "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+                "sourceStart": 6594,
+                "text": "3 Model Architecture\n\nMost competitive neural sequence transduction models have an encoder-decoder structure [5, 2, 35]. Here, the encoder maps an input sequence of symbol representations (x1, ..., xn) to a sequence of continuous representations z = (z1, ..., zn). Given z, the decoder then generates an output sequence (y1, ..., ym) of symbols one element at a time. At each step the model is auto-regressive [10], consuming the previously generated symbols as additional input when generating the next.\n\n2\n\nFigure 1: The Transformer - model architecture.\n\nThe Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1, respectively.\n\n3.1 Encoder and Decoder Stacks\n\nEncoder: The encoder is composed of a stack of N = 6 identical layers. Each layer has two sub-layers. The first is a multi-head self-attention mechanism, and the second is a simple, position\u0002 wise fully connected feed-forward network. We employ a residual connection [11] around each of the two sub-layers, followed by layer normalization [1]. That is, the output of each sub-layer is LayerNorm(x + Sublayer(x)), where Sublayer(x) is the function implemented by the sub-layer itself. To facilitate these residual connections, all sub-layers in the model, as well as the embedding layers, produce outputs of dimension dmodel = 512."
+              },
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:6",
+                "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+                "pageEnd": 3,
+                "pageStart": 3,
+                "paperId": "web:a7468c685165",
+                "passageRef": "passage_b389aec252bc411aa63bb996a240ffcf",
+                "sourceEnd": 8935,
+                "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+                "sourceStart": 8031,
+                "text": "Decoder: The decoder is also composed of a stack ofN = 6 identical layers. In addition to the two sub-layers in each encoder layer, the decoder inserts a third sub-layer, which performs multi-head attention over the output of the encoder stack. Similar to the encoder, we employ residual connections around each of the sub-layers, followed by layer normalization. We also modify the self-attention sub-layer in the decoder stack to prevent positions from attending to subsequent positions. This masking, combined with fact that the output embeddings are offset by one position, ensures that the predictions for position i can depend only on the known outputs at positions less than i.\n\n3.2 Attention\n\nAn attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is computed as a weighted sum\n\n3"
+              },
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:7",
+                "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+                "pageEnd": 4,
+                "pageStart": 4,
+                "paperId": "web:a7468c685165",
+                "passageRef": "passage_85f9d8aa4ea84ab88b0afcbb474dc00e",
+                "sourceEnd": 10794,
+                "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+                "sourceStart": 8937,
+                "text": "Scaled Dot-Product Attention Multi-Head Attention\n\nFigure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several attention layers running in parallel.\n\nof the values, where the weight assigned to each value is computed by a compatibility function of the query with the corresponding key.\n\n3.2.1 Scaled Dot-Product Attention\n\nWe call our particular attention \"Scaled Dot-Product Attention\" (Figure 2). The input consists of queries and keys of dimension dk, and values of dimension dv. We compute the dot products of the query with all keys, divide each by \u221adk, and apply a softmax function to obtain the weights on the values.\n\nIn practice, we compute the attention function on a set of queries simultaneously, packed together into a matrix Q. The keys and values are also packed together into matrices K and V. We compute the matrix of outputs as:\n\nQKT\n\nAttention(Q, K, V) = softmax( )V (1)\n\n\u221adk\n\nThe two most commonly used attention functions are additive attention [2], and dot-product (multi\u0002 plicative) attention. Dot-product attention is identical to our algorithm, except for the scaling factor of \u221a1dk . Additive attention computes the compatibility function using a feed-forward network with a single hidden layer. While the two are similar in theoretical complexity, dot-product attention is much faster and more space-efficient in practice, since it can be implemented using highly optimized matrix multiplication code.\n\nWhile for small values ofdk the two mechanisms perform similarly, additive attention outperforms dot product attention without scaling for larger values ofdk [3]. We suspect that for large values of dk, the dot products grow large in magnitude, pushing the softmax function into regions where it has extremely small gradients 4. To counteract this effect, we scale the dot products by \u221a1dk ."
+              },
+              {
+                "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:8",
+                "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+                "pageEnd": 4,
+                "pageStart": 4,
+                "paperId": "web:a7468c685165",
+                "passageRef": "passage_9996bed8b92c4f37baedb198b2bbbd0b",
+                "sourceEnd": 11451,
+                "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+                "sourceStart": 10796,
+                "text": "3.2.2 Multi-Head Attention\n\nInstead of performing a single attention function with dmodel-dimensional keys, values and queries, we found it beneficial to linearly project the queries, keys and values h times with different, learned linear projections to dk, dk and dv dimensions, respectively. On each of these projected versions of queries, keys and values we then perform the attention function in parallel, yielding dv-dimensional\n\n4To illustrate why the dot products get large, assume that the components ofq and k are independent random variables with mean 0 and variance 1. Then their dot product, q \u00b7 k = Pid=1k qiki, has mean 0 and variance dk.\n\n4"
+              }
+            ],
+            "reason": null,
+            "sourceUrl": null,
+            "sourceVersion": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "reader_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "base_revision": 1,
+          "changes": [
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "The paper\u2019s Model Architecture section directly describes the encoder-decoder structure, stacked self-attention and point-wise fully connected layers, and the six-layer encoder with its sublayers, residual connections, and layer normalization.",
+                  "passage_ref": "passage_1e1feb95064042b8a44ad3b4e391d1b9",
+                  "relationship": "supports",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "transformer_architecture_original_paper",
+              "reason": "Answer the active architecture question with directly verified full-text evidence from the original 2017 paper.",
+              "relationships": [
+                {
+                  "kind": "motivated_by",
+                  "target_entry_id": "research_entry_1788810951001537000"
+                }
+              ],
+              "statement": "The original Transformer is an encoder-decoder sequence transduction architecture built from stacked self-attention and position-wise fully connected layers: its encoder uses six identical layers with multi-head self-attention and feed-forward sublayers, with residual connections and layer normalization."
+            }
+          ],
+          "project_id": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+          "request_id": "run-fce68e35-create-transformer-architecture-finding-1"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-a66439e4-60fb-4e49-94cb-e46e2e8216d7",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "state_update",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "base_revision": 1,
+          "changes": [
+            {
+              "epistemic_status": "source_supported",
+              "evidence": [
+                {
+                  "explanation": "The paper\u2019s Model Architecture section directly describes the encoder-decoder structure, stacked self-attention and point-wise fully connected layers, and the six-layer encoder with its sublayers, residual connections, and layer normalization.",
+                  "passage_ref": "passage_1e1feb95064042b8a44ad3b4e391d1b9",
+                  "relationship": "supports",
+                  "source": "passage"
+                }
+              ],
+              "kind": "finding",
+              "operation": "create",
+              "operation_key": "transformer_architecture_original_paper",
+              "reason": "Answer the active architecture question with directly verified full-text evidence from the original 2017 paper.",
+              "relationships": [
+                {
+                  "kind": "motivated_by",
+                  "target_entry_id": "research_entry_1788810951001537000"
+                }
+              ],
+              "statement": "The original Transformer is an encoder-decoder sequence transduction architecture built from stacked self-attention and position-wise fully connected layers: its encoder uses six identical layers with multi-head self-attention and feed-forward sublayers, with residual connections and layer normalization."
+            }
+          ],
+          "project_id": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518",
+          "request_id": "run-fce68e35-create-transformer-architecture-finding-1"
+        },
+        "durationMs": 15,
+        "error": null,
+        "id": "exec-a66439e4-60fb-4e49-94cb-e46e2e8216d7",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"affectedEntryIds\":[\"research_entry_1788811065114223000\"],\"createdEntryIds\":{\"transformer_architecture_original_paper\":\"research_entry_1788811065114223000\"},\"revision\":2}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "affectedEntryIds": [
+              "research_entry_1788811065114223000"
+            ],
+            "createdEntryIds": {
+              "transformer_architecture_original_paper": "research_entry_1788811065114223000"
+            },
+            "revision": 2
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "state_update",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "entry_ids": [
+            "research_entry_1788811065114223000"
+          ],
+          "limit": 10,
+          "project_id": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-b5d107d6-4240-411b-8751-710b1d8eeae3",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "entry_ids": [
+            "research_entry_1788811065114223000"
+          ],
+          "limit": 10,
+          "project_id": "project:research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": 17,
+        "error": null,
+        "id": "exec-b5d107d6-4240-411b-8751-710b1d8eeae3",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"currentRevision\":2,\"entries\":[{\"context\":[],\"epistemicStatus\":\"source_supported\",\"evidence\":[{\"chunkId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:5\",\"excerpt\":\"3 Model Architecture\\n\\nMost competitive neural sequence transduction models have an encoder-decoder structure [5, 2, 35]. Here, the encoder maps an input sequence of symbol representations (x1, ..., xn) to a sequence of continuous representations z = (z1, ..., zn). Given z, the decoder then generates an output sequence (y1, ..., ym) of symbols one element at a time. At each step the model is auto-regressive [10], consuming the previously generated symbols as additional input when generating the next.\\n\\n2\\n\\nFigure 1: The Transformer - model architecture.\\n\\nThe Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1, respectively.\\n\\n3.1 Encoder and Decoder Stacks\\n\\nEncoder: The encoder is composed of a stack of N = 6 identical layers. Each layer has two sub-layers. The first is a multi-head self-attention mechanism, and the second is a simple, position\\u0002 wise fully connected feed-forward network. We employ a residual connection [11] around each of the two sub-layers, followed by layer normalization [1]. That is, the output of each sub-layer is LayerNorm(x + Sublayer(x)), where Sublayer(x) is the function implemented by the sub-layer itself. To facilitate these residual connections, all sub-layers in the model, as well as the embedding layers, produce outputs of dimension dmodel = 512.\",\"explanation\":\"The paper\u2019s Model Architecture section directly describes the encoder-decoder structure, stacked self-attention and point-wise fully connected layers, and the six-layer encoder with its sublayers, residual connections, and layer normalization.\",\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"id\":\"research_entry_1788811065114223000:r2:e0\",\"pageEnd\":2,\"pageStart\":1,\"paperId\":\"web:a7468c685165\",\"relationship\":\"supports\",\"sourceEnd\":8029,\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"sourceStart\":6594}],\"firstRevision\":2,\"id\":\"research_entry_1788811065114223000\",\"kind\":\"finding\",\"lastRevision\":2,\"lifecycle\":\"active\",\"originRunId\":\"harness_run_1788810951492154000\",\"originalKind\":\"finding\",\"relatedEntries\":[{\"kind\":\"motivated_by\",\"targetEntryId\":\"research_entry_1788810951001537000\"}],\"revisionRunId\":\"harness_run_1788810951492154000\",\"statement\":\"The original Transformer is an encoder-decoder sequence transduction architecture built from stacked self-attention and position-wise fully connected layers: its encoder uses six identical layers with multi-head self-attention and feed-forward sublayers, with residual connections and layer normalization.\"}],\"nextCursor\":null,\"revision\":2}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "currentRevision": 2,
+            "entries": [
+              {
+                "context": [],
+                "epistemicStatus": "source_supported",
+                "evidence": [
+                  {
+                    "chunkId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:5",
+                    "excerpt": "3 Model Architecture\n\nMost competitive neural sequence transduction models have an encoder-decoder structure [5, 2, 35]. Here, the encoder maps an input sequence of symbol representations (x1, ..., xn) to a sequence of continuous representations z = (z1, ..., zn). Given z, the decoder then generates an output sequence (y1, ..., ym) of symbols one element at a time. At each step the model is auto-regressive [10], consuming the previously generated symbols as additional input when generating the next.\n\n2\n\nFigure 1: The Transformer - model architecture.\n\nThe Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1, respectively.\n\n3.1 Encoder and Decoder Stacks\n\nEncoder: The encoder is composed of a stack of N = 6 identical layers. Each layer has two sub-layers. The first is a multi-head self-attention mechanism, and the second is a simple, position\u0002 wise fully connected feed-forward network. We employ a residual connection [11] around each of the two sub-layers, followed by layer normalization [1]. That is, the output of each sub-layer is LayerNorm(x + Sublayer(x)), where Sublayer(x) is the function implemented by the sub-layer itself. To facilitate these residual connections, all sub-layers in the model, as well as the embedding layers, produce outputs of dimension dmodel = 512.",
+                    "explanation": "The paper\u2019s Model Architecture section directly describes the encoder-decoder structure, stacked self-attention and point-wise fully connected layers, and the six-layer encoder with its sublayers, residual connections, and layer normalization.",
+                    "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+                    "id": "research_entry_1788811065114223000:r2:e0",
+                    "pageEnd": 2,
+                    "pageStart": 1,
+                    "paperId": "web:a7468c685165",
+                    "relationship": "supports",
+                    "sourceEnd": 8029,
+                    "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+                    "sourceStart": 6594
+                  }
+                ],
+                "firstRevision": 2,
+                "id": "research_entry_1788811065114223000",
+                "kind": "finding",
+                "lastRevision": 2,
+                "lifecycle": "active",
+                "originRunId": "harness_run_1788810951492154000",
+                "originalKind": "finding",
+                "relatedEntries": [
+                  {
+                    "kind": "motivated_by",
+                    "targetEntryId": "research_entry_1788810951001537000"
+                  }
+                ],
+                "revisionRunId": "harness_run_1788810951492154000",
+                "statement": "The original Transformer is an encoder-decoder sequence transduction architecture built from stacked self-attention and position-wise fully connected layers: its encoder uses six identical layers with multi-head self-attention and feed-forward sublayers, with residual connections and layer normalization."
+              }
+            ],
+            "nextCursor": null,
+            "revision": 2
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "state_read",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "web:a7468c685165",
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-34384870-d66d-4be2-aef0-1f23c3a78a3b",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "paper_id": "web:a7468c685165",
+          "vault_id": "research-evaluation-4faa38edfd764cdaa87e031e23134518"
+        },
+        "durationMs": 4,
+        "error": null,
+        "id": "exec-34384870-d66d-4be2-aef0-1f23c3a78a3b",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"paper\":{\"authors\":[\"Ashish Vaswani\",\"Noam Shazeer\",\"Niki Parmar\",\"Jakob Uszkoreit\",\"Llion Jones\",\"Aidan N. Gomez\",\"Lukasz Kaiser\",\"Illia Polosukhin\"],\"citations\":0,\"extractionId\":\"extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\",\"hasAbstract\":true,\"id\":\"web:a7468c685165\",\"sourceId\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"status\":\"UNREAD\",\"title\":\"Attention Is All You Need\",\"venue\":\"cs.CL\",\"year\":2017},\"reason\":null,\"source\":{\"error\":null,\"id\":\"pdf:web:a7468c685165:c3ab01e47e61\",\"kind\":\"pdf\",\"sourceUrl\":\"https://arxiv.org/pdf/1706.03762\",\"status\":\"cached\"},\"textAvailability\":\"full_text\"}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+            "paper": {
+              "authors": [
+                "Ashish Vaswani",
+                "Noam Shazeer",
+                "Niki Parmar",
+                "Jakob Uszkoreit",
+                "Llion Jones",
+                "Aidan N. Gomez",
+                "Lukasz Kaiser",
+                "Illia Polosukhin"
+              ],
+              "citations": 0,
+              "extractionId": "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61",
+              "hasAbstract": true,
+              "id": "web:a7468c685165",
+              "sourceId": "pdf:web:a7468c685165:c3ab01e47e61",
+              "status": "UNREAD",
+              "title": "Attention Is All You Need",
+              "venue": "cs.CL",
+              "year": 2017
+            },
+            "reason": null,
+            "source": {
+              "error": null,
+              "id": "pdf:web:a7468c685165:c3ab01e47e61",
+              "kind": "pdf",
+              "sourceUrl": "https://arxiv.org/pdf/1706.03762",
+              "status": "cached"
+            },
+            "textAvailability": "full_text"
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "vault_get_paper",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/started",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": null,
+        "error": null,
+        "id": "exec-128731f1-2e85-4a17-8c00-e0f1d514c182",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": null,
+        "server": "ioi",
+        "status": "inProgress",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    },
+    {
+      "event": "item/completed",
+      "item": {
+        "appContext": null,
+        "arguments": {
+          "limit": 20,
+          "run_id": "run_1788811004038012000"
+        },
+        "durationMs": 11,
+        "error": null,
+        "id": "exec-128731f1-2e85-4a17-8c00-e0f1d514c182",
+        "pluginId": null,
+        "readOnlyHint": null,
+        "result": {
+          "_meta": null,
+          "content": [
+            {
+              "text": "{\"activity\":[{\"error\":null,\"kind\":\"iteration_planned\",\"message\":\"Planning research iteration 1\",\"sequence\":11},{\"error\":null,\"kind\":\"provider_query_started\",\"message\":\"Searching web\",\"sequence\":12},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 5 candidates\",\"sequence\":13},{\"error\":null,\"kind\":\"candidate_metadata_resolving\",\"message\":\"Resolving metadata for 5 candidates\",\"sequence\":14},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"web returned 5 candidates\",\"sequence\":15},{\"error\":null,\"kind\":\"provider_query_completed\",\"message\":\"web returned 5 candidates\",\"sequence\":16},{\"error\":null,\"kind\":\"candidates_deduplicated\",\"message\":\"Retained 5 unique candidates\",\"sequence\":17},{\"error\":null,\"kind\":\"candidates_inspected\",\"message\":\"Inspected 5 candidates\",\"sequence\":18},{\"error\":null,\"kind\":\"coverage_assessing\",\"message\":\"Assessing research coverage\",\"sequence\":19},{\"error\":null,\"kind\":\"candidates_ranking\",\"message\":\"Ranking 5 candidates\",\"sequence\":20}],\"cancelRequested\":false,\"candidates\":[{\"candidate\":{\"abstract\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://www.scirp.org/reference/referencespapers?referenceid=3700044\",\"id\":\"web:017985d45c84\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":1},{\"candidate\":{\"abstract\":\"August 2, 2023 - Authors:Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin \u00b7 View a PDF of the paper titled Attention Is All You Need, by Ashish Vaswani and 7 other authors View PDF HTML (experimental)\",\"alreadyInLibrary\":false,\"arxivId\":\"1706.03762\",\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://arxiv.org/abs/1706.03762\",\"id\":\"web:a7468c685165\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"[1706.03762] Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":2},{\"candidate\":{\"abstract\":\"October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/\",\"id\":\"web:78fe0f981b36\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"The Groundbreaking Transformer Paper: \\\"Attention is All You Need\\\" - The Brian Carter Group\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":3},{\"candidate\":{\"abstract\":\"The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://huggingface.co/papers/1706.03762\",\"id\":\"web:9f4a03c31c61\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Paper page - Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":4},{\"candidate\":{\"abstract\":\"August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827\",\"id\":\"web:c4b911c31bd8\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":5},{\"candidate\":{\"abstract\":\"The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://huggingface.co/papers/1706.03762\",\"id\":\"web:9f4a03c31c61\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Paper page - Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":6},{\"candidate\":{\"abstract\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://www.scirp.org/reference/referencespapers?referenceid=3700044\",\"id\":\"web:017985d45c84\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":7},{\"candidate\":{\"abstract\":\"October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/\",\"id\":\"web:78fe0f981b36\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"The Groundbreaking Transformer Paper: \\\"Attention is All You Need\\\" - The Brian Carter Group\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":8},{\"candidate\":{\"abstract\":\"August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827\",\"id\":\"web:c4b911c31bd8\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium\",\"venue\":null,\"year\":null},\"phase\":\"preview\",\"sequence\":9},{\"candidate\":{\"abstract\":\"The dominant sequence transduction models are based on complex recurrent or convolutional neural networks in an encoder-decoder configuration. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data.\",\"alreadyInLibrary\":false,\"arxivId\":\"1706.03762\",\"authors\":[\"Ashish Vaswani\",\"Noam Shazeer\",\"Niki Parmar\",\"Jakob Uszkoreit\",\"Llion Jones\",\"Aidan N. Gomez\",\"Lukasz Kaiser\",\"Illia Polosukhin\"],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://arxiv.org/abs/1706.03762\",\"id\":\"web:a7468c685165\",\"openalexId\":null,\"pdfUrl\":\"https://arxiv.org/pdf/1706.03762\",\"sourceProvider\":\"arxiv\",\"title\":\"Attention Is All You Need\",\"venue\":\"cs.CL\",\"year\":2017},\"phase\":\"preview\",\"sequence\":10},{\"candidate\":{\"abstract\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://www.scirp.org/reference/referencespapers?referenceid=3700044\",\"id\":\"web:017985d45c84\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing\",\"venue\":null,\"year\":null},\"phase\":\"ranked\",\"sequence\":11},{\"candidate\":{\"abstract\":\"October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/\",\"id\":\"web:78fe0f981b36\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"The Groundbreaking Transformer Paper: \\\"Attention is All You Need\\\" - The Brian Carter Group\",\"venue\":null,\"year\":null},\"phase\":\"ranked\",\"sequence\":12},{\"candidate\":{\"abstract\":\"The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://huggingface.co/papers/1706.03762\",\"id\":\"web:9f4a03c31c61\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"Paper page - Attention Is All You Need\",\"venue\":null,\"year\":null},\"phase\":\"ranked\",\"sequence\":13},{\"candidate\":{\"abstract\":\"August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762\",\"alreadyInLibrary\":false,\"arxivId\":null,\"authors\":[],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827\",\"id\":\"web:c4b911c31bd8\",\"openalexId\":null,\"pdfUrl\":null,\"sourceProvider\":\"web\",\"title\":\"ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium\",\"venue\":null,\"year\":null},\"phase\":\"ranked\",\"sequence\":14},{\"candidate\":{\"abstract\":\"The dominant sequence transduction models are based on complex recurrent or convolutional neural networks in an encoder-decoder configuration. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data.\",\"alreadyInLibrary\":false,\"arxivId\":\"1706.03762\",\"authors\":[\"Ashish Vaswani\",\"Noam Shazeer\",\"Niki Parmar\",\"Jakob Uszkoreit\",\"Llion Jones\",\"Aidan N. Gomez\",\"Lukasz Kaiser\",\"Illia Polosukhin\"],\"citationCount\":null,\"doi\":null,\"externalUrl\":\"https://arxiv.org/abs/1706.03762\",\"id\":\"web:a7468c685165\",\"openalexId\":null,\"pdfUrl\":\"https://arxiv.org/pdf/1706.03762\",\"sourceProvider\":\"arxiv\",\"title\":\"Attention Is All You Need\",\"venue\":\"cs.CL\",\"year\":2017},\"phase\":\"ranked\",\"sequence\":15}],\"errors\":[],\"nextCursor\":null,\"status\":\"ready\",\"stopReason\":\"target_reached\",\"usage\":{\"inspectedCandidates\":5,\"llmCalls\":2,\"providerQueries\":1}}",
+              "type": "text"
+            }
+          ],
+          "structuredContent": {
+            "activity": [
+              {
+                "error": null,
+                "kind": "iteration_planned",
+                "message": "Planning research iteration 1",
+                "sequence": 11
+              },
+              {
+                "error": null,
+                "kind": "provider_query_started",
+                "message": "Searching web",
+                "sequence": 12
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 5 candidates",
+                "sequence": 13
+              },
+              {
+                "error": null,
+                "kind": "candidate_metadata_resolving",
+                "message": "Resolving metadata for 5 candidates",
+                "sequence": 14
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "web returned 5 candidates",
+                "sequence": 15
+              },
+              {
+                "error": null,
+                "kind": "provider_query_completed",
+                "message": "web returned 5 candidates",
+                "sequence": 16
+              },
+              {
+                "error": null,
+                "kind": "candidates_deduplicated",
+                "message": "Retained 5 unique candidates",
+                "sequence": 17
+              },
+              {
+                "error": null,
+                "kind": "candidates_inspected",
+                "message": "Inspected 5 candidates",
+                "sequence": 18
+              },
+              {
+                "error": null,
+                "kind": "coverage_assessing",
+                "message": "Assessing research coverage",
+                "sequence": 19
+              },
+              {
+                "error": null,
+                "kind": "candidates_ranking",
+                "message": "Ranking 5 candidates",
+                "sequence": 20
+              }
+            ],
+            "cancelRequested": false,
+            "candidates": [
+              {
+                "candidate": {
+                  "abstract": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://www.scirp.org/reference/referencespapers?referenceid=3700044",
+                  "id": "web:017985d45c84",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 1
+              },
+              {
+                "candidate": {
+                  "abstract": "August 2, 2023 - Authors:Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin \u00b7 View a PDF of the paper titled Attention Is All You Need, by Ashish Vaswani and 7 other authors View PDF HTML (experimental)",
+                  "alreadyInLibrary": false,
+                  "arxivId": "1706.03762",
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://arxiv.org/abs/1706.03762",
+                  "id": "web:a7468c685165",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "[1706.03762] Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 2
+              },
+              {
+                "candidate": {
+                  "abstract": "October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/",
+                  "id": "web:78fe0f981b36",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "The Groundbreaking Transformer Paper: \"Attention is All You Need\" - The Brian Carter Group",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 3
+              },
+              {
+                "candidate": {
+                  "abstract": "The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://huggingface.co/papers/1706.03762",
+                  "id": "web:9f4a03c31c61",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Paper page - Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 4
+              },
+              {
+                "candidate": {
+                  "abstract": "August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827",
+                  "id": "web:c4b911c31bd8",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 5
+              },
+              {
+                "candidate": {
+                  "abstract": "The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://huggingface.co/papers/1706.03762",
+                  "id": "web:9f4a03c31c61",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Paper page - Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 6
+              },
+              {
+                "candidate": {
+                  "abstract": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://www.scirp.org/reference/referencespapers?referenceid=3700044",
+                  "id": "web:017985d45c84",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 7
+              },
+              {
+                "candidate": {
+                  "abstract": "October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/",
+                  "id": "web:78fe0f981b36",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "The Groundbreaking Transformer Paper: \"Attention is All You Need\" - The Brian Carter Group",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 8
+              },
+              {
+                "candidate": {
+                  "abstract": "August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827",
+                  "id": "web:c4b911c31bd8",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "preview",
+                "sequence": 9
+              },
+              {
+                "candidate": {
+                  "abstract": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks in an encoder-decoder configuration. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data.",
+                  "alreadyInLibrary": false,
+                  "arxivId": "1706.03762",
+                  "authors": [
+                    "Ashish Vaswani",
+                    "Noam Shazeer",
+                    "Niki Parmar",
+                    "Jakob Uszkoreit",
+                    "Llion Jones",
+                    "Aidan N. Gomez",
+                    "Lukasz Kaiser",
+                    "Illia Polosukhin"
+                  ],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://arxiv.org/abs/1706.03762",
+                  "id": "web:a7468c685165",
+                  "openalexId": null,
+                  "pdfUrl": "https://arxiv.org/pdf/1706.03762",
+                  "sourceProvider": "arxiv",
+                  "title": "Attention Is All You Need",
+                  "venue": "cs.CL",
+                  "year": 2017
+                },
+                "phase": "preview",
+                "sequence": 10
+              },
+              {
+                "candidate": {
+                  "abstract": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762.",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://www.scirp.org/reference/referencespapers?referenceid=3700044",
+                  "id": "web:017985d45c84",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Vaswani, A., Shazeer, N., Parmar, N., et al. (2017) Attention Is All You Need. arXiv 1706.03762. - References - Scientific Research Publishing",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "ranked",
+                "sequence": 11
+              },
+              {
+                "candidate": {
+                  "abstract": "October 5, 2024 - Find the PDF here: https://arxiv.org/abs/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://briancartergroup.com/the-groundbreaking-transformer-paper-attention-is-all-you-need/",
+                  "id": "web:78fe0f981b36",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "The Groundbreaking Transformer Paper: \"Attention is All You Need\" - The Brian Carter Group",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "ranked",
+                "sequence": 12
+              },
+              {
+                "candidate": {
+                  "abstract": "The Transformer architecture, based purely on attention mechanisms, achieves superior performance on machine translation and parsing tasks with improved parallelizability and reduced training time \u00b7 The dominant sequence transduction models ...",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://huggingface.co/papers/1706.03762",
+                  "id": "web:9f4a03c31c61",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "Paper page - Attention Is All You Need",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "ranked",
+                "sequence": 13
+              },
+              {
+                "candidate": {
+                  "abstract": "August 4, 2025 - Original Paper link- https://arxiv.org/pdf/1706.03762",
+                  "alreadyInLibrary": false,
+                  "arxivId": null,
+                  "authors": [],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://medium.com/@visshu78/all-you-need-is-attention-75bb845d1827",
+                  "id": "web:c4b911c31bd8",
+                  "openalexId": null,
+                  "pdfUrl": null,
+                  "sourceProvider": "web",
+                  "title": "ATTENTION IS ALL YOU NEED. Original Paper by Ashish Vaswani, Noam\u2026 | by Vishal dhawal | Medium",
+                  "venue": null,
+                  "year": null
+                },
+                "phase": "ranked",
+                "sequence": 14
+              },
+              {
+                "candidate": {
+                  "abstract": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks in an encoder-decoder configuration. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data.",
+                  "alreadyInLibrary": false,
+                  "arxivId": "1706.03762",
+                  "authors": [
+                    "Ashish Vaswani",
+                    "Noam Shazeer",
+                    "Niki Parmar",
+                    "Jakob Uszkoreit",
+                    "Llion Jones",
+                    "Aidan N. Gomez",
+                    "Lukasz Kaiser",
+                    "Illia Polosukhin"
+                  ],
+                  "citationCount": null,
+                  "doi": null,
+                  "externalUrl": "https://arxiv.org/abs/1706.03762",
+                  "id": "web:a7468c685165",
+                  "openalexId": null,
+                  "pdfUrl": "https://arxiv.org/pdf/1706.03762",
+                  "sourceProvider": "arxiv",
+                  "title": "Attention Is All You Need",
+                  "venue": "cs.CL",
+                  "year": 2017
+                },
+                "phase": "ranked",
+                "sequence": 15
+              }
+            ],
+            "errors": [],
+            "nextCursor": null,
+            "status": "ready",
+            "stopReason": "target_reached",
+            "usage": {
+              "inspectedCandidates": 5,
+              "llmCalls": 2,
+              "providerQueries": 1
+            }
+          }
+        },
+        "server": "ioi",
+        "status": "completed",
+        "tool": "search_get",
+        "type": "mcpToolCall"
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "production_run_terminal",
+      "status": "pass",
+      "detail": "1 Run(s): harness_run_1788810951492154000=ready"
+    },
+    {
+      "name": "new_paper_collected",
+      "status": "pass",
+      "detail": "Added papers: web:a7468c685165"
+    },
+    {
+      "name": "no_duplicate_membership",
+      "status": "pass",
+      "detail": "1 unique membership rows"
+    },
+    {
+      "name": "state_revision_advanced",
+      "status": "pass",
+      "detail": "State revision 1 -> 2"
+    },
+    {
+      "name": "evidence_references_resolve",
+      "status": "pass",
+      "detail": "Resolved 1 new evidence link(s) against stored chunks"
+    },
+    {
+      "name": "state_persists_after_reopen",
+      "status": "pass",
+      "detail": "Reopened current revision 2; historical revision 1 readable=true"
+    },
+    {
+      "name": "passage_read_before_state_update",
+      "status": "pass",
+      "detail": "Completed tool order: state_read -> vault_list_papers -> search_start -> search_get -> search_start -> search_get -> search_get -> search_get -> vault_add_paper -> vault_get_paper -> reader_read -> state_update -> state_read -> vault_get_paper -> search_get"
+    },
+    {
+      "name": "run_within_limits",
+      "status": "pass",
+      "detail": "Persisted usage stayed within each Run's captured limits"
+    },
+    {
+      "name": "live_source_hashed",
+      "status": "pass",
+      "detail": "Recorded 1 acquired source hash(es)"
+    },
+    {
+      "name": "full_text_read",
+      "status": "pass",
+      "detail": "Reader coverage observed: {\"full_text\"}"
+    },
+    {
+      "name": "evaluation_data_cleaned_up",
+      "status": "pass",
+      "detail": "Removed isolated evaluation root /var/folders/7x/_h0bp8250hdg_jcb_wsy6zlr0000gp/T/i0i-research-eval-fce68e3584ba4e5980e71b3ba1c32df5"
+    }
+  ],
+  "judge": {
+    "dimensions": {
+      "state_improvement": {
+        "score": 3,
+        "explanation": "The state improved from a single speculative question with no evidence at revision 1 to an active source_supported finding at revision 2, with one supporting evidence record and a motivated_by relation back to the question.",
+        "references": [
+          "revision 1",
+          "revision 2",
+          "research_entry_1788811065114223000:r2:e0",
+          "exec-a66439e4-60fb-4e49-94cb-e46e2e8216d7"
+        ]
+      },
+      "grounding": {
+        "score": 3,
+        "explanation": "The finding is directly supported by passage_1e1feb95064042b8a44ad3b4e391d1b9 / chunk 5, which states that the Transformer follows an encoder-decoder architecture using stacked self-attention and point-wise fully connected layers, and that the encoder has N=6 identical layers with multi-head self-attention, position-wise feed-forward networks, residual connections, and layer normalization.",
+        "references": [
+          "passage_1e1feb95064042b8a44ad3b4e391d1b9",
+          "extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61:chunk:5",
+          "pdf:web:a7468c685165:c3ab01e47e61"
+        ]
+      },
+      "iterative_adaptation": {
+        "score": null,
+        "explanation": "Not applicable under the supplied oneIterationRule for live_discovery_smoke / one_iteration scenarios.",
+        "references": [
+          "oneIterationRule"
+        ]
+      },
+      "relevance": {
+        "score": 3,
+        "explanation": "The created finding directly answers the initial question and research instruction by explaining the original Attention Is All You Need Transformer architecture, using the original arXiv paper web:a7468c685165 as the source.",
+        "references": [
+          "research_entry_1788810951001537000",
+          "research_entry_1788811065114223000",
+          "web:a7468c685165"
+        ]
+      },
+      "epistemic_care": {
+        "score": 2,
+        "explanation": "The run distinguished the canonical arXiv paper from derivative/search results, including a failed first search and a second targeted search for arXiv:1706.03762; it then verified full_text availability via vault_get_paper exec-45c2d03f-04d6-40ff-8343-36084f7303a1 and cited a passage rather than relying on metadata. Minor limitation: it read the relevant model-architecture pages, not demonstrably the entire paper end to end.",
+        "references": [
+          "exec-79cd4314-6259-4312-bcfb-a263fd6db6d3",
+          "exec-f2d10338-6a46-4abe-b94a-8066875a9e65",
+          "exec-45c2d03f-04d6-40ff-8343-36084f7303a1",
+          "exec-00f75af2-4f63-4ee5-9c54-6e20ba162bb4"
+        ]
+      }
+    },
+    "materialFabrication": false,
+    "summary": "Strong result: it found the canonical original paper, cached an auditable PDF source, read the relevant full-text architecture passage, and recorded an accurate cited finding. The only notable weakness is that the trace shows focused reading of pages 2-4 rather than an explicit full-paper inspection."
+  },
+  "errors": [],
+  "cleanupComplete": true,
+  "process": {
+    "exitCode": 0,
+    "stdoutTail": "\nrunning 1 test\ntest services::research::research_eval::tests::explicit_scenario ... \n   ____  _                              \n  / __ \\| |                             \n | |  | | |__  ___  ___ _   _ _ __ __ _ \n | |  | | '_ \\/ __|/ __| | | | '__/ _` |\n | |__| | |_) \\__ \\ (__| |_| | | | (_| |\n  \\____/|_.__/|___/\\___|\\__,_|_|  \\__,_|\n                   \n  Headless Browser v0.2.1\n  CDP server: ws://127.0.0.1:56022/devtools/browser\n\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 618 filtered out; finished in 171.40s\n\n",
+    "stderrTail": " You Need\\\" by Ashish Vaswani and coauthors, first published in 2017 (arXiv:1706.03762 / NeurIPS 2017). Priori...\" html_bytes=1173561 text_bytes=54777 raw_links=27 assets=16 network_urls=101 candidates=1 elapsed_ms=771\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=search_get elapsed_ms=5 outcome=ready results=0\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=search_start elapsed_ms=12 outcome=queued results=0\n[research] run start search_id=search_1788811004038010000 run_id=run_1788811004038012000\n[INFO 1788811006418] browser-discovery: page=1/1 requested_host=search.brave.com final_host=search.brave.com final_path=/search classification=result_page title=\"Locate the canonical original record for arXiv:1706.03762, DOI 10.48550/arXiv.1706.03762, titled \\\"Attention Is All You Need\\\" by Vaswani et al. Return the ori...\" html_bytes=1367395 text_bytes=151822 raw_links=101 assets=92 network_urls=133 candidates=5 elapsed_ms=2363\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=search_get elapsed_ms=14 outcome=planning results=5\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=search_get elapsed_ms=22 outcome=planning results=0\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=search_get elapsed_ms=14 outcome=planning results=5\n[pdf-ingestion 1788811028448] queued source_id=pdf:web:a7468c685165:c3ab01e47e61\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=vault_add_paper elapsed_ms=5 outcome=ok results=1\n[pdf-ingestion 1788811028450] start source_id=pdf:web:a7468c685165:c3ab01e47e61 paper_id=web:a7468c685165 url=https://arxiv.org/pdf/1706.03762\n[pdf-ingestion 1788811028453] attempt 1/1 source_id=pdf:web:a7468c685165:c3ab01e47e61 url=https://arxiv.org/pdf/1706.03762\n[source_acquisition] pdf acquired via provider location https://arxiv.org/pdf/1706.03762\n[pdf-ingestion 1788811028708] acquired source_id=pdf:web:a7468c685165:c3ab01e47e61 method=direct_http final_url=https://arxiv.org/pdf/1706.03762 content_type=Some(\"application/pdf\")\n[pdf-ingestion 1788811028718] cached source_id=pdf:web:a7468c685165:c3ab01e47e61 bytes=2215244 method=direct_http path=/var/folders/7x/_h0bp8250hdg_jcb_wsy6zlr0000gp/T/i0i-research-eval-fce68e3584ba4e5980e71b3ba1c32df5/documents/web:a7468c685165/sources/pdf_web_a7468c685165_c3ab01e47e61/source.pdf\n[pdf-extraction 1788811028718] queued source_id=pdf:web:a7468c685165:c3ab01e47e61 force=false\n[pdf-extraction 1788811028723] start source_id=pdf:web:a7468c685165:c3ab01e47e61 paper_id=web:a7468c685165 extraction_id=extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61\n[pdf-extraction 1788811028724] bound pdfium path=/Users/pzhao/Projects/i0i/src-tauri/resources/pdfium/libpdfium.dylib\n[pdf-extraction 1788811028969] ready source_id=pdf:web:a7468c685165:c3ab01e47e61 extraction_id=extraction:pdfium_basic:pdf:web:a7468c685165:c3ab01e47e61 pages=15 blocks=256\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=vault_get_paper elapsed_ms=2 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=reader_read elapsed_ms=18 outcome=available results=6\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=state_update elapsed_ms=7 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=state_read elapsed_ms=12 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=vault_get_paper elapsed_ms=2 outcome=ok results=1\n[mcp] caller=codex-agent:harness_run_1788810951492154000 run=harness_run_1788810951492154000 tool=search_get elapsed_ms=9 outcome=ready results=15\n"
+  },
+  "git": {
+    "revision": "d192b69211a6db6ec7c812c9106a090a9fa0e9a3",
+    "dirty": false
+  },
+  "runtime": {
+    "codexVersion": "codex-cli 0.153.4"
+  },
+  "models": {
+    "agent": "gpt-5.6-sol",
+    "judge": "gpt-5.5"
+  },
+  "manifest": {
+    "version": 1,
+    "sha256": "0f0907cfa4a3bf2063414c8f821289724a9a99d593cec2e2713f3cce1e72c0f4"
+  }
+}
