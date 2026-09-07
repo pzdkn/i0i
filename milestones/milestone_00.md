@@ -398,7 +398,7 @@ first research loop works.
 | Order / ID | Focused RFC | Scope and completion evidence | Status |
 | --- | --- | --- | --- |
 | 1 / M00-01 | [0126: On-Demand Research Loop Evaluation](../docs/rfcs/milestone_00/0126-on-demand-research-loop-evaluation.md) | Fixed scenarios, real agent/MCP boundary, assertions, separate LLM judge, retained reports. Execute again after all features. | Implemented; final suite pending |
-| 2 / M00-02 | [0127: Managed Codex Runtime](../docs/rfcs/milestone_00/0127-managed-codex-runtime.md) | Verify installed runtime, authentication, scoped MCP, streamed events, and interruption. | Implemented; controller smoke pending |
+| 2 / M00-02 | [0127: Managed Codex Runtime](../docs/rfcs/milestone_00/0127-managed-codex-runtime.md) | Verify installed runtime, authentication, scoped MCP, streamed events, and interruption. | Complete |
 | 3 / M00-03 | [0128: Local MCP Server and Vault Listing](../docs/rfcs/milestone_00/0128-local-mcp-server.md) | Own the endpoint, caller scope, contracts, and real Vault/paper listing. | Complete |
 | 4 / M00-04a | [0129: Reader Evidence Access](../docs/rfcs/milestone_00/0129-reader-evidence-access.md) | Metadata, pending acquisition, exact paginated passages, and stable references. | Complete |
 | 5 / M00-04b | [0130: Agent Reader Notes](../docs/rfcs/milestone_00/0130-agent-reader-notes.md) | Persist anchored notes with authorship, retry deduplication, and Reader navigation. | Complete |
@@ -406,12 +406,12 @@ first research loop works.
 | 7 / M00-05b | [0132: Validated Research State Updates](../docs/rfcs/milestone_00/0132-validated-research-state-updates.md) | Atomic entry changes, source validation, conflicts, and retry receipts. | Complete |
 | 8 / M00-06a | [0133: Bounded Search Tools](../docs/rfcs/milestone_00/0133-bounded-search-tools.md) | Concurrent scoped searches, incremental results, shared limits, cancellation. | Complete |
 | 9 / M00-06b | [0134: Vault Candidate Collection](../docs/rfcs/milestone_00/0134-vault-candidate-collection.md) | Save candidates once and acquire readable sources without opening tabs. | Complete |
-| 10 / M00-07 | [0135: Codex-Driven Project Research Loop](../docs/rfcs/milestone_00/0135-codex-project-research-loop.md) | Integrate one real iteration through the production Run entry point. | Implemented; fixed-corpus acceptance pending |
-| 11 / M00-08 | [0136: Research Feedback and Continuation](../docs/rfcs/milestone_00/0136-research-feedback-and-continuation.md) | Adapt searches after evidence and carry useful outcomes into a new thread. | Implemented; controlled evaluation pending |
-| 12 / M00-09a | [0137: Research Cancellation and Recovery](../docs/rfcs/milestone_00/0137-research-cancellation-and-recovery.md) | Handle cancellation/commit races, crashes, and restart without losing results. | Implemented; live interruption pending |
+| 10 / M00-07 | [0135: Codex-Driven Project Research Loop](../docs/rfcs/milestone_00/0135-codex-project-research-loop.md) | Integrate one real iteration through the production Run entry point. | Complete |
+| 11 / M00-08 | [0136: Research Feedback and Continuation](../docs/rfcs/milestone_00/0136-research-feedback-and-continuation.md) | Adapt searches after evidence and carry useful outcomes into a new thread. | Complete |
+| 12 / M00-09a | [0137: Research Cancellation and Recovery](../docs/rfcs/milestone_00/0137-research-cancellation-and-recovery.md) | Handle cancellation/commit races, crashes, and restart without losing results. | Complete |
 | 13 / M00-09b | [0138: Native Research Progress](../docs/rfcs/milestone_00/0138-native-research-progress.md) | Existing Run/Cancel UI, live changes, evidence navigation, and native acceptance. | Implemented; native acceptance pending |
 | 14 / M00-10a | [0139: Evidence Question Tools](../docs/rfcs/milestone_00/0139-evidence-question-tools.md) | Optional paper/Vault answers with source references and no implicit note writes. | Complete |
-| 15 / M00-10b | [0140: Vault Evidence Summary](../docs/rfcs/milestone_00/0140-vault-evidence-summary.md) | Bounded collection overview with coverage and freshness. | Implemented; explicit live check pending |
+| 15 / M00-10b | [0140: Vault Evidence Summary](../docs/rfcs/milestone_00/0140-vault-evidence-summary.md) | Bounded collection overview with coverage and freshness. | Complete |
 
 ### Dependency Order
 

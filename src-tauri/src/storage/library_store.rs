@@ -193,9 +193,14 @@ impl LibraryStore {
         })
     }
 
+    /// Open a library at an explicit path for isolated application harnesses.
+    pub(crate) fn at_path(db_path: PathBuf) -> Self {
+        Self { db_path }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(db_path: PathBuf) -> Self {
-        Self { db_path }
+        Self::at_path(db_path)
     }
 
     pub fn init(&self) -> StoreResult<()> {

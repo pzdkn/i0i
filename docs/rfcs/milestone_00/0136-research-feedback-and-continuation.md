@@ -1,6 +1,6 @@
 # RFC 0136: Research Feedback and Continuation
 
-- Status: Implemented; controlled multi-run evaluation pending
+- Status: Complete
 - Date: 2026-09-06
 - Parent: [Milestone 00, M00-08](../../../milestones/milestone_00.md)
 - Depends on: RFC 0135
@@ -79,3 +79,10 @@ reference rejection, bounded continuation history, event ordering, structured
 output parsing, and preservation after summary failure. `pnpm check` reports no
 diagnostics. The controlled multi-iteration and fresh-thread scenarios remain
 part of RFC 0126's final on-demand milestone evaluation.
+
+Both controlled acceptance scenarios passed on 2026-09-07. The multi-iteration
+trace committed an evidence-backed update before a later adapted search, and the
+fresh-run scenario started a distinct Codex thread from persisted State and prior
+outcomes. Deterministic ordering and the separate judge passed. Reports are
+`artifacts/research-eval/20260907T133405Z-multiple_iterations.md` and
+`artifacts/research-eval/20260907T140419Z-new_run_continuation.md`.

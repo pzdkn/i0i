@@ -181,6 +181,14 @@ impl BrowserDiscoverySource {
         provisional = crate::services::research::dedup::dedup(provisional);
         provisional.truncate(limit);
         if provisional.is_empty() {
+            let fallback = self.resolve_exact_query(query, limit, resolvers).await;
+            if !fallback.is_empty() {
+                on_progress(BrowserDiscoveryProgress::Provisional(fallback.clone()));
+                on_progress(BrowserDiscoveryProgress::Resolved {
+                    count: fallback.len(),
+                });
+                return Ok(fallback);
+            }
             return Err(empty_search_error(
                 inspected_pages,
                 challenged_pages,
@@ -205,6 +213,71 @@ impl BrowserDiscoverySource {
             count: resolved.len(),
         });
         Ok(resolved)
+    }
+
+    /// Resolve an explicit DOI, arXiv id, or quoted title when browser rows vanish.
+    async fn resolve_exact_query(
+        &self,
+        query: &str,
+        limit: usize,
+        resolvers: &[DiscoveryProviderChoice],
+    ) -> Vec<PaperCandidate> {
+        let Some(hint) = exact_query_hint(query) else {
+            return Vec::new();
+        };
+        let permits = |provider| resolvers.is_empty() || resolvers.contains(&provider);
+        let mut candidates = Vec::new();
+
+        if hint.kind == ExactQueryKind::Arxiv && permits(DiscoveryProviderChoice::Arxiv) {
+            let mut request = exact_request(&hint.value, false);
+            request.provider = DiscoveryProviderChoice::Arxiv;
+            if let Ok(result) = self.arxiv.search(&request).await {
+                candidates.extend(result.candidates);
+            }
+        } else if hint.kind == ExactQueryKind::Doi && permits(DiscoveryProviderChoice::OpenAlex) {
+            let request = exact_request(&format!("doi:{}", hint.value), false);
+            if let Ok(result) = self.openalex.search(&request).await {
+                candidates.extend(result.candidates);
+            }
+        } else if hint.kind == ExactQueryKind::Title {
+            if permits(DiscoveryProviderChoice::OpenAlex) {
+                let request = exact_request(&hint.value, true);
+                if let Ok(result) = self.openalex.search(&request).await {
+                    candidates.extend(result.candidates);
+                }
+            }
+            if permits(DiscoveryProviderChoice::Arxiv) {
+                let mut request = exact_request(&hint.value, true);
+                request.provider = DiscoveryProviderChoice::Arxiv;
+                if let Ok(result) = self.arxiv.search(&request).await {
+                    candidates.extend(result.candidates);
+                }
+            }
+        }
+
+        let expected = normalize_title(&hint.value);
+        let mut candidates = crate::services::research::dedup::dedup(candidates)
+            .into_iter()
+            .filter(|candidate| match hint.kind {
+                ExactQueryKind::Arxiv => candidate
+                    .arxiv_id
+                    .as_deref()
+                    .is_some_and(|id| normalized_identifier(id) == hint.value.to_lowercase()),
+                ExactQueryKind::Doi => candidate
+                    .doi
+                    .as_deref()
+                    .is_some_and(|doi| normalized_identifier(doi) == hint.value.to_lowercase()),
+                ExactQueryKind::Title => normalize_title(&candidate.title) == expected,
+            })
+            .collect::<Vec<_>>();
+        for candidate in &mut candidates {
+            candidate
+                .match_summary
+                .reasons
+                .push("fallback:exact_provider".to_string());
+        }
+        candidates.truncate(limit);
+        candidates
     }
 
     async fn resolve_candidate(
@@ -673,7 +746,49 @@ fn looks_like_external_result(url: &str) -> bool {
         && !host.ends_with("google.com")
         && !host.ends_with("googleusercontent.com")
         && !host.ends_with("gstatic.com")
-        && host != "search.brave.com"
+        && host != "brave.com"
+        && !host.ends_with(".brave.com")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExactQueryKind {
+    Arxiv,
+    Doi,
+    Title,
+}
+
+struct ExactQueryHint {
+    kind: ExactQueryKind,
+    value: String,
+}
+
+/// Extract only identifiers or explicitly quoted titles safe for API fallback.
+fn exact_query_hint(query: &str) -> Option<ExactQueryHint> {
+    let arxiv = Regex::new(
+        r"(?i)arxiv(?:\s+identifier)?\s*:?\s*([a-z][a-z.-]*/\d{7}|\d{4}\.\d{4,5})(?:v\d+)?",
+    )
+    .expect("valid arXiv hint regex");
+    if let Some(value) = arxiv.captures(query).and_then(|captures| captures.get(1)) {
+        return Some(ExactQueryHint {
+            kind: ExactQueryKind::Arxiv,
+            value: value.as_str().to_string(),
+        });
+    }
+    if let Some(value) = extract_doi(query) {
+        return Some(ExactQueryHint {
+            kind: ExactQueryKind::Doi,
+            value,
+        });
+    }
+    let title = Regex::new(r#"(?i)(?:title|titled)\s+[\"“]([^\"”]+)[\"”]"#)
+        .expect("valid exact-title regex");
+    title
+        .captures(query)
+        .and_then(|captures| captures.get(1))
+        .map(|value| ExactQueryHint {
+            kind: ExactQueryKind::Title,
+            value: clean_title(value.as_str()),
+        })
 }
 
 /// Returns whether a host is Google itself or one of its subdomains.
@@ -868,6 +983,31 @@ mod tests {
         let mut resolved = provisional.clone();
         resolved.title = "Attention is all you need!".to_string();
         assert!(identity_matches(&provisional, &resolved));
+    }
+
+    #[test]
+    fn extracts_exact_arxiv_id_and_quoted_title_hints() {
+        let arxiv = exact_query_hint(
+            "Find the original paper, arXiv identifier: 1706.03762, with full text",
+        )
+        .expect("arXiv hint");
+        assert!(arxiv.kind == ExactQueryKind::Arxiv);
+        assert_eq!(arxiv.value, "1706.03762");
+
+        let title = exact_query_hint("Find the paper titled “Attention Is All You Need”")
+            .expect("title hint");
+        assert!(title.kind == ExactQueryKind::Title);
+        assert_eq!(title.value, "Attention Is All You Need");
+    }
+
+    #[test]
+    fn brave_page_chrome_is_not_a_search_candidate() {
+        let html = r#"
+            <a href="https://account.brave.com/?intent=checkout">Brave Search Premium</a>
+            <a href="https://brave.com/wallet/">Brave Wallet</a>
+        "#;
+
+        assert!(parse_search_results(html, "attention", 10).is_empty());
     }
 
     #[test]

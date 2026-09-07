@@ -30,7 +30,8 @@ pub struct PdfIngestionConfig {
 
 #[derive(Clone)]
 pub struct PdfDownloadManager {
-    app: AppHandle,
+    app: Option<AppHandle>,
+    app_data_dir: PathBuf,
     store: LibraryStore,
     config: PdfIngestionConfig,
     pdf_extractions: PdfExtractionManager,
@@ -136,8 +137,34 @@ impl PdfDownloadManager {
         pdf_extractions: PdfExtractionManager,
         source_acquisition: SourceAcquisitionService,
     ) -> Self {
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
         Self {
-            app,
+            app: Some(app),
+            app_data_dir,
+            store,
+            pdf_extractions,
+            semaphore: Arc::new(Semaphore::new(config.max_concurrent_downloads)),
+            config,
+            source_acquisition,
+            queued_or_active: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Construct a downloader rooted in an isolated directory without UI events.
+    #[cfg(test)]
+    pub(crate) fn for_evaluation(
+        app_data_dir: PathBuf,
+        store: LibraryStore,
+        config: PdfIngestionConfig,
+        pdf_extractions: PdfExtractionManager,
+        source_acquisition: SourceAcquisitionService,
+    ) -> Self {
+        Self {
+            app: None,
+            app_data_dir,
             store,
             pdf_extractions,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent_downloads)),
@@ -337,12 +364,8 @@ impl PdfDownloadManager {
     }
 
     fn source_pdf_path(&self, source: &DocumentSource) -> PdfResult<PathBuf> {
-        let app_data_dir = self
-            .app
-            .path()
-            .app_data_dir()
-            .map_err(|error| error.to_string())?;
-        Ok(app_data_dir
+        Ok(self
+            .app_data_dir
             .join("documents")
             .join(&source.paper_id)
             .join("sources")
@@ -365,7 +388,9 @@ impl PdfDownloadManager {
             local_path: source.local_path.clone(),
             error: source.error.clone(),
         };
-        let _ = self.app.emit("document_source_updated", payload);
+        if let Some(app) = &self.app {
+            let _ = app.emit("document_source_updated", payload);
+        }
     }
 
     fn mark_queued(&self, source_id: &str) -> bool {

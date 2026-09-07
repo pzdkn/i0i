@@ -31,6 +31,13 @@ use crate::storage::library_store::LibraryStore;
 
 type Cancellations = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 
+/// Combined planner contract consumed by one persisted Search execution.
+#[cfg(test)]
+pub(crate) trait SearchPlanner: Planner + ReconciliationPlanner {}
+
+#[cfg(test)]
+impl<T> SearchPlanner for T where T: Planner + ReconciliationPlanner {}
+
 /// Owns the search-run queue, worker, cancellation tokens, and events.
 #[derive(Clone)]
 pub struct SearchManager {
@@ -41,6 +48,10 @@ pub struct SearchManager {
     /// which case deep research falls back to legacy ranking.
     reranker: EmbeddingReranker,
     source_acquisition: Option<SourceAcquisitionService>,
+    #[cfg(test)]
+    source_override: Option<Arc<dyn CandidateSource>>,
+    #[cfg(test)]
+    planner_override: Option<Arc<dyn SearchPlanner>>,
     queued_or_active: Arc<Mutex<HashSet<String>>>,
     cancellations: Cancellations,
     timed_out: Arc<Mutex<HashSet<String>>>,
@@ -88,6 +99,10 @@ impl SearchManager {
             store,
             reranker,
             source_acquisition: Some(source_acquisition),
+            #[cfg(test)]
+            source_override: None,
+            #[cfg(test)]
+            planner_override: None,
             queued_or_active: Arc::new(Mutex::new(HashSet::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             timed_out: Arc::new(Mutex::new(HashSet::new())),
@@ -102,6 +117,28 @@ impl SearchManager {
             store,
             reranker: EmbeddingReranker::disabled(),
             source_acquisition: None,
+            source_override: None,
+            planner_override: None,
+            queued_or_active: Arc::new(Mutex::new(HashSet::new())),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            timed_out: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Construct a headless manager with controlled external search results.
+    #[cfg(test)]
+    pub(crate) fn for_evaluation(
+        store: LibraryStore,
+        planner: Arc<dyn SearchPlanner>,
+        source: Arc<dyn CandidateSource>,
+    ) -> Self {
+        Self {
+            app: None,
+            store,
+            reranker: EmbeddingReranker::disabled(),
+            source_acquisition: None,
+            source_override: Some(source),
+            planner_override: Some(planner),
             queued_or_active: Arc::new(Mutex::new(HashSet::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             timed_out: Arc::new(Mutex::new(HashSet::new())),
@@ -230,6 +267,18 @@ impl SearchManager {
         cancel: Arc<AtomicBool>,
     ) -> Result<(), String> {
         eprintln!("[research] run start search_id={search_id} run_id={run_id}");
+        #[cfg(test)]
+        if let (Some(planner), Some(source)) = (&self.planner_override, &self.source_override) {
+            return self
+                .execute_with_dependencies(
+                    search_id,
+                    run_id,
+                    cancel,
+                    planner.as_ref(),
+                    source.as_ref(),
+                )
+                .await;
+        }
         // Build the seams. Provider/LLM config is loaded per run (runs are rare),
         // so a `model.planner` override (Settings) applies without restart; it
         // falls back to the chat model (RFC 0055).
@@ -269,8 +318,8 @@ impl SearchManager {
         source: &S,
     ) -> Result<(), String>
     where
-        P: Planner + ReconciliationPlanner,
-        S: CandidateSource,
+        P: Planner + ReconciliationPlanner + ?Sized,
+        S: CandidateSource + ?Sized,
     {
         let search = self.store.get_search(search_id)?;
         self.store.set_search_run_status(
@@ -495,7 +544,7 @@ impl SearchManager {
         Ok(())
     }
 
-    async fn reconcile_harness_run<P: ReconciliationPlanner>(
+    async fn reconcile_harness_run<P: ReconciliationPlanner + ?Sized>(
         &self,
         search_run_id: &str,
         planner: &P,

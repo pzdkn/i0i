@@ -1,6 +1,6 @@
 # RFC 0137: Research Cancellation and Recovery
 
-- Status: Implemented; live interruption acceptance pending
+- Status: Complete
 - Date: 2026-09-06
 - Parent: [Milestone 00, M00-09a](../../../milestones/milestone_00.md)
 - Depends on: RFC 0135
@@ -81,3 +81,9 @@ cancel, managed finalization interrupted by restart, retained sources, process
 EOF, and forced shutdown of a nonresponsive fake runtime. `pnpm check` reports no
 diagnostics. The installed-Codex live interruption check remains part of the
 final explicit milestone acceptance run.
+
+The explicit installed-Codex interruption check passed on 2026-09-07. It started
+a real turn, requested interruption, observed the matching `turn/completed`
+event with status `interrupted`, verified the app-server remained alive, and
+then shut it down. Routine race, restart, revocation, and forced-shutdown tests
+continue to run without model access.

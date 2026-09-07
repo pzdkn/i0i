@@ -1,6 +1,6 @@
 # RFC 0140: Evidence-Based Vault Summary
 
-- Status: Implemented; explicit live check pending
+- Status: Complete
 - Date: 2026-09-06
 - Parent: [Milestone 00, M00-10b](../../../milestones/milestone_00.md)
 - Depends on: RFC 0139
@@ -71,7 +71,8 @@ write is created.
 Real MCP transport tests cover empty, metadata-only, mixed, truncated, and
 concurrently changing Vaults. They verify resolvable references, stable sampling,
 honest counts, bounded context, failure details, and absence of hidden writes.
-The full Rust library suite passes with 600 tests and 9 explicit/live tests
-ignored; `pnpm check` passes with no errors or warnings. The explicit live
-summary check is implemented but remains pending because OpenRouter reset the
-connection on both attempts before returning an HTTP response.
+The full Rust library suite passes and `pnpm check` reports no errors or warnings.
+The explicit live summary check passed on 2026-09-07 after the external VPN
+transport issue was removed. The configured model used the supplied full-text
+fixture, returned its registered passage citation, and the validator resolved
+that citation to the stored source without creating hidden writes.

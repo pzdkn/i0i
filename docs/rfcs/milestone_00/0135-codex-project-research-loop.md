@@ -1,6 +1,6 @@
 # RFC 0135: Codex-Driven Project Research Loop
 
-- Status: Implemented; fixed-corpus live acceptance pending
+- Status: Complete
 - Date: 2026-09-06
 - Parent: [Milestone 00, M00-07](../../../milestones/milestone_00.md)
 - Depends on: RFCs 0127 through 0134
@@ -90,7 +90,9 @@ agent failure. The full Rust suite passes with 574 tests and 7 explicit ignores;
 `pnpm check` reports no diagnostics. The installed Codex 0.153.4 app-server also
 passes the explicit initialization and shutdown smoke test.
 
-The real fixed-corpus search-read-update scenario remains a milestone acceptance
-gate. RFC 0126's production adapter and corpus are not yet implemented, so this
-RFC must not be marked complete in the repository Changelog until that scenario
-passes.
+The real fixed-corpus search-read-update scenario passed on 2026-09-07. Codex
+searched the controlled corpus through the production controller and MCP,
+collected papers, inspected full-text and limited-availability records, and
+committed cited State updates that survived reopening SQLite. The separate judge
+accepted grounding and evidence-care requirements. The retained report is
+`artifacts/research-eval/20260907T133007Z-one_iteration.md`.

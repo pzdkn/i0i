@@ -161,16 +161,7 @@ impl CodexRuntime {
         let result = self
             .request(
                 "thread/start",
-                json!({
-                    "cwd": cwd,
-                    "model": self.config.model,
-                    "developerInstructions": developer_instructions,
-                    "config": config,
-                    "ephemeral": true,
-                    "approvalPolicy": "never",
-                    "sandbox": "read-only",
-                    "environments": []
-                }),
+                thread_start_params(cwd, &self.config.model, developer_instructions, config),
             )
             .await?;
         string_at(&result, &["thread", "id"], "thread/start response")
@@ -292,6 +283,24 @@ impl CodexRuntime {
             .map_err(|error| error.to_string())?;
         stdin.flush().await.map_err(|error| error.to_string())
     }
+}
+
+/// Build the stable, non-experimental thread contract accepted by app-server.
+fn thread_start_params(
+    cwd: &Path,
+    model: &str,
+    developer_instructions: &str,
+    config: Value,
+) -> Value {
+    json!({
+        "cwd": cwd,
+        "model": model,
+        "developerInstructions": developer_instructions,
+        "config": config,
+        "ephemeral": true,
+        "approvalPolicy": "never",
+        "sandbox": "read-only"
+    })
 }
 
 #[derive(Deserialize)]
@@ -487,6 +496,18 @@ mod tests {
     }
 
     #[test]
+    fn thread_start_uses_only_stable_app_server_fields() {
+        let params = thread_start_params(
+            Path::new("/tmp/research"),
+            "test-model",
+            "Use MCP only",
+            json!({"web_search": "disabled"}),
+        );
+        assert_eq!(params["ephemeral"], true);
+        assert!(params.get("environments").is_none());
+    }
+
+    #[test]
     fn quotes_unusual_mcp_names_for_config_overrides() {
         assert_eq!(toml_path_segment("ordinary-name"), "ordinary-name");
         assert_eq!(toml_path_segment("team.reader"), "\"team.reader\"");
@@ -547,6 +568,57 @@ done
         let runtime = CodexRuntime::start(CodexRuntimeConfig::load())
             .await
             .expect("initialize installed Codex app-server");
+        runtime.shutdown().await.expect("stop Codex app-server");
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit live compatibility check; starts and interrupts installed Codex"]
+    async fn live_runtime_interrupts_an_active_turn() {
+        let mut config = CodexRuntimeConfig::load();
+        if let Ok(model) = std::env::var("I0I_RESEARCH_EVAL_AGENT_MODEL") {
+            config.model = model;
+        }
+        let runtime = CodexRuntime::start(config)
+            .await
+            .expect("initialize installed Codex app-server");
+        let mut events = runtime.subscribe();
+        let thread_id = runtime
+            .start_thread(
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                "Answer directly. Do not call tools.",
+                json!({}),
+            )
+            .await
+            .expect("start live interruption thread");
+        let turn = runtime
+            .start_turn(
+                &thread_id,
+                "Write a detailed ten-section survey of scientific research methods.",
+                None,
+            )
+            .await
+            .expect("start live interruption turn");
+
+        runtime
+            .interrupt(&turn)
+            .await
+            .expect("interrupt active Codex turn");
+        let completion = timeout(Duration::from_secs(15), async {
+            loop {
+                let event = events.recv().await.expect("receive Codex event");
+                if event.method == "turn/completed"
+                    && event.params["threadId"].as_str() == Some(&turn.thread_id)
+                    && event.params["turn"]["id"].as_str() == Some(&turn.turn_id)
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("observe interrupted turn completion");
+
+        assert_eq!(completion.params["turn"]["status"], "interrupted");
+        assert!(runtime.is_running().await.expect("inspect live runtime"));
         runtime.shutdown().await.expect("stop Codex app-server");
     }
 }

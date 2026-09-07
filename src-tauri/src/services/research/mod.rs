@@ -26,6 +26,8 @@ pub mod manager;
 #[allow(dead_code)]
 pub mod planner;
 pub mod reconciliation;
+#[cfg(test)]
+pub mod research_eval;
 pub mod scheduler;
 #[allow(dead_code)]
 pub mod source;

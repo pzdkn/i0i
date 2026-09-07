@@ -82,7 +82,11 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0140 - Agents can generate bounded Vault summaries with explicit source coverage, validated citations, and membership freshness.
 - [x] RFC 0139 - Agents can ask scoped questions of papers and Vaults with bounded source context, validated passage citations, and no implicit notes or State writes.
+- [x] RFC 0137 - Research cancellation, process interruption, and restart recovery preserve committed work and close further run-scoped writes.
+- [x] RFC 0136 - Research Runs adapt after evidence and carry bounded validated outcomes into fresh agent threads.
+- [x] RFC 0135 - The production Run action now drives real Codex search, reading, collection, and cited Research State updates through scoped i0i tools.
 - [x] RFC 0134 - Agents can save scoped Search candidates once, queue durable PDF acquisition, and read acquired text without opening a tab.
 - [x] RFC 0133 - Agents can run bounded project-scoped searches with shared budgets, incremental candidates, stable polling, and idempotent cancellation.
 - [x] RFC 0132 - Agents can atomically update revisioned Research State with typed evidence, source validation, conflicts, and restart-safe retries.
@@ -90,7 +94,8 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [x] RFC 0130 - Agents can create and list scoped Reader notes with exact passage anchors, authorship, navigation, and idempotent retries.
 - [x] RFC 0129 - Agents can inspect saved-paper availability and read bounded, exact PDF or HTML passages with resolvable references.
 - [x] RFC 0128 - i0i now owns an authenticated loopback MCP endpoint with project-scoped Vault and paper listing.
-- [x] RFC 0126 - An explicit research-loop evaluation now records deterministic and LLM-judge results, reporting unavailable production capabilities as blocked.
+- [x] RFC 0127 - i0i manages an installed Codex app-server with scoped configuration, structured events, bounded interruption, and clean shutdown.
+- [ ] RFC 0126 - Final all-scenario and native UI acceptance remain pending for the explicit research-loop evaluation.
 - [x] RFC 0124 - Project Research now uses one instruction, one bounded paper count, automatic validated enrichment, and progressively disclosed Run Activity.
 - [x] RFC 0123 - Research Runs now handle nullable planner responses, retry once, report the failed stage, and have deterministic pipeline and live smoke tests.
 - [x] RFC 0122 - Harness Runs now remain active through reconciliation and finalize atomically only after Change Set, usage, reflection, and checkpoint facts are durable.

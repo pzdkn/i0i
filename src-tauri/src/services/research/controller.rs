@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -70,12 +71,15 @@ struct TurnCompletion {
 /// Starts and supervises managed Codex research without duplicating tool logic.
 #[derive(Clone)]
 pub struct ProjectResearchController {
-    app: AppHandle,
+    app: Option<AppHandle>,
+    runtime_dir: PathBuf,
     store: LibraryStore,
     search_manager: SearchManager,
     mcp_server: LocalMcpServer,
+    runtime_config_override: Option<CodexRuntimeConfig>,
     runtime: Arc<Mutex<Option<CodexRuntime>>>,
     active_runs: Arc<StdMutex<HashMap<String, ActiveAgentRun>>>,
+    tool_trace: Option<Arc<StdMutex<Vec<Value>>>>,
 }
 
 impl ProjectResearchController {
@@ -86,14 +90,55 @@ impl ProjectResearchController {
         search_manager: SearchManager,
         mcp_server: LocalMcpServer,
     ) -> Self {
+        let runtime_dir = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("research-runtime");
         Self {
-            app,
+            app: Some(app),
+            runtime_dir,
             store,
             search_manager,
             mcp_server,
+            runtime_config_override: None,
             runtime: Arc::new(Mutex::new(None)),
             active_runs: Arc::new(StdMutex::new(HashMap::new())),
+            tool_trace: None,
         }
+    }
+
+    /// Construct the production controller without native-window events.
+    #[cfg(test)]
+    pub(crate) fn for_evaluation(
+        runtime_dir: PathBuf,
+        store: LibraryStore,
+        search_manager: SearchManager,
+        mcp_server: LocalMcpServer,
+        runtime_config: CodexRuntimeConfig,
+    ) -> Self {
+        Self {
+            app: None,
+            runtime_dir,
+            store,
+            search_manager,
+            mcp_server,
+            runtime_config_override: Some(runtime_config),
+            runtime: Arc::new(Mutex::new(None)),
+            active_runs: Arc::new(StdMutex::new(HashMap::new())),
+            tool_trace: Some(Arc::new(StdMutex::new(Vec::new()))),
+        }
+    }
+
+    /// Return the tool lifecycle observed from managed Codex during evaluation.
+    #[cfg(test)]
+    pub(crate) fn evaluation_tool_trace(&self) -> Vec<Value> {
+        self.tool_trace
+            .as_ref()
+            .expect("evaluation controller trace")
+            .lock()
+            .expect("evaluation tool trace lock")
+            .clone()
     }
 
     /// Persist a complete Run snapshot, dispatch Codex, and return immediately.
@@ -113,7 +158,10 @@ impl ProjectResearchController {
             return Err("Research instructions cannot be empty".to_string());
         }
 
-        let runtime_config = CodexRuntimeConfig::load();
+        let runtime_config = self
+            .runtime_config_override
+            .clone()
+            .unwrap_or_else(CodexRuntimeConfig::load);
         let limits = effective_agent_limits(&configuration);
         let search = self.store.create_search(&SearchDraft {
             title: instructions
@@ -168,10 +216,7 @@ impl ProjectResearchController {
             .lock()
             .expect("active Research Run lock")
             .insert(project_key.clone(), active);
-        let _ = self.app.emit(
-            "research_harness_updated",
-            json!({"projectId": project_id, "runId": run.id}),
-        );
+        self.emit_update(project_id, &run.id);
         tauri::async_runtime::spawn(async move {
             controller
                 .execute(run_id, runtime_config, cancellation)
@@ -266,10 +311,9 @@ impl ProjectResearchController {
             .get_harness_run(&run_id)
             .ok()
             .map(|run| run.project_id);
-        let _ = self.app.emit(
-            "research_harness_updated",
-            json!({"projectId": project_id, "runId": run_id}),
-        );
+        if let Some(project_id) = project_id.as_deref() {
+            self.emit_update(project_id, &run_id);
+        }
     }
 
     async fn execute_inner(
@@ -329,12 +373,7 @@ impl ProjectResearchController {
             continuation.maximum_recent_outcomes,
             continuation.maximum_history_chars,
         )?;
-        let work_dir = self
-            .app
-            .path()
-            .app_data_dir()
-            .map_err(|error| error.to_string())?
-            .join("research-runtime");
+        let work_dir = self.runtime_dir.clone();
         fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
         let thread_id = runtime
             .start_thread(
@@ -343,7 +382,12 @@ impl ProjectResearchController {
                 codex_thread_config(&grant.endpoint, &grant.bearer_token),
             )
             .await?;
-        let prompt = render_research_prompt(&run.effective_instructions, &limits, &prior_outcomes)?;
+        let prompt = render_research_prompt(
+            &run.project_id,
+            &run.effective_instructions,
+            &limits,
+            &prior_outcomes,
+        )?;
         let turn = runtime
             .start_turn(&thread_id, &prompt, Some(research_outcome_schema()))
             .await?;
@@ -355,9 +399,10 @@ impl ProjectResearchController {
                 &mut events,
                 &turn,
                 &self.store,
-                Some(&self.app),
+                self.app.as_ref(),
                 &run.project_id,
                 run_id,
+                self.tool_trace.as_ref(),
             ) => result,
             _ = cancellation.cancelled() => {
                 runtime.interrupt(&turn).await?;
@@ -471,11 +516,17 @@ impl ProjectResearchController {
         {
             active.cancellation.cancel();
         }
-        let _ = self.app.emit(
-            "research_harness_updated",
-            json!({"projectId": project_id, "runId": run.id}),
-        );
+        self.emit_update(project_id, &run.id);
         Ok(run)
+    }
+
+    fn emit_update(&self, project_id: &str, run_id: &str) {
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                "research_harness_updated",
+                json!({"projectId": project_id, "runId": run_id}),
+            );
+        }
     }
 
     fn signal_child_searches(&self, project_id: &str, parent_run_id: &str) -> Result<(), String> {
@@ -528,6 +579,7 @@ fn codex_thread_config(endpoint: &str, bearer_token: &str) -> Value {
             "ioi": {
                 "url": endpoint,
                 "http_headers": {"Authorization": format!("Bearer {bearer_token}")},
+                "default_tools_approval_mode": "approve",
                 "enabled": true
             }
         },
@@ -536,11 +588,13 @@ fn codex_thread_config(endpoint: &str, bearer_token: &str) -> Value {
 }
 
 fn render_research_prompt(
+    project_id: &str,
     stack: &EffectiveInstructionStack,
     limits: &AgentRunLimits,
     prior_outcomes: &[PriorResearchRunOutcome],
 ) -> Result<String, String> {
     let snapshot = serde_json::to_string_pretty(&json!({
+        "projectId": project_id,
         "projectInstructions": stack.project_research_instructions,
         "stateRevision": stack.run_context.starting_state_revision,
         "stateEntries": stack.run_context.active_entries,
@@ -566,11 +620,28 @@ async fn wait_for_turn(
     app: Option<&AppHandle>,
     project_id: &str,
     run_id: &str,
+    tool_trace: Option<&Arc<StdMutex<Vec<Value>>>>,
 ) -> Result<TurnCompletion, String> {
     let mut final_message = None;
     loop {
         match events.recv().await {
             Ok(event) => {
+                if matches!(event.method.as_str(), "item/started" | "item/completed")
+                    && event.params["threadId"].as_str() == Some(&turn.thread_id)
+                    && event.params["turnId"].as_str() == Some(&turn.turn_id)
+                    && event.params["item"]["type"].as_str() == Some("mcpToolCall")
+                    && event.params["item"]["server"].as_str() == Some("ioi")
+                {
+                    if let Some(trace) = tool_trace {
+                        trace
+                            .lock()
+                            .expect("evaluation tool trace lock")
+                            .push(json!({
+                                "event": event.method,
+                                "item": event.params["item"],
+                            }));
+                    }
+                }
                 if event.method == "runtime/exited" {
                     return Ok(TurnCompletion {
                         status: "runtime_exited".to_string(),
@@ -723,6 +794,16 @@ mod tests {
     }
 
     #[test]
+    fn managed_i0i_tools_are_preapproved_for_unattended_runs() {
+        let config = codex_thread_config("http://127.0.0.1:1234/mcp", "secret");
+        assert_eq!(
+            config["mcp_servers"]["ioi"]["default_tools_approval_mode"],
+            "approve"
+        );
+        assert_eq!(config["web_search"], "disabled");
+    }
+
+    #[test]
     fn activity_projection_exposes_tool_lifecycle_but_not_arguments() {
         let turn = CodexTurn {
             thread_id: "thread-1".to_string(),
@@ -793,6 +874,7 @@ mod tests {
             None,
             "project:test",
             "unused-run",
+            None,
         )
         .await
         .expect("wait for completion");
@@ -826,6 +908,7 @@ mod tests {
             None,
             "project:test",
             "unused-run",
+            None,
         )
         .await
         .expect("process exit is observable");

@@ -1,6 +1,6 @@
 # RFC 0127: Managed Codex Runtime
 
-- Status: Implemented; MCP smoke pending RFC 0128
+- Status: Complete
 - Date: 2026-09-06
 - Parent: [Milestone 00, M00-02](../../../milestones/milestone_00.md)
 - Depends on: none; RFC 0126 defines eventual evaluation
@@ -73,3 +73,13 @@ The live initialization check and process cleanup pass. Complete the MCP call,
 tool-isolation, and interruption checks with RFC 0128's server before changing
 this RFC to implemented and verified. Public interfaces document timing, event
 ordering, and failure behavior.
+
+## Acceptance Record
+
+Verified on 2026-09-07 with codex-cli 0.153.4. The controlled RFC 0126
+evaluations started real scoped Codex threads and completed authenticated calls
+to the i0i MCP server while inherited MCP servers, shell, and direct web tools
+were disabled. Project/run grants and cross-scope failures are covered by the
+MCP transport tests. The explicit installed-Codex interruption test observed an
+`interrupted` terminal event, confirmed the process remained usable, and then
+shut it down cleanly.

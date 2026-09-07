@@ -48,7 +48,7 @@ impl ReconciliationPlanner for crate::services::research::planner::OpenRouterPla
 }
 
 /// Gives invalid model output one correction attempt and returns the last error.
-pub async fn plan_reconciliation_with_retry<P: ReconciliationPlanner>(
+pub async fn plan_reconciliation_with_retry<P: ReconciliationPlanner + ?Sized>(
     planner: &P,
     prompt: &str,
     stack: &EffectiveInstructionStack,
@@ -60,7 +60,7 @@ pub async fn plan_reconciliation_with_retry<P: ReconciliationPlanner>(
 }
 
 /// Plans with one correction attempt and reports the exact model-call count.
-pub async fn plan_reconciliation_with_retry_counted<P: ReconciliationPlanner>(
+pub async fn plan_reconciliation_with_retry_counted<P: ReconciliationPlanner + ?Sized>(
     planner: &P,
     prompt: &str,
     stack: &EffectiveInstructionStack,

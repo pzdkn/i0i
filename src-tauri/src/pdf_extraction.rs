@@ -63,7 +63,7 @@ pub struct PdfExtractionConfig {
 /// background write path, while the Reader is a read path over persisted rows.
 #[derive(Clone)]
 pub struct PdfExtractionManager {
-    app: AppHandle,
+    app: Option<AppHandle>,
     store: LibraryStore,
     config: PdfExtractionConfig,
     semaphore: Arc<Semaphore>,
@@ -166,7 +166,19 @@ impl Default for PdfExtractionConfig {
 impl PdfExtractionManager {
     pub fn new(app: AppHandle, store: LibraryStore, config: PdfExtractionConfig) -> Self {
         Self {
-            app,
+            app: Some(app),
+            store,
+            semaphore: Arc::new(Semaphore::new(config.max_concurrent_extractions)),
+            config,
+            queued_or_active: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Construct an extractor without native-window events for explicit backend evaluation.
+    #[cfg(test)]
+    pub(crate) fn for_evaluation(store: LibraryStore, config: PdfExtractionConfig) -> Self {
+        Self {
+            app: None,
             store,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent_extractions)),
             config,
@@ -345,7 +357,9 @@ impl PdfExtractionManager {
             status: extraction.status.clone(),
             error: extraction.error.clone(),
         };
-        let _ = self.app.emit("document_extraction_updated", payload);
+        if let Some(app) = &self.app {
+            let _ = app.emit("document_extraction_updated", payload);
+        }
     }
 
     fn mark_queued(&self, source_id: &str) -> bool {
@@ -372,12 +386,12 @@ struct ExtractedDocumentRows {
 }
 
 struct PdfiumBasicAdapter {
-    app: AppHandle,
+    app: Option<AppHandle>,
     config: PdfExtractionConfig,
 }
 
 impl PdfiumBasicAdapter {
-    fn new(app: AppHandle, config: PdfExtractionConfig) -> Self {
+    fn new(app: Option<AppHandle>, config: PdfExtractionConfig) -> Self {
         Self { app, config }
     }
 
@@ -529,9 +543,11 @@ impl PdfiumBasicAdapter {
             candidates.push(path.clone());
         }
 
-        if let Ok(resource_dir) = self.app.path().resource_dir() {
-            candidates.push(resource_dir.join("libpdfium.dylib"));
-            candidates.push(resource_dir.join("pdfium").join("libpdfium.dylib"));
+        if let Some(app) = &self.app {
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                candidates.push(resource_dir.join("libpdfium.dylib"));
+                candidates.push(resource_dir.join("pdfium").join("libpdfium.dylib"));
+            }
         }
 
         if let Ok(cwd) = std::env::current_dir() {

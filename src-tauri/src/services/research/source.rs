@@ -67,20 +67,23 @@ pub struct BrowserCandidateSource {
 }
 
 impl BrowserCandidateSource {
+    /// Wrap an already configured browser discovery source.
+    pub(crate) fn new(source: BrowserDiscoverySource) -> Self {
+        Self { source }
+    }
+
     pub fn from_app(
         app: &tauri::AppHandle,
         browser: SourceAcquisitionService,
         openalex: OpenAlexProvider,
         arxiv: ArxivProvider,
     ) -> Self {
-        Self {
-            source: BrowserDiscoverySource::new(
-                browser,
-                openalex,
-                arxiv,
-                crate::commands::discovery::browser::BrowserDiscoveryConfig::load(app),
-            ),
-        }
+        Self::new(BrowserDiscoverySource::new(
+            browser,
+            openalex,
+            arxiv,
+            crate::commands::discovery::browser::BrowserDiscoveryConfig::load(app),
+        ))
     }
 
     async fn discover(

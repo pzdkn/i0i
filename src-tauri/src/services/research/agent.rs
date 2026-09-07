@@ -109,8 +109,8 @@ pub async fn run<P, S>(
     on: impl FnMut(Progress) + Send,
 ) -> Result<RunOutcome, ResearchError>
 where
-    P: Planner,
-    S: CandidateSource,
+    P: Planner + ?Sized,
+    S: CandidateSource + ?Sized,
 {
     let on = Mutex::new(on);
     let strategy = inputs.strategy;

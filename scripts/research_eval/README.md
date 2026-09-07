@@ -10,14 +10,40 @@ Run the offline contract tests:
 python3 -m unittest scripts/research_eval/test_run.py
 ```
 
-Run the acceptance suite on demand:
+The model-backed scenarios require:
+
+- `codex` on `PATH`, authenticated and able to use both selected models;
+- `src-tauri/resources/pdfium/libpdfium.dylib` for the fixed-corpus PDFs;
+- `src-tauri/resources/obscura/obscura` and configured discovery credentials for
+  the live-discovery scenario.
+
+From the repository root, first run one controlled scenario:
+
+```sh
+pnpm eval:research --scenario one_iteration \
+  --agent-model gpt-5.6-sol \
+  --judge-model gpt-5.5
+```
+
+Then run the complete acceptance suite:
 
 ```sh
 pnpm eval:research --scenario all \
-  --agent-model MODEL_ID \
-  --judge-model DIFFERENT_MODEL_ID
+  --agent-model gpt-5.6-sol \
+  --judge-model gpt-5.5 \
+  --run-timeout 420 \
+  --scenario-timeout 900
 ```
 
-Until RFCs 0127 through 0135 provide the production boundary, this command exits
-with status 2 and writes honest `blocked` reports under `artifacts/research-eval`.
-The runner never reads or writes the user's application database.
+The agent and judge models must differ. `--run-timeout` bounds each production
+Research Run; `--scenario-timeout` bounds the complete Rust scenario, including
+setup and judging. Increase the latter for a slow live acquisition without
+removing the per-Run bound.
+
+Each attempt writes a machine-readable JSON report, a concise Markdown report,
+and the raw Rust report under `artifacts/research-eval`. A complete pass exits
+with status 0. Failed prerequisites are reported as blocked and all other failed
+acceptance checks exit with status 2. The runner uses an isolated temporary
+database and document cache, verifies reopening and historical State access, and
+removes that temporary data before a scenario can pass. It never reads or writes
+the user's application database.

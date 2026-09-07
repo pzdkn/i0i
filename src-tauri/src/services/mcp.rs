@@ -1203,7 +1203,9 @@ impl I0iMcpHandler {
     }
 
     /// Commit a bounded, evidence-validated State batch as one revision.
-    #[tool(description = "Create, revise, or change lifecycle of i0i Research State entries")]
+    #[tool(
+        description = "Create, revise, or change lifecycle of i0i Research State entries. Direct passage evidence belongs on a source_supported finding; hypotheses remain speculative and may be related to findings."
+    )]
     async fn state_update(
         &self,
         context: RequestContext<RoleServer>,
@@ -1666,11 +1668,11 @@ impl I0iMcpHandler {
                 Ok(AgentStateChange::Create {
                     operation_key,
                     draft: ResearchEntryDraft {
-                        kind: parse_minimal_kind(&kind)?,
-                        epistemic_status: parse_epistemic_status(&epistemic_status)?,
+                        kind: kind.into(),
+                        epistemic_status: epistemic_status.into(),
                         text: statement,
                         evidence,
-                        relations: parse_state_relations(relationships)?,
+                        relations: parse_state_relations(relationships),
                         context: Vec::new(),
                         reason: Some(reason),
                     },
@@ -1692,10 +1694,10 @@ impl I0iMcpHandler {
                 Ok(AgentStateChange::Revise {
                     update: ResearchEntryUpdate {
                         id: entry_id,
-                        epistemic_status: parse_epistemic_status(&epistemic_status)?,
+                        epistemic_status: epistemic_status.into(),
                         text: statement,
                         evidence,
-                        relations: parse_state_relations(relationships)?,
+                        relations: parse_state_relations(relationships),
                         context: Vec::new(),
                         reason: Some(reason),
                     },
@@ -1708,9 +1710,7 @@ impl I0iMcpHandler {
                 reason,
             } => Ok(AgentStateChange::SetLifecycle {
                 entry_id,
-                lifecycle: EntryLifecycle::parse(&lifecycle).map_err(|_| {
-                    invalid_input("lifecycle must be active, contested, or superseded")
-                })?,
+                lifecycle: lifecycle.into(),
                 reason: validate_state_reason(reason)?,
             }),
         }
@@ -1743,7 +1743,6 @@ impl I0iMcpHandler {
                     relationship,
                     explanation,
                 } => {
-                    validate_evidence_relationship(&relationship)?;
                     let explanation = explanation.trim().to_string();
                     if explanation.is_empty() {
                         return Err(invalid_input("Evidence explanation must not be empty"));
@@ -1768,7 +1767,7 @@ impl I0iMcpHandler {
                         excerpt: Some(passage.quote),
                         support_note: Some(explanation),
                     });
-                    relationships.push(relationship);
+                    relationships.push(relationship.as_str().to_string());
                 }
                 StateEvidenceInput::Retain { evidence_id } => {
                     let link = retained
@@ -2169,6 +2168,23 @@ impl LocalMcpServer {
         .await
     }
 
+    /// Bind the real MCP handlers without a native window for explicit evaluation.
+    #[cfg(test)]
+    pub(crate) async fn start_for_evaluation(
+        store: LibraryStore,
+        pdf_downloads: PdfDownloadManager,
+        pdf_extractions: PdfExtractionManager,
+    ) -> Result<Self, String> {
+        Self::start_with_cursor_ttl(
+            None,
+            store,
+            Some(pdf_downloads),
+            Some(pdf_extractions),
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+    }
+
     async fn start_with_cursor_ttl(
         app: Option<AppHandle>,
         store: LibraryStore,
@@ -2517,44 +2533,14 @@ fn validate_passage_anchor(
     Ok(())
 }
 
-fn parse_minimal_kind(value: &str) -> Result<ResearchEntryKind, rmcp::ErrorData> {
-    match value {
-        "finding" => Ok(ResearchEntryKind::Finding),
-        "hypothesis" => Ok(ResearchEntryKind::Hypothesis),
-        "question" => Ok(ResearchEntryKind::Question),
-        _ => Err(invalid_input(
-            "kind must be finding, hypothesis, or question",
-        )),
-    }
-}
-
-fn parse_epistemic_status(value: &str) -> Result<EpistemicStatus, rmcp::ErrorData> {
-    EpistemicStatus::parse(value).map_err(|_| invalid_input("Invalid epistemic_status"))
-}
-
-fn parse_state_relations(
-    values: Vec<StateRelationInput>,
-) -> Result<Vec<EntryRelationDraft>, rmcp::ErrorData> {
+fn parse_state_relations(values: Vec<StateRelationInput>) -> Vec<EntryRelationDraft> {
     values
         .into_iter()
-        .map(|value| {
-            Ok(EntryRelationDraft {
-                target_entry_id: value.target_entry_id,
-                kind: EntryRelationKind::parse(&value.kind)
-                    .map_err(|_| invalid_input("Invalid entry relationship kind"))?,
-            })
+        .map(|value| EntryRelationDraft {
+            target_entry_id: value.target_entry_id,
+            kind: value.kind.into(),
         })
         .collect()
-}
-
-fn validate_evidence_relationship(value: &str) -> Result<(), rmcp::ErrorData> {
-    if matches!(value, "supports" | "contradicts" | "context") {
-        Ok(())
-    } else {
-        Err(invalid_input(
-            "Evidence relationship must be supports, contradicts, or context",
-        ))
-    }
 }
 
 fn validate_state_reason(value: String) -> Result<String, rmcp::ErrorData> {
@@ -2875,9 +2861,11 @@ struct VaultAddPaperInput {
 enum StateChangeInput {
     Create {
         operation_key: String,
-        kind: String,
+        /// Entry type. Direct source evidence belongs on a finding.
+        kind: StateEntryKindInput,
         statement: String,
-        epistemic_status: String,
+        /// Provenance class. Use source_supported only for cited findings.
+        epistemic_status: StateEpistemicStatusInput,
         evidence: Vec<StateEvidenceInput>,
         relationships: Vec<StateRelationInput>,
         reason: String,
@@ -2885,16 +2873,74 @@ enum StateChangeInput {
     Revise {
         entry_id: String,
         statement: String,
-        epistemic_status: String,
+        /// Provenance class. Preserve speculative for a hypothesis.
+        epistemic_status: StateEpistemicStatusInput,
+        /// Replacement evidence. Keep empty when revising a hypothesis; cite a related finding instead.
         evidence: Vec<StateEvidenceInput>,
         relationships: Vec<StateRelationInput>,
         reason: String,
     },
     SetLifecycle {
         entry_id: String,
-        lifecycle: String,
+        lifecycle: StateLifecycleInput,
         reason: String,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StateEntryKindInput {
+    Finding,
+    Hypothesis,
+    Question,
+}
+
+impl From<StateEntryKindInput> for ResearchEntryKind {
+    fn from(value: StateEntryKindInput) -> Self {
+        match value {
+            StateEntryKindInput::Finding => Self::Finding,
+            StateEntryKindInput::Hypothesis => Self::Hypothesis,
+            StateEntryKindInput::Question => Self::Question,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StateEpistemicStatusInput {
+    SourceSupported,
+    AgentSynthesis,
+    ResearcherContext,
+    Speculative,
+}
+
+impl From<StateEpistemicStatusInput> for EpistemicStatus {
+    fn from(value: StateEpistemicStatusInput) -> Self {
+        match value {
+            StateEpistemicStatusInput::SourceSupported => Self::SourceSupported,
+            StateEpistemicStatusInput::AgentSynthesis => Self::AgentSynthesis,
+            StateEpistemicStatusInput::ResearcherContext => Self::ResearcherContext,
+            StateEpistemicStatusInput::Speculative => Self::Speculative,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StateLifecycleInput {
+    Active,
+    Contested,
+    Superseded,
+}
+
+impl From<StateLifecycleInput> for EntryLifecycle {
+    fn from(value: StateLifecycleInput) -> Self {
+        match value {
+            StateLifecycleInput::Active => Self::Active,
+            StateLifecycleInput::Contested => Self::Contested,
+            StateLifecycleInput::Superseded => Self::Superseded,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -2902,7 +2948,7 @@ enum StateChangeInput {
 enum StateEvidenceInput {
     Passage {
         passage_ref: String,
-        relationship: String,
+        relationship: StateEvidenceRelationshipInput,
         explanation: String,
     },
     Retain {
@@ -2911,9 +2957,47 @@ enum StateEvidenceInput {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StateEvidenceRelationshipInput {
+    Supports,
+    Contradicts,
+    Context,
+}
+
+impl StateEvidenceRelationshipInput {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Supports => "supports",
+            Self::Contradicts => "contradicts",
+            Self::Context => "context",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct StateRelationInput {
     target_entry_id: String,
-    kind: String,
+    kind: StateRelationKindInput,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StateRelationKindInput {
+    DerivedFrom,
+    MotivatedBy,
+    Contests,
+    Supersedes,
+}
+
+impl From<StateRelationKindInput> for EntryRelationKind {
+    fn from(value: StateRelationKindInput) -> Self {
+        match value {
+            StateRelationKindInput::DerivedFrom => Self::DerivedFrom,
+            StateRelationKindInput::MotivatedBy => Self::MotivatedBy,
+            StateRelationKindInput::Contests => Self::Contests,
+            StateRelationKindInput::Supersedes => Self::Supersedes,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3677,6 +3761,25 @@ mod tests {
     use rmcp::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn state_update_schema_exposes_closed_vocabulary() {
+        let schema: String =
+            serde_json::to_string(&schemars::schema_for!(StateUpdateInput)).unwrap();
+
+        for value in [
+            "source_supported",
+            "agent_synthesis",
+            "supports",
+            "contradicts",
+            "derived_from",
+            "motivated_by",
+        ] {
+            assert!(schema.contains(value), "schema omitted {value}");
+        }
+        assert!(!schema.contains("qualifies"));
+        assert!(!schema.contains("informs"));
+    }
 
     struct FixtureEvidenceModel {
         response: String,

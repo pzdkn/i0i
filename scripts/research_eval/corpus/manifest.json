@@ -6,5 +6,96 @@
     {"id": "new_run_continuation", "description": "A fresh agent thread continues from persisted State."},
     {"id": "live_discovery_smoke", "description": "Live discovery, acquisition, reading, and State update."}
   ],
-  "documents": []
+  "research_instruction": "Assess whether adaptive gradient clipping reduces optimizer instability in noisy small-batch training, and identify conditions that limit the claim.",
+  "reference_questions": [
+    "What direct evidence supports a stability benefit, and under which tested conditions?",
+    "Which evidence contradicts or limits a universal stability claim?",
+    "Did the research distinguish full text, abstract-only evidence, and unavailable content?",
+    "Did later investigation respond to evidence learned earlier?"
+  ],
+  "documents": [
+    {
+      "id": "fixture:adaptive-clipping-support",
+      "title": "Adaptive Gradient Clipping for Noisy Small-Batch Optimization",
+      "authors": ["Mira Chen", "Jon Bell"],
+      "year": 2024,
+      "venue": "Controlled Optimization Studies",
+      "role": "supporting",
+      "availability": "full_text",
+      "keywords": ["adaptive", "gradient", "clipping", "small batch", "instability", "support"],
+      "abstract": "A controlled study compares adaptive clipping with fixed clipping in noisy small-batch optimization.",
+      "body": [
+        "Adaptive Gradient Clipping for Noisy Small-Batch Optimization",
+        "Methods. We ran 120 matched training trials with batch size eight and injected label noise. The adaptive threshold used a moving percentile of recent gradient norms. Fixed clipping and no clipping were preregistered comparison conditions.",
+        "Results. Adaptive gradient clipping reduced divergent runs from 18 percent to 4 percent. Median validation accuracy among converged runs changed by less than one percentage point. The result therefore supports improved stability, not a general accuracy gain.",
+        "Limitations. The experiment covered one convolutional architecture, batch sizes from eight to sixteen, and synthetic label noise. We did not test large-batch training or transformer pretraining."
+      ],
+      "expected_evidence": "Adaptive gradient clipping reduced divergent runs from 18 percent to 4 percent.",
+      "generated_pdf_sha256": "8d5b212151981d3b6f7165f1bee8b213e96c3898c1d000fa39cbf28872ee51d9"
+    },
+    {
+      "id": "fixture:adaptive-clipping-conflict",
+      "title": "Boundary Conditions for Adaptive Clipping under Momentum",
+      "authors": ["Sofia Reyes", "Tariq Okafor"],
+      "year": 2025,
+      "venue": "Reproducible Learning Systems",
+      "role": "conflicting",
+      "availability": "full_text",
+      "keywords": ["adaptive", "clipping", "momentum", "contradiction", "limitation", "boundary"],
+      "abstract": "A replication examines adaptive clipping when high momentum and correlated gradient noise are present.",
+      "body": [
+        "Boundary Conditions for Adaptive Clipping under Momentum",
+        "Methods. We repeated the small-batch protocol with momentum 0.95 and temporally correlated gradient noise across 80 matched trials.",
+        "Results. Divergence was 11 percent with adaptive clipping and 10 percent with fixed clipping, a difference that was not statistically distinguishable. Adaptive clipping also required 7 percent more optimization steps to reach the target loss.",
+        "Interpretation. These results contradict a universal stability benefit. They do not refute the earlier result under independent noise; instead they identify momentum and correlated noise as boundary conditions."
+      ],
+      "expected_evidence": "Divergence was 11 percent with adaptive clipping and 10 percent with fixed clipping, a difference that was not statistically distinguishable.",
+      "generated_pdf_sha256": "d4d1acc43f26fe03b0ebbe9465b6e7a252aa5f947d2ce412810ac3696dc094e3"
+    },
+    {
+      "id": "fixture:marine-clipping-irrelevant",
+      "title": "Adaptive Signal Clipping in Marine Acoustic Sensors",
+      "authors": ["Leonie Fischer"],
+      "year": 2023,
+      "venue": "Marine Instrumentation Notes",
+      "role": "irrelevant",
+      "availability": "full_text",
+      "keywords": ["marine", "signal", "sensor", "clipping"],
+      "abstract": "Adaptive amplitude clipping protects underwater microphones from impulsive saturation.",
+      "body": [
+        "Adaptive Signal Clipping in Marine Acoustic Sensors",
+        "This report concerns acoustic hardware saturation. It does not study gradients, optimization, machine learning training, or batch size."
+      ],
+      "expected_evidence": "It does not study gradients, optimization, machine learning training, or batch size.",
+      "generated_pdf_sha256": "7d17afb8d7823d2c490977de5cd0147ee0cacaca0fcc4526f24914741b452a64"
+    },
+    {
+      "id": "fixture:federated-clipping-abstract",
+      "title": "Adaptive Clipping in Federated Optimization: A Pilot Study",
+      "authors": ["Priya Nair"],
+      "year": 2025,
+      "venue": "Federated Learning Workshop",
+      "role": "abstract_only",
+      "availability": "abstract_only",
+      "keywords": ["adaptive", "clipping", "federated", "pilot"],
+      "abstract": "A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.",
+      "body": [],
+      "expected_evidence": "A pilot reports fewer unstable client updates with adaptive clipping, but the full text and statistical protocol are unavailable.",
+      "generated_pdf_sha256": null
+    },
+    {
+      "id": "fixture:long-horizon-unavailable",
+      "title": "Long-Horizon Behavior of Dynamic Gradient Thresholds",
+      "authors": ["Amir Haddad"],
+      "year": 2022,
+      "venue": "Archived Optimization Results",
+      "role": "unavailable",
+      "availability": "unavailable",
+      "keywords": ["dynamic", "gradient", "threshold", "long horizon"],
+      "abstract": null,
+      "body": [],
+      "expected_evidence": null,
+      "generated_pdf_sha256": null
+    }
+  ]
 }

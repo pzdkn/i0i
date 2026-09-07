@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "scenario": "one_iteration",
+  "status": "fail",
+  "startedAt": "2026-09-07T11:36:03.694804+00:00",
+  "elapsedMs": 2764,
+  "corpusVersion": 1,
+  "corpusHashes": {
+    "fixture:marine-clipping-irrelevant": "7d17afb8d7823d2c490977de5cd0147ee0cacaca0fcc4526f24914741b452a64",
+    "fixture:adaptive-clipping-conflict": "d4d1acc43f26fe03b0ebbe9465b6e7a252aa5f947d2ce412810ac3696dc094e3",
+    "fixture:adaptive-clipping-support": "8d5b212151981d3b6f7165f1bee8b213e96c3898c1d000fa39cbf28872ee51d9"
+  },
+  "instruction": "Assess whether adaptive gradient clipping reduces optimizer instability in noisy small-batch training, and identify conditions that limit the claim.",
+  "agentModel": "gpt-5.6-sol",
+  "judgeModel": "gpt-5.5",
+  "runIds": [
+    "harness_run_1788780966031059000"
+  ],
+  "initialState": {
+    "currentRevision": 1,
+    "entries": [
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 11:36:03",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788780963809707000",
+        "kind": "hypothesis",
+        "lastRevision": 1,
+        "lifecycle": "active",
+        "originRunId": null,
+        "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+        "relationCount": 0,
+        "text": "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training.",
+        "updatedAt": "2026-09-07 11:36:03"
+      }
+    ],
+    "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+    "revision": 1,
+    "revisions": [
+      {
+        "createdAt": "2026-09-07 11:36:03",
+        "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+        "reason": "Initial evaluation hypothesis",
+        "revision": 1,
+        "runId": null
+      },
+      {
+        "createdAt": "2026-09-07 11:36:03",
+        "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+        "reason": "Initial empty Research State",
+        "revision": 0,
+        "runId": null
+      }
+    ]
+  },
+  "finalState": {
+    "currentRevision": 1,
+    "entries": [
+      {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 11:36:03",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788780963809707000",
+        "kind": "hypothesis",
+        "lastRevision": 1,
+        "lifecycle": "active",
+        "originRunId": null,
+        "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+        "relationCount": 0,
+        "text": "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training.",
+        "updatedAt": "2026-09-07 11:36:03"
+      }
+    ],
+    "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+    "revision": 1,
+    "revisions": [
+      {
+        "createdAt": "2026-09-07 11:36:03",
+        "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+        "reason": "Initial evaluation hypothesis",
+        "revision": 1,
+        "runId": null
+      },
+      {
+        "createdAt": "2026-09-07 11:36:03",
+        "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+        "reason": "Initial empty Research State",
+        "revision": 0,
+        "runId": null
+      }
+    ]
+  },
+  "stateDetails": [
+    {
+      "context": [],
+      "entry": {
+        "contextCount": 0,
+        "createdAt": "2026-09-07 11:36:03",
+        "epistemicStatus": "speculative",
+        "evidenceCount": 0,
+        "firstRevision": 1,
+        "id": "research_entry_1788780963809707000",
+        "kind": "hypothesis",
+        "lastRevision": 1,
+        "lifecycle": "active",
+        "originRunId": null,
+        "projectId": "project:research-evaluation-6c34528094fb4f7bbd0fbedef67b9df9",
+        "relationCount": 0,
+        "text": "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training.",
+        "updatedAt": "2026-09-07 11:36:03"
+      },
+      "evidence": [],
+      "history": [
+        {
+          "createdAt": "2026-09-07 11:36:03",
+          "entryId": "research_entry_1788780963809707000",
+          "epistemicStatus": "speculative",
+          "kind": "hypothesis",
+          "lifecycle": "active",
+          "originRunId": null,
+          "reason": "Initial evaluation hypothesis",
+          "stateRevision": 1,
+          "text": "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training."
+        }
+      ],
+      "relations": []
+    }
+  ],
+  "addedPaperIds": [],
+  "toolTrace": [],
+  "checks": [
+    {
+      "name": "production_run_terminal",
+      "status": "fail",
+      "detail": "1 Run(s): harness_run_1788780966031059000=failed"
+    },
+    {
+      "name": "new_paper_collected",
+      "status": "fail",
+      "detail": "Added papers: "
+    },
+    {
+      "name": "no_duplicate_membership",
+      "status": "pass",
+      "detail": "0 unique membership rows"
+    },
+    {
+      "name": "state_revision_advanced",
+      "status": "fail",
+      "detail": "State revision 1 -> 1"
+    },
+    {
+      "name": "evidence_references_resolve",
+      "status": "fail",
+      "detail": "Resolved 0 new evidence link(s) against stored chunks"
+    },
+    {
+      "name": "passage_read_before_state_update",
+      "status": "fail",
+      "detail": "Completed tool order: "
+    },
+    {
+      "name": "run_within_limits",
+      "status": "pass",
+      "detail": "Persisted usage stayed within each Run's captured limits"
+    }
+  ],
+  "judge": null,
+  "errors": [
+    "Run harness_run_1788780966031059000 ended as failed: agent_failed"
+  ],
+  "cleanupComplete": true,
+  "process": {
+    "exitCode": 0,
+    "stdoutTail": "\nrunning 1 test\ntest services::research::research_eval::tests::explicit_scenario ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 611 filtered out; finished in 2.77s\n\n",
+    "stderrTail": "warning: struct `VaultStatus` is never constructed\n --> src/domain/vault.rs:3:12\n  |\n3 | pub struct VaultStatus {\n  |            ^^^^^^^^^^^\n  |\n  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: enum `HighlightTarget` is never used\n  --> src/services/highlight/mod.rs:14:10\n   |\n14 | pub enum HighlightTarget {\n   |          ^^^^^^^^^^^^^^^\n\nwarning: method `run_harness_search_with_timeout` is never used\n   --> src/services/research/manager.rs:154:12\n    |\n 81 | impl SearchManager {\n    | ------------------ method in this implementation\n...\n154 |     pub fn run_harness_search_with_timeout(\n    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: `i0i` (lib test) generated 3 warnings\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.83s\n     Running unittests src/lib.rs (target/debug/deps/i0i_lib-b2cda0fe71600129)\n[mcp] listening on http://127.0.0.1:59044/mcp\n[research-controller] run_id=harness_run_1788780966031059000 failed: thread/start.environments requires experimentalApi capability\n"
+  },
+  "git": {
+    "revision": "a45c045ec9de152823bd7e1397aa2a13f2f40c2c",
+    "dirty": true
+  },
+  "models": {
+    "agent": "gpt-5.6-sol",
+    "judge": "gpt-5.5"
+  },
+  "manifest": {
+    "version": 1,
+    "sha256": "5a41d7b3089de631368d6f1766d633b39d27e3392885c1ede8b2bba9cc6b8601"
+  }
+}

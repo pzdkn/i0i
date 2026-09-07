@@ -1,0 +1,10 @@
+{
+  "checks": [],
+  "errors": [
+    "Operation not permitted (os error 1)"
+  ],
+  "judge": null,
+  "scenario": "one_iteration",
+  "schemaVersion": 1,
+  "status": "fail"
+}
