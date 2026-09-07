@@ -133,6 +133,13 @@ pub struct AgentVaultAddReceipt {
     pub source_ids: Vec<String>,
 }
 
+/// Source text delegated to one evidence-question model call, grouped by paper.
+#[derive(Debug, Clone)]
+pub struct AgentQuestionDelivery {
+    pub paper_id: String,
+    pub returned_text_chars: u64,
+}
+
 /// One persisted candidate snapshot emitted while an agent search runs.
 #[derive(Debug, Clone)]
 pub struct AgentSearchCandidateEvent {
@@ -3869,6 +3876,207 @@ impl LibraryStore {
         tx.commit().map_err(|error| error.to_string())
     }
 
+    /// Atomically admit one delegated evidence question against Run limits.
+    ///
+    /// Text and the model call are charged before the external request starts.
+    /// Passage references become citable separately, only after a validated
+    /// answer returns.
+    pub fn admit_agent_evidence_question(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        deliveries: &[AgentQuestionDelivery],
+    ) -> StoreResult<()> {
+        if deliveries.is_empty() {
+            return Err("Evidence question requires source text".to_string());
+        }
+        let mut conn = self.open_connection()?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let (limits_json, direct_llm_calls): (String, u32) = tx
+            .query_row(
+                "select agent_limits_json, llm_call_count from harness_runs
+                 where id = ?1 and project_id = ?2 and execution_kind = 'codex_agent'
+                   and status in ('planning', 'searching', 'assessing', 'ranking')",
+                params![run_id, project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| "Managed Research Run is no longer active".to_string())?;
+        let limits: AgentRunLimits =
+            serde_json::from_str(&limits_json).map_err(|error| error.to_string())?;
+        let reserved_child_calls: u32 = tx
+            .query_row(
+                "select coalesce(sum(reserved_llm_calls), 0)
+                 from agent_search_runs where parent_run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if direct_llm_calls
+            .saturating_add(reserved_child_calls)
+            .saturating_add(1)
+            > limits.maximum_llm_calls
+        {
+            return Err("Research Run model-call limit is exhausted".to_string());
+        }
+
+        let existing_papers: HashSet<String> = {
+            let mut statement = tx
+                .prepare("select paper_id from agent_reader_usage where run_id = ?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![run_id], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?.into_iter().collect()
+        };
+        let new_papers: HashSet<&str> = deliveries
+            .iter()
+            .map(|delivery| delivery.paper_id.as_str())
+            .filter(|paper_id| !existing_papers.contains(*paper_id))
+            .collect();
+        if existing_papers.len().saturating_add(new_papers.len())
+            > limits.maximum_distinct_papers_read as usize
+        {
+            return Err("Research Run paper-read limit is exhausted".to_string());
+        }
+        let current_chars: i64 = tx
+            .query_row(
+                "select coalesce(sum(returned_text_chars), 0)
+                 from agent_reader_usage where run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let added_chars: u64 = deliveries
+            .iter()
+            .map(|delivery| delivery.returned_text_chars)
+            .sum();
+        if current_chars.saturating_add(added_chars as i64)
+            > limits.maximum_returned_text_chars as i64
+        {
+            return Err("Research Run returned-text limit is exhausted".to_string());
+        }
+        for delivery in deliveries {
+            let belongs_to_project: bool = tx
+                .query_row(
+                    "select exists(
+                       select 1 from vault_papers vp join vaults v on v.id = vp.vault_id
+                       where vp.paper_id = ?1 and v.project_id = ?2
+                     )",
+                    params![delivery.paper_id, project_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !belongs_to_project {
+                return Err("Evidence question paper is outside this Project".to_string());
+            }
+            let chars: i64 = delivery
+                .returned_text_chars
+                .try_into()
+                .map_err(|_| "Evidence question context is too large to account for".to_string())?;
+            tx.execute(
+                "insert into agent_reader_usage
+                   (run_id, paper_id, returned_text_chars, read_count)
+                 values (?1, ?2, ?3, 1)
+                 on conflict(run_id, paper_id) do update set
+                   returned_text_chars = returned_text_chars + excluded.returned_text_chars,
+                   read_count = read_count + 1",
+                params![run_id, delivery.paper_id, chars],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.execute(
+            "update harness_runs set llm_call_count = llm_call_count + 1 where id = ?1",
+            params![run_id],
+        )
+        .map_err(|error| error.to_string())?;
+        append_structured_harness_event(
+            &tx,
+            run_id,
+            "agent_evidence_question_started",
+            &format!(
+                "Asked one evidence question over {} papers and {added_chars} characters",
+                deliveries.len()
+            ),
+            Some(serde_json::json!({
+                "paperCount": deliveries.len(),
+                "returnedTextChars": added_chars,
+            })),
+            Some("reading"),
+            None,
+            None,
+            "harness",
+        )?;
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// Make validated question-answer citations eligible for later State writes.
+    pub fn record_agent_question_citations(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        citations: &[(String, String)],
+    ) -> StoreResult<()> {
+        if citations.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let active: bool = tx
+            .query_row(
+                "select exists(select 1 from harness_runs
+                 where id = ?1 and project_id = ?2 and execution_kind = 'codex_agent'
+                   and status in ('planning', 'searching', 'assessing', 'ranking'))",
+                params![run_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !active {
+            return Err("Managed Research Run is no longer active".to_string());
+        }
+        for (paper_id, passage_ref) in citations {
+            let was_delivered: bool = tx
+                .query_row(
+                    "select exists(select 1 from agent_reader_usage
+                     where run_id = ?1 and paper_id = ?2)",
+                    params![run_id, paper_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !was_delivered {
+                return Err("Question citation refers to unread evidence".to_string());
+            }
+            tx.execute(
+                "insert into agent_reader_passages
+                   (run_id, passage_ref, paper_id, delivered_at)
+                 values (?1, ?2, ?3, datetime('now'))
+                 on conflict(run_id, passage_ref) do nothing",
+                params![run_id, passage_ref, paper_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        append_structured_harness_event(
+            &tx,
+            run_id,
+            "agent_evidence_question_answered",
+            &format!(
+                "Evidence answer returned {} cited passages",
+                citations.len()
+            ),
+            Some(serde_json::json!({
+                "passageRefs": citations.iter().map(|(_, reference)| reference).collect::<Vec<_>>(),
+            })),
+            Some("reading"),
+            None,
+            None,
+            "harness",
+        )?;
+        tx.commit().map_err(|error| error.to_string())
+    }
+
     /// List child searches that must settle before their parent can finish.
     pub fn list_agent_search_runs_for_parent(
         &self,
@@ -3923,7 +4131,7 @@ impl LibraryStore {
         if active_children > 0 {
             return Err("Managed Research Run still has active child searches".to_string());
         }
-        let (provider_queries, llm_calls, inspected_candidates): (u32, u32, u32) = tx
+        let (provider_queries, child_llm_calls, inspected_candidates): (u32, u32, u32) = tx
             .query_row(
                 "select coalesce(sum(r.provider_query_count), 0),
                         coalesce(sum(r.llm_call_count), 0),
@@ -3934,6 +4142,7 @@ impl LibraryStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|error| error.to_string())?;
+        let llm_calls = run.llm_call_count.saturating_add(child_llm_calls);
         let (papers_read, returned_chars): (u32, i64) = tx
             .query_row(
                 "select count(*), coalesce(sum(returned_text_chars), 0)
@@ -13628,6 +13837,10 @@ fn validate_harness_event_detail(
             ("nextDirection", "nullable_string"),
         ],
         "agent_passages_delivered" => &[("paperId", "string"), ("passageRefs", "string_array")],
+        "agent_evidence_question_started" => {
+            &[("paperCount", "integer"), ("returnedTextChars", "integer")]
+        }
+        "agent_evidence_question_answered" => &[("passageRefs", "string_array")],
         "agent_state_committed" => &[
             ("revision", "integer"),
             ("affectedEntryIds", "string_array"),
@@ -20430,6 +20643,52 @@ mod tests {
             .record_agent_reader_delivery(&run.id, "project:attention", "caron2021", 1, &[])
             .expect_err("new papers consume the distinct-paper budget")
             .contains("paper-read"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_evidence_question_accounts_text_model_call_and_citations() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.admit_agent_evidence_question(
+            &run.id,
+            "project:attention",
+            &[AgentQuestionDelivery {
+                paper_id: "vaswani2017".to_string(),
+                returned_text_chars: 42,
+            }],
+        )?;
+        db.store.record_agent_question_citations(
+            &run.id,
+            "project:attention",
+            &[("vaswani2017".to_string(), "passage:question".to_string())],
+        )?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        db.store.persist_agent_run_outcome(
+            &run.id,
+            &ResearchRunOutcome {
+                summary: "Delegated question answered".to_string(),
+                task_outcomes: vec![crate::domain::harness::ResearchTaskOutcome {
+                    search_run_ids: Vec::new(),
+                    motivating_entry_ids: Vec::new(),
+                    learned_points: vec!["Evidence inspected".to_string()],
+                    cited_passage_refs: vec!["passage:question".to_string()],
+                }],
+                unanswered_questions: Vec::new(),
+                next_direction: None,
+            },
+        )?;
+        db.store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+
+        let checkpoint = db.store.get_research_checkpoint(&run.id)?;
+        assert_eq!(checkpoint.usage.llm_calls, 1);
+        assert!(db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .events
+            .iter()
+            .any(|event| event.kind == "agent_evidence_question_answered"));
         Ok(())
     }
 

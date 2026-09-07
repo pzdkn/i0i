@@ -39,8 +39,15 @@ use crate::domain::research_state::{
 };
 use crate::pdf_extraction::PdfExtractionManager;
 use crate::pdf_ingestion::PdfDownloadManager;
+use crate::services::chat::evidence_question::{
+    EvidenceMetadataMatch, EvidenceQuestionAnswer, EvidenceQuestionContext,
+    EvidenceQuestionCoverage, EvidenceQuestionPassage, EvidenceQuestionService,
+    MAX_QUESTION_PASSAGES, MAX_QUESTION_SOURCE_CHARS,
+};
 use crate::services::research::manager::SearchManager;
-use crate::storage::library_store::{AgentSearchCandidateEvent, AgentStateChange, LibraryStore};
+use crate::storage::library_store::{
+    AgentQuestionDelivery, AgentSearchCandidateEvent, AgentStateChange, LibraryStore,
+};
 use tauri::{AppHandle, Emitter};
 
 const DEFAULT_PAGE_SIZE: usize = 25;
@@ -55,7 +62,9 @@ pub const VAULT_LIST: &str = "vault_list";
 pub const VAULT_LIST_PAPERS: &str = "vault_list_papers";
 pub const VAULT_GET_PAPER: &str = "vault_get_paper";
 pub const VAULT_ADD_PAPER: &str = "vault_add_paper";
+pub const VAULT_ASK: &str = "vault_ask";
 pub const READER_READ: &str = "reader_read";
+pub const READER_ASK: &str = "reader_ask";
 pub const READER_ADD_NOTE: &str = "reader_add_note";
 pub const READER_LIST_NOTES: &str = "reader_list_notes";
 pub const STATE_READ: &str = "state_read";
@@ -207,6 +216,7 @@ struct I0iMcpHandler {
     state_cursors: Arc<Mutex<HashMap<String, StateCursorSnapshot>>>,
     search_cursors: Arc<Mutex<HashMap<String, SearchCursorSnapshot>>>,
     search_manager: Arc<StdRwLock<Option<SearchManager>>>,
+    evidence_questions: Arc<StdRwLock<Option<EvidenceQuestionService>>>,
     cursor_ttl: Duration,
 }
 
@@ -230,6 +240,7 @@ impl I0iMcpHandler {
             state_cursors: Arc::new(Mutex::new(HashMap::new())),
             search_cursors: Arc::new(Mutex::new(HashMap::new())),
             search_manager: Arc::new(StdRwLock::new(None)),
+            evidence_questions: Arc::new(StdRwLock::new(None)),
             cursor_ttl,
         }
     }
@@ -313,6 +324,198 @@ impl I0iMcpHandler {
             },
         );
         passage_ref
+    }
+
+    /// Return the question service attached during application startup.
+    fn evidence_question_service(&self) -> Result<EvidenceQuestionService, rmcp::ErrorData> {
+        self.evidence_questions
+            .read()
+            .expect("MCP evidence question lock")
+            .clone()
+            .ok_or_else(|| service_unavailable("Evidence questions are not available"))
+    }
+
+    /// Give retrieved question passages opaque references valid for this grant.
+    async fn register_question_passages(
+        &self,
+        grant_token: &str,
+        passages: &mut [EvidenceQuestionPassage],
+    ) {
+        for passage in passages
+            .iter_mut()
+            .filter(|passage| passage.passage_ref.is_none())
+        {
+            let anchor = PassageAnchor {
+                paper_id: passage.paper_id.clone(),
+                source_id: passage.source_id.clone(),
+                extraction_id: passage.extraction_id.clone(),
+                chunk_id: passage.chunk_id.clone(),
+                page_start: passage.page_start.map(|page| page + 1),
+                page_end: passage.page_end.map(|page| page + 1),
+                source_start: passage.source_start,
+                source_end: passage.source_end,
+                quote: passage.text.clone(),
+            };
+            passage.passage_ref = Some(self.register_passage(grant_token, anchor).await);
+        }
+    }
+
+    /// Charge one started delegated question to its managed parent Run.
+    fn account_question_start(
+        &self,
+        grant: &McpCallContext,
+        passages: &[EvidenceQuestionPassage],
+    ) -> Result<(), rmcp::ErrorData> {
+        let Some(run_id) = grant.run_id.as_deref() else {
+            return Ok(());
+        };
+        let mut grouped: HashMap<String, u64> = HashMap::new();
+        for passage in passages {
+            *grouped.entry(passage.paper_id.clone()).or_default() +=
+                passage.text.chars().count() as u64;
+        }
+        let deliveries = grouped
+            .into_iter()
+            .map(|(paper_id, returned_text_chars)| AgentQuestionDelivery {
+                paper_id,
+                returned_text_chars,
+            })
+            .collect::<Vec<_>>();
+        self.store
+            .admit_agent_evidence_question(run_id, &grant.project_id, &deliveries)
+            .map_err(search_write_failure)
+    }
+
+    /// Make citations from a validated answer eligible for later State writes.
+    fn account_question_answer(
+        &self,
+        grant: &McpCallContext,
+        answer: &EvidenceQuestionAnswer,
+    ) -> Result<(), rmcp::ErrorData> {
+        let Some(run_id) = grant.run_id.as_deref() else {
+            return Ok(());
+        };
+        let citations = answer
+            .cited_passages
+            .iter()
+            .map(|passage| {
+                Ok((
+                    passage.paper_id.clone(),
+                    passage.passage_ref.clone().ok_or_else(|| {
+                        internal_failure("Question citation has no passage reference".to_string())
+                    })?,
+                ))
+            })
+            .collect::<Result<Vec<_>, rmcp::ErrorData>>()?;
+        self.store
+            .record_agent_question_citations(run_id, &grant.project_id, &citations)
+            .map_err(search_write_failure)
+    }
+
+    /// Validate readiness, account work, answer once, and return structured evidence.
+    async fn answer_question(
+        &self,
+        grant: &McpCallContext,
+        grant_token: &str,
+        question: &str,
+        mut context: EvidenceQuestionContext,
+    ) -> Result<EvidenceQuestionResult, rmcp::ErrorData> {
+        let service = self.evidence_question_service()?;
+        if !context.passages.is_empty() {
+            service.ensure_ready().map_err(service_unavailable_owned)?;
+        }
+        self.register_question_passages(grant_token, &mut context.passages)
+            .await;
+        if !context.passages.is_empty() {
+            self.account_question_start(grant, &context.passages)?;
+        }
+        let answer = service
+            .answer(question, &context.passages)
+            .await
+            .map_err(internal_failure)?;
+        self.account_question_answer(grant, &answer)?;
+        Ok(EvidenceQuestionResult::new(answer, context))
+    }
+
+    /// Resolve caller-supplied passage references within one scoped paper.
+    async fn supplied_question_context(
+        &self,
+        grant_token: &str,
+        paper: &Paper,
+        passage_refs: &[String],
+    ) -> Result<EvidenceQuestionContext, rmcp::ErrorData> {
+        if passage_refs.len() > MAX_QUESTION_PASSAGES {
+            return Err(invalid_input(
+                "At most 8 passage references may be supplied",
+            ));
+        }
+        let snapshot = self.snapshot()?;
+        let mut passages = Vec::new();
+        for passage_ref in passage_refs {
+            let passage = self
+                .passage_anchors
+                .read()
+                .await
+                .get(passage_ref)
+                .filter(|registered| registered.grant_token == grant_token)
+                .map(|registered| registered.anchor.clone())
+                .ok_or_else(|| invalid_input("Passage reference is stale or unknown"))?;
+            validate_passage_anchor(&snapshot, paper, &passage)?;
+            passages.push(EvidenceQuestionPassage {
+                passage_ref: Some(passage_ref.clone()),
+                paper_id: passage.paper_id,
+                paper_title: paper.title.clone(),
+                source_id: passage.source_id.clone(),
+                extraction_id: passage.extraction_id,
+                chunk_id: passage.chunk_id,
+                page_start: passage.page_start.map(|page| page - 1),
+                page_end: passage.page_end.map(|page| page - 1),
+                source_start: passage.source_start,
+                source_end: passage.source_end,
+                text: passage.quote,
+                evidence_kind: if passage.source_id.starts_with("metadata:") {
+                    "abstract".to_string()
+                } else {
+                    "full_text".to_string()
+                },
+            });
+        }
+        if passages
+            .iter()
+            .map(|passage| passage.text.chars().count())
+            .sum::<usize>()
+            > MAX_QUESTION_SOURCE_CHARS
+        {
+            return Err(invalid_input(
+                "Supplied passages exceed the 12000-character question limit",
+            ));
+        }
+        let full_text = passages
+            .iter()
+            .any(|passage| passage.evidence_kind == "full_text");
+        let abstract_text = passages
+            .iter()
+            .any(|passage| passage.evidence_kind == "abstract");
+        let kind = match (full_text, abstract_text) {
+            (true, true) => "mixed",
+            (true, false) => "full_text",
+            (false, true) => "abstract_only",
+            (false, false) => "none",
+        };
+        Ok(EvidenceQuestionContext {
+            passages,
+            metadata_matches: Vec::new(),
+            coverage: EvidenceQuestionCoverage {
+                kind: kind.to_string(),
+                scoped_paper_count: 1,
+                full_text_paper_ids: full_text.then(|| paper.id.clone()).into_iter().collect(),
+                abstract_paper_ids: abstract_text
+                    .then(|| paper.id.clone())
+                    .into_iter()
+                    .collect(),
+                unavailable_paper_ids: Vec::new(),
+            },
+        })
     }
 
     async fn passages_from_chunks(
@@ -470,6 +673,47 @@ impl I0iMcpHandler {
         }))
     }
 
+    /// Answer over bounded evidence retrieved only from the authorized Vault.
+    #[tool(description = "Answer a focused question from evidence in an authorized i0i vault")]
+    async fn vault_ask(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<VaultAskInput>,
+    ) -> Result<Json<EvidenceQuestionResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, VAULT_ASK)?;
+        if input.vault_id != grant.vault_id || input.question.trim().is_empty() {
+            return Err(if input.vault_id != grant.vault_id {
+                out_of_scope()
+            } else {
+                invalid_input("Question must not be empty")
+            });
+        }
+        let snapshot = self.snapshot()?;
+        let paper_ids = snapshot
+            .vault_papers
+            .iter()
+            .filter(|membership| membership.vault_id == grant.vault_id)
+            .map(|membership| membership.paper_id.clone())
+            .collect::<Vec<_>>();
+        let service = self.evidence_question_service()?;
+        let question_context = service
+            .collect(&input.question, &paper_ids)
+            .await
+            .map_err(internal_failure)?;
+        let result = self
+            .answer_question(&grant, &grant_token, &input.question, question_context)
+            .await?;
+        trace_tool(
+            &grant,
+            VAULT_ASK,
+            started,
+            &result.coverage.kind,
+            result.citations.len(),
+        );
+        Ok(Json(result))
+    }
+
     /// Read bounded exact passages from a scoped saved document.
     #[tool(description = "Read exact, referenceable passages from an i0i paper")]
     async fn reader_read(
@@ -514,6 +758,47 @@ impl I0iMcpHandler {
             started,
             &result.availability,
             result.passages.len(),
+        );
+        Ok(Json(result))
+    }
+
+    /// Answer over retrieved or explicitly named passages from one scoped paper.
+    #[tool(description = "Answer a focused question from evidence in one i0i paper")]
+    async fn reader_ask(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(input): Parameters<ReaderAskInput>,
+    ) -> Result<Json<EvidenceQuestionResult>, rmcp::ErrorData> {
+        let started = Instant::now();
+        let (grant, grant_token) = Self::context(&context, READER_ASK)?;
+        if input.question.trim().is_empty() {
+            return Err(invalid_input("Question must not be empty"));
+        }
+        let snapshot = self.snapshot()?;
+        let paper = Self::scoped_paper(&snapshot, &grant, &input.paper_id)?;
+        let service = self.evidence_question_service()?;
+        let question_context = if let Some(refs) = input
+            .passage_refs
+            .as_ref()
+            .filter(|passage_refs| !passage_refs.is_empty())
+        {
+            self.supplied_question_context(&grant_token, paper, refs)
+                .await?
+        } else {
+            service
+                .collect(&input.question, std::slice::from_ref(&input.paper_id))
+                .await
+                .map_err(internal_failure)?
+        };
+        let result = self
+            .answer_question(&grant, &grant_token, &input.question, question_context)
+            .await?;
+        trace_tool(
+            &grant,
+            READER_ASK,
+            started,
+            &result.coverage.kind,
+            result.citations.len(),
         );
         Ok(Json(result))
     }
@@ -1885,6 +2170,15 @@ impl LocalMcpServer {
             .expect("MCP SearchManager lock") = Some(manager);
     }
 
+    /// Attach bounded evidence questions after retrieval and chat setup exists.
+    pub(crate) fn attach_evidence_questions(&self, service: EvidenceQuestionService) {
+        *self
+            .handler
+            .evidence_questions
+            .write()
+            .expect("MCP evidence question lock") = Some(service);
+    }
+
     /// Revoke one credential without revealing whether it ever existed.
     pub async fn revoke_grant(&self, token: &str) {
         self.grants.revoke(token).await;
@@ -2014,6 +2308,11 @@ fn service_unavailable(message: &str) -> rmcp::ErrorData {
         message.to_string(),
         Some(serde_json::json!({"code": "unavailable"})),
     )
+}
+
+/// Adapt an owned service failure into the MCP unavailable error shape.
+fn service_unavailable_owned(message: String) -> rmcp::ErrorData {
+    service_unavailable(&message)
 }
 
 /// Confirm that an in-memory passage still names the currently persisted source.
@@ -2312,11 +2611,25 @@ struct GetPaperInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct VaultAskInput {
+    vault_id: String,
+    question: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ReaderReadInput {
     paper_id: String,
     page_start: Option<i32>,
     page_end: Option<i32>,
     cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReaderAskInput {
+    paper_id: String,
+    question: String,
+    #[serde(default)]
+    passage_refs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2517,6 +2830,106 @@ impl McpReaderNote {
 struct ReaderListNotesResult {
     notes: Vec<McpReaderNote>,
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpQuestionCitation {
+    passage_ref: String,
+    paper_id: String,
+    paper_title: String,
+    source_id: String,
+    extraction_id: Option<String>,
+    chunk_id: Option<String>,
+    page_start: Option<i32>,
+    page_end: Option<i32>,
+    text: String,
+    evidence_kind: String,
+}
+
+impl McpQuestionCitation {
+    /// Convert a validated internal passage into the MCP citation shape.
+    fn from_passage(passage: EvidenceQuestionPassage) -> Self {
+        Self {
+            passage_ref: passage
+                .passage_ref
+                .expect("question citations are registered before answering"),
+            paper_id: passage.paper_id,
+            paper_title: passage.paper_title,
+            source_id: passage.source_id,
+            extraction_id: passage.extraction_id,
+            chunk_id: passage.chunk_id,
+            page_start: passage.page_start.map(|page| page + 1),
+            page_end: passage.page_end.map(|page| page + 1),
+            text: passage.text,
+            evidence_kind: passage.evidence_kind,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceQuestionUsage {
+    model: Option<String>,
+    llm_calls: u32,
+    inspected_passages: usize,
+    inspected_source_chars: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceQuestionResult {
+    answer: String,
+    citations: Vec<McpQuestionCitation>,
+    relevant_paper_ids: Vec<String>,
+    metadata_matches: Vec<EvidenceMetadataMatch>,
+    coverage: EvidenceQuestionCoverage,
+    insufficient_evidence: bool,
+    usage: EvidenceQuestionUsage,
+}
+
+impl EvidenceQuestionResult {
+    /// Combine a validated answer with retrieval coverage and usage.
+    fn new(answer: EvidenceQuestionAnswer, context: EvidenceQuestionContext) -> Self {
+        let inspected_source_chars = context
+            .passages
+            .iter()
+            .map(|passage| passage.text.chars().count())
+            .sum();
+        let inspected_passages = context.passages.len();
+        let mut relevant_paper_ids = answer
+            .cited_passages
+            .iter()
+            .map(|passage| passage.paper_id.clone())
+            .chain(
+                context
+                    .metadata_matches
+                    .iter()
+                    .map(|paper| paper.paper_id.clone()),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        relevant_paper_ids.sort();
+        Self {
+            answer: answer.answer,
+            citations: answer
+                .cited_passages
+                .into_iter()
+                .map(McpQuestionCitation::from_passage)
+                .collect(),
+            relevant_paper_ids,
+            metadata_matches: context.metadata_matches,
+            coverage: context.coverage,
+            insufficient_evidence: answer.insufficient_evidence,
+            usage: EvidenceQuestionUsage {
+                model: answer.model,
+                llm_calls: answer.llm_calls,
+                inspected_passages,
+                inspected_source_chars,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -2959,6 +3372,8 @@ mod tests {
     use crate::domain::library::{DocumentBlock, DocumentPage, PaperDraft, PaperSourceDraft};
     use crate::domain::research::{Depth, SearchConstraints, SearchDraft};
     use crate::domain::research_state::{EpistemicStatus, ResearchEntryDraft, ResearchEntryKind};
+    use crate::services::chat::evidence_question::EvidenceAnswerModel;
+    use crate::services::search::SearchService;
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::streamable_http_client::{
         StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
@@ -2966,6 +3381,35 @@ mod tests {
     use rmcp::ServiceExt;
 
     use super::*;
+
+    struct FixtureEvidenceModel {
+        response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl EvidenceAnswerModel for FixtureEvidenceModel {
+        fn model_id(&self) -> &str {
+            "fixture-evidence-model"
+        }
+
+        fn ensure_ready(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String, String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    fn attach_fixture_questions(server: &LocalMcpServer, store: &LibraryStore, response: &str) {
+        server.attach_evidence_questions(EvidenceQuestionService::with_model(
+            store.clone(),
+            SearchService::new(store.clone(), None),
+            Arc::new(FixtureEvidenceModel {
+                response: response.to_string(),
+            }),
+        ));
+    }
 
     fn test_store(name: &str) -> LibraryStore {
         let path =
@@ -3587,6 +4031,306 @@ mod tests {
             .expect("resolve passage");
         assert_eq!(anchor.quote, expected);
         assert_eq!(anchor.page_start, Some(1));
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn real_client_asks_one_paper_with_resolvable_citations_and_no_writes() {
+        let store = test_store("reader-question");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let paper_id = "paper:question-fixture";
+        add_extracted_pdf(
+            &store,
+            &vault.id,
+            paper_id,
+            "The intervention reduced the measured error by twelve percent.",
+        );
+        let state_revision = store
+            .get_research_state(&vault.project_id, None)
+            .expect("read State")
+            .current_revision;
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        attach_fixture_questions(
+            &server,
+            &store,
+            r#"{"answer":"The error fell by twelve percent.","citedPassages":["E1"],"insufficientEvidence":false}"#,
+        );
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [READER_READ, READER_ASK, VAULT_ASK],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let read = client
+            .call_tool(
+                CallToolRequestParams::new(READER_READ).with_arguments(
+                    serde_json::json!({"paper_id": paper_id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read fixture")
+            .structured_content
+            .expect("read result");
+        let passage_ref = read["passages"][0]["passageRef"]
+            .as_str()
+            .expect("passage reference");
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(READER_ASK).with_arguments(
+                    serde_json::json!({
+                        "paper_id": paper_id,
+                        "question": "What changed?",
+                        "passage_refs": [passage_ref],
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("ask fixture")
+            .structured_content
+            .expect("question result");
+        assert_eq!(result["coverage"]["kind"], "full_text");
+        assert_eq!(result["citations"][0]["passageRef"], passage_ref);
+        assert_eq!(result["usage"]["model"], "fixture-evidence-model");
+        assert!(client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_ASK).with_arguments(
+                    serde_json::json!({"vault_id": "another-vault", "question": "What changed?"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .is_err());
+        assert!(store
+            .list_chat_threads("paper", paper_id)
+            .expect("list threads")
+            .is_empty());
+        assert_eq!(
+            store
+                .get_research_state(&vault.project_id, None)
+                .expect("read unchanged State")
+                .current_revision,
+            state_revision
+        );
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reader_question_reports_abstract_only_coverage() {
+        let store = test_store("reader-question-abstract");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let paper = paper_draft(
+            "paper:abstract-question",
+            Some("The abstract reports a preliminary association."),
+        );
+        store
+            .add_paper_to_vaults(&paper, std::slice::from_ref(&vault.id))
+            .expect("add abstract-only paper");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        attach_fixture_questions(
+            &server,
+            &store,
+            r#"{"answer":"Only a preliminary association is reported.","citedPassages":["E1"],"insufficientEvidence":false}"#,
+        );
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [READER_ASK],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(READER_ASK).with_arguments(
+                    serde_json::json!({
+                        "paper_id": paper.id,
+                        "question": "What association is reported?",
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("ask abstract")
+            .structured_content
+            .expect("question result");
+        assert_eq!(result["coverage"]["kind"], "abstract_only");
+        assert_eq!(result["citations"][0]["evidenceKind"], "abstract");
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn vault_question_returns_only_scoped_relevant_source_evidence() {
+        let store = test_store("vault-question");
+        let initial_search_count = store.list_searches().expect("list searches").len();
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        add_extracted_pdf(
+            &store,
+            &vault.id,
+            "paper:vault-relevant",
+            "Counterfactual augmentation improved robustness under domain shift.",
+        );
+        add_extracted_pdf(
+            &store,
+            &vault.id,
+            "paper:vault-unrelated",
+            "The appendix lists routine implementation details.",
+        );
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        attach_fixture_questions(
+            &server,
+            &store,
+            r#"{"answer":"Counterfactual augmentation improved robustness.","citedPassages":["E1"],"insufficientEvidence":false}"#,
+        );
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [VAULT_ASK],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(VAULT_ASK).with_arguments(
+                    serde_json::json!({
+                        "vault_id": vault.id,
+                        "question": "What improved robustness under domain shift?",
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("ask Vault")
+            .structured_content
+            .expect("Vault answer");
+        assert_eq!(result["citations"][0]["paperId"], "paper:vault-relevant");
+        assert!(result["relevantPaperIds"]
+            .as_array()
+            .expect("relevant papers")
+            .contains(&serde_json::json!("paper:vault-relevant")));
+        assert_eq!(
+            store.list_searches().expect("list searches").len(),
+            initial_search_count,
+            "vault_ask must use local retrieval without launching another search"
+        );
+
+        client.cancel().await.expect("stop client");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reader_question_without_source_text_returns_insufficient_without_model_use() {
+        let store = test_store("reader-question-empty");
+        let snapshot = store.get_library().expect("read fixture library");
+        let vault = snapshot.vaults.first().expect("seed vault");
+        let paper = paper_draft("paper:no-question-evidence", None);
+        store
+            .add_paper_to_vaults(&paper, std::slice::from_ref(&vault.id))
+            .expect("add metadata-only paper");
+        let server = LocalMcpServer::start_with_cursor_ttl(
+            None,
+            store.clone(),
+            None,
+            None,
+            DEFAULT_CURSOR_TTL,
+        )
+        .await
+        .expect("start MCP");
+        attach_fixture_questions(
+            &server,
+            &store,
+            r#"{"answer":"This fixture must not run.","citedPassages":["E1"],"insufficientEvidence":false}"#,
+        );
+        let grant = server
+            .issue_grant(
+                &store,
+                &vault.project_id,
+                &vault.id,
+                "test-client",
+                None,
+                [READER_ASK],
+            )
+            .await
+            .expect("issue grant");
+        let client = client_for(&grant).await;
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(READER_ASK).with_arguments(
+                    serde_json::json!({
+                        "paper_id": paper.id,
+                        "question": "What did the source establish?",
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("ask unavailable paper")
+            .structured_content
+            .expect("insufficient result");
+        assert_eq!(result["coverage"]["kind"], "none");
+        assert_eq!(result["insufficientEvidence"], true);
+        assert_eq!(result["usage"]["llmCalls"], 0);
 
         client.cancel().await.expect("stop client");
         server.shutdown().await;

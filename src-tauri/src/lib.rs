@@ -143,6 +143,12 @@ pub fn run() {
             // never calls search directly.
             let chat_config =
                 services::chat::config::ChatConfig::load().map_err(std::io::Error::other)?;
+            let evidence_questions = services::chat::EvidenceQuestionService::new(
+                store.clone(),
+                search_service.clone(),
+                chat_config.clone(),
+            );
+            mcp_server.attach_evidence_questions(evidence_questions);
             let context_manager = services::chat::ContextManager::new(
                 store.clone(),
                 std::sync::Arc::new(search_service.clone()),

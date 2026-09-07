@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0139 - Agents can ask scoped questions of papers and Vaults with bounded source context, validated passage citations, and no implicit notes or State writes.
 - [x] RFC 0134 - Agents can save scoped Search candidates once, queue durable PDF acquisition, and read acquired text without opening a tab.
 - [x] RFC 0133 - Agents can run bounded project-scoped searches with shared budgets, incremental candidates, stable polling, and idempotent cancellation.
 - [x] RFC 0132 - Agents can atomically update revisioned Research State with typed evidence, source validation, conflicts, and restart-safe retries.
