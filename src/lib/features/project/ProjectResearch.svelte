@@ -70,7 +70,9 @@
     latestResearchActivity,
     latestResearchFailure,
     researchEntryCounts,
+    researchProgressCounter,
     researchProgressLabel,
+    researchStateResultLabel,
     simpleResearchConfiguration,
     sortResearchEntries,
   } from "$lib/features/project/research-state-ui";
@@ -880,7 +882,7 @@
       {#if activeRun}
         <small class="live-progress" aria-live="polite">
           <span class="spin"><LoaderCircle size={13} aria-hidden="true" /></span>
-          <span>{researchProgressLabel(activeRun, activeProgress)}{activeProgress?.progressCurrent !== undefined ? ` · ${activeProgress.progressCurrent}${activeProgress.progressTotal !== undefined ? `/${activeProgress.progressTotal}` : ""}` : ""}</span>
+          <span>{researchProgressLabel(activeRun, activeProgress)}{researchProgressCounter(activeProgress)}</span>
         </small>
       {/if}
     </header>
@@ -935,7 +937,7 @@
             {#if checkpoints[run.id]}
               {@const checkpoint = checkpoints[run.id]}
               {@const restoreAvailability = checkpointRestoreAvailability(checkpoint, historical)}
-              <p class="result-summary">{checkpoint.addedPaperIds.length} papers added to Vault · State {checkpoint.resultingStateRevision === undefined ? "unchanged" : `advanced to r${checkpoint.resultingStateRevision}`}</p>
+              <p class="result-summary">{checkpoint.addedPaperIds.length} papers added to Vault · State {researchStateResultLabel(checkpoint.startingStateRevision, checkpoint.resultingStateRevision)}</p>
               {#if checkpoint.outcome?.unansweredQuestions[0]}<p><strong>Still open</strong><br />{checkpoint.outcome.unansweredQuestions[0]}</p>{/if}
               {#if checkpoint.nextDirection}<p><strong>Next</strong><br />{checkpoint.nextDirection}</p>{/if}
               <details class="checkpoint">

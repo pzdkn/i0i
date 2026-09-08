@@ -173,7 +173,7 @@ export interface HarnessRun {
   searchId: string;
   searchRunId?: string;
   startingStateRevision: number;
-  resultingStateRevision?: number;
+  resultingStateRevision?: number | null;
   startingVaultRevision: number;
   resultingVaultRevision?: number;
   providerQueryCount: number;
@@ -346,8 +346,8 @@ export interface HarnessEvent {
   summary: string;
   detail?: Record<string, unknown>;
   phase?: string;
-  progressCurrent?: number;
-  progressTotal?: number;
+  progressCurrent?: number | null;
+  progressTotal?: number | null;
   actor: "researcher" | "harness" | "scheduler" | "system" | string;
   occurredAt: string;
 }
@@ -364,7 +364,7 @@ export interface ResearchCheckpoint {
   projectId: string;
   status: string;
   startingStateRevision: number;
-  resultingStateRevision?: number;
+  resultingStateRevision?: number | null;
   startingVaultRevision: number;
   resultingVaultRevision?: number;
   appliedChangeSetId?: string;

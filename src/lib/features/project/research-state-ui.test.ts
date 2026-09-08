@@ -13,7 +13,9 @@ import {
   latestResearchActivity,
   latestResearchFailure,
   researchEntryCounts,
+  researchProgressCounter,
   researchProgressLabel,
+  researchStateResultLabel,
   simpleResearchConfiguration,
   sortResearchEntries,
 } from "./research-state-ui.ts";
@@ -175,6 +177,14 @@ test("Research progress uses the newest sequence and includes canceling", () => 
     "agent_failed",
   );
   assert.equal(researchProgressLabel(run, newer), "Reading relevant passages");
+  assert.equal(researchProgressCounter({ ...newer, progressCurrent: null }), "");
+  assert.equal(
+    researchProgressCounter({ ...newer, progressCurrent: 2, progressTotal: 5 }),
+    " · 2/5",
+  );
+  assert.equal(researchStateResultLabel(3, null), "unchanged");
+  assert.equal(researchStateResultLabel(3, 3), "unchanged");
+  assert.equal(researchStateResultLabel(3, 4), "advanced to r4");
   run.status = "canceling";
   assert.equal(isActiveResearchRun(run), true);
   assert.equal(researchProgressLabel(run, newer), "Stopping research");

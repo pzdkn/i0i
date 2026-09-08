@@ -61,6 +61,22 @@ export function researchProgressLabel(run: HarnessRun, event?: HarnessEvent): st
   return "Research agent is working";
 }
 
+/** Formats persisted progress only when the backend supplied a current value. */
+export function researchProgressCounter(event?: HarnessEvent): string {
+  if (event?.progressCurrent == null) return "";
+  const total = event.progressTotal == null ? "" : `/${event.progressTotal}`;
+  return ` · ${event.progressCurrent}${total}`;
+}
+
+/** Describes whether a checkpoint advanced State from its starting revision. */
+export function researchStateResultLabel(
+  startingRevision: number,
+  resultingRevision?: number | null,
+): string {
+  if (resultingRevision == null || resultingRevision === startingRevision) return "unchanged";
+  return `advanced to r${resultingRevision}`;
+}
+
 /** Turns common runtime failures into an action the researcher can take. */
 export function actionableResearchError(error: unknown): string {
   const message = String(error);
@@ -217,7 +233,7 @@ export function checkpointRestoreAvailability(
   checkpoint: ResearchCheckpoint,
   viewingHistoricalState: boolean,
 ): { enabled: boolean; description: string } {
-  if (!checkpoint.restoreAvailable || checkpoint.resultingStateRevision === undefined) {
+  if (!checkpoint.restoreAvailable || checkpoint.resultingStateRevision == null) {
     return { enabled: false, description: "This Run has no restorable Research State" };
   }
   if (viewingHistoricalState) {
