@@ -299,6 +299,11 @@ pub struct ResearchCheckpoint {
     pub accepted_candidate_count: i64,
     pub rejected_candidate_count: i64,
     pub added_paper_ids: Vec<String>,
+    pub attempted_paper_count: i64,
+    pub read_paper_count: i64,
+    pub unavailable_paper_count: i64,
+    pub removed_paper_count: i64,
+    pub retained_paper_count: i64,
     pub affected_documents: Vec<DocumentRevisionFact>,
     pub usage: HarnessUsage,
     pub stop_reason: Option<String>,
@@ -360,6 +365,42 @@ pub struct ResearchOutcomeItem {
     pub text: String,
 }
 
+/// Why a newly investigated paper should or should not remain in the Vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperDispositionKind {
+    EvidenceUsed,
+    Background,
+    Contradictory,
+    Unavailable,
+    Irrelevant,
+}
+
+impl PaperDispositionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EvidenceUsed => "evidence_used",
+            Self::Background => "background",
+            Self::Contradictory => "contradictory",
+            Self::Unavailable => "unavailable",
+            Self::Irrelevant => "irrelevant",
+        }
+    }
+
+    pub fn retained(self) -> bool {
+        self != Self::Irrelevant
+    }
+}
+
+/// Final assessment of one paper added by a managed Run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchPaperDisposition {
+    pub paper_id: String,
+    pub disposition: PaperDispositionKind,
+    pub reason: String,
+}
+
 /// The validated interpretation retained after one managed research Run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -368,6 +409,9 @@ pub struct ResearchRunOutcome {
     /// Structured report rows. Empty for outcomes written before RFC 0141.
     #[serde(default)]
     pub display_items: Vec<ResearchOutcomeItem>,
+    /// Exhaustive assessments for papers newly added by this Run.
+    #[serde(default)]
+    pub paper_dispositions: Vec<ResearchPaperDisposition>,
     pub task_outcomes: Vec<ResearchTaskOutcome>,
     pub unanswered_questions: Vec<String>,
     pub next_direction: Option<String>,

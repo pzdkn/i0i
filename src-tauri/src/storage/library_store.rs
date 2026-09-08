@@ -19,8 +19,9 @@ use crate::domain::harness::{
     next_schedule_occurrence, render_harness_search_goal, AgentRunLimits, DueHarnessClaim,
     EffectiveInstructionStack, EffectiveRunContext, HarnessAutonomy, HarnessConfiguration,
     HarnessConfigurationVersion, HarnessEvent, HarnessRun, HarnessRunTrigger, HarnessSnapshot,
-    HarnessUsage, PriorResearchRunOutcome, ResearchCheckpoint, ResearchHarness, ResearchRunOutcome,
-    RunContextEntry, RunContextObservation, HARNESS_POLICY_SUMMARY, HARNESS_POLICY_VERSION,
+    HarnessUsage, PaperDispositionKind, PriorResearchRunOutcome, ResearchCheckpoint,
+    ResearchHarness, ResearchPaperDisposition, ResearchRunOutcome, RunContextEntry,
+    RunContextObservation, HARNESS_POLICY_SUMMARY, HARNESS_POLICY_VERSION,
 };
 use crate::domain::harness_improvement::{
     HarnessImprovement, HarnessImprovementStatus, HarnessImprovementTarget,
@@ -70,6 +71,8 @@ type StoreResult<T> = Result<T, String>;
 /// only a log line to explain it — so the two are the same constant, not two
 /// constants that agree today.
 const VECTOR_DIMENSIONS: usize = crate::services::embedding::MODEL_DIMENSIONS;
+/// Minimum text budget kept available for each not-yet-assessed addition.
+const FIRST_PAPER_ASSESSMENT_RESERVE_CHARS: i64 = 1_000;
 
 #[derive(Clone)]
 pub struct LibraryStore {
@@ -114,6 +117,16 @@ pub struct AgentStateUpdateReceipt {
     pub revision: i64,
     pub affected_entry_ids: Vec<String>,
     pub created_entry_ids: HashMap<String, String>,
+}
+
+/// Audited result of applying one Run's paper-retention decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPaperRetentionSummary {
+    pub attempted: i64,
+    pub read: i64,
+    pub unavailable: i64,
+    pub removed: i64,
+    pub retained: i64,
 }
 
 /// Stable identity returned by an idempotent agent search start.
@@ -3794,9 +3807,6 @@ impl LibraryStore {
         returned_text_chars: u64,
         passage_refs: &[String],
     ) -> StoreResult<()> {
-        if returned_text_chars == 0 {
-            return Ok(());
-        }
         let mut conn = self.open_connection()?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
@@ -3839,10 +3849,28 @@ impl LibraryStore {
         let returned_text_chars: i64 = returned_text_chars
             .try_into()
             .map_err(|_| "Reader response is too large to account for".to_string())?;
-        if returned_chars.saturating_add(returned_text_chars)
+        let unattempted_other_additions: i64 = tx
+            .query_row(
+                "select count(*) from agent_vault_additions addition
+                 left join agent_reader_usage usage
+                   on usage.run_id = addition.run_id and usage.paper_id = addition.paper_id
+                 where addition.run_id = ?1 and addition.membership_added = 1
+                   and addition.paper_id <> ?2 and usage.paper_id is null",
+                params![run_id, paper_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let reserved_chars =
+            unattempted_other_additions.saturating_mul(FIRST_PAPER_ASSESSMENT_RESERVE_CHARS);
+        if returned_chars
+            .saturating_add(returned_text_chars)
+            .saturating_add(reserved_chars)
             > limits.maximum_returned_text_chars as i64
         {
-            return Err("Research Run returned-text limit is exhausted".to_string());
+            return Err(
+                "Research Run returned-text limit must preserve capacity for unassessed additions"
+                    .to_string(),
+            );
         }
         tx.execute(
             "insert into agent_reader_usage
@@ -4107,6 +4135,154 @@ impl LibraryStore {
             .collect()
     }
 
+    /// Validate and apply exhaustive retention decisions for newly added papers.
+    pub fn finalize_agent_paper_retention(
+        &self,
+        run_id: &str,
+        dispositions: &[ResearchPaperDisposition],
+    ) -> StoreResult<AgentPaperRetentionSummary> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let run = read_harness_run(&tx, run_id)?;
+        if run.execution_kind != "codex_agent" || run.status != "reconciling" {
+            return Err("Only a synthesizing managed Run may finalize papers".to_string());
+        }
+        let vault_id: String = tx
+            .query_row(
+                "select id from vaults where project_id = ?1",
+                params![run.project_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let additions: Vec<String> = {
+            let mut statement = tx
+                .prepare(
+                    "select paper_id from agent_vault_additions
+                     where run_id = ?1 and membership_added = 1 order by paper_id",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![run_id], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            collect_rows(rows)?
+        };
+        let decisions: HashMap<&str, &ResearchPaperDisposition> = dispositions
+            .iter()
+            .map(|decision| (decision.paper_id.as_str(), decision))
+            .collect();
+        if decisions.len() != dispositions.len()
+            || additions.len() != dispositions.len()
+            || additions
+                .iter()
+                .any(|paper_id| !decisions.contains_key(paper_id.as_str()))
+        {
+            return Err(
+                "Paper dispositions must cover every newly added paper exactly once".to_string(),
+            );
+        }
+
+        let mut removed: i64 = 0;
+        let mut unavailable: i64 = 0;
+        for paper_id in &additions {
+            let decision = decisions[paper_id.as_str()];
+            validate_outcome_text("paper disposition reason", &decision.reason, 500)?;
+            let attempted: bool = tx
+                .query_row(
+                    "select exists(select 1 from agent_reader_usage
+                     where run_id = ?1 and paper_id = ?2 and read_count > 0)",
+                    params![run_id, paper_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !attempted {
+                return Err(format!(
+                    "Newly added paper was not assessed through Reader: {paper_id}"
+                ));
+            }
+            let has_source: bool = tx
+                .query_row(
+                    "select exists(select 1 from document_sources
+                     where paper_id = ?1 and (
+                       coalesce(trim(source_url), '') <> '' or
+                       coalesce(trim(landing_url), '') <> '' or
+                       coalesce(trim(local_path), '') <> ''
+                     ))",
+                    params![paper_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if decision.disposition.retained() && !has_source {
+                return Err(format!(
+                    "Newly retained paper has no actionable source: {paper_id}"
+                ));
+            }
+            let retained = decision.disposition.retained();
+            if decision.disposition == PaperDispositionKind::Unavailable {
+                unavailable += 1;
+            }
+            if !retained {
+                removed += tx
+                    .execute(
+                        "delete from vault_papers where vault_id = ?1 and paper_id = ?2",
+                        params![vault_id, paper_id],
+                    )
+                    .map_err(|error| error.to_string())? as i64;
+            }
+            tx.execute(
+                "insert into agent_paper_dispositions
+                   (run_id, paper_id, disposition, reason, retained, created_at)
+                 values (?1, ?2, ?3, ?4, ?5, datetime('now'))
+                 on conflict(run_id, paper_id) do update set
+                   disposition = excluded.disposition, reason = excluded.reason,
+                   retained = excluded.retained",
+                params![
+                    run_id,
+                    paper_id,
+                    decision.disposition.as_str(),
+                    decision.reason.trim(),
+                    retained,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let (attempted, read): (i64, i64) = tx
+            .query_row(
+                "select count(*), coalesce(sum(returned_text_chars > 0), 0)
+                 from agent_reader_usage where run_id = ?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let retained = additions.len() as i64 - removed;
+        append_structured_harness_event(
+            &tx,
+            run_id,
+            "agent_papers_assessed",
+            &format!("Assessed {attempted} papers; retained {retained} and removed {removed}"),
+            Some(serde_json::json!({
+                "attempted": attempted,
+                "read": read,
+                "unavailable": unavailable,
+                "removed": removed,
+                "retained": retained,
+            })),
+            Some("synthesizing"),
+            None,
+            None,
+            "harness",
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(AgentPaperRetentionSummary {
+            attempted,
+            read,
+            unavailable,
+            removed,
+            retained,
+        })
+    }
+
     /// Finish a managed Run from committed State, Vault, search, and Reader facts.
     pub fn finish_codex_harness_run(
         &self,
@@ -4135,6 +4311,28 @@ impl LibraryStore {
             .map_err(|error| error.to_string())?;
         if active_children > 0 {
             return Err("Managed Research Run still has active child searches".to_string());
+        }
+        if status == "ready" && run.execution_kind == "codex_agent" {
+            let incomplete_additions: i64 = tx
+                .query_row(
+                    "select count(*) from agent_vault_additions addition
+                     left join agent_paper_dispositions disposition
+                       on disposition.run_id = addition.run_id
+                      and disposition.paper_id = addition.paper_id
+                     left join agent_reader_usage usage
+                       on usage.run_id = addition.run_id and usage.paper_id = addition.paper_id
+                     where addition.run_id = ?1 and addition.membership_added = 1
+                       and (disposition.paper_id is null or usage.paper_id is null)",
+                    params![harness_run_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if incomplete_additions > 0 {
+                return Err(
+                    "Managed Research Run has unassessed or undispositioned paper additions"
+                        .to_string(),
+                );
+            }
         }
         let (provider_queries, child_llm_calls, inspected_candidates): (u32, u32, u32) = tx
             .query_row(
@@ -4177,16 +4375,20 @@ impl LibraryStore {
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
-        let added_papers: i64 = tx
+        let retained_papers: i64 = tx
             .query_row(
-                "select count(*) from agent_vault_additions
-                 where run_id = ?1 and membership_added = 1",
+                "select count(*) from agent_vault_additions addition
+                 join agent_paper_dispositions disposition
+                   on disposition.run_id = addition.run_id
+                  and disposition.paper_id = addition.paper_id
+                 where addition.run_id = ?1 and addition.membership_added = 1
+                   and disposition.retained = 1",
                 params![harness_run_id],
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
         let summary = format!(
-            "Read {papers_read} papers ({returned_chars} characters), added {added_papers} papers, and committed {state_iterations} State revisions"
+            "Read {papers_read} papers ({returned_chars} characters), retained {retained_papers} papers, and committed {state_iterations} State revisions"
         );
         tx.execute(
             "update harness_runs
@@ -4221,7 +4423,7 @@ impl LibraryStore {
                 &tx,
                 &run.project_id,
                 harness_run_id,
-                resulting_state_revision > run.starting_state_revision || added_papers > 0,
+                resulting_state_revision > run.starting_state_revision || retained_papers > 0,
             )?;
         } else {
             tx.execute(
@@ -6369,6 +6571,18 @@ impl LibraryStore {
               foreign key (paper_id) references papers(id) on delete cascade
             );
 
+            create table if not exists agent_paper_dispositions (
+              run_id text not null,
+              paper_id text not null,
+              disposition text not null,
+              reason text not null,
+              retained integer not null,
+              created_at text not null,
+              primary key (run_id, paper_id),
+              foreign key (run_id) references harness_runs(id) on delete cascade,
+              foreign key (paper_id) references papers(id) on delete cascade
+            );
+
             create table if not exists harness_change_sets (
               id text primary key,
               run_id text not null unique,
@@ -8047,8 +8261,12 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
     };
     let mut managed_added_paper_ids = conn
         .prepare(
-            "select paper_id from agent_vault_additions
-             where run_id = ?1 and membership_added = 1 order by created_at, paper_id",
+            "select addition.paper_id from agent_vault_additions addition
+             left join agent_paper_dispositions disposition
+               on disposition.run_id = addition.run_id and disposition.paper_id = addition.paper_id
+             where addition.run_id = ?1 and addition.membership_added = 1
+               and (disposition.run_id is null or disposition.retained = 1)
+             order by addition.created_at, addition.paper_id",
         )
         .map_err(|error| error.to_string())?
         .query_map(params![run_id], |row| row.get::<_, String>(0))
@@ -8063,6 +8281,32 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
     } else {
         legacy_accepted_candidate_count
     };
+    let (attempted_paper_count, read_paper_count): (i64, i64) = conn
+        .query_row(
+            "select count(*), coalesce(sum(returned_text_chars > 0), 0)
+             from agent_reader_usage where run_id = ?1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let (unavailable_paper_count, removed_paper_count, mut retained_paper_count): (i64, i64, i64) =
+        conn.query_row(
+            "select coalesce(sum(disposition = 'unavailable'), 0),
+                    coalesce(sum(retained = 0), 0), coalesce(sum(retained = 1), 0)
+             from agent_paper_dispositions where run_id = ?1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    // Runs created before paper dispositions existed retained every recorded
+    // addition. Preserve that meaning when presenting their checkpoints.
+    if run.execution_kind == "codex_agent"
+        && unavailable_paper_count == 0
+        && removed_paper_count == 0
+        && retained_paper_count == 0
+    {
+        retained_paper_count = added_paper_ids.len() as i64;
+    }
     let reflection = conn
         .query_row(
             "select id, next_direction, metrics_json from harness_reflections where run_id = ?1",
@@ -8109,6 +8353,11 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
         accepted_candidate_count,
         rejected_candidate_count,
         added_paper_ids,
+        attempted_paper_count,
+        read_paper_count,
+        unavailable_paper_count,
+        removed_paper_count,
+        retained_paper_count,
         affected_documents: Vec::new(),
         usage: HarnessUsage {
             provider_queries: run.provider_query_count,
@@ -11612,7 +11861,9 @@ fn drop_legacy_chat_messages(conn: &Connection) -> StoreResult<()> {
 
 fn upsert_document_sources(tx: &rusqlite::Transaction<'_>, paper: &PaperDraft) -> StoreResult<()> {
     for source in &paper.sources {
-        if source.source_kind != "pdf" || source.source_url.trim().is_empty() {
+        if !matches!(source.source_kind.as_str(), "pdf" | "html")
+            || source.source_url.trim().is_empty()
+        {
             continue;
         }
 
@@ -13854,6 +14105,13 @@ fn validate_harness_event_detail(
             ("revision", "integer"),
             ("affectedEntryIds", "string_array"),
         ],
+        "agent_papers_assessed" => &[
+            ("attempted", "integer"),
+            ("read", "integer"),
+            ("unavailable", "integer"),
+            ("removed", "integer"),
+            ("retained", "integer"),
+        ],
         _ => {
             return Err(format!(
                 "Activity event kind does not define structured detail: {kind}"
@@ -14037,6 +14295,7 @@ fn validate_reflection_draft(draft: &HarnessReflectionDraft) -> StoreResult<()> 
 fn validate_research_run_outcome_shape(outcome: &ResearchRunOutcome) -> StoreResult<()> {
     validate_outcome_text("summary", &outcome.summary, 2_000)?;
     if outcome.display_items.len() > 20
+        || outcome.paper_dispositions.len() > 100
         || outcome.task_outcomes.len() > 20
         || outcome.unanswered_questions.len() > 20
     {
@@ -14044,6 +14303,10 @@ fn validate_research_run_outcome_shape(outcome: &ResearchRunOutcome) -> StoreRes
     }
     for item in &outcome.display_items {
         validate_outcome_text("display item", &item.text, 1_000)?;
+    }
+    for decision in &outcome.paper_dispositions {
+        validate_outcome_text("paper id", &decision.paper_id, 500)?;
+        validate_outcome_text("paper disposition reason", &decision.reason, 500)?;
     }
     for question in &outcome.unanswered_questions {
         validate_outcome_text("unanswered question", question, 1_000)?;
@@ -20437,6 +20700,7 @@ mod tests {
         ResearchRunOutcome {
             summary: summary.to_string(),
             display_items: Vec::new(),
+            paper_dispositions: Vec::new(),
             task_outcomes: Vec::new(),
             unanswered_questions: vec!["What should be tested next?".to_string()],
             next_direction: Some("Investigate the unresolved condition".to_string()),
@@ -20685,6 +20949,7 @@ mod tests {
             &ResearchRunOutcome {
                 summary: "Delegated question answered".to_string(),
                 display_items: Vec::new(),
+                paper_dispositions: Vec::new(),
                 task_outcomes: vec![crate::domain::harness::ResearchTaskOutcome {
                     search_run_ids: Vec::new(),
                     motivating_entry_ids: Vec::new(),
@@ -20752,7 +21017,7 @@ mod tests {
     fn managed_checkpoint_attributes_only_its_own_vault_additions() -> StoreResult<()> {
         let db = test_db()?;
         let run = managed_harness_run(&db, &AgentRunLimits::default())?;
-        let paper = paper_draft("managed-addition");
+        let paper = paper_draft_with_pdf("managed-addition", "https://example.test/paper.pdf");
         db.store.add_agent_search_candidate_to_vault(
             "project:attention",
             "attention",
@@ -20763,11 +21028,113 @@ mod tests {
             &paper,
         )?;
         db.store
+            .record_agent_reader_delivery(&run.id, "project:attention", &paper.id, 20, &[])?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        db.store.finalize_agent_paper_retention(
+            &run.id,
+            &[ResearchPaperDisposition {
+                paper_id: paper.id.clone(),
+                disposition: PaperDispositionKind::Background,
+                reason: "Relevant background".to_string(),
+            }],
+        )?;
+        db.store
             .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
 
         let checkpoint = db.store.get_research_checkpoint(&run.id)?;
         assert_eq!(checkpoint.accepted_candidate_count, 1);
         assert_eq!(checkpoint.added_paper_ids, vec![paper.id]);
+        assert_eq!(checkpoint.attempted_paper_count, 1);
+        assert_eq!(checkpoint.read_paper_count, 1);
+        assert_eq!(checkpoint.retained_paper_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn managed_retention_requires_reader_attempts_and_applies_each_disposition() -> StoreResult<()>
+    {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        let cases = [
+            ("evidence-paper", PaperDispositionKind::EvidenceUsed, 20_u64),
+            ("background-paper", PaperDispositionKind::Background, 20),
+            (
+                "contradictory-paper",
+                PaperDispositionKind::Contradictory,
+                20,
+            ),
+            ("unavailable-paper", PaperDispositionKind::Unavailable, 0),
+            ("irrelevant-paper", PaperDispositionKind::Irrelevant, 20),
+        ];
+        for (paper_id, _, _) in &cases {
+            let paper = paper_draft_with_pdf(paper_id, "https://example.test/paper.pdf");
+            db.store.add_agent_search_candidate_to_vault(
+                "project:attention",
+                "attention",
+                "codex-test",
+                Some(&run.id),
+                &format!("add-{paper_id}"),
+                &format!("payload-{paper_id}"),
+                &paper,
+            )?;
+        }
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        let dispositions: Vec<ResearchPaperDisposition> = cases
+            .iter()
+            .map(|(paper_id, disposition, _)| ResearchPaperDisposition {
+                paper_id: (*paper_id).to_string(),
+                disposition: *disposition,
+                reason: format!("Assessment for {paper_id}"),
+            })
+            .collect();
+        assert!(db
+            .store
+            .finalize_agent_paper_retention(&run.id, &dispositions)
+            .expect_err("unread additions must prevent finalization")
+            .contains("not assessed through Reader"));
+
+        // Return to the active phase only to finish arranging this test fixture.
+        db.store
+            .open_connection()?
+            .execute(
+                "update harness_runs set status = 'assessing' where id = ?1",
+                params![run.id],
+            )
+            .map_err(|error| error.to_string())?;
+        for (paper_id, _, returned_chars) in &cases {
+            db.store.record_agent_reader_delivery(
+                &run.id,
+                "project:attention",
+                paper_id,
+                *returned_chars,
+                &[],
+            )?;
+        }
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        let summary = db
+            .store
+            .finalize_agent_paper_retention(&run.id, &dispositions)?;
+        assert_eq!(summary.attempted, 5);
+        assert_eq!(summary.read, 4);
+        assert_eq!(summary.unavailable, 1);
+        assert_eq!(summary.removed, 1);
+        assert_eq!(summary.retained, 4);
+
+        let snapshot = db.store.get_library()?;
+        let vault = snapshot
+            .vaults
+            .iter()
+            .find(|vault| vault.project_id == "project:attention")
+            .expect("project vault");
+        assert!(!has_membership(&snapshot, &vault.id, "irrelevant-paper"));
+        for retained in [
+            "evidence-paper",
+            "background-paper",
+            "contradictory-paper",
+            "unavailable-paper",
+        ] {
+            assert!(has_membership(&snapshot, &vault.id, retained));
+        }
         Ok(())
     }
 

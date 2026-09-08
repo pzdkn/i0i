@@ -862,7 +862,7 @@
       </label>
       <div class="run-controls">
         <label>
-          <span>Papers to find</span>
+          <span>Papers to investigate</span>
           <input type="number" min="1" max="100" step="1" bind:value={paperBudget} />
         </label>
         {#if activeRun}
@@ -974,7 +974,7 @@
             {#if checkpoints[run.id]}
               {@const checkpoint = checkpoints[run.id]}
               {@const restoreAvailability = checkpointRestoreAvailability(checkpoint, historical)}
-              <p class="result-summary">{checkpoint.addedPaperIds.length} papers retained · State {researchStateResultLabel(checkpoint.startingStateRevision, checkpoint.resultingStateRevision)}</p>
+              <p class="result-summary">{checkpoint.retainedPaperCount} retained · {checkpoint.readPaperCount}/{checkpoint.attemptedPaperCount} readable · {checkpoint.unavailablePaperCount} unavailable · {checkpoint.removedPaperCount} removed · State {researchStateResultLabel(checkpoint.startingStateRevision, checkpoint.resultingStateRevision)}</p>
               {#if checkpoint.outcome?.unansweredQuestions.length}
                 <section class="outcome-section"><strong>Still open</strong><ul>{#each checkpoint.outcome.unansweredQuestions as question}<li>{question}</li>{/each}</ul></section>
               {/if}

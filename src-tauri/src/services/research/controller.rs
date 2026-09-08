@@ -418,20 +418,11 @@ impl ProjectResearchController {
         self.settle_child_searches(&run.project_id, run_id).await?;
         let (status, reason): (&str, String) = match completion.status.as_str() {
             "completed" => {
+                let outcome = parse_research_outcome(completion.final_message.as_deref())?;
                 self.store.begin_codex_harness_finalization(run_id)?;
-                match parse_research_outcome(completion.final_message.as_deref())
-                    .and_then(|outcome| self.store.persist_agent_run_outcome(run_id, &outcome))
-                {
-                    Ok(_) => {}
-                    Err(error) => {
-                        self.store.record_harness_activity(
-                            run_id,
-                            "summary_failed",
-                            &format!("Research outcome was not retained: {error}"),
-                            Some("complete"),
-                        )?;
-                    }
-                }
+                self.store
+                    .finalize_agent_paper_retention(run_id, &outcome.paper_dispositions)?;
+                self.store.persist_agent_run_outcome(run_id, &outcome)?;
                 ("ready", "agent_completed".to_string())
             }
             "cancelled" => {
@@ -544,10 +535,13 @@ impl ProjectResearchController {
     }
 }
 
-const RESEARCH_AGENT_INSTRUCTIONS: &str = r#"You are i0i's bounded literature research agent. Work only through the i0i MCP tools. Do not use shell, filesystem, built-in web search, or unrelated MCP servers. Inspect Research State and the Vault before choosing work. Use vault_summary only when a collection overview is useful; it is sampled context, not proof that every paper was read. State the purpose of each focused search. Save useful candidates, wait for acquisition when needed, and read relevant passages before citing them. You may delegate a bounded evidence question to reader_ask or vault_ask, but direct reading remains the primary path. Compare evidence with existing entries and actively look for conflicting results and conditions. Update Research State only with passage references actually returned by reader_read, reader_ask, vault_ask, or vault_summary. Distinguish source claims, model interpretation, speculation, abstract-only coverage, and unavailable full text. Continue only while another step can materially improve the project; otherwise finish with a concise summary and remaining questions."#;
+const RESEARCH_AGENT_INSTRUCTIONS: &str = r#"You are i0i's bounded literature research agent. Work only through the i0i MCP tools. Do not use shell, filesystem, built-in web search, or unrelated MCP servers. Inspect Research State and the Vault before choosing work. Use vault_summary only when a collection overview is useful; it is sampled context, not proof that every paper was read. State the purpose of each focused search. Investigate candidates incrementally: save a useful candidate, attempt to read it, and assess why it should remain before moving on. Every paper newly added by this Run must appear exactly once in paperDispositions, even when reading is unavailable. Use evidence_used, background, contradictory, unavailable, or irrelevant; irrelevant papers will be removed from the Vault. You may delegate a bounded evidence question to reader_ask or vault_ask, but direct reading remains the primary path. Compare evidence with existing entries and actively look for conflicting results and conditions. Update Research State only with passage references actually returned by reader_read, reader_ask, vault_ask, or vault_summary. Distinguish source claims, model interpretation, speculation, abstract-only coverage, and unavailable full text. Continue only while another step can materially improve the project; otherwise finish with a concise summary and remaining questions."#;
 
 fn effective_agent_limits(configuration: &HarnessConfiguration) -> AgentRunLimits {
     let mut limits = AgentRunLimits::default();
+    limits.maximum_distinct_papers_read = limits
+        .maximum_distinct_papers_read
+        .max(configuration.paper_budget.max(0) as u32);
     if let Some(value) = configuration.stop_conditions.maximum_run_seconds {
         if value > 0 {
             limits.maximum_run_seconds = value as u64;
@@ -690,7 +684,7 @@ fn research_outcome_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["summary", "displayItems", "taskOutcomes", "unansweredQuestions", "nextDirection"],
+        "required": ["summary", "displayItems", "paperDispositions", "taskOutcomes", "unansweredQuestions", "nextDirection"],
         "properties": {
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
             "displayItems": {
@@ -703,6 +697,20 @@ fn research_outcome_schema() -> Value {
                     "properties": {
                         "kind": {"type": "string", "enum": ["finding", "question", "gap", "hypothesis", "experiment_idea"]},
                         "text": {"type": "string", "minLength": 1, "maxLength": 1000}
+                    }
+                }
+            },
+            "paperDispositions": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["paperId", "disposition", "reason"],
+                    "properties": {
+                        "paperId": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "disposition": {"type": "string", "enum": ["evidence_used", "background", "contradictory", "unavailable", "irrelevant"]},
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 500}
                     }
                 }
             },
@@ -783,6 +791,7 @@ mod tests {
         serde_json::json!({
             "summary": "The evidence narrows the question.",
             "displayItems": [{"kind": "gap", "text": "Generalization remains untested."}],
+            "paperDispositions": [],
             "taskOutcomes": [{
                 "searchRunIds": [],
                 "motivatingEntryIds": [],

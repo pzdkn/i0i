@@ -239,6 +239,11 @@ export interface ResearchRunOutcome {
     kind: "finding" | "question" | "gap" | "hypothesis" | "experiment_idea";
     text: string;
   }>;
+  paperDispositions: Array<{
+    paperId: string;
+    disposition: "evidence_used" | "background" | "contradictory" | "unavailable" | "irrelevant";
+    reason: string;
+  }>;
   taskOutcomes: ResearchTaskOutcome[];
   unansweredQuestions: string[];
   nextDirection?: string | null;
@@ -375,6 +380,11 @@ export interface ResearchCheckpoint {
   acceptedCandidateCount: number;
   rejectedCandidateCount: number;
   addedPaperIds: string[];
+  attemptedPaperCount: number;
+  readPaperCount: number;
+  unavailablePaperCount: number;
+  removedPaperCount: number;
+  retainedPaperCount: number;
   affectedDocuments: Array<{ documentId: string; contentRevision: number }>;
   usage: HarnessUsage;
   stopReason?: string;

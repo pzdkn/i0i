@@ -1575,7 +1575,7 @@ impl I0iMcpHandler {
             .store
             .get_agent_search_candidate(&grant.project_id, &input.candidate_id)
             .map_err(|_| out_of_scope())?;
-        let paper = candidate_paper_draft(&candidate);
+        let paper = candidate_paper_draft(&candidate).map_err(|error| invalid_input(&error))?;
         let payload_hash = sha256(
             &serde_json::to_string(&input).map_err(|error| internal_failure(error.to_string()))?,
         );
@@ -2573,19 +2573,37 @@ fn render_agent_search_goal(instructions: &str, state_entry_ids: &[String]) -> S
     )
 }
 
-fn candidate_paper_draft(candidate: &crate::domain::discovery::PaperCandidate) -> PaperDraft {
-    let sources = candidate
-        .pdf_url
-        .as_ref()
-        .map(|pdf_url| {
-            vec![PaperSourceDraft {
-                source_kind: "pdf".to_string(),
-                source_url: pdf_url.clone(),
-                landing_url: candidate.external_url.clone(),
-            }]
-        })
-        .unwrap_or_default();
-    PaperDraft {
+fn candidate_paper_draft(
+    candidate: &crate::domain::discovery::PaperCandidate,
+) -> Result<PaperDraft, String> {
+    let doi_url = candidate.doi.as_deref().map(|doi| {
+        if doi.starts_with("http://") || doi.starts_with("https://") {
+            doi.to_string()
+        } else {
+            format!("https://doi.org/{doi}")
+        }
+    });
+    let sources = match (&candidate.pdf_url, &candidate.external_url, doi_url) {
+        (Some(pdf_url), landing_url, _) => vec![PaperSourceDraft {
+            source_kind: "pdf".to_string(),
+            source_url: pdf_url.clone(),
+            landing_url: landing_url.clone(),
+        }],
+        (None, Some(external_url), _) => vec![PaperSourceDraft {
+            source_kind: "html".to_string(),
+            source_url: external_url.clone(),
+            landing_url: Some(external_url.clone()),
+        }],
+        (None, None, Some(doi_url)) => vec![PaperSourceDraft {
+            source_kind: "html".to_string(),
+            source_url: doi_url.clone(),
+            landing_url: Some(doi_url),
+        }],
+        (None, None, None) => {
+            return Err("Candidate has no PDF, landing page, or DOI source".to_string())
+        }
+    };
+    Ok(PaperDraft {
         id: candidate.id.clone(),
         title: candidate.title.clone(),
         authors: candidate.authors.clone(),
@@ -2596,7 +2614,7 @@ fn candidate_paper_draft(candidate: &crate::domain::discovery::PaperCandidate) -
         status: "UNREAD".to_string(),
         abstract_text: candidate.abstract_text.clone(),
         sources,
-    }
+    })
 }
 
 fn is_terminal_search_status(status: &str) -> bool {
@@ -5772,5 +5790,52 @@ mod tests {
         assert_eq!(parts[1], (2, 4, "日z".to_string()));
         assert!(validate_page_range(Some(0), None).is_err());
         assert!(validate_page_range(Some(3), Some(2)).is_err());
+    }
+
+    #[test]
+    fn candidate_conversion_preserves_an_html_only_source() {
+        let mut candidate = search_candidate("html-only");
+        candidate.pdf_url = None;
+
+        let paper = candidate_paper_draft(&candidate).expect("convert candidate");
+
+        assert_eq!(paper.sources.len(), 1);
+        assert_eq!(paper.sources[0].source_kind, "html");
+        assert_eq!(
+            paper.sources[0].source_url,
+            "https://example.test/html-only"
+        );
+        assert_eq!(
+            paper.sources[0].landing_url.as_deref(),
+            Some("https://example.test/html-only")
+        );
+    }
+
+    #[test]
+    fn candidate_conversion_rejects_a_paper_without_a_source_route() {
+        let mut candidate = search_candidate("linkless");
+        candidate.pdf_url = None;
+        candidate.external_url = None;
+        candidate.doi = None;
+
+        assert!(candidate_paper_draft(&candidate)
+            .expect_err("linkless candidate must be rejected")
+            .contains("no PDF, landing page, or DOI source"));
+    }
+
+    #[test]
+    fn candidate_conversion_uses_a_doi_as_the_last_source_fallback() {
+        let mut candidate = search_candidate("doi-only");
+        candidate.pdf_url = None;
+        candidate.external_url = None;
+        candidate.doi = Some("10.1000/example".to_string());
+
+        let paper = candidate_paper_draft(&candidate).expect("convert DOI candidate");
+
+        assert_eq!(paper.sources[0].source_kind, "html");
+        assert_eq!(
+            paper.sources[0].source_url,
+            "https://doi.org/10.1000/example"
+        );
     }
 }

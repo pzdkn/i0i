@@ -196,7 +196,7 @@ export type PaperDraft = {
 };
 
 export type PaperSourceDraft = {
-  sourceKind: "pdf";
+  sourceKind: "pdf" | "html";
   sourceUrl: string;
   landingUrl?: string;
 };
