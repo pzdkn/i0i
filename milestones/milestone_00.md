@@ -1,6 +1,6 @@
 # Milestone 00: Research That Builds on What It Learns
 
-- Status: Implementation complete; native acceptance pending
+- Status: Complete
 - Date: 2026-09-06
 - Immediate focus: the search, reading, and Research State loop
 - Later extension: coding and experiments that contribute evidence to the same State
@@ -409,7 +409,7 @@ first research loop works.
 | 10 / M00-07 | [0135: Codex-Driven Project Research Loop](../docs/rfcs/milestone_00/0135-codex-project-research-loop.md) | Integrate one real iteration through the production Run entry point. | Complete |
 | 11 / M00-08 | [0136: Research Feedback and Continuation](../docs/rfcs/milestone_00/0136-research-feedback-and-continuation.md) | Adapt searches after evidence and carry useful outcomes into a new thread. | Complete |
 | 12 / M00-09a | [0137: Research Cancellation and Recovery](../docs/rfcs/milestone_00/0137-research-cancellation-and-recovery.md) | Handle cancellation/commit races, crashes, and restart without losing results. | Complete |
-| 13 / M00-09b | [0138: Native Research Progress](../docs/rfcs/milestone_00/0138-native-research-progress.md) | Existing Run/Cancel UI, live changes, evidence navigation, and native acceptance. | Implemented; native acceptance pending |
+| 13 / M00-09b | [0138: Native Research Progress](../docs/rfcs/milestone_00/0138-native-research-progress.md) | Existing Run/Cancel UI, live changes, evidence navigation, and native acceptance. | Complete |
 | 14 / M00-10a | [0139: Evidence Question Tools](../docs/rfcs/milestone_00/0139-evidence-question-tools.md) | Optional paper/Vault answers with source references and no implicit note writes. | Complete |
 | 15 / M00-10b | [0140: Vault Evidence Summary](../docs/rfcs/milestone_00/0140-vault-evidence-summary.md) | Bounded collection overview with coverage and freshness. | Complete |
 
@@ -516,3 +516,12 @@ requires changing a user-visible contract; do not silently broaden the milestone
 
 Approval of this milestone records the direction. Each RFC requires its own
 implementation approval.
+
+## Completion Record
+
+Milestone 00 completed on 2026-09-08. The final model-backed RFC 0126 suite passed
+all four scenarios against clean revision `d192b69211a6db6ec7c812c9106a090a9fa0e9a3`;
+its retained report is `artifacts/research-eval/20260907T194242Z-suite.md`. The
+subsequent change was limited to nullable native progress presentation and passed
+`pnpm check`, nine focused UI tests, and native Run, Cancel, restart, evidence
+navigation, compact-layout, and wide-layout acceptance.

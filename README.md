@@ -96,6 +96,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 - [x] RFC 0128 - i0i now owns an authenticated loopback MCP endpoint with project-scoped Vault and paper listing.
 - [x] RFC 0127 - i0i manages an installed Codex app-server with scoped configuration, structured events, bounded interruption, and clean shutdown.
 - [x] RFC 0126 - The explicit research-loop evaluation passes one iteration, multi-iteration adaptation, new-run continuation, and live discovery with deterministic checks and an independent judge.
+- [x] RFC 0138 - Native Project Research now shows real progress, supports one-shot cancellation and restart recovery, and opens cited evidence in the Reader.
 - [x] RFC 0124 - Project Research now uses one instruction, one bounded paper count, automatic validated enrichment, and progressively disclosed Run Activity.
 - [x] RFC 0123 - Research Runs now handle nullable planner responses, retry once, report the failed stage, and have deterministic pipeline and live smoke tests.
 - [x] RFC 0122 - Harness Runs now remain active through reconciliation and finalize atomically only after Change Set, usage, reflection, and checkpoint facts are durable.

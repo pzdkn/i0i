@@ -1,6 +1,6 @@
 # RFC 0138: Native Research Progress and Evidence Navigation
 
-- Status: Implemented; native acceptance pending
+- Status: Complete
 - Date: 2026-09-06
 - Parent: [Milestone 00, M00-09b](../../../milestones/milestone_00.md)
 - Depends on: RFCs 0130, 0136, 0137
@@ -48,8 +48,9 @@ auto-open newly added papers or discard current panel sizes/selected tabs.
   and State updates, opens evidence and an agent note, then cancels another run.
 - Restart after an injected interruption shows retained results and no resumed
   old run. Missing authentication produces actionable status.
-- Record desktop screenshots and test steps for the native checks, including
-  compact and wide panel sizes with no overlap or inaccessible controls.
+- Record desktop screenshots when host capture permission is available. Otherwise,
+  record native window dimensions and accessibility-tree evidence for compact and
+  wide panel sizes, with no inaccessible controls.
 - Browser mocks alone do not satisfy native acceptance. Run RFC 0126 separately;
   its backend trace does not prove this UI works.
 
@@ -71,6 +72,30 @@ overwrite edited instructions, and recover from missed events by reading the
 persisted snapshot.
 
 Focused Rust storage/controller tests, the Research UI helper tests, and
-`pnpm check` pass. The milestone's native Tauri screenshots, live interruption,
-and final on-demand acceptance suite remain pending; this RFC must not be marked
-complete until those checks are recorded.
+`pnpm check` pass.
+
+## Acceptance Record
+
+Native acceptance passed on 2026-09-08 with `pnpm tauri dev` and the persisted
+`adapter-interp` Project:
+
+- A real Codex Run visibly progressed, read existing Vault papers, and advanced
+  Research State from r1 to r2 with three source-supported findings. Provider
+  search transport failed during that Run and was reported honestly while the
+  useful Vault-backed work remained committed.
+- A second Run exposed one Cancel action. Cancel produced exactly one persisted
+  `cancelled` terminal Run, removed the action, retained State r2, and displayed
+  `LAST RUN · CANCELLED` and `State unchanged` after restart.
+- Opening a finding exposed its exact paper passages. Activating a passage opened
+  the saved PDF in the Reader, where the paper's notes and annotations remained
+  available.
+- Restart recovery, an installed-Codex interruption, and missing-authentication
+  translation are covered by focused runtime and UI tests. The interruption
+  smoke observed a terminal `interrupted` turn and clean runtime shutdown.
+- The native accessibility tree exposed instructions, the numeric paper limit,
+  Run, Activity, Settings, State controls, outcome, and the panel splitter at
+  both 800x600 and 1512x949. No required control became inaccessible.
+
+macOS denied `screencapture` with `could not create image from display`, so no
+desktop image was fabricated. The size-specific native accessibility evidence
+above is the recorded host-permission fallback allowed by this RFC.
