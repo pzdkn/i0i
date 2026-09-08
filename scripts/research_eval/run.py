@@ -220,6 +220,16 @@ def overall_status(checks: list[CheckResult]) -> str:
     return "pass"
 
 
+def add_execution_limits(
+    report: dict[str, Any], scenario_seconds: int, run_seconds: int
+) -> None:
+    """Record configured process and per-Run limits on any scenario report."""
+
+    execution_limits = report.setdefault("executionLimits", {})
+    execution_limits["scenarioProcessSeconds"] = scenario_seconds
+    execution_limits["maximumRunSeconds"] = run_seconds
+
+
 def aggregate_status(statuses: list[str]) -> str:
     """Combine scenario statuses without hiding blocked prerequisites."""
 
@@ -344,9 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         report["git"] = git
         report["runtime"] = runtime
         report["models"] = {"agent": args.agent_model, "judge": args.judge_model}
-        report.setdefault("executionLimits", {})["scenarioProcessSeconds"] = (
-            args.scenario_timeout
-        )
+        add_execution_limits(report, args.scenario_timeout, args.run_timeout)
         report["manifest"] = {
             "version": manifest["version"],
             "sha256": sha256_file(script_dir / "corpus" / "manifest.json"),

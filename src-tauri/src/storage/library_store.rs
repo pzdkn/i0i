@@ -20,8 +20,9 @@ use crate::domain::harness::{
     EffectiveInstructionStack, EffectiveRunContext, HarnessAutonomy, HarnessConfiguration,
     HarnessConfigurationVersion, HarnessEvent, HarnessRun, HarnessRunTrigger, HarnessSnapshot,
     HarnessUsage, PaperDispositionKind, PriorResearchRunOutcome, ResearchCheckpoint,
-    ResearchHarness, ResearchPaperDisposition, ResearchRunOutcome, RunContextEntry,
-    RunContextObservation, HARNESS_POLICY_SUMMARY, HARNESS_POLICY_VERSION,
+    ResearchHarness, ResearchPaperDisposition, ResearchRunOutcome, ResearchStateSynthesis,
+    ResearchSynthesisChange, RunContextEntry, RunContextObservation, HARNESS_POLICY_SUMMARY,
+    HARNESS_POLICY_VERSION,
 };
 use crate::domain::harness_improvement::{
     HarnessImprovement, HarnessImprovementStatus, HarnessImprovementTarget,
@@ -4135,6 +4136,47 @@ impl LibraryStore {
             .collect()
     }
 
+    /// Confirm that a citable passage was delivered to this managed Run.
+    pub fn agent_run_read_passage(&self, run_id: &str, passage_ref: &str) -> StoreResult<bool> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "select exists(select 1 from agent_reader_passages
+             where run_id = ?1 and passage_ref = ?2)",
+            params![run_id, passage_ref],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Record a required synthesis phase that honestly produced no mutation.
+    pub fn record_agent_state_unchanged(&self, run_id: &str, reason: &str) -> StoreResult<()> {
+        validate_outcome_text("no-change reason", reason, 1_000)?;
+        let conn = self.open_connection()?;
+        let valid: bool = conn
+            .query_row(
+                "select exists(select 1 from harness_runs
+                 where id = ?1 and execution_kind = 'codex_agent'
+                   and status = 'reconciling')",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !valid {
+            return Err("Only a synthesizing managed Run may record no State change".to_string());
+        }
+        append_structured_harness_event(
+            &conn,
+            run_id,
+            "agent_state_unchanged",
+            reason.trim(),
+            Some(serde_json::json!({"reason": reason.trim()})),
+            Some("synthesizing"),
+            None,
+            None,
+            "harness",
+        )
+    }
+
     /// Validate and apply exhaustive retention decisions for newly added papers.
     pub fn finalize_agent_paper_retention(
         &self,
@@ -4333,6 +4375,18 @@ impl LibraryStore {
                         .to_string(),
                 );
             }
+            let synthesis_completed: bool = tx
+                .query_row(
+                    "select exists(select 1 from harness_events
+                     where run_id = ?1 and kind in ('agent_state_committed','agent_state_unchanged')
+                       and phase = 'synthesizing')",
+                    params![harness_run_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !synthesis_completed {
+                return Err("Managed Research Run has no completed State synthesis".to_string());
+            }
         }
         let (provider_queries, child_llm_calls, inspected_candidates): (u32, u32, u32) = tx
             .query_row(
@@ -4452,11 +4506,16 @@ impl LibraryStore {
         if changed == 0 {
             return Err("Managed Research Run cannot begin finalization".to_string());
         }
-        append_harness_event(
+        append_structured_harness_event(
             &conn,
             run_id,
-            "summarizing",
-            "Validating the Research Run outcome",
+            "synthesizing",
+            "Synthesizing Research State from the completed investigation",
+            None,
+            Some("synthesizing"),
+            None,
+            None,
+            "harness",
         )
     }
 
@@ -4467,6 +4526,13 @@ impl LibraryStore {
         outcome: &ResearchRunOutcome,
     ) -> StoreResult<HarnessReflection> {
         validate_research_run_outcome_shape(outcome)?;
+        validate_research_state_synthesis_shape(
+            outcome
+                .state_synthesis
+                .as_ref()
+                .ok_or("Managed Research outcome requires a State synthesis")?,
+            outcome.next_direction.as_deref(),
+        )?;
         let conn = self.open_connection()?;
         let (project_id, execution_kind, status): (String, String, String) = conn
             .query_row(
@@ -5529,40 +5595,65 @@ impl LibraryStore {
         require_agent_run_write_admission(&tx, run_id, Some(project_id))?;
         require_current_state_revision(&tx, project_id, base_revision)?;
 
+        // Allocate create ids before validation so relations may target another
+        // create operation in the same atomic batch.
+        let mut created_ids: HashMap<String, String> = HashMap::new();
+        for change in &changes {
+            if let AgentStateChange::Create { operation_key, .. } = change {
+                if operation_key.trim().is_empty() || created_ids.contains_key(operation_key) {
+                    return Err("Create operation keys must be non-empty and unique".to_string());
+                }
+                created_ids.insert(operation_key.clone(), timestamped_id("research_entry")?);
+            }
+        }
+        let pending_entry_ids: HashSet<String> = created_ids.values().cloned().collect();
+
         enum PreparedChange {
             Create(String, String, ResearchEntryDraft, Vec<String>),
             Revise(ResearchEntryUpdate, ResearchEntryDraft, Vec<String>),
             Lifecycle(String, EntryLifecycle, ResearchEntryDraft),
         }
         let mut prepared = Vec::new();
-        let mut operation_keys = std::collections::HashSet::new();
+        let mut new_statements: HashSet<String> = HashSet::new();
         for change in changes {
             match change {
                 AgentStateChange::Create {
                     operation_key,
-                    draft,
+                    mut draft,
                     evidence_relationships,
                 } => {
-                    if operation_key.trim().is_empty()
-                        || !operation_keys.insert(operation_key.clone())
-                    {
-                        return Err(
-                            "Create operation keys must be non-empty and unique".to_string()
-                        );
-                    }
+                    resolve_local_relation_targets(&mut draft.relations, &created_ids);
                     validate_evidence_relationships(&draft, &evidence_relationships)?;
-                    validate_research_entry_draft(&tx, project_id, &draft)?;
+                    validate_research_entry_draft_with_pending(
+                        &tx,
+                        project_id,
+                        &draft,
+                        &pending_entry_ids,
+                    )?;
+                    let normalized_statement = normalize_state_statement(&draft.text);
+                    let duplicate = !new_statements.insert(normalized_statement.clone())
+                        || read_research_entry_summaries(&tx, project_id, base_revision)?
+                            .into_iter()
+                            .any(|entry| {
+                                entry.lifecycle == EntryLifecycle::Active
+                                    && normalize_state_statement(&entry.text)
+                                        == normalized_statement
+                            });
+                    if duplicate {
+                        return Err("Equivalent active Research Entry already exists".to_string());
+                    }
                     prepared.push(PreparedChange::Create(
-                        operation_key,
-                        timestamped_id("research_entry")?,
+                        operation_key.clone(),
+                        created_ids[&operation_key].clone(),
                         draft,
                         evidence_relationships,
                     ));
                 }
                 AgentStateChange::Revise {
-                    update,
+                    mut update,
                     evidence_relationships,
                 } => {
+                    resolve_local_relation_targets(&mut update.relations, &created_ids);
                     let current = read_current_research_entry(&tx, &update.id)?;
                     if current.project_id != project_id {
                         return Err(format!(
@@ -5580,7 +5671,12 @@ impl LibraryStore {
                         reason: update.reason.clone(),
                     };
                     validate_evidence_relationships(&draft, &evidence_relationships)?;
-                    validate_research_entry_draft(&tx, project_id, &draft)?;
+                    validate_research_entry_draft_with_pending(
+                        &tx,
+                        project_id,
+                        &draft,
+                        &pending_entry_ids,
+                    )?;
                     prepared.push(PreparedChange::Revise(
                         update,
                         draft,
@@ -5617,13 +5713,24 @@ impl LibraryStore {
             run_id,
             "Agent Research State update",
         )?;
+        for change in &prepared {
+            if let PreparedChange::Create(_, entry_id, draft, _) = change {
+                insert_research_entry_header(&tx, entry_id, project_id, revision, run_id, draft)?;
+            }
+        }
         let mut affected_entry_ids = Vec::new();
         let mut created_entry_ids = HashMap::new();
         for change in prepared {
             match change {
                 PreparedChange::Create(key, entry_id, draft, relationships) => {
-                    insert_new_research_entry(
-                        &tx, &entry_id, project_id, revision, run_id, &draft,
+                    insert_research_entry_version(
+                        &tx,
+                        &entry_id,
+                        project_id,
+                        revision,
+                        EntryLifecycle::Active,
+                        run_id,
+                        &draft,
                     )?;
                     set_evidence_relationships(&tx, &entry_id, revision, &relationships)?;
                     created_entry_ids.insert(key, entry_id.clone());
@@ -5690,15 +5797,16 @@ impl LibraryStore {
         )
         .map_err(|error| error.to_string())?;
         if let Some(run_id) = run_id {
-            let managed_run: bool = tx
+            let managed_status: Option<String> = tx
                 .query_row(
-                    "select exists(select 1 from harness_runs
-                     where id = ?1 and execution_kind = 'codex_agent')",
+                    "select status from harness_runs
+                     where id = ?1 and execution_kind = 'codex_agent'",
                     params![run_id],
                     |row| row.get(0),
                 )
+                .optional()
                 .map_err(|error| error.to_string())?;
-            if managed_run {
+            if let Some(status) = managed_status {
                 append_structured_harness_event(
                     &tx,
                     run_id,
@@ -5708,7 +5816,11 @@ impl LibraryStore {
                         "revision": revision,
                         "affectedEntryIds": receipt.affected_entry_ids,
                     })),
-                    Some("assessing"),
+                    Some(if status == "reconciling" {
+                        "synthesizing"
+                    } else {
+                        "assessing"
+                    }),
                     None,
                     None,
                     "harness",
@@ -13281,6 +13393,16 @@ fn validate_research_entry_draft(
     project_id: &str,
     draft: &ResearchEntryDraft,
 ) -> StoreResult<()> {
+    validate_research_entry_draft_with_pending(conn, project_id, draft, &HashSet::new())
+}
+
+/// Validate an entry while allowing ids allocated by the same atomic batch.
+fn validate_research_entry_draft_with_pending(
+    conn: &Connection,
+    project_id: &str,
+    draft: &ResearchEntryDraft,
+    pending_entry_ids: &HashSet<String>,
+) -> StoreResult<()> {
     if draft.text.trim().is_empty() {
         return Err("Research Entry text cannot be empty".to_string());
     }
@@ -13345,7 +13467,9 @@ fn validate_research_entry_draft(
             )
             .optional()
             .map_err(|error| error.to_string())?;
-        if owner.as_deref() != Some(project_id) {
+        if owner.as_deref() != Some(project_id)
+            && !pending_entry_ids.contains(&relation.target_entry_id)
+        {
             return Err(format!(
                 "Related Research Entry is not in this Project: {}",
                 relation.target_entry_id
@@ -13356,6 +13480,25 @@ fn validate_research_entry_draft(
         validate_research_context(conn, project_id, context)?;
     }
     Ok(())
+}
+
+fn resolve_local_relation_targets(
+    relations: &mut [EntryRelationDraft],
+    created_ids: &HashMap<String, String>,
+) {
+    for relation in relations {
+        if let Some(entry_id) = created_ids.get(&relation.target_entry_id) {
+            relation.target_entry_id = entry_id.clone();
+        }
+    }
+}
+
+fn normalize_state_statement(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn validate_evidence_relationships(
@@ -13492,6 +13635,27 @@ fn insert_new_research_entry(
     run_id: Option<&str>,
     draft: &ResearchEntryDraft,
 ) -> StoreResult<()> {
+    insert_research_entry_header(conn, entry_id, project_id, revision, run_id, draft)?;
+    insert_research_entry_version(
+        conn,
+        entry_id,
+        project_id,
+        revision,
+        EntryLifecycle::Active,
+        run_id,
+        draft,
+    )
+}
+
+/// Insert the stable identity for a new entry before its revision payload.
+fn insert_research_entry_header(
+    conn: &Connection,
+    entry_id: &str,
+    project_id: &str,
+    revision: i64,
+    run_id: Option<&str>,
+    draft: &ResearchEntryDraft,
+) -> StoreResult<()> {
     conn.execute(
         "insert into research_entries (
            id, project_id, kind, epistemic_status, text, lifecycle,
@@ -13508,15 +13672,7 @@ fn insert_new_research_entry(
         ],
     )
     .map_err(|error| error.to_string())?;
-    insert_research_entry_version(
-        conn,
-        entry_id,
-        project_id,
-        revision,
-        EntryLifecycle::Active,
-        run_id,
-        draft,
-    )
+    Ok(())
 }
 
 fn insert_research_entry_version(
@@ -14105,6 +14261,7 @@ fn validate_harness_event_detail(
             ("revision", "integer"),
             ("affectedEntryIds", "string_array"),
         ],
+        "agent_state_unchanged" => &[("reason", "string")],
         "agent_papers_assessed" => &[
             ("attempted", "integer"),
             ("read", "integer"),
@@ -14345,6 +14502,61 @@ fn validate_research_run_outcome_shape(outcome: &ResearchRunOutcome) -> StoreRes
     Ok(())
 }
 
+fn validate_research_state_synthesis_shape(
+    synthesis: &ResearchStateSynthesis,
+    next_direction: Option<&str>,
+) -> StoreResult<()> {
+    if synthesis.changes.len() > 20
+        || synthesis.unresolved_entry_ids.len() > 20
+        || synthesis.next_direction_entry_ids.len() > 20
+    {
+        return Err("Research State synthesis exceeds its item limits".to_string());
+    }
+    if synthesis.changes.is_empty() != synthesis.no_change_reason.is_some() {
+        return Err(
+            "State synthesis requires a no-change reason exactly when it has no changes"
+                .to_string(),
+        );
+    }
+    if next_direction.is_some() != !synthesis.next_direction_entry_ids.is_empty() {
+        return Err("Next direction must name at least one motivating State entry".to_string());
+    }
+    if let Some(reason) = &synthesis.no_change_reason {
+        validate_outcome_text("no-change reason", reason, 1_000)?;
+    }
+    for change in &synthesis.changes {
+        match change {
+            ResearchSynthesisChange::Create {
+                handle,
+                statement,
+                reason,
+                ..
+            } => {
+                validate_outcome_text("create handle", handle, 100)?;
+                validate_outcome_text("synthesis statement", statement, 4_000)?;
+                validate_outcome_text("synthesis reason", reason, 1_000)?;
+            }
+            ResearchSynthesisChange::Revise {
+                entry_id,
+                statement,
+                reason,
+                ..
+            } => {
+                validate_outcome_text("entry id", entry_id, 500)?;
+                validate_outcome_text("synthesis statement", statement, 4_000)?;
+                validate_outcome_text("synthesis reason", reason, 1_000)?;
+            }
+            ResearchSynthesisChange::SetLifecycle {
+                entry_id, reason, ..
+            } => {
+                validate_outcome_text("entry id", entry_id, 500)?;
+                validate_outcome_text("synthesis reason", reason, 1_000)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_outcome_text(label: &str, value: &str, maximum_chars: usize) -> StoreResult<()> {
     if value.trim().is_empty() || value.chars().count() > maximum_chars {
         return Err(format!(
@@ -14368,7 +14580,7 @@ fn require_agent_run_write_admission(
             "select exists(select 1 from harness_runs
              where id = ?1 and execution_kind = 'codex_agent'
                and (?2 is null or project_id = ?2)
-               and status in ('queued','planning','searching','assessing','ranking'))",
+               and status in ('queued','planning','searching','assessing','ranking','reconciling'))",
             params![run_id, project_id],
             |row| row.get(0),
         )
@@ -20701,9 +20913,17 @@ mod tests {
             summary: summary.to_string(),
             display_items: Vec::new(),
             paper_dispositions: Vec::new(),
+            state_synthesis: Some(crate::domain::harness::ResearchStateSynthesis {
+                changes: Vec::new(),
+                unresolved_entry_ids: Vec::new(),
+                next_direction_entry_ids: Vec::new(),
+                no_change_reason: Some("No additional State entry was warranted".to_string()),
+                resulting_revision: None,
+                created_entry_ids: HashMap::new(),
+            }),
             task_outcomes: Vec::new(),
             unanswered_questions: vec!["What should be tested next?".to_string()],
-            next_direction: Some("Investigate the unresolved condition".to_string()),
+            next_direction: None,
         }
     }
 
@@ -20838,6 +21058,9 @@ mod tests {
     fn managed_completion_wins_over_a_late_cancel() -> StoreResult<()> {
         let db = test_db()?;
         let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        db.store
+            .record_agent_state_unchanged(&run.id, "No evidence was gathered")?;
         db.store
             .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
 
@@ -20944,12 +21167,22 @@ mod tests {
             &[("vaswani2017".to_string(), "passage:question".to_string())],
         )?;
         db.store.begin_codex_harness_finalization(&run.id)?;
+        db.store
+            .record_agent_state_unchanged(&run.id, "No State change was warranted")?;
         db.store.persist_agent_run_outcome(
             &run.id,
             &ResearchRunOutcome {
                 summary: "Delegated question answered".to_string(),
                 display_items: Vec::new(),
                 paper_dispositions: Vec::new(),
+                state_synthesis: Some(crate::domain::harness::ResearchStateSynthesis {
+                    changes: Vec::new(),
+                    unresolved_entry_ids: Vec::new(),
+                    next_direction_entry_ids: Vec::new(),
+                    no_change_reason: Some("No State change was warranted".to_string()),
+                    resulting_revision: None,
+                    created_entry_ids: HashMap::new(),
+                }),
                 task_outcomes: vec![crate::domain::harness::ResearchTaskOutcome {
                     search_run_ids: Vec::new(),
                     motivating_entry_ids: Vec::new(),
@@ -21039,6 +21272,8 @@ mod tests {
             }],
         )?;
         db.store
+            .record_agent_state_unchanged(&run.id, "No State change was warranted")?;
+        db.store
             .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
 
         let checkpoint = db.store.get_research_checkpoint(&run.id)?;
@@ -21047,6 +21282,129 @@ mod tests {
         assert_eq!(checkpoint.attempted_paper_count, 1);
         assert_eq!(checkpoint.read_paper_count, 1);
         assert_eq!(checkpoint.retained_paper_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn managed_synthesis_creates_related_entries_atomically_and_rejects_duplicates(
+    ) -> StoreResult<()> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "vaswani2017",
+            &[(
+                "paragraph",
+                "The measured effect was limited to two benchmarks.",
+            )],
+        )?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+
+        let receipt = db.store.apply_agent_state_update(
+            "project:attention",
+            0,
+            "codex-test",
+            Some(&run.id),
+            "synthesis-batch",
+            "synthesis-batch-payload",
+            vec![
+                AgentStateChange::Create {
+                    operation_key: "finding".to_string(),
+                    draft: ResearchEntryDraft {
+                        kind: ResearchEntryKind::Finding,
+                        epistemic_status: EpistemicStatus::SourceSupported,
+                        text: "The measured effect was evaluated on two benchmarks.".to_string(),
+                        evidence: vec![EvidenceLinkDraft {
+                            chunk_id: chunk.id,
+                            excerpt: Some(
+                                "The measured effect was limited to two benchmarks.".to_string(),
+                            ),
+                            support_note: Some("Defines the observed evaluation scope".to_string()),
+                        }],
+                        relations: Vec::new(),
+                        context: Vec::new(),
+                        reason: Some("New evidence from this Run".to_string()),
+                    },
+                    evidence_relationships: vec!["supports".to_string()],
+                },
+                AgentStateChange::Create {
+                    operation_key: "gap".to_string(),
+                    draft: ResearchEntryDraft {
+                        kind: ResearchEntryKind::Gap,
+                        epistemic_status: EpistemicStatus::AgentSynthesis,
+                        text: "Within the bounded corpus, evaluation beyond those two benchmarks remains absent."
+                            .to_string(),
+                        evidence: Vec::new(),
+                        relations: vec![EntryRelationDraft {
+                            target_entry_id: "finding".to_string(),
+                            kind: EntryRelationKind::DerivedFrom,
+                        }],
+                        context: Vec::new(),
+                        reason: Some("Bounded post-Run synthesis".to_string()),
+                    },
+                    evidence_relationships: Vec::new(),
+                },
+            ],
+        )?;
+
+        assert_eq!(receipt.revision, 1);
+        let finding_id = &receipt.created_entry_ids["finding"];
+        let gap = db
+            .store
+            .get_research_entry(&receipt.created_entry_ids["gap"], None)?;
+        assert_eq!(gap.relations[0].target_entry_id, *finding_id);
+        assert!(db
+            .store
+            .apply_agent_state_update(
+                "project:attention",
+                1,
+                "codex-test",
+                Some(&run.id),
+                "duplicate-synthesis",
+                "duplicate-synthesis-payload",
+                vec![AgentStateChange::Create {
+                    operation_key: "duplicate".to_string(),
+                    draft: ResearchEntryDraft {
+                        kind: ResearchEntryKind::Gap,
+                        epistemic_status: EpistemicStatus::Speculative,
+                        text: "Within the bounded corpus, evaluation beyond those two benchmarks remains absent."
+                            .to_string(),
+                        evidence: Vec::new(),
+                        relations: Vec::new(),
+                        context: Vec::new(),
+                        reason: Some("Duplicate attempt".to_string()),
+                    },
+                    evidence_relationships: Vec::new(),
+                }],
+            )
+            .expect_err("equivalent active claims must not be duplicated")
+            .contains("Equivalent active Research Entry"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_no_change_synthesis_finishes_without_a_new_revision() -> StoreResult<()> {
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        db.store.record_agent_state_unchanged(
+            &run.id,
+            "The Run found no evidence warranting a State mutation",
+        )?;
+        db.store
+            .persist_agent_run_outcome(&run.id, &research_outcome("No State change"))?;
+        let completed = db
+            .store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+
+        assert_eq!(completed.resulting_state_revision, Some(0));
+        assert_eq!(
+            db.store
+                .get_research_state("project:attention", None)?
+                .current_revision,
+            0
+        );
         Ok(())
     }
 
@@ -21182,6 +21540,8 @@ mod tests {
             .expect_err("an unread passage must not enter continuation history")
             .contains("did not read"));
         db.store
+            .record_agent_state_unchanged(&run.id, "Outcome validation failed")?;
+        db.store
             .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
         assert!(db
             .store
@@ -21191,7 +21551,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_run_outcome_preserves_committed_state() -> StoreResult<()> {
+    fn missing_synthesis_prevents_a_ready_run() -> StoreResult<()> {
         let db = test_db()?;
         let run = managed_harness_run(&db, &AgentRunLimits::default())?;
         db.store.apply_agent_state_update(
@@ -21213,8 +21573,13 @@ mod tests {
             "Research outcome was not retained: invalid JSON",
             Some("complete"),
         )?;
+        assert!(db
+            .store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")
+            .expect_err("ready requires a completed synthesis")
+            .contains("no completed State synthesis"));
         db.store
-            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+            .finish_codex_harness_run(&run.id, "failed", "invalid_outcome")?;
 
         assert_eq!(
             db.store
@@ -21238,6 +21603,8 @@ mod tests {
             let run = managed_harness_run(&db, &AgentRunLimits::default())?;
             latest_run_id = run.id.clone();
             db.store.begin_codex_harness_finalization(&run.id)?;
+            db.store
+                .record_agent_state_unchanged(&run.id, "No State change was warranted")?;
             db.store.persist_agent_run_outcome(
                 &run.id,
                 &research_outcome(&format!("Outcome {index}")),

@@ -845,23 +845,28 @@ async fn run_scenario(
 
 fn scenario_instructions(scenario: &str, core: &str) -> Result<Vec<String>, String> {
     let one_iteration: String = format!(
-        "{core}\n\nRun one complete investigation cycle. Search for direct supporting experimental evidence, save at least one useful full-text paper, wait for it to become readable, inspect the relevant passage, and update the existing hypothesis with a cited passage. Inspect any abstract-only or unavailable candidate you encounter and describe that limitation honestly."
+        "{core}\n\nRun one complete investigation cycle. Search for direct supporting experimental evidence, save at least one useful full-text paper, wait for it to become readable, inspect the relevant passage, and synthesize a cited State update at the end. Inspect any abstract-only or unavailable candidate you encounter and describe that limitation honestly."
     );
     match scenario {
         "one_iteration" => Ok(vec![one_iteration]),
-        "multiple_iterations" => Ok(vec![format!(
-            "{core}\n\nPerform two ordered investigation cycles. First search specifically for supporting experimental evidence, save and read a full-text paper, and commit a cited State update. Only after that commit, start a new search specifically for contradictory evidence or boundary conditions, save and read it, then revise or extend State so the disagreement and its conditions remain visible."
-        )]),
+        "multiple_iterations" => Ok(vec![
+            format!(
+                "{core}\n\nThis is the first of two Runs. Search specifically for supporting experimental evidence, save and read a full-text paper, and synthesize a cited source-supported Finding at the end. Leave contradictory conditions as an explicit unresolved question."
+            ),
+            format!(
+                "{core}\n\nThis is the second Run. Read the persisted State first, then search specifically for contradictory evidence or boundary conditions. Save and read the relevant paper, preserve the earlier Finding, and synthesize a related bounded Gap, Question, or Hypothesis that makes the disagreement visible."
+            ),
+        ]),
         "new_run_continuation" => Ok(vec![
             format!(
                 "{core}\n\nThis is the baseline Run for a continuation test. Perform one focused supporting-evidence cycle only: start one search for direct experimental support, save and read one useful full-text paper, create one cited source-supported finding, and then finish promptly. Leave contradictory conditions as an explicit question for the next Run rather than investigating them now."
             ),
             format!(
-                "{core}\n\nThis is a new Run. Read current Research State and prior Run outcomes first. Do not repeat the supporting search. Pursue the most useful unresolved boundary condition or contradictory evidence, read the relevant full text, and commit a cited State update that improves the existing understanding."
+                "{core}\n\nThis is a new Run. Read current Research State and prior Run outcomes first. Do not repeat the supporting search. Pursue the most useful unresolved boundary condition or contradictory evidence, read the relevant full text, and synthesize a State update that improves the existing understanding."
             ),
         ]),
         "live_discovery_smoke" => Ok(vec![
-            format!("{core}\n\nSave the original paper, wait for a readable source, read a passage describing the architecture, and add one source-supported Research State finding with that passage as evidence. Clearly report if live discovery or acquisition prevents completion."),
+            format!("{core}\n\nSave the original paper, wait for a readable source, read a passage describing the architecture, and synthesize one source-supported Research State finding with that passage as evidence. Clearly report if live discovery or acquisition prevents completion."),
         ]),
         other => Err(format!("Unknown research evaluation scenario: {other}")),
     }
@@ -1044,19 +1049,33 @@ fn deterministic_checks(
         ),
     ));
 
-    let completed_tools: Vec<&str> = successful_tool_names(tool_trace);
-    let reader_position: Option<usize> = completed_tools
-        .iter()
-        .position(|tool| *tool == "reader_read");
-    let update_position: Option<usize> = completed_tools
-        .iter()
-        .position(|tool| *tool == "state_update");
+    let synthesis_after_read = runs.iter().all(|run| {
+        let events = store
+            .get_harness_snapshot(&run.project_id)
+            .map(|snapshot| {
+                snapshot
+                    .events
+                    .into_iter()
+                    .filter(|event| event.run_id == run.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let read = events
+            .iter()
+            .position(|event| event.kind == "agent_passages_delivered");
+        let synthesis = events.iter().position(|event| {
+            matches!(
+                event.kind.as_str(),
+                "agent_state_committed" | "agent_state_unchanged"
+            ) && event.phase.as_deref() == Some("synthesizing")
+        });
+        read.zip(synthesis)
+            .is_some_and(|(read, synthesis)| read < synthesis)
+    });
     checks.push(check(
-        "passage_read_before_state_update",
-        reader_position
-            .zip(update_position)
-            .is_some_and(|(read, update)| read < update),
-        format!("Completed tool order: {}", completed_tools.join(" -> ")),
+        "passage_read_before_state_synthesis",
+        synthesis_after_read,
+        "Every Run synthesized only after delivering Reader passages".to_string(),
     ));
 
     let within_bounds: bool = runs.iter().all(|run| {
@@ -1101,26 +1120,36 @@ fn deterministic_checks(
     }
 
     if scenario == "multiple_iterations" {
-        let first_update: Option<usize> = completed_tools
-            .iter()
-            .position(|tool| *tool == "state_update");
-        let later_search: Option<usize> = first_update.and_then(|position| {
-            completed_tools
-                .iter()
-                .enumerate()
-                .skip(position + 1)
-                .find(|(_, tool)| **tool == "search_start")
-                .map(|(index, _)| index)
-        });
+        let later_search = runs.len() == 2
+            && runs[0].resulting_state_revision.is_some()
+            && runs[1].starting_state_revision
+                >= runs[0].resulting_state_revision.unwrap_or_default();
         checks.push(check(
-            "later_search_follows_first_update",
-            later_search.is_some(),
-            "A second search_start completed after the first State commit".to_string(),
+            "later_run_follows_first_synthesis",
+            later_search,
+            "The second Run started from the first Run's synthesized State".to_string(),
         ));
         checks.push(check(
             "multiple_state_revisions",
             final_revision >= initial_revision + 2,
             format!("Expected at least two commits; final revision is {final_revision}"),
+        ));
+        let finding_ids: HashSet<&str> = state_details
+            .iter()
+            .filter(|detail| detail.entry.kind == ResearchEntryKind::Finding)
+            .map(|detail| detail.entry.id.as_str())
+            .collect();
+        let derived_higher_level = state_details.iter().any(|detail| {
+            detail.entry.kind != ResearchEntryKind::Finding
+                && detail
+                    .relations
+                    .iter()
+                    .any(|relation| finding_ids.contains(relation.target_entry_id.as_str()))
+        });
+        checks.push(check(
+            "second_run_derives_higher_level_state",
+            !finding_ids.is_empty() && derived_higher_level,
+            "A persisted Finding remains and a higher-level entry relates to it".to_string(),
         ));
     }
     if scenario == "new_run_continuation" {

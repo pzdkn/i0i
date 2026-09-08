@@ -51,6 +51,7 @@
     HarnessSnapshot,
     RunReconciliationPlan,
     ResearchCheckpoint,
+    ResearchStateSynthesis,
   } from "$lib/domain/research";
   import type {
     EpistemicStatus,
@@ -404,6 +405,20 @@
     if (!runId || !snapshot) return "Manual";
     const index = snapshot.runs.findIndex((run) => run.id === runId);
     return index < 0 ? "Run" : `Cycle ${snapshot.runs.length - index}`;
+  }
+
+  function synthesisSummary(synthesis: ResearchStateSynthesis): string {
+    const counts = new Map<string, number>();
+    for (const change of synthesis.changes) {
+      const label =
+        change.operation === "create"
+          ? change.kind.replaceAll("_", " ")
+          : change.operation.replaceAll("_", " ");
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([label, count]) => `+ ${count} ${label}${count === 1 ? "" : "s"}`)
+      .join(" · ");
   }
 
   async function saveEntry() {
@@ -975,6 +990,13 @@
               {@const checkpoint = checkpoints[run.id]}
               {@const restoreAvailability = checkpointRestoreAvailability(checkpoint, historical)}
               <p class="result-summary">{checkpoint.retainedPaperCount} retained · {checkpoint.readPaperCount}/{checkpoint.attemptedPaperCount} readable · {checkpoint.unavailablePaperCount} unavailable · {checkpoint.removedPaperCount} removed · State {researchStateResultLabel(checkpoint.startingStateRevision, checkpoint.resultingStateRevision)}</p>
+              {#if checkpoint.outcome?.stateSynthesis}
+                {@const synthesis = checkpoint.outcome.stateSynthesis}
+                <section class="outcome-section synthesis">
+                  <strong>{synthesis.resultingRevision ? `State synthesis · revision ${synthesis.resultingRevision}` : "State unchanged"}</strong>
+                  {#if synthesis.changes.length}<p>{synthesisSummary(synthesis)}</p>{:else if synthesis.noChangeReason}<p>{synthesis.noChangeReason}</p>{/if}
+                </section>
+              {/if}
               {#if checkpoint.outcome?.unansweredQuestions.length}
                 <section class="outcome-section"><strong>Still open</strong><ul>{#each checkpoint.outcome.unansweredQuestions as question}<li>{question}</li>{/each}</ul></section>
               {/if}

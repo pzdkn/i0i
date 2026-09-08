@@ -233,6 +233,41 @@ export interface ResearchTaskOutcome {
   citedPassageRefs: string[];
 }
 
+export interface ResearchStateSynthesis {
+  changes: Array<
+    | {
+        operation: "create";
+        handle: string;
+        kind: "finding" | "question" | "gap" | "hypothesis" | "experiment_idea";
+        epistemicStatus: "source_supported" | "agent_synthesis" | "researcher_context" | "speculative";
+        statement: string;
+        evidence: Array<{ passageRef: string; relationship: string; explanation: string }>;
+        relations: Array<{ target: string; kind: "derived_from" | "motivated_by" | "contests" | "supersedes" }>;
+        reason: string;
+      }
+    | {
+        operation: "revise";
+        entryId: string;
+        epistemicStatus: "source_supported" | "agent_synthesis" | "researcher_context" | "speculative";
+        statement: string;
+        evidence: Array<{ passageRef: string; relationship: string; explanation: string }>;
+        relations: Array<{ target: string; kind: "derived_from" | "motivated_by" | "contests" | "supersedes" }>;
+        reason: string;
+      }
+    | {
+        operation: "set_lifecycle";
+        entryId: string;
+        lifecycle: "active" | "contested" | "superseded";
+        reason: string;
+      }
+  >;
+  unresolvedEntryIds: string[];
+  nextDirectionEntryIds: string[];
+  noChangeReason?: string | null;
+  resultingRevision?: number | null;
+  createdEntryIds?: Record<string, string>;
+}
+
 export interface ResearchRunOutcome {
   summary: string;
   displayItems: Array<{
@@ -244,6 +279,7 @@ export interface ResearchRunOutcome {
     disposition: "evidence_used" | "background" | "contradictory" | "unavailable" | "irrelevant";
     reason: string;
   }>;
+  stateSynthesis?: ResearchStateSynthesis | null;
   taskOutcomes: ResearchTaskOutcome[];
   unansweredQuestions: string[];
   nextDirection?: string | null;

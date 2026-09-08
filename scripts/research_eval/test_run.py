@@ -72,6 +72,15 @@ class ResearchEvaluationTests(unittest.TestCase):
         self.assertIn("codex-cli 1.2.3", markdown)
         self.assertIn("Judge did not produce", markdown)
 
+    def test_failed_backend_report_receives_configured_execution_limits(self) -> None:
+        """The CLI adds both limits even when Rust returns an early failure."""
+
+        report = {"executionLimits": {}}
+        RUNNER.add_execution_limits(report, scenario_seconds=900, run_seconds=420)
+
+        self.assertEqual(report["executionLimits"]["scenarioProcessSeconds"], 900)
+        self.assertEqual(report["executionLimits"]["maximumRunSeconds"], 420)
+
     def test_suite_markdown_lists_each_scenario(self) -> None:
         report = {
             "status": "pass",

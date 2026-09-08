@@ -5,7 +5,9 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::research::Depth;
-use crate::domain::research_state::ResearchEntryKind;
+use crate::domain::research_state::{
+    EntryLifecycle, EntryRelationKind, EpistemicStatus, ResearchEntryKind,
+};
 
 pub const HARNESS_POLICY_VERSION: &str = "project-research-v1";
 pub const HARNESS_POLICY_SUMMARY: &str = "Rust owns bounded orchestration, Project boundaries, evidence provenance, epistemic validation, cancellation, persistence, and budget enforcement.";
@@ -401,6 +403,71 @@ pub struct ResearchPaperDisposition {
     pub reason: String,
 }
 
+/// One exact passage used by post-Run Research State synthesis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchSynthesisEvidence {
+    pub passage_ref: String,
+    pub relationship: String,
+    pub explanation: String,
+}
+
+/// A typed dependency on an existing entry id or an earlier local handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchSynthesisRelation {
+    pub target: String,
+    pub kind: EntryRelationKind,
+}
+
+/// One atomic operation proposed by the required post-Run synthesis phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "operation",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ResearchSynthesisChange {
+    Create {
+        handle: String,
+        kind: ResearchEntryKind,
+        epistemic_status: EpistemicStatus,
+        statement: String,
+        evidence: Vec<ResearchSynthesisEvidence>,
+        relations: Vec<ResearchSynthesisRelation>,
+        reason: String,
+    },
+    Revise {
+        entry_id: String,
+        epistemic_status: EpistemicStatus,
+        statement: String,
+        evidence: Vec<ResearchSynthesisEvidence>,
+        relations: Vec<ResearchSynthesisRelation>,
+        reason: String,
+    },
+    SetLifecycle {
+        entry_id: String,
+        lifecycle: EntryLifecycle,
+        reason: String,
+    },
+}
+
+/// Structured synthesis proposal plus backend-recorded commit facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchStateSynthesis {
+    pub changes: Vec<ResearchSynthesisChange>,
+    pub unresolved_entry_ids: Vec<String>,
+    pub next_direction_entry_ids: Vec<String>,
+    pub no_change_reason: Option<String>,
+    /// Set by Rust after a successful mutation; never supplied by the agent.
+    #[serde(default)]
+    pub resulting_revision: Option<i64>,
+    /// Maps local create handles to durable ids after commit.
+    #[serde(default)]
+    pub created_entry_ids: std::collections::HashMap<String, String>,
+}
+
 /// The validated interpretation retained after one managed research Run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -412,6 +479,9 @@ pub struct ResearchRunOutcome {
     /// Exhaustive assessments for papers newly added by this Run.
     #[serde(default)]
     pub paper_dispositions: Vec<ResearchPaperDisposition>,
+    /// Required for new Runs; absent historical outcomes deserialize as no-op.
+    #[serde(default)]
+    pub state_synthesis: Option<ResearchStateSynthesis>,
     pub task_outcomes: Vec<ResearchTaskOutcome>,
     pub unanswered_questions: Vec<String>,
     pub next_direction: Option<String>,
