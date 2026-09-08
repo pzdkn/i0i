@@ -235,6 +235,10 @@ export interface ResearchTaskOutcome {
 
 export interface ResearchRunOutcome {
   summary: string;
+  displayItems: Array<{
+    kind: "finding" | "question" | "gap" | "hypothesis" | "experiment_idea";
+    text: string;
+  }>;
   taskOutcomes: ResearchTaskOutcome[];
   unansweredQuestions: string[];
   nextDirection?: string | null;

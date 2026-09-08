@@ -105,6 +105,20 @@ export type PdfRect = {
   height: number;
 };
 
+/** Exact Research State evidence location requested by another workspace. */
+export type EvidenceNavigationTarget = {
+  paperId: string;
+  sourceId: string;
+  extractionId: string;
+  chunkId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  pageStart: number;
+  pageEnd: number;
+  excerpt: string;
+  requestId: number;
+};
+
 export type ReaderMark = {
   id: string;
   paragraphId: string;

@@ -315,6 +315,19 @@
     return null;
   }
 
+  /** Resolve an exact quotation only on its cited page. */
+  export async function resolveQuoteOnPage(pageIndex: number, quote: string): Promise<Locator | null> {
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && !pageRefs[pageIndex]) {
+      if (error) return null;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const page = pageRefs[pageIndex];
+    if (!page) return null;
+    await page.whenTextReady();
+    return page.resolveQuote(quote);
+  }
+
   function errorDetail(value: unknown) {
     if (value instanceof Error) {
       return {

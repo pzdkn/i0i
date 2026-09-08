@@ -198,6 +198,7 @@ pub struct ResearchEvidenceLink {
     pub entry_id: String,
     pub state_revision: i64,
     pub paper_id: String,
+    pub paper_title: String,
     pub source_id: String,
     pub extraction_id: String,
     pub chunk_id: String,

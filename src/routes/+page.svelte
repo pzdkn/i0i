@@ -47,7 +47,7 @@
     Vault,
   } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
-  import type { DiscoveryReaderCandidate } from "$lib/domain/reader";
+  import type { DiscoveryReaderCandidate, EvidenceNavigationTarget } from "$lib/domain/reader";
   import type { ChunkHit } from "$lib/domain/search";
   import type { VaultStatus } from "$lib/domain/vault";
   import type { WorkspaceTab } from "$lib/domain/workspace";
@@ -140,7 +140,7 @@
     paperId: string;
     pageIndex: number;
     requestId: number;
-  } | null>(null);
+  } | EvidenceNavigationTarget | null>(null);
   let readerNavigationSequence = 0;
   let autofillingMetadataPaperIds = $state<string[]>([]);
   let metadataAutofillProgressByPaperId = $state<Record<string, MetadataAutofillProgress>>({});
@@ -441,15 +441,19 @@
     return tabs.map((tab, index) => (index === existing ? readerTab : tab));
   }
 
-  function openPaper(paperId: string, pageIndex?: number) {
+  function openPaper(
+    paperId: string,
+    pageOrEvidence?: number | Omit<EvidenceNavigationTarget, "requestId">,
+  ) {
     const paper = getPaperById(paperId);
     if (!paper) {
       return;
     }
-    readerNavigation =
-      pageIndex === undefined
-        ? null
-        : { paperId, pageIndex, requestId: ++readerNavigationSequence };
+    readerNavigation = pageOrEvidence === undefined
+      ? null
+      : typeof pageOrEvidence === "number"
+        ? { paperId, pageIndex: pageOrEvidence, requestId: ++readerNavigationSequence }
+        : { ...pageOrEvidence, requestId: ++readerNavigationSequence };
     selectedPaperId = paper.id;
     selectedReaderPaper = paper;
 

@@ -13574,11 +13574,14 @@ fn read_research_entry_detail_from_conn(
 
     let mut evidence_statement = conn
         .prepare(
-            "select id, entry_id, state_revision, paper_id, source_id, extraction_id,
-                    chunk_id, excerpt, source_start, source_end, page_start, page_end,
-                    support_note, relationship
-             from research_evidence_links where entry_id = ?1 and state_revision = ?2
-             order by id",
+            "select link.id, link.entry_id, link.state_revision, link.paper_id,
+                    paper.title, link.source_id, link.extraction_id, link.chunk_id,
+                    link.excerpt, link.source_start, link.source_end, link.page_start,
+                    link.page_end, link.support_note, link.relationship
+             from research_evidence_links link
+             join papers paper on paper.id = link.paper_id
+             where link.entry_id = ?1 and link.state_revision = ?2
+             order by link.id",
         )
         .map_err(|error| error.to_string())?;
     let evidence_rows = evidence_statement
@@ -13588,16 +13591,17 @@ fn read_research_entry_detail_from_conn(
                 entry_id: row.get(1)?,
                 state_revision: row.get(2)?,
                 paper_id: row.get(3)?,
-                source_id: row.get(4)?,
-                extraction_id: row.get(5)?,
-                chunk_id: row.get(6)?,
-                excerpt: row.get(7)?,
-                source_start: row.get(8)?,
-                source_end: row.get(9)?,
-                page_start: row.get(10)?,
-                page_end: row.get(11)?,
-                support_note: row.get(12)?,
-                relationship: row.get(13)?,
+                paper_title: row.get(4)?,
+                source_id: row.get(5)?,
+                extraction_id: row.get(6)?,
+                chunk_id: row.get(7)?,
+                excerpt: row.get(8)?,
+                source_start: row.get(9)?,
+                source_end: row.get(10)?,
+                page_start: row.get(11)?,
+                page_end: row.get(12)?,
+                support_note: row.get(13)?,
+                relationship: row.get(14)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -14032,8 +14036,14 @@ fn validate_reflection_draft(draft: &HarnessReflectionDraft) -> StoreResult<()> 
 
 fn validate_research_run_outcome_shape(outcome: &ResearchRunOutcome) -> StoreResult<()> {
     validate_outcome_text("summary", &outcome.summary, 2_000)?;
-    if outcome.task_outcomes.len() > 20 || outcome.unanswered_questions.len() > 20 {
+    if outcome.display_items.len() > 20
+        || outcome.task_outcomes.len() > 20
+        || outcome.unanswered_questions.len() > 20
+    {
         return Err("Research outcome exceeds its item limits".to_string());
+    }
+    for item in &outcome.display_items {
+        validate_outcome_text("display item", &item.text, 1_000)?;
     }
     for question in &outcome.unanswered_questions {
         validate_outcome_text("unanswered question", question, 1_000)?;
@@ -20426,6 +20436,7 @@ mod tests {
     fn research_outcome(summary: &str) -> ResearchRunOutcome {
         ResearchRunOutcome {
             summary: summary.to_string(),
+            display_items: Vec::new(),
             task_outcomes: Vec::new(),
             unanswered_questions: vec!["What should be tested next?".to_string()],
             next_direction: Some("Investigate the unresolved condition".to_string()),
@@ -20673,6 +20684,7 @@ mod tests {
             &run.id,
             &ResearchRunOutcome {
                 summary: "Delegated question answered".to_string(),
+                display_items: Vec::new(),
                 task_outcomes: vec![crate::domain::harness::ResearchTaskOutcome {
                     search_run_ids: Vec::new(),
                     motivating_entry_ids: Vec::new(),

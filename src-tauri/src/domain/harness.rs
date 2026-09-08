@@ -5,6 +5,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::research::Depth;
+use crate::domain::research_state::ResearchEntryKind;
 
 pub const HARNESS_POLICY_VERSION: &str = "project-research-v1";
 pub const HARNESS_POLICY_SUMMARY: &str = "Rust owns bounded orchestration, Project boundaries, evidence provenance, epistemic validation, cancellation, persistence, and budget enforcement.";
@@ -351,11 +352,22 @@ pub struct ResearchTaskOutcome {
     pub cited_passage_refs: Vec<String>,
 }
 
+/// One scannable, typed result shown in the latest Run report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchOutcomeItem {
+    pub kind: ResearchEntryKind,
+    pub text: String,
+}
+
 /// The validated interpretation retained after one managed research Run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResearchRunOutcome {
     pub summary: String,
+    /// Structured report rows. Empty for outcomes written before RFC 0141.
+    #[serde(default)]
+    pub display_items: Vec<ResearchOutcomeItem>,
     pub task_outcomes: Vec<ResearchTaskOutcome>,
     pub unanswered_questions: Vec<String>,
     pub next_direction: Option<String>,

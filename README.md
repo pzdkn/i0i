@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0141 - Research outcomes are structured and evidence opens at its exact Reader passage when geometry is available.
 - [x] RFC 0140 - Agents can generate bounded Vault summaries with explicit source coverage, validated citations, and membership freshness.
 - [x] RFC 0139 - Agents can ask scoped questions of papers and Vaults with bounded source context, validated passage citations, and no implicit notes or State writes.
 - [x] RFC 0137 - Research cancellation, process interruption, and restart recovery preserve committed work and close further run-scoped writes.

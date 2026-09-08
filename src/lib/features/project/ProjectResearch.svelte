@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ExternalLink, LoaderCircle, Play, Square } from "@lucide/svelte";
   import { onMount, tick } from "svelte";
+  import SafeMarkdown from "$lib/components/SafeMarkdown.svelte";
   import {
     applyHarnessChangeSet,
     cancelProjectResearch,
@@ -58,6 +59,7 @@
     ResearchEvidenceCandidate,
     ResearchStateSnapshot,
   } from "$lib/domain/research-state";
+  import type { EvidenceNavigationTarget } from "$lib/domain/reader";
   import {
     allowedEpistemicStatuses,
     actionableResearchError,
@@ -93,7 +95,7 @@
     documents?: ProjectDocumentSummary[];
     initialRevision?: number;
     onOpenDocument?: (documentId: string) => void;
-    onOpenPaper?: (paperId: string, pageIndex?: number) => void;
+    onOpenPaper?: (paperId: string, target?: Omit<EvidenceNavigationTarget, "requestId">) => void;
     onLibraryChanged?: () => void | Promise<void>;
   } = $props();
 
@@ -146,6 +148,7 @@
   let originatingEntryId: string | null = null;
   let previousInspectorTab: "activity" | "settings" = "activity";
   let entryButtons: Record<string, HTMLButtonElement> = {};
+  let expandedEvidenceIds = $state<string[]>([]);
 
   const activeRun = $derived(
     snapshot?.runs.find(isActiveResearchRun),
@@ -903,7 +906,34 @@
         {#if !historical}
           <div class="actions"><button type="button" onclick={() => void startEdit()}>Revise</button><button type="button" onclick={() => void changeLifecycle("contested")}>Contest</button><button type="button" onclick={() => void changeLifecycle("superseded")}>Supersede</button>{#if selectedEntry.entry.kind === "experiment_idea"}<button class="primary" type="button" onclick={promoteExperiment}>Promote to document</button>{/if}</div>
         {/if}
-        <section><h3>Source evidence</h3>{#each selectedEntry.evidence as link}<button class="provenance provenance-link" type="button" onclick={() => onOpenPaper?.(link.paperId, link.pageStart)}><span><strong>Paper {link.paperId} · pp. {link.pageStart + 1}–{link.pageEnd + 1}</strong><ExternalLink size={12} aria-hidden="true" /></span><p>“{link.excerpt}”</p>{#if link.supportNote}<small>{link.supportNote}</small>{/if}</button>{:else}<p class="empty-list">No direct source evidence. This entry is not presented as a sourced quotation.</p>{/each}</section>
+        <section>
+          <h3>Source evidence</h3>
+          {#each selectedEntry.evidence as link}
+            <article class="provenance evidence-row">
+              <div class="row evidence-heading">
+                <div><strong>{link.paperTitle}</strong><small>pp. {link.pageStart + 1}–{link.pageEnd + 1} · {link.relationship}</small></div>
+                <button class="source-action" type="button" onclick={() => onOpenPaper?.(link.paperId, {
+                  paperId: link.paperId,
+                  sourceId: link.sourceId,
+                  extractionId: link.extractionId,
+                  chunkId: link.chunkId,
+                  sourceStart: link.sourceStart,
+                  sourceEnd: link.sourceEnd,
+                  pageStart: link.pageStart,
+                  pageEnd: link.pageEnd,
+                  excerpt: link.excerpt,
+                })}>Open <ExternalLink size={12} aria-hidden="true" /></button>
+              </div>
+              <blockquote class:clamped={!expandedEvidenceIds.includes(link.id)}>“{link.excerpt}”</blockquote>
+              {#if link.excerpt.length > 320}
+                <button class="expand-quote" type="button" onclick={() => expandedEvidenceIds = expandedEvidenceIds.includes(link.id) ? expandedEvidenceIds.filter((id) => id !== link.id) : [...expandedEvidenceIds, link.id]}>
+                  {expandedEvidenceIds.includes(link.id) ? "Show less" : "Show full passage"}
+                </button>
+              {/if}
+              {#if link.supportNote}<p class="support-note">{link.supportNote}</p>{/if}
+            </article>
+          {:else}<p class="empty-list">No direct source evidence. This entry is not presented as a sourced quotation.</p>{/each}
+        </section>
         <section><h3>Derivation</h3>{#each selectedEntry.relations as link}<p class="provenance">{link.kind.replaceAll("_", " ")} · {link.targetEntryId}</p>{:else}<p class="empty-list">No entry derivations.</p>{/each}</section>
         <section><h3>Researcher context</h3>{#each selectedEntry.context as link}<p class="provenance">{link.kind.replaceAll("_", " ")} · {link.label}</p>{:else}<p class="empty-list">No working context attached.</p>{/each}</section>
         <section><h3>Immutable history</h3>{#each selectedEntry.history as version}<article class="history"><strong>r{version.stateRevision} · {version.lifecycle}</strong><p>{version.reason}</p><time>{version.createdAt}</time></article>{/each}</section>
@@ -930,16 +960,25 @@
             {#if featuredFailure && ["failed", "cancelled"].includes(run.status)}
               <p class="error-text">{actionableResearchError(featuredFailure.summary)}</p>
             {:else if checkpoints[run.id]?.outcome}
-              <p>{checkpoints[run.id].outcome?.summary}</p>
+              {@const outcome = checkpoints[run.id].outcome}
+              <SafeMarkdown text={outcome?.summary ?? ""} />
+              {#if outcome?.displayItems?.length}
+                <section class="outcome-section">
+                  <strong>What changed</strong>
+                  <ul>{#each outcome.displayItems as item}<li><span>{item.kind.replaceAll("_", " ")}</span>{item.text}</li>{/each}</ul>
+                </section>
+              {/if}
             {:else}
               <p>{run.summary ?? run.stopReason ?? "Research is starting."}</p>
             {/if}
             {#if checkpoints[run.id]}
               {@const checkpoint = checkpoints[run.id]}
               {@const restoreAvailability = checkpointRestoreAvailability(checkpoint, historical)}
-              <p class="result-summary">{checkpoint.addedPaperIds.length} papers added to Vault · State {researchStateResultLabel(checkpoint.startingStateRevision, checkpoint.resultingStateRevision)}</p>
-              {#if checkpoint.outcome?.unansweredQuestions[0]}<p><strong>Still open</strong><br />{checkpoint.outcome.unansweredQuestions[0]}</p>{/if}
-              {#if checkpoint.nextDirection}<p><strong>Next</strong><br />{checkpoint.nextDirection}</p>{/if}
+              <p class="result-summary">{checkpoint.addedPaperIds.length} papers retained · State {researchStateResultLabel(checkpoint.startingStateRevision, checkpoint.resultingStateRevision)}</p>
+              {#if checkpoint.outcome?.unansweredQuestions.length}
+                <section class="outcome-section"><strong>Still open</strong><ul>{#each checkpoint.outcome.unansweredQuestions as question}<li>{question}</li>{/each}</ul></section>
+              {/if}
+              {#if checkpoint.nextDirection}<section class="outcome-section"><strong>Next</strong><SafeMarkdown text={checkpoint.nextDirection} /></section>{/if}
               <details class="checkpoint">
                 <summary>Technical activity</summary>
                 <p>{checkpoint.acceptedCandidateCount} accepted · {checkpoint.rejectedCandidateCount} rejected · {checkpoint.usage.providerQueries} queries · {checkpoint.usage.llmCalls} model calls</p>
@@ -1298,6 +1337,77 @@
     margin: 6px 0;
   }
 
+  .evidence-row {
+    display: grid;
+    gap: 7px;
+  }
+
+  .evidence-heading {
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .evidence-heading small {
+    display: block;
+    margin-top: 3px;
+    color: var(--fg-3);
+    text-transform: uppercase;
+  }
+
+  .source-action {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .evidence-row blockquote {
+    margin: 0;
+    color: var(--fg-2);
+    line-height: 1.45;
+    user-select: text;
+  }
+
+  .evidence-row blockquote.clamped {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  .expand-quote {
+    justify-self: start;
+    padding: 0;
+    border: 0;
+    color: var(--amber);
+    background: transparent;
+  }
+
+  .support-note {
+    color: var(--fg-3);
+  }
+
+  .outcome-section {
+    display: grid;
+    gap: 5px;
+  }
+
+  .outcome-section ul {
+    display: grid;
+    gap: 5px;
+    margin: 0;
+    padding-left: 18px;
+  }
+
+  .outcome-section li span {
+    margin-right: 7px;
+    color: var(--amber);
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+
   .candidate input {
     width: auto;
     margin-top: 2px;
@@ -1368,19 +1478,6 @@
     margin-top: 5px;
     color: var(--fg-2);
     line-height: 1.4;
-  }
-
-  .provenance-link {
-    display: block;
-    width: 100%;
-    text-align: left;
-  }
-
-  .provenance-link > span {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 8px;
   }
 
   @keyframes research-spin {

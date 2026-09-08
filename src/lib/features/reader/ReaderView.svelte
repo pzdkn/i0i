@@ -1,7 +1,7 @@
 <script lang="ts">
   import { listen } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     cancelDiscoveryPdfAcquisition,
     extractPaperDocument,
@@ -37,7 +37,7 @@
   } from "$lib/domain/library";
   import type { Paper } from "$lib/domain/paper";
   import { citationRects, type ContextCitation } from "$lib/domain/context";
-  import type { DiscoveryReaderCandidate, PdfRect, ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
+  import type { DiscoveryReaderCandidate, EvidenceNavigationTarget, PdfRect, ReaderDocument, ReaderTextSelection } from "$lib/domain/reader";
   import ReaderFooter from "$lib/features/reader/ReaderFooter.svelte";
   import ReaderHeader from "$lib/features/reader/ReaderHeader.svelte";
   import ReaderInspector from "$lib/features/reader/ReaderInspector.svelte";
@@ -81,7 +81,7 @@
     onUpdatePaperMetadata: (paperId: string, update: PaperMetadataUpdate) => void | Promise<void>;
     onToggleFocus: () => void;
     /** One-shot request to reveal a cited PDF page from another i0i surface. */
-    navigationTarget?: { requestId: number; pageIndex: number };
+    navigationTarget?: { requestId: number; pageIndex: number } | EvidenceNavigationTarget;
   } = $props();
 
   // Anchored chat state (RFC 0034). ReaderView owns the thread/pin lists so the
@@ -306,6 +306,8 @@
   const CITATION_FLASH_MS = 2600;
   let citationFlash = $state<{ pageIndex: number; rects: PdfRect[] } | null>(null);
   let citationFlashTimer: ReturnType<typeof setTimeout> | undefined;
+  let evidenceFocusNotice = $state("");
+  let handledEvidenceRequest = 0;
   // The chat model string to attribute agent-created highlights to, resolved
   // once from settings; falls back to a generic label if unset.
   let chatModel = $state("agent");
@@ -380,6 +382,16 @@
   const isWebUrl = (url: string | undefined): boolean =>
     typeof url === "string" && /^https?:\/\//i.test(url);
   const canReadAsHtml = $derived(isWebUrl(fallbackSourceUrl) && !isHtml);
+  const pageNavigationTarget = $derived(
+    navigationTarget
+      ? {
+          requestId: navigationTarget.requestId,
+          pageIndex: "pageIndex" in navigationTarget
+            ? navigationTarget.pageIndex
+            : navigationTarget.pageStart,
+        }
+      : undefined,
+  );
   const isFocusMode = $derived(layoutMode === "focus");
   const threadsCollapsed = $derived(isFocusMode && focusThreadsMode === "collapsed");
 
@@ -1214,6 +1226,42 @@
     citationFlashTimer = setTimeout(() => (citationFlash = null), CITATION_FLASH_MS);
   }
 
+  /** Focus exact Research State evidence after its paper has opened. */
+  async function focusEvidence(target: EvidenceNavigationTarget): Promise<void> {
+    handledEvidenceRequest = target.requestId;
+    evidenceFocusNotice = "";
+    await tick();
+    if (isHtml) {
+      htmlReaderRef?.focusOffsets(target.sourceStart, target.sourceEnd);
+      return;
+    }
+    pdfPageRef?.scrollToPage(target.pageStart);
+    const locator = await pdfPageRef?.resolveQuoteOnPage(target.pageStart, target.excerpt);
+    if (!locator || locator.kind !== "pdfRect") {
+      citationFlash = null;
+      evidenceFocusNotice = "Opened the cited page; exact passage geometry is unavailable.";
+      return;
+    }
+    citationFlash = {
+      pageIndex: locator.pageIndex,
+      rects: JSON.parse(locator.rectsJson || "[]") as PdfRect[],
+    };
+    clearTimeout(citationFlashTimer);
+    citationFlashTimer = setTimeout(() => (citationFlash = null), CITATION_FLASH_MS);
+  }
+
+  $effect(() => {
+    const target = navigationTarget;
+    if (
+      target &&
+      !("pageIndex" in target) &&
+      readerDocument &&
+      target.requestId !== handledEvidenceRequest
+    ) {
+      void focusEvidence(target);
+    }
+  });
+
   function openHighlightById(highlightId: string) {
     const highlight = highlights.find((hl) => hl.id === highlightId);
     if (highlight) {
@@ -1521,6 +1569,7 @@
 
           {#snippet readerContent()}
             <div class="reader-content col">
+              {#if evidenceFocusNotice}<div class="evidence-focus-notice">{evidenceFocusNotice}</div>{/if}
               <div class="reading-surface row">
                 {#if isHtml}
                   <HtmlReader
@@ -1548,7 +1597,7 @@
                     scale={pdfScale}
                     {activeTool}
                     {citationFlash}
-                    {navigationTarget}
+                    navigationTarget={pageNavigationTarget}
                     onSelectPassage={selectPassage}
                     onHighlightClick={openHighlightPopover}
                     onHighlightContextMenu={openHighlightContextMenu}

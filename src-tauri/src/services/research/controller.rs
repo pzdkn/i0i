@@ -690,9 +690,22 @@ fn research_outcome_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["summary", "taskOutcomes", "unansweredQuestions", "nextDirection"],
+        "required": ["summary", "displayItems", "taskOutcomes", "unansweredQuestions", "nextDirection"],
         "properties": {
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "displayItems": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "text"],
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["finding", "question", "gap", "hypothesis", "experiment_idea"]},
+                        "text": {"type": "string", "minLength": 1, "maxLength": 1000}
+                    }
+                }
+            },
             "taskOutcomes": {
                 "type": "array",
                 "maxItems": 20,
@@ -769,6 +782,7 @@ mod tests {
     fn outcome_json() -> String {
         serde_json::json!({
             "summary": "The evidence narrows the question.",
+            "displayItems": [{"kind": "gap", "text": "Generalization remains untested."}],
             "taskOutcomes": [{
                 "searchRunIds": [],
                 "motivatingEntryIds": [],
@@ -832,6 +846,7 @@ mod tests {
     fn final_outcome_parser_requires_the_structured_contract() {
         let outcome = parse_research_outcome(Some(&outcome_json())).expect("valid outcome");
         assert_eq!(outcome.task_outcomes.len(), 1);
+        assert_eq!(outcome.display_items.len(), 1);
         assert!(parse_research_outcome(Some("not json")).is_err());
         assert!(parse_research_outcome(None).is_err());
     }

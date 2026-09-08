@@ -59,6 +59,7 @@ export interface ResearchEvidenceLink {
   entryId: string;
   stateRevision: number;
   paperId: string;
+  paperTitle: string;
   sourceId: string;
   extractionId: string;
   chunkId: string;
@@ -68,6 +69,7 @@ export interface ResearchEvidenceLink {
   pageStart: number;
   pageEnd: number;
   supportNote?: string;
+  relationship: "supports" | "contradicts" | "context" | "unspecified";
 }
 
 export interface EntryRelation {
