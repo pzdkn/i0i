@@ -84,6 +84,7 @@ impl ContinuationConfig {
     }
 }
 
+#[derive(Debug)]
 struct TurnCompletion {
     status: String,
     final_message: Option<String>,
@@ -952,18 +953,8 @@ async fn wait_for_turn(
                         );
                     }
                 }
-                if event.method == "turn/completed"
-                    && event.params["threadId"].as_str() == Some(&turn.thread_id)
-                    && event.params["turn"]["id"].as_str() == Some(&turn.turn_id)
-                {
-                    let status = event.params["turn"]["status"]
-                        .as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| "Codex completion omitted turn status".to_string())?;
-                    return Ok(TurnCompletion {
-                        status,
-                        final_message,
-                    });
+                if let Some(completion) = completed_turn(&event, turn, final_message.as_deref()) {
+                    return completion;
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -972,6 +963,34 @@ async fn wait_for_turn(
             }
         }
     }
+}
+
+/// Decode a matching terminal event and retain its caller-visible failure.
+fn completed_turn(
+    event: &CodexEvent,
+    turn: &CodexTurn,
+    final_message: Option<&str>,
+) -> Option<Result<TurnCompletion, String>> {
+    if event.method != "turn/completed"
+        || event.params["threadId"].as_str() != Some(&turn.thread_id)
+        || event.params["turn"]["id"].as_str() != Some(&turn.turn_id)
+    {
+        return None;
+    }
+    let status = match event.params["turn"]["status"].as_str() {
+        Some(status) => status,
+        None => return Some(Err("Codex completion omitted turn status".to_string())),
+    };
+    if status == "failed" {
+        let message = event.params["turn"]["error"]["message"]
+            .as_str()
+            .unwrap_or("Codex turn failed without error details");
+        return Some(Err(format!("Codex turn failed: {message}")));
+    }
+    Some(Ok(TurnCompletion {
+        status: status.to_string(),
+        final_message: final_message.map(str::to_string),
+    }))
 }
 
 fn research_outcome_schema() -> Value {
@@ -1011,14 +1030,14 @@ fn research_outcome_schema() -> Value {
         "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
     });
     let mut create_properties = statement_properties.clone();
-    create_properties["operation"] = json!({"const": "create"});
+    create_properties["operation"] = json!({"type": "string", "const": "create"});
     create_properties["handle"] = json!({"type": "string", "minLength": 1, "maxLength": 100});
     let mut revise_properties = statement_properties;
     revise_properties
         .as_object_mut()
         .expect("schema object")
         .remove("kind");
-    revise_properties["operation"] = json!({"const": "revise"});
+    revise_properties["operation"] = json!({"type": "string", "const": "revise"});
     revise_properties["entryId"] = json!({"type": "string", "minLength": 1, "maxLength": 500});
     let synthesis_change = json!({
         "anyOf": [
@@ -1039,7 +1058,7 @@ fn research_outcome_schema() -> Value {
                 "additionalProperties": false,
                 "required": ["operation", "entryId", "lifecycle", "reason"],
                 "properties": {
-                    "operation": {"const": "set_lifecycle"},
+                    "operation": {"type": "string", "const": "set_lifecycle"},
                     "entryId": {"type": "string", "minLength": 1, "maxLength": 500},
                     "lifecycle": {"type": "string", "enum": ["active", "contested", "superseded"]},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
@@ -1267,6 +1286,44 @@ mod tests {
             change,
             ResearchSynthesisChange::Create { handle, .. } if handle == "finding-1"
         ));
+    }
+
+    #[test]
+    fn synthesis_operation_discriminators_are_typed_strings() {
+        let schema = research_outcome_schema();
+        let variants = schema["properties"]["stateSynthesis"]["properties"]["changes"]["items"]
+            ["anyOf"]
+            .as_array()
+            .expect("synthesis operation variants");
+
+        for variant in variants {
+            assert_eq!(variant["properties"]["operation"]["type"], "string");
+            assert!(variant["properties"]["operation"]["const"].is_string());
+        }
+    }
+
+    #[test]
+    fn failed_turn_completion_returns_the_provider_message() {
+        let turn = CodexTurn {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        };
+        let event = CodexEvent {
+            method: "turn/completed".to_string(),
+            params: json!({
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "failed",
+                    "error": {"message": "Invalid output schema"}
+                }
+            }),
+        };
+
+        let error = completed_turn(&event, &turn, None)
+            .expect("matching completion")
+            .expect_err("failed turn");
+        assert_eq!(error, "Codex turn failed: Invalid output schema");
     }
 
     #[tokio::test]
