@@ -1,6 +1,6 @@
 # RFC 0146: Research Agent Tool Scope and Next-Direction Validation
 
-- Status: Proposed
+- Status: Implemented and verified
 - Date: 2026-09-09
 - Depends on: RFCs 0143 and 0144
 
@@ -81,3 +81,12 @@ RFC 0143's stronger wording is superseded by this rule.
 - Focused controller and storage tests cover both accepted and rejected shapes.
 - The Rust test suite and Cargo checks pass.
 
+## Verification
+
+- Codex thread configuration exposes exactly the 14 managed research tools and
+  omits `state_update`.
+- Focused controller and storage tests cover unlinked next directions and the
+  rejected inverse case.
+- Rust library suite: 622 passed, 11 intentionally ignored live tests.
+- `cargo check --no-default-features`: passed with existing dead-code warnings.
+- `pnpm check`: 0 errors and 0 warnings.

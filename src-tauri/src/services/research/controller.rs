@@ -723,8 +723,8 @@ fn validate_synthesis_shape(
                 .to_string(),
         );
     }
-    if next_direction.is_some() != !synthesis.next_direction_entry_ids.is_empty() {
-        return Err("Next direction must name at least one motivating State entry".to_string());
+    if next_direction.is_none() && !synthesis.next_direction_entry_ids.is_empty() {
+        return Err("Next direction entry IDs require a next direction".to_string());
     }
     for change in &synthesis.changes {
         let evidence = match change {
@@ -830,7 +830,7 @@ fn validate_synthesis_targets_before_commit(
     Ok(())
 }
 
-const RESEARCH_AGENT_INSTRUCTIONS: &str = r#"You are i0i's bounded literature research agent. Work only through the i0i MCP tools. Do not use shell, filesystem, built-in web search, or unrelated MCP servers. Inspect Research State and the Vault before choosing work. Use vault_summary only when a collection overview is useful; it is sampled context, not proof that every paper was read. State the purpose of each focused search. Investigate candidates incrementally: save a useful candidate, attempt to read it, and assess why it should remain before moving on. Every paper newly added by this Run must appear exactly once in paperDispositions, even when reading is unavailable. Use evidence_used, background, contradictory, unavailable, or irrelevant; irrelevant papers will be removed from the Vault. You may delegate a bounded evidence question to reader_ask or vault_ask, but direct reading remains the primary path. Compare evidence with existing entries and actively look for conflicting results and conditions. Do not mutate Research State while gathering evidence. Instead, finish with one stateSynthesis that creates, revises, contests, or supersedes entries using only passage references returned by this Run. Source claims become source_supported findings; higher-level questions, bounded gaps, hypotheses, and experiment ideas relate to their premises. Use local create handles as relation targets when needed. If no State change is warranted, return an empty change list and a concise noChangeReason. Distinguish source claims, model interpretation, speculation, abstract-only coverage, and unavailable full text. Continue only while another step can materially improve the project; otherwise finish with a concise summary and remaining questions."#;
+const RESEARCH_AGENT_INSTRUCTIONS: &str = r#"You are i0i's bounded literature research agent. Work only through the i0i MCP tools. Do not use shell, filesystem, built-in web search, or unrelated MCP servers. Inspect Research State and the Vault before choosing work. Use vault_summary only when a collection overview is useful; it is sampled context, not proof that every paper was read. State the purpose of each focused search. Investigate candidates incrementally: save a useful candidate, attempt to read it, and assess why it should remain before moving on. Every paper newly added by this Run must appear exactly once in paperDispositions, even when reading is unavailable. Use evidence_used, background, contradictory, unavailable, or irrelevant; irrelevant papers will be removed from the Vault. You may delegate a bounded evidence question to reader_ask or vault_ask, but direct reading remains the primary path. Compare evidence with existing entries and actively look for conflicting results and conditions. Do not mutate Research State while gathering evidence. Instead, finish with one stateSynthesis that creates, revises, contests, or supersedes entries using only passage references returned by this Run. Source claims become source_supported findings; higher-level questions, bounded gaps, hypotheses, and experiment ideas relate to their premises. Use local create handles as relation targets when needed. If no State change is warranted, return an empty change list and a concise noChangeReason. When a next direction is motivated by specific existing entries or local create handles, list them in nextDirectionEntryIds; otherwise leave that list empty. Distinguish source claims, model interpretation, speculation, abstract-only coverage, and unavailable full text. Continue only while another step can materially improve the project; otherwise finish with a concise summary and remaining questions."#;
 
 fn effective_agent_limits(configuration: &HarnessConfiguration) -> AgentRunLimits {
     let mut limits = AgentRunLimits::default();
@@ -869,6 +869,7 @@ fn codex_thread_config(endpoint: &str, bearer_token: &str) -> Value {
                 "url": endpoint,
                 "http_headers": {"Authorization": format!("Bearer {bearer_token}")},
                 "default_tools_approval_mode": "approve",
+                "enabled_tools": RESEARCH_AGENT_TOOLS,
                 "enabled": true
             }
         },
@@ -1226,7 +1227,34 @@ mod tests {
             "approve"
         );
         assert_eq!(config["web_search"], "disabled");
+        assert_eq!(
+            config["mcp_servers"]["ioi"]["enabled_tools"],
+            serde_json::json!(RESEARCH_AGENT_TOOLS)
+        );
         assert!(!RESEARCH_AGENT_TOOLS.contains(&"state_update"));
+    }
+
+    #[test]
+    fn next_direction_does_not_require_a_state_entry_link() {
+        let outcome: ResearchRunOutcome =
+            serde_json::from_str(&outcome_json()).expect("valid outcome fixture");
+        let synthesis = outcome.state_synthesis.expect("synthesis fixture");
+
+        assert!(validate_synthesis_shape(&synthesis, Some("Broaden the corpus")).is_ok());
+    }
+
+    #[test]
+    fn next_direction_entry_ids_require_direction_text() {
+        let outcome: ResearchRunOutcome =
+            serde_json::from_str(&outcome_json()).expect("valid outcome fixture");
+        let mut synthesis = outcome.state_synthesis.expect("synthesis fixture");
+        synthesis
+            .next_direction_entry_ids
+            .push("state-entry:gap".to_string());
+
+        let error = validate_synthesis_shape(&synthesis, None)
+            .expect_err("entry links without direction text must fail");
+        assert_eq!(error, "Next direction entry IDs require a next direction");
     }
 
     #[test]

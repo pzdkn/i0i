@@ -14517,8 +14517,8 @@ fn validate_research_state_synthesis_shape(
                 .to_string(),
         );
     }
-    if next_direction.is_some() != !synthesis.next_direction_entry_ids.is_empty() {
-        return Err("Next direction must name at least one motivating State entry".to_string());
+    if next_direction.is_none() && !synthesis.next_direction_entry_ids.is_empty() {
+        return Err("Next direction entry IDs require a next direction".to_string());
     }
     if let Some(reason) = &synthesis.no_change_reason {
         validate_outcome_text("no-change reason", reason, 1_000)?;
@@ -20973,6 +20973,31 @@ mod tests {
             unanswered_questions: vec!["What should be tested next?".to_string()],
             next_direction: None,
         }
+    }
+
+    #[test]
+    fn stored_synthesis_allows_an_unlinked_next_direction() {
+        let synthesis = research_outcome("Completed investigation")
+            .state_synthesis
+            .expect("synthesis fixture");
+
+        assert!(
+            validate_research_state_synthesis_shape(&synthesis, Some("Broaden the corpus")).is_ok()
+        );
+    }
+
+    #[test]
+    fn stored_synthesis_rejects_entry_ids_without_direction_text() {
+        let mut synthesis = research_outcome("Completed investigation")
+            .state_synthesis
+            .expect("synthesis fixture");
+        synthesis
+            .next_direction_entry_ids
+            .push("state-entry:gap".to_string());
+
+        let error = validate_research_state_synthesis_shape(&synthesis, None)
+            .expect_err("entry links without direction text must fail");
+        assert_eq!(error, "Next direction entry IDs require a next direction");
     }
 
     #[test]
