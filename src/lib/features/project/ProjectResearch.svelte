@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ExternalLink, LoaderCircle, Play, Square } from "@lucide/svelte";
+  import { ArrowLeft, ExternalLink, LoaderCircle, Play, Square } from "@lucide/svelte";
   import { onMount, tick } from "svelte";
   import SafeMarkdown from "$lib/components/SafeMarkdown.svelte";
   import {
@@ -148,8 +148,12 @@
   let detailHeading = $state<HTMLHeadingElement>();
   let originatingEntryId: string | null = null;
   let previousInspectorTab: "activity" | "settings" = "activity";
-  let entryButtons: Record<string, HTMLButtonElement> = {};
+  let entryButtons = $state<Record<string, HTMLButtonElement>>({});
   let expandedEvidenceIds = $state<string[]>([]);
+  let entryTrail = $state<Array<{ detail: ResearchEntryDetail; relationIndex: number }>>([]);
+  let openingEntry = $state(false);
+  let entryRequest = 0;
+  let relationButtons = $state<Record<number, HTMLButtonElement>>({});
 
   const activeRun = $derived(
     snapshot?.runs.find(isActiveResearchRun),
@@ -166,6 +170,7 @@
     Boolean(researchState && researchState.revision !== researchState.currentRevision),
   );
   const entryCounts = $derived(researchEntryCounts(researchState?.entries ?? []));
+  const entriesById = $derived(new Map((researchState?.entries ?? []).map((entry) => [entry.id, entry])));
   const filteredEntries = $derived(
     sortResearchEntries(
       filterResearchEntries(researchState?.entries ?? [], kindFilter, search).filter(
@@ -186,6 +191,16 @@
     const key = `${projectId}:${initialRevision ?? "current"}`;
     if (projectId && key !== loadedProjectKey) void loadProject(key);
   });
+
+  /** Invalidate pending navigation and discard details from a different snapshot. */
+  function resetEntryNavigation(): void {
+    entryRequest += 1;
+    openingEntry = false;
+    entryTrail = [];
+    selectedEntry = null;
+    originatingEntryId = null;
+    expandedEvidenceIds = [];
+  }
 
   onMount(() => {
     const unlisteners: Array<() => void> = [];
@@ -243,11 +258,13 @@
     );
     return () => {
       disposed = true;
+      entryRequest += 1;
       for (const unlisten of unlisteners) unlisten();
     };
   });
 
   async function loadProject(key: string) {
+    resetEntryNavigation();
     refreshRequest += 1;
     loading = true;
     error = "";
@@ -279,17 +296,26 @@
   }
 
   async function switchRevision(value: string) {
+    resetEntryNavigation();
+    refreshRequest += 1;
+    loading = true;
+    const request = entryRequest;
+    const requestedProject = projectId;
     error = "";
     try {
-      researchState = await getResearchState(
-        projectId,
+      const nextState = await getResearchState(
+        requestedProject,
         value === "current" ? undefined : Number(value),
       );
+      if (request !== entryRequest || requestedProject !== projectId) return;
+      researchState = nextState;
       selectedEntry = null;
       editorOpen = false;
       generationSelection = [];
     } catch (caught) {
-      error = String(caught);
+      if (request === entryRequest && requestedProject === projectId) error = String(caught);
+    } finally {
+      if (request === entryRequest && requestedProject === projectId) loading = false;
     }
   }
 
@@ -342,24 +368,55 @@
     generation = await retryResearchDocumentGeneration(generation.id);
   }
 
-  async function openEntry(entryId: string) {
+  /** Follow a relation only after its revision-specific detail loads successfully. */
+  async function openEntry(entryId: string, relationIndex?: number): Promise<void> {
+    if (openingEntry || !researchState || loading) return;
+    const request = ++entryRequest;
+    const requestedProject = projectId;
+    const revision = researchState.revision;
+    const previous = selectedEntry;
+    openingEntry = true;
+    error = "";
     try {
-      originatingEntryId = entryId;
-      previousInspectorTab = inspectorTab;
-      selectedEntry = await getResearchEntry(entryId, researchState?.revision);
+      const detail = await getResearchEntry(entryId, revision);
+      if (request !== entryRequest || requestedProject !== projectId || revision !== researchState?.revision) return;
+      if (relationIndex !== undefined && previous) {
+        entryTrail = [...entryTrail, { detail: previous, relationIndex }];
+      } else {
+        entryTrail = [];
+        originatingEntryId = entryId;
+        previousInspectorTab = inspectorTab;
+      }
+      selectedEntry = detail;
+      expandedEvidenceIds = [];
       await tick();
-      detailHeading?.focus();
+      if (request === entryRequest) detailHeading?.focus();
     } catch (caught) {
-      error = String(caught);
+      if (request === entryRequest && requestedProject === projectId) error = String(caught);
+    } finally {
+      if (request === entryRequest) openingEntry = false;
     }
   }
 
-  async function closeDetails() {
+  /** Go back through followed entries, then restore the original list focus. */
+  async function closeDetails(): Promise<void> {
+    const request = ++entryRequest;
+    openingEntry = false;
+    error = "";
+    expandedEvidenceIds = [];
+    const previous = entryTrail.at(-1);
+    if (previous) {
+      entryTrail = entryTrail.slice(0, -1);
+      selectedEntry = previous.detail;
+      await tick();
+      if (request === entryRequest) relationButtons[previous.relationIndex]?.focus();
+      return;
+    }
     const entryId = originatingEntryId;
     selectedEntry = null;
     inspectorTab = previousInspectorTab;
     await tick();
-    if (entryId) entryButtons[entryId]?.focus();
+    if (request === entryRequest && entryId) entryButtons[entryId]?.focus();
   }
 
   async function startCreate() {
@@ -460,8 +517,10 @@
             context,
             reason: entryReason || undefined,
           });
+      resetEntryNavigation();
       researchState = mutation.state;
       selectedEntry = mutation.entry;
+      originatingEntryId = mutation.entry.entry.id;
       editorOpen = false;
     } catch (caught) {
       error = String(caught);
@@ -481,8 +540,10 @@
         lifecycle,
         reason,
       );
+      resetEntryNavigation();
       researchState = mutation.state;
       selectedEntry = mutation.entry;
+      originatingEntryId = mutation.entry.entry.id;
     } catch (caught) {
       error = String(caught);
     }
@@ -512,7 +573,10 @@
       improvements = nextImprovements;
       checkpoints = Object.fromEntries(nextCheckpoints.map((checkpoint) => [checkpoint.runId, checkpoint]));
       changeSets = nextChangeSets;
-      if (nextState) researchState = nextState;
+      if (nextState) {
+        if (nextState.revision !== researchState?.revision) resetEntryNavigation();
+        researchState = nextState;
+      }
       error = "";
     } catch (caught) {
       if (request === refreshRequest) error = actionableResearchError(caught);
@@ -533,7 +597,7 @@
         checkpoint.runId,
         researchState.currentRevision,
       );
-      selectedEntry = null;
+      resetEntryNavigation();
       await refreshHarness();
     } catch (caught) {
       error = String(caught);
@@ -914,7 +978,7 @@
 
     {#if selectedEntry}
       <div class="panel details">
-        <div class="row detail-heading"><button type="button" onclick={() => void closeDetails()}>Back</button><h2 bind:this={detailHeading} tabindex="-1">Research Entry details</h2></div>
+        <div class="row detail-heading"><button type="button" aria-label="Back" title="Back" onclick={() => void closeDetails()}><ArrowLeft size={14} aria-hidden="true" /></button><h2 bind:this={detailHeading} tabindex="-1">Research Entry details</h2>{#if openingEntry}<LoaderCircle size={14} class="spin" aria-label="Loading entry" />{/if}</div>
         <div class="detail-meta">{selectedEntry.entry.kind.replaceAll("_", " ")} · {selectedEntry.entry.epistemicStatus.replaceAll("_", " ")} · {selectedEntry.entry.lifecycle}</div>
         <small>Origin: {runLabel(selectedEntry.entry.originRunId)} · first recorded r{selectedEntry.entry.firstRevision}</small>
         <p class="detail-text">{selectedEntry.entry.text}</p>
@@ -949,7 +1013,25 @@
             </article>
           {:else}<p class="empty-list">No direct source evidence. This entry is not presented as a sourced quotation.</p>{/each}
         </section>
-        <section><h3>Derivation</h3>{#each selectedEntry.relations as link}<p class="provenance">{link.kind.replaceAll("_", " ")} · {link.targetEntryId}</p>{:else}<p class="empty-list">No entry derivations.</p>{/each}</section>
+        <section aria-label="Entry relationships" aria-busy={openingEntry}>
+          <h3>Derivation</h3>
+          {#each selectedEntry.relations as link, index}
+            {@const target = entriesById.get(link.targetEntryId)}
+            <div class="entry-relation">
+              <span class="relation-kind">{link.kind.replaceAll("_", " ")}</span>
+              {#if target}
+                <button bind:this={relationButtons[index]} class="relation-link" type="button"
+                  aria-disabled={openingEntry} aria-label={`${link.kind.replaceAll("_", " ")}: ${target.text}`}
+                  onclick={() => void openEntry(target.id, index)}>
+                  <span class="relation-statement">{target.text}</span>
+                </button>
+                <span class="relation-preview" role="tooltip">{target.text}</span>
+              {:else}
+                <span class="empty-list">Entry unavailable</span>
+              {/if}
+            </div>
+          {:else}<p class="empty-list">No entry derivations.</p>{/each}
+        </section>
         <section><h3>Researcher context</h3>{#each selectedEntry.context as link}<p class="provenance">{link.kind.replaceAll("_", " ")} · {link.label}</p>{:else}<p class="empty-list">No working context attached.</p>{/each}</section>
         <section><h3>Immutable history</h3>{#each selectedEntry.history as version}<article class="history"><strong>r{version.stateRevision} · {version.lifecycle}</strong><p>{version.reason}</p><time>{version.createdAt}</time></article>{/each}</section>
       </div>
@@ -1481,6 +1563,66 @@
     font-size: 10px;
     text-transform: uppercase;
   }
+
+  .entry-relation {
+    position: relative;
+    min-width: 0;
+    margin: 10px 0;
+  }
+
+  .relation-kind {
+    display: block;
+    color: var(--fg-3);
+    font-size: 10px;
+    text-transform: capitalize;
+  }
+
+  .relation-link {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    padding: 4px 0;
+    border: 0;
+    background: transparent;
+    color: var(--amber);
+    text-align: left;
+  }
+
+  .relation-statement {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    line-height: 1.5;
+  }
+
+  .relation-link:hover .relation-statement { text-decoration: underline; }
+  .relation-link:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .relation-link[aria-disabled="true"] { cursor: progress; opacity: 0.6; }
+
+  .relation-preview {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 2;
+    padding: 8px;
+    border: 1px solid var(--border-2);
+    background: var(--bg-1);
+    color: var(--fg);
+    overflow-wrap: anywhere;
+    white-space: normal;
+    line-height: 1.5;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+
+  .entry-relation:hover .relation-preview,
+  .entry-relation:focus-within .relation-preview { display: block; }
 
   .provenance,
   .history {

@@ -4,6 +4,7 @@
   "description": "",
   "type": "module",
   "scripts": {
+    "test:ui": "vitest run --config vitest.config.ts",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
@@ -30,9 +31,11 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
     "@types/node": "^25.9.1",
+    "jsdom": "^26.1.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "^3.2.7"
   }
 }
