@@ -101,6 +101,10 @@
 
 ### Testing
 
+* Use focused unit and deterministic integration tests for ordinary refactors.
+* Reserve costly live-model end-to-end tests for critical behavior changes or
+  explicit requests. Do not rerun them after every incremental edit or repeatedly
+  retry with different models without agreeing on a bounded test budget.
 * Implement or update tests for the requested behavior.
 * Keep tests focused, readable, and close to the behavior being validated.
 * Avoid over-engineered test infrastructure.

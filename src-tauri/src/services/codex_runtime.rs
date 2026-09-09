@@ -76,6 +76,7 @@ pub struct CodexTurn {
 pub struct CodexRuntime {
     inner: Arc<RuntimeInner>,
     config: CodexRuntimeConfig,
+    inherited_mcp: serde_json::Map<String, Value>,
 }
 
 struct RuntimeInner {
@@ -89,7 +90,12 @@ struct RuntimeInner {
 impl CodexRuntime {
     /// Start and initialize Codex, or return a readable setup/protocol error.
     pub async fn start(config: CodexRuntimeConfig) -> Result<Self, String> {
-        let inherited_mcp_overrides = inherited_mcp_disable_overrides(&config.executable).await?;
+        let inherited_mcp = timeout(
+            config.startup_timeout,
+            inherited_mcp_disable_config(&config.executable),
+        )
+        .await
+        .map_err(|_| "Codex inherited MCP inspection timed out".to_string())??;
         let mut command = Command::new(&config.executable);
         command.args([
             "app-server",
@@ -101,8 +107,11 @@ impl CodexRuntime {
         for feature in DISABLED_RESEARCH_FEATURES {
             command.args(["--disable", feature]);
         }
-        for config_override in inherited_mcp_overrides {
-            command.args(["--config", &config_override]);
+        for name in inherited_mcp.keys() {
+            command.args([
+                "--config",
+                &format!("mcp_servers.{}.enabled=false", toml_path_segment(name)),
+            ]);
         }
         let mut child = command
             .stdin(Stdio::piped())
@@ -138,6 +147,7 @@ impl CodexRuntime {
                 next_request_id: AtomicU64::new(1),
             }),
             config,
+            inherited_mcp,
         };
 
         timeout(runtime.config.startup_timeout, runtime.initialize())
@@ -151,13 +161,34 @@ impl CodexRuntime {
         self.inner.events.subscribe()
     }
 
+    /// Inspect the actual thread-scoped catalog during explicit acceptance tests.
+    #[cfg(test)]
+    pub(crate) async fn tool_catalog(&self, thread_id: &str) -> Result<Value, String> {
+        timeout(
+            self.config.startup_timeout,
+            self.request(
+                "mcpServerStatus/list",
+                json!({"threadId":thread_id,"detail":"toolsAndAuthOnly","limit":100}),
+            ),
+        )
+        .await
+        .map_err(|_| "Codex MCP catalog request timed out".to_string())?
+    }
+
     /// Start an ephemeral thread with caller-supplied scoped configuration.
     pub async fn start_thread(
         &self,
         cwd: &Path,
         developer_instructions: &str,
-        config: Value,
+        mut config: Value,
     ) -> Result<String, String> {
+        // A thread-level MCP table replaces global overrides. Carry disabled
+        // inherited servers into every thread, including synthesis correction.
+        let mut servers = self.inherited_mcp.clone();
+        if let Some(supplied) = config.get("mcp_servers").and_then(Value::as_object) {
+            servers.extend(supplied.clone());
+        }
+        config["mcp_servers"] = Value::Object(servers);
         let result = self
             .request(
                 "thread/start",
@@ -306,10 +337,13 @@ fn thread_start_params(
 #[derive(Deserialize)]
 struct ConfiguredMcpServer {
     name: String,
+    transport: Value,
 }
 
 /// Disable every MCP server inherited from the user's global Codex settings.
-async fn inherited_mcp_disable_overrides(executable: &Path) -> Result<Vec<String>, String> {
+async fn inherited_mcp_disable_config(
+    executable: &Path,
+) -> Result<serde_json::Map<String, Value>, String> {
     let output = Command::new(executable)
         .args(["mcp", "list", "--json"])
         .output()
@@ -326,10 +360,15 @@ async fn inherited_mcp_disable_overrides(executable: &Path) -> Result<Vec<String
     Ok(servers
         .into_iter()
         .map(|server| {
-            format!(
-                "mcp_servers.{}.enabled=false",
-                toml_path_segment(&server.name)
-            )
+            let mut disabled = json!({"enabled":false});
+            // Disabled entries still need a transport to satisfy Codex's config
+            // parser. Credentials and environment variables are unnecessary.
+            for field in ["command", "url"] {
+                if let Some(value) = server.transport.get(field) {
+                    disabled[field] = value.clone();
+                }
+            }
+            (server.name, disabled)
         })
         .collect())
 }

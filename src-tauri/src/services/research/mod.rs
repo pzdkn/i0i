@@ -31,3 +31,4 @@ pub mod research_eval;
 pub mod scheduler;
 #[allow(dead_code)]
 pub mod source;
+pub mod synthesis;

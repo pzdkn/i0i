@@ -223,6 +223,10 @@ or a second Research State representation.
 
 ## Verification
 
+The figures below describe the original implementation, not end-to-end evidence
+for correction, atomic finalization, or restart recovery. RFC 0147 implements
+those missing boundaries and records their current verification separately.
+
 - Rust library suite: 615 passed, 11 ignored. The two process-sensitive Obscura
   tests were run separately and passed.
 - Svelte validation: `pnpm check` completed with no errors or warnings.

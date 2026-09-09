@@ -146,7 +146,7 @@ struct CursorSnapshot {
 }
 
 /// Canonical source location represented by an opaque passage reference.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PassageAnchor {
     pub paper_id: String,
     pub source_id: String,
@@ -342,12 +342,12 @@ impl I0iMcpHandler {
         &self,
         grant_token: &str,
         passages: &mut [EvidenceQuestionPassage],
-    ) {
+    ) -> Result<(), rmcp::ErrorData> {
         for passage in passages
             .iter_mut()
             .filter(|passage| passage.passage_ref.is_none())
         {
-            let anchor = PassageAnchor {
+            let mut anchor = PassageAnchor {
                 paper_id: passage.paper_id.clone(),
                 source_id: passage.source_id.clone(),
                 extraction_id: passage.extraction_id.clone(),
@@ -358,8 +358,42 @@ impl I0iMcpHandler {
                 source_end: passage.source_end,
                 quote: passage.text.clone(),
             };
+            self.index_html_anchor(&mut anchor)?;
+            passage.chunk_id = anchor.chunk_id.clone();
+            passage.extraction_id = anchor.extraction_id.clone();
             passage.passage_ref = Some(self.register_passage(grant_token, anchor).await);
         }
+        Ok(())
+    }
+
+    /// Resolve HTML excerpts against the exact stored text used by Reader.
+    fn index_html_anchor(&self, anchor: &mut PassageAnchor) -> Result<(), rmcp::ErrorData> {
+        if anchor.chunk_id.is_some() {
+            return Ok(());
+        }
+        let sources = self
+            .store
+            .get_document_sources(&anchor.paper_id)
+            .map_err(internal_failure)?;
+        if let Some(source) = sources
+            .iter()
+            .find(|s| s.id == anchor.source_id && s.source_kind == "html")
+        {
+            let text = read_html_source_text(source).map_err(internal_failure)?;
+            let chunks = self
+                .store
+                .materialize_html_text(source, &text)
+                .map_err(internal_failure)?;
+            if let Some(chunk) = chunks.into_iter().find(|c| {
+                c.source_start <= anchor.source_start
+                    && c.source_end >= anchor.source_end
+                    && c.text.contains(&anchor.quote)
+            }) {
+                anchor.chunk_id = Some(chunk.id);
+                anchor.extraction_id = Some(chunk.extraction_id);
+            }
+        }
+        Ok(())
     }
 
     /// Charge one started delegated question to its managed parent Run.
@@ -389,7 +423,7 @@ impl I0iMcpHandler {
     }
 
     /// Make citations from a validated answer eligible for later State writes.
-    fn account_question_answer(
+    async fn account_question_answer(
         &self,
         grant: &McpCallContext,
         answer: &EvidenceQuestionAnswer,
@@ -411,7 +445,34 @@ impl I0iMcpHandler {
             .collect::<Result<Vec<_>, rmcp::ErrorData>>()?;
         self.store
             .record_agent_question_citations(run_id, &grant.project_id, &citations)
-            .map_err(search_write_failure)
+            .map_err(search_write_failure)?;
+        self.capture_delivered_anchors(
+            run_id,
+            &citations
+                .into_iter()
+                .map(|(_, reference)| reference)
+                .collect::<Vec<_>>(),
+        )
+        .await
+    }
+
+    /// Persist the original passages before exposing their references to the agent.
+    async fn capture_delivered_anchors(
+        &self,
+        run_id: &str,
+        references: &[String],
+    ) -> Result<(), rmcp::ErrorData> {
+        let registered = self.passage_anchors.read().await;
+        let mut anchors = HashMap::new();
+        for reference in references {
+            let passage = registered
+                .get(reference)
+                .ok_or_else(|| internal_failure("Delivered passage has no anchor".into()))?;
+            anchors.insert(reference.clone(), passage.anchor.clone());
+        }
+        self.store
+            .persist_delivered_anchors(run_id, &anchors)
+            .map_err(internal_failure)
     }
 
     /// Validate readiness, account work, answer once, and return structured evidence.
@@ -429,7 +490,7 @@ impl I0iMcpHandler {
                 .map_err(|error| evidence_question_failure(error, 0, &context.passages))?;
         }
         self.register_question_passages(grant_token, &mut context.passages)
-            .await;
+            .await?;
         if !context.passages.is_empty() {
             self.account_question_start(grant, &context.passages)?;
         }
@@ -437,7 +498,7 @@ impl I0iMcpHandler {
             .answer(question, &context.passages)
             .await
             .map_err(|error| evidence_question_failure(error, 1, &context.passages))?;
-        self.account_question_answer(grant, &answer)?;
+        self.account_question_answer(grant, &answer).await?;
         Ok(EvidenceQuestionResult::new(answer, context))
     }
 
@@ -540,8 +601,8 @@ impl I0iMcpHandler {
                     source_id: chunk.source_id.clone(),
                     extraction_id: Some(chunk.extraction_id.clone()),
                     chunk_id: Some(chunk.id.clone()),
-                    page_start: Some(chunk.page_start + 1),
-                    page_end: Some(chunk.page_end + 1),
+                    page_start: (chunk.chunker != "html_text").then_some(chunk.page_start + 1),
+                    page_end: (chunk.chunker != "html_text").then_some(chunk.page_end + 1),
                     source_start: chunk.source_start + relative_start as i64,
                     source_end: chunk.source_start + relative_end as i64,
                     quote: text.clone(),
@@ -549,32 +610,6 @@ impl I0iMcpHandler {
                 let passage_ref = self.register_passage(grant_token, anchor.clone()).await;
                 passages.push(McpPassage::from_anchor(passage_ref, anchor));
             }
-        }
-        passages
-    }
-
-    async fn passages_from_flow_text(
-        &self,
-        grant_token: &str,
-        paper_id: &str,
-        source_id: &str,
-        text: &str,
-    ) -> Vec<McpPassage> {
-        let mut passages = Vec::new();
-        for (start, end, text) in split_text(text, MAX_PASSAGE_CHARS) {
-            let anchor = PassageAnchor {
-                paper_id: paper_id.to_string(),
-                source_id: source_id.to_string(),
-                extraction_id: None,
-                chunk_id: None,
-                page_start: None,
-                page_end: None,
-                source_start: start as i64,
-                source_end: end as i64,
-                quote: text.clone(),
-            };
-            let passage_ref = self.register_passage(grant_token, anchor.clone()).await;
-            passages.push(McpPassage::from_anchor(passage_ref, anchor));
         }
         passages
     }
@@ -763,7 +798,7 @@ impl I0iMcpHandler {
         let coverage =
             VaultSummaryCoverage::new(total_papers, &paper_ids, &summary_context, sample_truncated);
         self.register_question_passages(&grant_token, &mut summary_context.passages)
-            .await;
+            .await?;
 
         let answer = if summary_context.passages.is_empty() {
             metadata_only_summary(&summary_context.metadata_matches)
@@ -782,7 +817,7 @@ impl I0iMcpHandler {
                 .map_err(|error| {
                     vault_summary_failure(error, &coverage, 1, &summary_context.passages)
                 })?;
-            self.account_question_answer(&grant, &answer)?;
+            self.account_question_answer(&grant, &answer).await?;
             answer
         };
 
@@ -846,6 +881,8 @@ impl I0iMcpHandler {
                     &passage_refs,
                 )
                 .map_err(search_write_failure)?;
+            self.capture_delivered_anchors(run_id, &passage_refs)
+                .await?;
         }
         trace_tool(
             &grant,
@@ -1805,6 +1842,9 @@ impl I0iMcpHandler {
         let Some(source) = source else {
             return self.abstract_or_unavailable(grant_token, paper).await;
         };
+        if source.source_kind == "metadata_abstract" {
+            return self.abstract_or_unavailable(grant_token, paper).await;
+        }
         if source.source_kind == "html" {
             if page_start.is_some() {
                 return Err(rmcp::ErrorData::invalid_params(
@@ -1813,12 +1853,28 @@ impl I0iMcpHandler {
                 ));
             }
             if source.status != "cached" {
+                if paper.abstract_text.is_some() {
+                    let mut result = self.abstract_or_unavailable(grant_token, paper).await?;
+                    result.reason = Some(
+                        "HTML full text is not cached; returning only the saved abstract".into(),
+                    );
+                    result.source_url = source.source_url.clone();
+                    return Ok(result);
+                }
                 return Ok(unavailable_or_pending(source));
             }
             let text = read_html_source_text(source).map_err(internal_failure)?;
-            let passages = self
-                .passages_from_flow_text(grant_token, paper_id, &source.id, &text)
+            let chunks = self
+                .store
+                .materialize_html_text(source, &text)
+                .map_err(internal_failure)?;
+            let mut passages = self
+                .passages_from_chunks(grant_token, chunks, None, None)
                 .await;
+            for passage in &mut passages {
+                passage.page_start = None;
+                passage.page_end = None;
+            }
             return self
                 .first_reader_result(
                     grant_token,
@@ -2300,7 +2356,8 @@ impl LocalMcpServer {
         self.grants.revoke_run(run_id).await;
     }
 
-    /// Resolve a passage issued by this app session for a later write tool.
+    /// Inspect a delivered session anchor in MCP contract tests.
+    #[cfg(test)]
     pub(crate) async fn resolve_passage(&self, passage_ref: &str) -> Option<PassageAnchor> {
         self.handler
             .passage_anchors
@@ -2670,7 +2727,7 @@ fn sha256(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
-fn read_html_source_text(source: &DocumentSource) -> Result<String, String> {
+pub(crate) fn read_html_source_text(source: &DocumentSource) -> Result<String, String> {
     let html_path = source
         .local_path
         .as_deref()
@@ -3103,6 +3160,7 @@ struct ReaderListNotesResult {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpQuestionCitation {
+    state_citable: bool,
     passage_ref: String,
     paper_id: String,
     paper_title: String,
@@ -3119,6 +3177,7 @@ impl McpQuestionCitation {
     /// Convert a validated internal passage into the MCP citation shape.
     fn from_passage(passage: EvidenceQuestionPassage) -> Self {
         Self {
+            state_citable: passage.chunk_id.is_some(),
             passage_ref: passage
                 .passage_ref
                 .expect("question citations are registered before answering"),
@@ -3657,6 +3716,7 @@ struct GetPaperResult {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpPassage {
+    state_citable: bool,
     passage_ref: String,
     paper_id: String,
     source_id: String,
@@ -3672,6 +3732,7 @@ struct McpPassage {
 impl McpPassage {
     fn from_anchor(passage_ref: String, anchor: PassageAnchor) -> Self {
         Self {
+            state_citable: anchor.chunk_id.is_some(),
             passage_ref,
             paper_id: anchor.paper_id,
             source_id: anchor.source_id,
@@ -5765,6 +5826,43 @@ mod tests {
         assert_eq!(first_content["coverage"], "full_text");
         assert_eq!(first_content["hasMore"], true);
         assert!(first_content["nextCursor"].is_string());
+        for passage in first_content["passages"].as_array().unwrap() {
+            assert_eq!(passage["stateCitable"], true);
+            assert!(passage["pageStart"].is_null());
+            let anchor = server
+                .resolve_passage(passage["passageRef"].as_str().unwrap())
+                .await
+                .unwrap();
+            let chunk = store
+                .chunks_by_ids(&[anchor.chunk_id.unwrap()])
+                .unwrap()
+                .remove(0);
+            assert_eq!(chunk.chunker, "html_text");
+            assert!(chunk.text.contains(passage["text"].as_str().unwrap()));
+        }
+
+        // A changed snapshot gets new chunks without replacing the old evidence.
+        let source = store
+            .get_document_source("html:paper:html:fixture")
+            .unwrap();
+        let original = store
+            .materialize_html_text(&source, "Original snapshot")
+            .unwrap();
+        let revised = store
+            .materialize_html_text(&source, "Revised snapshot")
+            .unwrap();
+        assert_ne!(original[0].extraction_id, revised[0].extraction_id);
+        assert_eq!(
+            store.chunks_by_ids(&[original[0].id.clone()]).unwrap()[0].text,
+            "Original snapshot"
+        );
+        assert_eq!(
+            store
+                .materialize_html_text(&source, "Revised snapshot")
+                .unwrap()[0]
+                .id,
+            revised[0].id
+        );
 
         let invalid_range = client
             .call_tool(
@@ -5781,6 +5879,158 @@ mod tests {
         client.cancel().await.expect("stop client");
         server.shutdown().await;
         let _ = fs::remove_dir_all(directory);
+    }
+
+    /// Exercise controller correction with real HTTP MCP, HTML chunks, and SQLite.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn synthesis_controller_corrects_once_or_fails_without_partial_state() {
+        use crate::services::codex_runtime::CodexRuntimeConfig;
+        use crate::services::research::controller::ProjectResearchController;
+        use std::os::unix::fs::PermissionsExt;
+
+        for correction in ["valid", "invalid", "wait", "timeout"] {
+            let root =
+                std::env::temp_dir().join(format!("i0i-synthesis-{}", Uuid::new_v4().simple()));
+            fs::create_dir_all(&root).unwrap();
+            let store = LibraryStore::at_path(root.join("library.sqlite"));
+            store.init().unwrap();
+            let vault = empty_project_vault(&store, correction);
+            let paper = paper_draft("fixture:html", None);
+            let html = root.join("source.html");
+            fs::write(&html, "<p>The study tested two benchmarks.</p>").unwrap();
+            fs::write(
+                root.join("meta.json"),
+                serde_json::json!({"source_text":"The study tested two benchmarks."}).to_string(),
+            )
+            .unwrap();
+            store
+                .add_local_html_to_vault(
+                    &paper,
+                    &vault.id,
+                    "html:fixture",
+                    "https://example.test/fixture",
+                    html.to_str().unwrap(),
+                )
+                .unwrap();
+            let mut config = store
+                .get_harness_snapshot(&vault.project_id)
+                .unwrap()
+                .harness
+                .configuration;
+            config.research_instructions =
+                "Read the saved HTML and produce a bounded synthesis".into();
+            if correction == "timeout" {
+                config.stop_conditions.maximum_run_seconds = Some(10);
+            }
+            store
+                .save_harness_configuration(&vault.project_id, &config)
+                .unwrap();
+
+            let executable = root.join("fake_codex.py");
+            fs::write(
+                &executable,
+                include_str!("../../../scripts/research_eval/fake_codex.py"),
+            )
+            .unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                root.join("scenario.json"),
+                serde_json::json!({"paperId":paper.id,"correction":correction}).to_string(),
+            )
+            .unwrap();
+            let server = LocalMcpServer::start_with_cursor_ttl(
+                None,
+                store.clone(),
+                None,
+                None,
+                DEFAULT_CURSOR_TTL,
+            )
+            .await
+            .unwrap();
+            let controller = ProjectResearchController::for_evaluation(
+                root.join("runtime"),
+                store.clone(),
+                SearchManager::for_test(store.clone()),
+                server.clone(),
+                CodexRuntimeConfig {
+                    executable,
+                    model: "fixture-model".into(),
+                    startup_timeout: Duration::from_secs(5),
+                    interrupt_grace: Duration::from_secs(1),
+                },
+            );
+            let run = controller
+                .start(
+                    &vault.project_id,
+                    crate::domain::harness::HarnessRunTrigger::Manual,
+                    None,
+                )
+                .unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(20), async {
+                let mut cancelled = false;
+                loop {
+                    let current = store.get_harness_run(&run.id).unwrap();
+                    if ["ready", "failed", "cancelled"].contains(&current.status.as_str()) {
+                        break current;
+                    }
+                    if correction == "wait"
+                        && !cancelled
+                        && store
+                            .get_harness_snapshot(&vault.project_id)
+                            .unwrap()
+                            .events
+                            .iter()
+                            .any(|e| e.kind == "synthesis_correcting")
+                    {
+                        controller.cancel(&vault.project_id).await.unwrap();
+                        cancelled = true;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            controller.shutdown().await;
+            server.shutdown().await;
+            let state = store.get_research_state(&vault.project_id, None).unwrap();
+            let attempts = store.synthesis_attempt_reports(&run.id).unwrap();
+            let captured = store.captured_run_evidence(&run.id).unwrap();
+            fs::remove_dir_all(&root).unwrap();
+            let completed = result.expect("bounded fixture controller");
+            assert_eq!(
+                completed.status,
+                if correction == "valid" {
+                    "ready"
+                } else if correction == "wait" {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+                "{correction}: {:?}",
+                completed.stop_reason
+            );
+            assert_eq!(state.revision, if correction == "valid" { 1 } else { 0 });
+            assert_eq!(
+                attempts.len(),
+                if matches!(correction, "wait" | "timeout") {
+                    1
+                } else {
+                    2
+                }
+            );
+            assert_eq!(
+                attempts.iter().filter(|a| a["committed"] == true).count(),
+                if correction == "valid" { 1 } else { 0 }
+            );
+            assert_eq!(captured.len(), 1);
+            // The existing meter counts delegated calls and synthesis corrections,
+            // not Codex's internal investigation inference steps.
+            assert_eq!(completed.llm_call_count, 1);
+            assert!(attempts[0]["issues"]
+                .as_str()
+                .unwrap()
+                .contains("evidence_kind"));
+        }
     }
 
     #[test]

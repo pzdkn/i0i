@@ -11,21 +11,18 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::discovery::DiscoveryProviderChoice;
+#[cfg(test)]
+use crate::domain::harness::ResearchRunOutcome;
 use crate::domain::harness::{
     AgentRunLimits, EffectiveInstructionStack, HarnessConfiguration, HarnessRun, HarnessRunTrigger,
-    PriorResearchRunOutcome, ResearchRunOutcome, ResearchStateSynthesis, ResearchSynthesisChange,
-    ResearchSynthesisEvidence,
+    PriorResearchRunOutcome,
 };
 use crate::domain::research::{SearchConstraints, SearchDraft};
-use crate::domain::research_state::{
-    EntryRelationDraft, EvidenceLinkDraft, ResearchEntryDraft, ResearchEntryUpdate,
-};
 use crate::services::codex_runtime::{CodexEvent, CodexRuntime, CodexRuntimeConfig, CodexTurn};
 use crate::services::mcp::{
     LocalMcpServer, READER_ADD_NOTE, READER_ASK, READER_LIST_NOTES, READER_READ, SEARCH_CANCEL,
@@ -33,7 +30,7 @@ use crate::services::mcp::{
     VAULT_LIST_PAPERS, VAULT_SUMMARY,
 };
 use crate::services::research::manager::SearchManager;
-use crate::storage::library_store::{AgentStateChange, LibraryStore};
+use crate::storage::library_store::LibraryStore;
 
 const CHILD_SETTLE_SECONDS: u64 = 30;
 const DEFAULT_RECENT_OUTCOMES: usize = 3;
@@ -344,6 +341,15 @@ impl ProjectResearchController {
         runtime_config: CodexRuntimeConfig,
         cancellation: CancellationToken,
     ) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(
+                self.store
+                    .get_harness_run(run_id)?
+                    .agent_limits
+                    .as_ref()
+                    .ok_or("Missing Run limits")?
+                    .maximum_run_seconds,
+            );
         let run = self.store.get_harness_run(run_id)?;
         if run.status == "canceling" {
             self.settle_child_searches(&run.project_id, run_id).await?;
@@ -414,7 +420,7 @@ impl ProjectResearchController {
                 runtime.interrupt(&turn).await?;
                 Ok(TurnCompletion { status: "cancelled".to_string(), final_message: None })
             }
-            _ = tokio::time::sleep(Duration::from_secs(limits.maximum_run_seconds)) => {
+            _ = tokio::time::sleep_until(deadline) => {
                 self.cancel_with_reason(&run.project_id, "time_limit").await?;
                 runtime.interrupt(&turn).await?;
                 Ok(TurnCompletion { status: "timed_out".to_string(), final_message: None })
@@ -424,13 +430,97 @@ impl ProjectResearchController {
         self.settle_child_searches(&run.project_id, run_id).await?;
         let (status, reason): (&str, String) = match completion.status.as_str() {
             "completed" => {
-                let mut outcome = parse_research_outcome(completion.final_message.as_deref())?;
+                #[cfg(test)]
+                if let Some(trace) = &self.tool_trace {
+                    let catalog = runtime.tool_catalog(&thread_id).await?;
+                    trace.lock().expect("evaluation trace lock").push(
+                        json!({"event":"runtime/toolCatalog","runId":run_id,"catalog":catalog}),
+                    );
+                }
                 self.store.begin_codex_harness_finalization(run_id)?;
-                self.store
-                    .finalize_agent_paper_retention(run_id, &outcome.paper_dispositions)?;
-                self.apply_state_synthesis(&run, &caller, &mut outcome)
-                    .await?;
-                self.store.persist_agent_run_outcome(run_id, &outcome)?;
+                let evidence = self.store.captured_run_evidence(run_id)?;
+                self.mcp_server.revoke_run(run_id).await;
+                let mut proposal = completion
+                    .final_message
+                    .ok_or("Codex completed without a final Research outcome")?;
+                let mut proposal_turn = turn.clone();
+                for attempt in 0..=1 {
+                    self.store
+                        .save_synthesis_attempt(run_id, attempt, &proposal, &evidence)?;
+                    self.store
+                        .identify_synthesis_turn(run_id, attempt, &proposal_turn)?;
+                    match self.store.preflight_synthesis(run_id, attempt) {
+                        Ok(()) => {
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err("Research synthesis deadline exceeded".into());
+                            }
+                            if cancellation.is_cancelled() {
+                                return Err("Run cancelled before synthesis commit".into());
+                            }
+                            let completed = self.store.finalize_synthesis(run_id, attempt, true)?;
+                            if let Some(app) = &self.app {
+                                let _ = app.emit("research_state_updated",json!({"projectId":run.project_id,"revision":completed.resulting_state_revision}));
+                            }
+                            break;
+                        }
+                        Err(error) if attempt == 0 && repairable_synthesis_error(&error) => {
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err("Research synthesis deadline exceeded".into());
+                            }
+                            self.store.reserve_synthesis_correction(run_id)?;
+                            self.store.record_harness_activity(
+                                run_id,
+                                "synthesis_correcting",
+                                "Correcting research summary",
+                                Some("synthesizing"),
+                            )?;
+                            self.emit_update(&run.project_id, run_id);
+                            let context = json!({"proposal":proposal,"issues":error,"state":self.store.get_research_state(&run.project_id,None)?,"evidence":evidence,"additions":self.store.synthesis_additions(run_id)?});
+                            let mut correction_events = runtime.subscribe();
+                            let start_correction = async {
+                                let thread = runtime.start_thread(&work_dir,
+                                    "Correct the research proposal using only the provided evidence and State. Do not call tools, search, write files, invent evidence, or invent researcher-authored context. Return the complete corrected JSON proposal.",
+                                    json!({"mcp_servers":{"ioi":{"url":grant.endpoint,"enabled":false}},"web_search":"disabled"})).await?;
+                                runtime
+                                    .start_turn(
+                                        &thread,
+                                        &context.to_string(),
+                                        Some(research_outcome_schema()),
+                                    )
+                                    .await
+                            };
+                            let correction = tokio::select! {
+                                result = tokio::time::timeout_at(deadline, start_correction) => match result {
+                                    Ok(result) => result?,
+                                    Err(_) => { runtime.shutdown().await?; return Err("Research synthesis deadline exceeded".into()); }
+                                },
+                                _ = cancellation.cancelled() => { runtime.shutdown().await?; return Err("Run cancelled during synthesis correction".into()); }
+                            };
+                            let completion = tokio::select! {
+                                result = tokio::time::timeout_at(deadline, wait_for_turn(&mut correction_events,&correction,&self.store,self.app.as_ref(),&run.project_id,run_id,None)) => {
+                                    match result { Ok(value) => value?, Err(_) => { runtime.interrupt(&correction).await?; return Err("Research synthesis deadline exceeded".into()); } }
+                                }
+                                _ = cancellation.cancelled() => { runtime.interrupt(&correction).await?; return Err("Run cancelled during synthesis correction".into()); }
+                            };
+                            if completion.status != "completed" {
+                                return Err(format!(
+                                    "Synthesis correction ended: {}",
+                                    completion.status
+                                ));
+                            }
+                            #[cfg(test)]
+                            if let Some(trace) = &self.tool_trace {
+                                let catalog = runtime.tool_catalog(&correction.thread_id).await?;
+                                trace.lock().expect("evaluation trace lock").push(json!({"event":"runtime/correctionCatalog","runId":run_id,"catalog":catalog}));
+                            }
+                            proposal = completion
+                                .final_message
+                                .ok_or("Correction omitted final proposal")?;
+                            proposal_turn = correction;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 ("ready", "agent_completed".to_string())
             }
             "cancelled" => {
@@ -492,170 +582,6 @@ impl ProjectResearchController {
         .map_err(|_| "Child searches did not stop before finalization".to_string())?
     }
 
-    /// Validate and commit the mandatory final Research State synthesis.
-    async fn apply_state_synthesis(
-        &self,
-        run: &HarnessRun,
-        caller: &str,
-        outcome: &mut ResearchRunOutcome,
-    ) -> Result<(), String> {
-        let synthesis = outcome
-            .state_synthesis
-            .as_mut()
-            .ok_or("Research outcome omitted the required State synthesis")?;
-        validate_synthesis_shape(synthesis, outcome.next_direction.as_deref())?;
-        validate_synthesis_targets_before_commit(&self.store, &run.project_id, synthesis)?;
-
-        if synthesis.changes.is_empty() {
-            let reason = synthesis
-                .no_change_reason
-                .as_deref()
-                .ok_or("An empty State synthesis requires a no-change reason")?;
-            self.store.record_agent_state_unchanged(&run.id, reason)?;
-            return Ok(());
-        }
-
-        let changes = self.prepare_synthesis_changes(&run.id, synthesis).await?;
-        let payload = serde_json::to_vec(synthesis).map_err(|error| error.to_string())?;
-        let payload_hash = format!("{:x}", Sha256::digest(payload));
-        let receipt = self.store.apply_agent_state_update(
-            &run.project_id,
-            run.starting_state_revision,
-            caller,
-            Some(&run.id),
-            &format!("synthesis:{}", run.id),
-            &payload_hash,
-            changes,
-        )?;
-        synthesis.resulting_revision = Some(receipt.revision);
-        synthesis.created_entry_ids = receipt.created_entry_ids;
-        resolve_synthesis_entry_ids(synthesis);
-        if let Some(app) = &self.app {
-            let _ = app.emit(
-                "research_state_updated",
-                json!({"projectId": run.project_id, "revision": receipt.revision}),
-            );
-        }
-        Ok(())
-    }
-
-    /// Convert model-facing passage references into canonical State drafts.
-    async fn prepare_synthesis_changes(
-        &self,
-        run_id: &str,
-        synthesis: &ResearchStateSynthesis,
-    ) -> Result<Vec<AgentStateChange>, String> {
-        let mut changes = Vec::with_capacity(synthesis.changes.len());
-        for change in &synthesis.changes {
-            changes.push(match change {
-                ResearchSynthesisChange::Create {
-                    handle,
-                    kind,
-                    epistemic_status,
-                    statement,
-                    evidence,
-                    relations,
-                    reason,
-                } => AgentStateChange::Create {
-                    operation_key: handle.clone(),
-                    draft: ResearchEntryDraft {
-                        kind: *kind,
-                        epistemic_status: *epistemic_status,
-                        text: statement.clone(),
-                        evidence: self.prepare_synthesis_evidence(run_id, evidence).await?,
-                        relations: relations
-                            .iter()
-                            .map(|relation| EntryRelationDraft {
-                                target_entry_id: relation.target.clone(),
-                                kind: relation.kind,
-                            })
-                            .collect(),
-                        context: Vec::new(),
-                        reason: Some(reason.clone()),
-                    },
-                    evidence_relationships: evidence
-                        .iter()
-                        .map(|item| item.relationship.clone())
-                        .collect(),
-                },
-                ResearchSynthesisChange::Revise {
-                    entry_id,
-                    epistemic_status,
-                    statement,
-                    evidence,
-                    relations,
-                    reason,
-                } => AgentStateChange::Revise {
-                    update: ResearchEntryUpdate {
-                        id: entry_id.clone(),
-                        epistemic_status: *epistemic_status,
-                        text: statement.clone(),
-                        evidence: self.prepare_synthesis_evidence(run_id, evidence).await?,
-                        relations: relations
-                            .iter()
-                            .map(|relation| EntryRelationDraft {
-                                target_entry_id: relation.target.clone(),
-                                kind: relation.kind,
-                            })
-                            .collect(),
-                        context: Vec::new(),
-                        reason: Some(reason.clone()),
-                    },
-                    evidence_relationships: evidence
-                        .iter()
-                        .map(|item| item.relationship.clone())
-                        .collect(),
-                },
-                ResearchSynthesisChange::SetLifecycle {
-                    entry_id,
-                    lifecycle,
-                    reason,
-                } => AgentStateChange::SetLifecycle {
-                    entry_id: entry_id.clone(),
-                    lifecycle: *lifecycle,
-                    reason: reason.clone(),
-                },
-            });
-        }
-        Ok(changes)
-    }
-
-    async fn prepare_synthesis_evidence(
-        &self,
-        run_id: &str,
-        evidence: &[ResearchSynthesisEvidence],
-    ) -> Result<Vec<EvidenceLinkDraft>, String> {
-        let mut drafts = Vec::with_capacity(evidence.len());
-        for item in evidence {
-            if !self
-                .store
-                .agent_run_read_passage(run_id, &item.passage_ref)?
-            {
-                return Err(format!(
-                    "State synthesis cites a passage the Run did not read: {}",
-                    item.passage_ref
-                ));
-            }
-            let anchor = self
-                .mcp_server
-                .resolve_passage(&item.passage_ref)
-                .await
-                .ok_or_else(|| format!("State synthesis passage is stale: {}", item.passage_ref))?;
-            let chunk_id = anchor.chunk_id.ok_or_else(|| {
-                format!(
-                    "State synthesis passage is not citable: {}",
-                    item.passage_ref
-                )
-            })?;
-            drafts.push(EvidenceLinkDraft {
-                chunk_id,
-                excerpt: Some(anchor.quote),
-                support_note: Some(item.explanation.clone()),
-            });
-        }
-        Ok(drafts)
-    }
-
     async fn cancel_with_reason(
         &self,
         project_id: &str,
@@ -707,128 +633,8 @@ impl ProjectResearchController {
     }
 }
 
-fn validate_synthesis_shape(
-    synthesis: &ResearchStateSynthesis,
-    next_direction: Option<&str>,
-) -> Result<(), String> {
-    if synthesis.changes.len() > 20
-        || synthesis.unresolved_entry_ids.len() > 20
-        || synthesis.next_direction_entry_ids.len() > 20
-    {
-        return Err("Research State synthesis exceeds its item limits".to_string());
-    }
-    if synthesis.changes.is_empty() != synthesis.no_change_reason.is_some() {
-        return Err(
-            "State synthesis requires a no-change reason exactly when it has no changes"
-                .to_string(),
-        );
-    }
-    if next_direction.is_none() && !synthesis.next_direction_entry_ids.is_empty() {
-        return Err("Next direction entry IDs require a next direction".to_string());
-    }
-    for change in &synthesis.changes {
-        let evidence = match change {
-            ResearchSynthesisChange::Create {
-                handle,
-                evidence,
-                reason,
-                ..
-            } => {
-                validate_synthesis_text("create handle", handle, 100)?;
-                validate_synthesis_text("change reason", reason, 1_000)?;
-                evidence
-            }
-            ResearchSynthesisChange::Revise {
-                entry_id,
-                evidence,
-                reason,
-                ..
-            } => {
-                validate_synthesis_text("entry id", entry_id, 500)?;
-                validate_synthesis_text("change reason", reason, 1_000)?;
-                evidence
-            }
-            ResearchSynthesisChange::SetLifecycle {
-                entry_id, reason, ..
-            } => {
-                validate_synthesis_text("entry id", entry_id, 500)?;
-                validate_synthesis_text("change reason", reason, 1_000)?;
-                continue;
-            }
-        };
-        for item in evidence {
-            validate_synthesis_text("passage reference", &item.passage_ref, 500)?;
-            validate_synthesis_text("evidence explanation", &item.explanation, 1_000)?;
-            if !matches!(
-                item.relationship.as_str(),
-                "supports" | "contradicts" | "context"
-            ) {
-                return Err("Unknown synthesis evidence relationship".to_string());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_synthesis_text(label: &str, value: &str, maximum: usize) -> Result<(), String> {
-    if value.trim().is_empty() || value.chars().count() > maximum {
-        return Err(format!(
-            "Synthesis {label} must contain 1 to {maximum} characters"
-        ));
-    }
-    Ok(())
-}
-
-fn resolve_synthesis_entry_ids(synthesis: &mut ResearchStateSynthesis) {
-    for id in synthesis
-        .unresolved_entry_ids
-        .iter_mut()
-        .chain(synthesis.next_direction_entry_ids.iter_mut())
-    {
-        if let Some(durable_id) = synthesis.created_entry_ids.get(id) {
-            *id = durable_id.clone();
-        }
-    }
-    for change in &mut synthesis.changes {
-        let relations = match change {
-            ResearchSynthesisChange::Create { relations, .. }
-            | ResearchSynthesisChange::Revise { relations, .. } => relations,
-            ResearchSynthesisChange::SetLifecycle { .. } => continue,
-        };
-        for relation in relations {
-            if let Some(durable_id) = synthesis.created_entry_ids.get(&relation.target) {
-                relation.target = durable_id.clone();
-            }
-        }
-    }
-}
-
-fn validate_synthesis_targets_before_commit(
-    store: &LibraryStore,
-    project_id: &str,
-    synthesis: &ResearchStateSynthesis,
-) -> Result<(), String> {
-    let mut allowed_ids: std::collections::HashSet<String> = store
-        .get_research_state(project_id, None)?
-        .entries
-        .into_iter()
-        .map(|entry| entry.id)
-        .collect();
-    allowed_ids.extend(synthesis.changes.iter().filter_map(|change| match change {
-        ResearchSynthesisChange::Create { handle, .. } => Some(handle.clone()),
-        _ => None,
-    }));
-    for id in synthesis
-        .unresolved_entry_ids
-        .iter()
-        .chain(synthesis.next_direction_entry_ids.iter())
-    {
-        if !allowed_ids.contains(id) {
-            return Err(format!("Synthesis references an unknown State entry: {id}"));
-        }
-    }
-    Ok(())
-}
+#[cfg(test)]
+use super::synthesis::validate_shape as validate_synthesis_shape;
 
 const RESEARCH_AGENT_INSTRUCTIONS: &str = r#"You are i0i's bounded literature research agent. Work only through the i0i MCP tools. Do not use shell, filesystem, built-in web search, or unrelated MCP servers. Inspect Research State and the Vault before choosing work. Use vault_summary only when a collection overview is useful; it is sampled context, not proof that every paper was read. State the purpose of each focused search. Investigate candidates incrementally: save a useful candidate, attempt to read it, and assess why it should remain before moving on. Every paper newly added by this Run must appear exactly once in paperDispositions, even when reading is unavailable. Use evidence_used, background, contradictory, unavailable, or irrelevant; irrelevant papers will be removed from the Vault. You may delegate a bounded evidence question to reader_ask or vault_ask, but direct reading remains the primary path. Compare evidence with existing entries and actively look for conflicting results and conditions. Do not mutate Research State while gathering evidence. Instead, finish with one stateSynthesis that creates, revises, contests, or supersedes entries using only passage references returned by this Run. Source claims become source_supported findings; higher-level questions, bounded gaps, hypotheses, and experiment ideas relate to their premises. Use local create handles as relation targets when needed. If no State change is warranted, return an empty change list and a concise noChangeReason. When a next direction is motivated by specific existing entries or local create handles, list them in nextDirectionEntryIds; otherwise leave that list empty. Distinguish source claims, model interpretation, speculation, abstract-only coverage, and unavailable full text. Continue only while another step can materially improve the project; otherwise finish with a concise summary and remaining questions."#;
 
@@ -896,6 +702,16 @@ fn render_research_prompt(
         "recentRunOutcomes": prior_outcomes,
         "paperTarget": stack.run_context.paper_budget,
         "limits": limits,
+        "synthesisContract": {
+            "maximumProposalBytes": crate::services::research::synthesis::MAX_PROPOSAL_BYTES,
+            "evidence": "Only use passages whose stateCitable is true. Cite each chunk at most once per entry. Preserve exact source coverage; abstracts do not prove full-text claims.",
+            "examples": [
+                "Finding/source_supported: evidence=[a real delivered passage]; relations may be empty.",
+                "Gap/agent_synthesis: evidence=[]; relations=[{target: a Finding id or local handle, kind: derived_from}].",
+                "Hypothesis/speculative: evidence=[]; relations=[{target: a premise id or local handle, kind: motivated_by}].",
+                "No change: changes=[]; noChangeReason explains why; do not fabricate evidence."
+            ]
+        },
     }))
     .map_err(|error| error.to_string())?;
     Ok(format!(
@@ -958,7 +774,7 @@ async fn wait_for_turn(
                     return completion;
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Lagged(count)) => return Err(format!("Codex event stream lost {count} required events; research outcome cannot be confirmed")),
             Err(broadcast::error::RecvError::Closed) => {
                 return Err("Codex event stream closed before turn completion".to_string());
             }
@@ -1040,7 +856,7 @@ fn research_outcome_schema() -> Value {
         .remove("kind");
     revise_properties["operation"] = json!({"type": "string", "const": "revise"});
     revise_properties["entryId"] = json!({"type": "string", "minLength": 1, "maxLength": 500});
-    let synthesis_change = json!({
+    let mut synthesis_change = json!({
         "anyOf": [
             {
                 "type": "object",
@@ -1067,6 +883,44 @@ fn research_outcome_schema() -> Value {
             }
         ]
     });
+    // Encode legal static combinations; revisions also check the stored kind.
+    let mut variants: Vec<Value> = Vec::new();
+    for (kind, status) in [
+        ("finding", "source_supported"),
+        ("finding", "agent_synthesis"),
+        ("finding", "speculative"),
+        ("question", "agent_synthesis"),
+        ("question", "speculative"),
+        ("gap", "agent_synthesis"),
+        ("gap", "speculative"),
+        ("hypothesis", "speculative"),
+        ("experiment_idea", "speculative"),
+    ] {
+        let mut variant = synthesis_change["anyOf"][0].clone();
+        variant["properties"]["kind"] = json!({"type":"string","const":kind});
+        variant["properties"]["epistemicStatus"] = json!({"type":"string","const":status});
+        if status == "source_supported" {
+            variant["properties"]["evidence"]["minItems"] = json!(1);
+        } else {
+            variant["properties"]["evidence"]["maxItems"] = json!(0);
+        }
+        if status == "agent_synthesis" || kind == "hypothesis" || kind == "experiment_idea" {
+            variant["properties"]["relations"]["minItems"] = json!(1);
+        }
+        variants.push(variant);
+    }
+    for status in ["source_supported", "agent_synthesis", "speculative"] {
+        let mut variant = synthesis_change["anyOf"][1].clone();
+        variant["properties"]["epistemicStatus"] = json!({"type":"string","const":status});
+        if status == "source_supported" {
+            variant["properties"]["evidence"]["minItems"] = json!(1);
+        } else {
+            variant["properties"]["evidence"]["maxItems"] = json!(0);
+        }
+        variants.push(variant);
+    }
+    variants.push(synthesis_change["anyOf"][2].clone());
+    synthesis_change["anyOf"] = json!(variants);
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -1106,9 +960,9 @@ fn research_outcome_schema() -> Value {
                 "required": ["changes", "unresolvedEntryIds", "nextDirectionEntryIds", "noChangeReason"],
                 "properties": {
                     "changes": {"type": "array", "maxItems": 20, "items": synthesis_change},
-                    "unresolvedEntryIds": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
-                    "nextDirectionEntryIds": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
-                    "noChangeReason": {"type": ["string", "null"], "maxLength": 1000}
+                    "unresolvedEntryIds": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength":1, "maxLength":500}},
+                    "nextDirectionEntryIds": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength":1, "maxLength":500}},
+                    "noChangeReason": {"type": ["string", "null"], "minLength":1, "maxLength": 1000}
                 }
             },
             "taskOutcomes": {
@@ -1119,19 +973,20 @@ fn research_outcome_schema() -> Value {
                     "additionalProperties": false,
                     "required": ["searchRunIds", "motivatingEntryIds", "learnedPoints", "citedPassageRefs"],
                     "properties": {
-                        "searchRunIds": {"type": "array", "maxItems": 12, "items": {"type": "string"}},
-                        "motivatingEntryIds": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
-                        "learnedPoints": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string"}},
-                        "citedPassageRefs": {"type": "array", "maxItems": 40, "items": {"type": "string"}}
+                        "searchRunIds": {"type": "array", "maxItems": 12, "items": {"type": "string", "minLength":1, "maxLength":500}},
+                        "motivatingEntryIds": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength":1, "maxLength":500}},
+                        "learnedPoints": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "minLength":1, "maxLength":1000}},
+                        "citedPassageRefs": {"type": "array", "maxItems": 40, "items": {"type": "string", "minLength":1, "maxLength":500}}
                     }
                 }
             },
-            "unansweredQuestions": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
-            "nextDirection": {"type": ["string", "null"]}
+            "unansweredQuestions": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength":1, "maxLength":1000}},
+            "nextDirection": {"type": ["string", "null"], "minLength":1, "maxLength":1000}
         }
     })
 }
 
+#[cfg(test)]
 fn parse_research_outcome(message: Option<&str>) -> Result<ResearchRunOutcome, String> {
     let message = message.ok_or("Codex completed without a final Research outcome")?;
     serde_json::from_str(message).map_err(|error| format!("Invalid Research outcome JSON: {error}"))
@@ -1180,9 +1035,40 @@ fn runtime_failure_reason(error: &str) -> &'static str {
     }
 }
 
+/// Retry model-content errors once; never reinterpret infrastructure failures.
+fn repairable_synthesis_error(error: &str) -> bool {
+    error.starts_with("[{\"path\"")
+        || [
+            "Invalid Research outcome JSON",
+            "Unknown State entry",
+            "Unknown relation target",
+            "Create handle",
+            "Dependency cycle",
+            "Equivalent active",
+            "Paper disposition",
+            "Newly added paper",
+            "Next direction",
+            "Only a Finding",
+            "A source-supported",
+            "Direct source evidence",
+            "Agent synthesis requires",
+            "Hypotheses and",
+            "A Gap must",
+            "Choose one evidence",
+            "Passage is context only",
+            "State synthesis cites",
+            "Research outcome references",
+            "speculative idea requires",
+            "Proposal cannot supply backend",
+        ]
+        .iter()
+        .any(|prefix| error.contains(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::harness::ResearchSynthesisChange;
 
     fn outcome_json() -> String {
         serde_json::json!({
@@ -1254,7 +1140,7 @@ mod tests {
 
         let error = validate_synthesis_shape(&synthesis, None)
             .expect_err("entry links without direction text must fail");
-        assert_eq!(error, "Next direction entry IDs require a next direction");
+        assert!(error.contains("Next direction entry IDs require a next direction"));
     }
 
     #[test]
@@ -1327,6 +1213,49 @@ mod tests {
         for variant in variants {
             assert_eq!(variant["properties"]["operation"]["type"], "string");
             assert!(variant["properties"]["operation"]["const"].is_string());
+        }
+    }
+
+    #[test]
+    fn synthesis_schema_rejects_illegal_evidence_and_status_combinations() {
+        let schema = research_outcome_schema();
+        let validator = jsonschema::validator_for(&schema).expect("valid output schema");
+        for kind in [
+            "finding",
+            "question",
+            "gap",
+            "hypothesis",
+            "experiment_idea",
+        ] {
+            for status in [
+                "source_supported",
+                "agent_synthesis",
+                "speculative",
+                "researcher_context",
+            ] {
+                for has_evidence in [false, true] {
+                    let mut proposal: Value = serde_json::from_str(&outcome_json()).unwrap();
+                    proposal["stateSynthesis"]["noChangeReason"] = Value::Null;
+                    proposal["stateSynthesis"]["changes"] = json!([{
+                        "operation":"create","handle":"example","kind":kind,"epistemicStatus":status,
+                        "statement":"Example claim","evidence":if has_evidence {json!([{"passageRef":"p","relationship":"supports","explanation":"Source"}])} else {json!([])},
+                        "relations":[{"target":"premise","kind":"derived_from"}],"reason":"Example"
+                    }]);
+                    let expected = match status {
+                        "source_supported" => kind == "finding" && has_evidence,
+                        "agent_synthesis" => {
+                            matches!(kind, "finding" | "question" | "gap") && !has_evidence
+                        }
+                        "speculative" => !has_evidence,
+                        _ => false,
+                    };
+                    assert_eq!(
+                        validator.is_valid(&proposal),
+                        expected,
+                        "{kind}/{status}/evidence={has_evidence}"
+                    );
+                }
+            }
         }
     }
 

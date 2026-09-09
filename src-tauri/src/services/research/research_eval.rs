@@ -26,7 +26,7 @@ use crate::commands::discovery::browser::{BrowserDiscoveryConfig, BrowserDiscove
 use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{CandidateMatch, PaperCandidate};
 use crate::domain::harness::{HarnessConfiguration, HarnessRun, HarnessRunTrigger};
-use crate::domain::library::ProjectDraft;
+use crate::domain::library::{PaperDraft, ProjectDraft};
 use crate::domain::reconciliation::RunReconciliationPlan;
 use crate::domain::research::{RankedCandidate, SearchConstraints};
 use crate::domain::research_state::{
@@ -139,6 +139,7 @@ struct EvaluationReport {
     state_details: Vec<Value>,
     added_paper_ids: Vec<String>,
     tool_trace: Vec<Value>,
+    synthesis_attempts: Vec<Value>,
     checks: Vec<EvaluationCheck>,
     judge: Option<JudgeResult>,
     errors: Vec<String>,
@@ -584,22 +585,69 @@ async fn run_scenario(
         "Adaptive gradient clipping reduces optimizer instability in noisy small-batch training."
             .to_string()
     };
-    let seed_entry = store.create_research_entry(
-        &project.id,
-        store.get_research_state(&project.id, None)?.revision,
-        &ResearchEntryDraft {
-            kind: seed_entry_kind,
-            epistemic_status: EpistemicStatus::Speculative,
-            text: seed_entry_text,
-            evidence: Vec::new(),
-            relations: Vec::new(),
-            context: Vec::new(),
-            reason: Some("Initial evaluation hypothesis".to_string()),
-        },
-    )?;
+    let initial_state_snapshot = if scenario == "one_iteration" {
+        store.get_research_state(&project.id, None)?
+    } else {
+        store
+            .create_research_entry(
+                &project.id,
+                store.get_research_state(&project.id, None)?.revision,
+                &ResearchEntryDraft {
+                    kind: seed_entry_kind,
+                    epistemic_status: EpistemicStatus::Speculative,
+                    text: seed_entry_text,
+                    evidence: Vec::new(),
+                    relations: Vec::new(),
+                    context: Vec::new(),
+                    reason: Some("Initial evaluation hypothesis".to_string()),
+                },
+            )?
+            .state
+    };
     let initial_state: Value =
-        serde_json::to_value(&seed_entry.state).map_err(|error| error.to_string())?;
-    let initial_paper_ids: HashSet<String> = library
+        serde_json::to_value(&initial_state_snapshot).map_err(|error| error.to_string())?;
+    if scenario == "one_iteration" {
+        // Exercise already-cached HTML through the real MCP Reader and finalizer.
+        let document = manifest
+            .documents
+            .iter()
+            .find(|d| d.role == "conflicting")
+            .ok_or("Missing HTML corpus document")?;
+        let directory = root.join("html-corpus");
+        fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        let html_path = directory.join("source.html");
+        let html = document
+            .body
+            .iter()
+            .map(|p| format!("<p>{p}</p>"))
+            .collect::<String>();
+        fs::write(&html_path, html).map_err(|e| e.to_string())?;
+        fs::write(
+            directory.join("meta.json"),
+            json!({"source_text":document.body.join("\n\n")}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        store.add_local_html_to_vault(
+            &PaperDraft {
+                id: "fixture:html-context".into(),
+                title: document.title.clone(),
+                authors: document.authors.clone(),
+                venue: document.venue.clone(),
+                year: document.year,
+                citations: 0,
+                tags: vec![],
+                status: "saved".into(),
+                abstract_text: document.abstract_text.clone(),
+                sources: vec![],
+            },
+            &vault.id,
+            "html:fixture:context",
+            "https://example.test/corpus/boundary",
+            html_path.to_str().ok_or("Non-UTF-8 corpus path")?,
+        )?;
+    }
+    let initial_paper_ids: HashSet<String> = store
+        .get_library()?
         .vault_papers
         .iter()
         .filter(|membership| membership.vault_id == vault.id)
@@ -725,6 +773,13 @@ async fn run_scenario(
         .cloned()
         .collect();
     let tool_trace: Vec<Value> = controller.evaluation_tool_trace();
+    let synthesis_attempts: Vec<Value> = runs
+        .iter()
+        .map(|run| store.synthesis_attempt_reports(&run.id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let source_hashes: HashMap<String, String> = acquired_source_hashes(&store, &added_paper_ids)?;
 
     // Reopen SQLite through a fresh store before accepting persistence claims.
@@ -734,7 +789,7 @@ async fn run_scenario(
         .get_research_state(&project.id, None)?
         .revision;
     let historical_revision_readable: bool = reopened_store
-        .get_research_state(&project.id, Some(seed_entry.state.revision))
+        .get_research_state(&project.id, Some(initial_state_snapshot.revision))
         .is_ok();
     let persistence_reopens: bool =
         reopened_current_revision == final_state_snapshot.revision && historical_revision_readable;
@@ -742,7 +797,7 @@ async fn run_scenario(
     let mut checks: Vec<EvaluationCheck> = deterministic_checks(
         scenario,
         &runs,
-        seed_entry.state.revision,
+        initial_state_snapshot.revision,
         final_state_snapshot.revision,
         &current_paper_ids,
         &added_paper_ids,
@@ -828,6 +883,7 @@ async fn run_scenario(
         state_details,
         added_paper_ids,
         tool_trace,
+        synthesis_attempts,
         checks,
         judge,
         errors,
@@ -848,7 +904,7 @@ fn scenario_instructions(scenario: &str, core: &str) -> Result<Vec<String>, Stri
         "{core}\n\nRun one complete investigation cycle. Search for direct supporting experimental evidence, save at least one useful full-text paper, wait for it to become readable, inspect the relevant passage, and synthesize a cited State update at the end. Inspect any abstract-only or unavailable candidate you encounter and describe that limitation honestly."
     );
     match scenario {
-        "one_iteration" => Ok(vec![one_iteration]),
+        "one_iteration" => Ok(vec![format!("{one_iteration}\nThe State is empty. Also read the existing cached HTML paper fixture:html-context in the Vault and cite its original passage in a source-supported Finding. Read a supporting PDF as well. Both source formats must contribute to this synthesis.")]),
         "multiple_iterations" => Ok(vec![
             format!(
                 "{core}\n\nThis is the first of two Runs. Search specifically for supporting experimental evidence, save and read a full-text paper, and synthesize a cited source-supported Finding at the end. Leave contradictory conditions as an explicit unresolved question."
@@ -985,6 +1041,50 @@ fn deterministic_checks(
     source_hashes: &HashMap<String, String>,
 ) -> Vec<EvaluationCheck> {
     let mut checks: Vec<EvaluationCheck> = Vec::new();
+    let catalogs: Vec<&Value> = tool_trace
+        .iter()
+        .filter(|event| event["event"] == "runtime/toolCatalog")
+        .collect();
+    let catalog_is_scoped = catalogs.len() == runs.len()
+        && catalogs.iter().all(|event| {
+            event["catalog"]["data"].as_array().is_some_and(|servers| {
+                servers.iter().all(|server| {
+                    server["name"] == "ioi"
+                        || server["tools"]
+                            .as_object()
+                            .is_some_and(|tools| tools.is_empty())
+                }) && servers.iter().any(|server| {
+                    server["name"] == "ioi"
+                        && server["tools"].as_object().is_some_and(|tools| {
+                            tools.contains_key("reader_read")
+                                && tools.contains_key("search_start")
+                                && !tools.contains_key("state_update")
+                        })
+                })
+            })
+        });
+    checks.push(check(
+        "runtime_tool_catalog_scoped",
+        catalog_is_scoped,
+        "Actual Codex thread catalog exposes Reader/Search but not State mutation".into(),
+    ));
+    let correction_catalogs: Vec<&Value> = tool_trace
+        .iter()
+        .filter(|event| event["event"] == "runtime/correctionCatalog")
+        .collect();
+    checks.push(check(
+        "correction_has_no_tools",
+        correction_catalogs.iter().all(|event| {
+            event["catalog"]["data"].as_array().is_some_and(|servers| {
+                servers.iter().all(|server| {
+                    server["tools"]
+                        .as_object()
+                        .is_some_and(|tools| tools.is_empty())
+                })
+            })
+        }),
+        format!("Observed {} correction catalogs", correction_catalogs.len()),
+    ));
     checks.push(check(
         "production_run_terminal",
         !runs.is_empty() && runs.iter().all(|run| run.status == "ready"),
@@ -1062,13 +1162,18 @@ fn deterministic_checks(
             .unwrap_or_default();
         let read = events
             .iter()
-            .position(|event| event.kind == "agent_passages_delivered");
-        let synthesis = events.iter().position(|event| {
-            matches!(
-                event.kind.as_str(),
-                "agent_state_committed" | "agent_state_unchanged"
-            ) && event.phase.as_deref() == Some("synthesizing")
-        });
+            .filter(|event| event.kind == "agent_passages_delivered")
+            .map(|event| event.sequence)
+            .min();
+        let synthesis = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "agent_state_committed" | "agent_state_unchanged"
+                ) && event.phase.as_deref() == Some("synthesizing")
+            })
+            .map(|event| event.sequence);
         read.zip(synthesis)
             .is_some_and(|(read, synthesis)| read < synthesis)
     });
@@ -1113,6 +1218,18 @@ fn deterministic_checks(
     ));
     if scenario == "one_iteration" {
         checks.push(check(
+            "empty_initial_state",
+            initial_revision == 0,
+            "First iteration starts without seeded entries".into(),
+        ));
+        checks.push(check(
+            "html_evidence_committed",
+            evidence
+                .iter()
+                .any(|link| link.paper_id == "fixture:html-context"),
+            "Cached HTML contributes resolvable State evidence".into(),
+        ));
+        checks.push(check(
             "limited_coverage_reported_honestly",
             observed_coverage.contains("abstract_only") && observed_coverage.contains("none"),
             format!("Reader coverage observed: {observed_coverage:?}"),
@@ -1141,6 +1258,9 @@ fn deterministic_checks(
             .collect();
         let derived_higher_level = state_details.iter().any(|detail| {
             detail.entry.kind != ResearchEntryKind::Finding
+                && runs
+                    .get(1)
+                    .is_some_and(|run| detail.entry.origin_run_id.as_ref() == Some(&run.id))
                 && detail
                     .relations
                     .iter()

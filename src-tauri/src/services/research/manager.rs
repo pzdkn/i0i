@@ -111,7 +111,7 @@ impl SearchManager {
 
     /// Construct a manager whose execution dependencies are supplied by a test.
     #[cfg(test)]
-    fn for_test(store: LibraryStore) -> Self {
+    pub(crate) fn for_test(store: LibraryStore) -> Self {
         Self {
             app: None,
             store,

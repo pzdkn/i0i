@@ -57,4 +57,5 @@ tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+jsonschema = { version = "0.55.1", default-features = false }
 rmcp = { version = "3.2.0", features = ["client", "transport-streamable-http-client-reqwest"] }

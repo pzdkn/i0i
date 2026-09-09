@@ -64,6 +64,9 @@ use crate::services::research::reconciliation::{ordered_entries, validate_reconc
 
 type StoreResult<T> = Result<T, String>;
 
+#[path = "research_finalization.rs"]
+mod research_finalization;
+
 /// Width of the `vec0` embedding column, tied to the active model rather than
 /// restated.
 ///
@@ -775,6 +778,57 @@ impl LibraryStore {
             .into_iter()
             .next()
             .ok_or_else(|| format!("Materialized abstract chunk was not found: {paper_id}"))
+    }
+
+    /// Index the exact cached HTML text without assigning synthetic PDF pages.
+    pub(crate) fn materialize_html_text(
+        &self,
+        source: &DocumentSource,
+        text: &str,
+    ) -> StoreResult<Vec<DocumentChunk>> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let extraction_id = format!("html_text:{}:{}", source.id, short_sha256(text));
+        let existing = read_chunks(&tx, "where c.extraction_id = ?1", params![extraction_id])?;
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+        tx.execute("insert into document_extractions (id,paper_id,source_id,extractor,extractor_version,annotation_source_id,status,created_at,updated_at)
+            values (?1,?2,?3,'html_text','1',?1,'ready',datetime('now'),datetime('now')) on conflict(id) do nothing",
+            params![extraction_id,source.paper_id,source.id]).map_err(|e| e.to_string())?;
+        let mut chunks: Vec<DocumentChunk> = Vec::new();
+        let chars: Vec<char> = text.chars().collect();
+        for (index, part) in chars.chunks(4000).enumerate() {
+            let block_id = format!("{extraction_id}:block:{index}");
+            let start = (index * 4000) as i64;
+            let end = start + part.len() as i64;
+            let content: String = part.iter().collect();
+            tx.execute("insert into document_blocks (id,paper_id,source_id,extraction_id,page_index,block_index,reading_order,kind,text,source_start,source_end)
+                values (?1,?2,?3,?4,0,?5,?5,'paragraph',?6,?7,?8)",
+                params![block_id,source.paper_id,source.id,extraction_id,index as i64,content,start,end]).map_err(|e| e.to_string())?;
+            chunks.push(DocumentChunk {
+                id: format!("{extraction_id}:chunk:{index}"),
+                paper_id: source.paper_id.clone(),
+                source_id: source.id.clone(),
+                extraction_id: extraction_id.clone(),
+                chunk_index: index as i32,
+                chunker: "html_text".into(),
+                chunk_version: CHUNK_VERSION,
+                page_start: 0,
+                page_end: 0,
+                heading_path: None,
+                text: content,
+                token_estimate: ((part.len() + 3) / 4) as i32,
+                source_start: start,
+                source_end: end,
+                block_ids: vec![block_id],
+            });
+        }
+        insert_chunks(&tx, &chunks)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(chunks)
     }
 
     /// Extractions that are ready but whose chunks predate the current chunker
@@ -3059,6 +3113,7 @@ impl LibraryStore {
 
     /// Fails interrupted Harness Runs and restores their requested lifecycle state.
     pub fn recover_interrupted_harness_runs(&self) -> StoreResult<usize> {
+        self.recover_prepared_synthesis()?;
         let mut conn = self.open_connection()?;
         let tx = conn.transaction().map_err(|error| error.to_string())?;
         let run_ids = {
@@ -3156,9 +3211,22 @@ impl LibraryStore {
         run_id: &str,
         draft: &HarnessReflectionDraft,
     ) -> StoreResult<HarnessReflection> {
-        validate_reflection_draft(draft)?;
         let mut conn = self.open_connection()?;
-        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let result = Self::persist_harness_reflection_on(&tx, run_id, draft)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(result)
+    }
+
+    /// Execute the operation inside the caller's transaction.
+    fn persist_harness_reflection_on(
+        tx: &Connection,
+        run_id: &str,
+        draft: &HarnessReflectionDraft,
+    ) -> StoreResult<HarnessReflection> {
+        validate_reflection_draft(draft)?;
         let (project_id, status, configuration_version): (String, String, i64) = tx
             .query_row(
                 "select project_id, status, configuration_version from harness_runs where id = ?1",
@@ -3267,9 +3335,7 @@ impl LibraryStore {
             None,
             "harness",
         )?;
-        tx.commit().map_err(|error| error.to_string())?;
-        let conn = self.open_connection()?;
-        read_harness_reflection(&conn, &reflection_id)
+        read_harness_reflection(tx, &reflection_id)
     }
 
     /// Builds a bounded reflection solely from persisted Run telemetry.
@@ -4136,22 +4202,24 @@ impl LibraryStore {
             .collect()
     }
 
-    /// Confirm that a citable passage was delivered to this managed Run.
-    pub fn agent_run_read_passage(&self, run_id: &str, passage_ref: &str) -> StoreResult<bool> {
-        let conn = self.open_connection()?;
-        conn.query_row(
-            "select exists(select 1 from agent_reader_passages
-             where run_id = ?1 and passage_ref = ?2)",
-            params![run_id, passage_ref],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())
-    }
-
     /// Record a required synthesis phase that honestly produced no mutation.
     pub fn record_agent_state_unchanged(&self, run_id: &str, reason: &str) -> StoreResult<()> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let result = Self::record_agent_state_unchanged_on(&tx, run_id, reason)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
+    /// Execute within the finalization transaction.
+    fn record_agent_state_unchanged_on(
+        conn: &Connection,
+        run_id: &str,
+        reason: &str,
+    ) -> StoreResult<()> {
         validate_outcome_text("no-change reason", reason, 1_000)?;
-        let conn = self.open_connection()?;
         let valid: bool = conn
             .query_row(
                 "select exists(select 1 from harness_runs
@@ -4187,6 +4255,17 @@ impl LibraryStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
+        let result = Self::finalize_agent_paper_retention_on(&tx, run_id, dispositions)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(result)
+    }
+
+    /// Execute the operation inside the caller's transaction.
+    fn finalize_agent_paper_retention_on(
+        tx: &Connection,
+        run_id: &str,
+        dispositions: &[ResearchPaperDisposition],
+    ) -> StoreResult<AgentPaperRetentionSummary> {
         let run = read_harness_run(&tx, run_id)?;
         if run.execution_kind != "codex_agent" || run.status != "reconciling" {
             return Err("Only a synthesizing managed Run may finalize papers".to_string());
@@ -4315,7 +4394,6 @@ impl LibraryStore {
             None,
             "harness",
         )?;
-        tx.commit().map_err(|error| error.to_string())?;
         Ok(AgentPaperRetentionSummary {
             attempted,
             read,
@@ -4332,11 +4410,25 @@ impl LibraryStore {
         status: &str,
         stop_reason: &str,
     ) -> StoreResult<HarnessRun> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let result = Self::finish_codex_harness_run_on(&tx, harness_run_id, status, stop_reason)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(result)
+    }
+
+    /// Execute the operation inside the caller's transaction.
+    fn finish_codex_harness_run_on(
+        tx: &Connection,
+        harness_run_id: &str,
+        status: &str,
+        stop_reason: &str,
+    ) -> StoreResult<HarnessRun> {
         if !matches!(status, "ready" | "failed" | "cancelled") {
             return Err(format!("Invalid managed Research Run status: {status}"));
         }
-        let mut conn = self.open_connection()?;
-        let tx = conn.transaction().map_err(|error| error.to_string())?;
         let run = read_harness_run(&tx, harness_run_id)?;
         if matches!(run.status.as_str(), "ready" | "failed" | "cancelled") {
             return Ok(run);
@@ -4386,6 +4478,13 @@ impl LibraryStore {
                 .map_err(|error| error.to_string())?;
             if !synthesis_completed {
                 return Err("Managed Research Run has no completed State synthesis".to_string());
+            }
+            let has_outcome: bool = tx.query_row(
+                "select exists(select 1 from harness_reflections where run_id=?1 and json_type(metrics_json,'$.agentOutcome')='object')",
+                [harness_run_id], |row|row.get(0),
+            ).map_err(|error|error.to_string())?;
+            if !has_outcome {
+                return Err("Managed Research Run has no persisted outcome".to_string());
             }
         }
         let (provider_queries, child_llm_calls, inspected_candidates): (u32, u32, u32) = tx
@@ -4487,9 +4586,7 @@ impl LibraryStore {
             )
             .map_err(|error| error.to_string())?;
         }
-        tx.commit().map_err(|error| error.to_string())?;
-        let conn = self.open_connection()?;
-        read_harness_run(&conn, harness_run_id)
+        read_harness_run(tx, harness_run_id)
     }
 
     /// Move a completed Codex turn into its short outcome-persistence phase.
@@ -4525,6 +4622,21 @@ impl LibraryStore {
         run_id: &str,
         outcome: &ResearchRunOutcome,
     ) -> StoreResult<HarnessReflection> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let result = Self::persist_agent_run_outcome_on(&tx, run_id, outcome)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
+    /// Execute within the finalization transaction.
+    fn persist_agent_run_outcome_on(
+        conn: &Connection,
+        run_id: &str,
+        outcome: &ResearchRunOutcome,
+    ) -> StoreResult<HarnessReflection> {
         validate_research_run_outcome_shape(outcome)?;
         validate_research_state_synthesis_shape(
             outcome
@@ -4533,7 +4645,6 @@ impl LibraryStore {
                 .ok_or("Managed Research outcome requires a State synthesis")?,
             outcome.next_direction.as_deref(),
         )?;
-        let conn = self.open_connection()?;
         let (project_id, execution_kind, status): (String, String, String) = conn
             .query_row(
                 "select project_id, execution_kind, status from harness_runs where id = ?1",
@@ -4597,14 +4708,14 @@ impl LibraryStore {
                 );
             }
         }
-        drop(conn);
 
         let metrics_json = serde_json::json!({
             "schemaVersion": 1,
             "agentOutcome": outcome,
         })
         .to_string();
-        self.persist_harness_reflection(
+        Self::persist_harness_reflection_on(
+            conn,
             run_id,
             &HarnessReflectionDraft {
                 summary: outcome.summary.clone(),
@@ -4654,6 +4765,7 @@ impl LibraryStore {
             let Ok(outcome) = serde_json::from_value::<ResearchRunOutcome>(value.clone()) else {
                 continue;
             };
+            let outcome = crate::services::research::synthesis::continuation(outcome);
             let size = serde_json::to_string(&outcome)
                 .map_err(|error| error.to_string())?
                 .chars()
@@ -5567,16 +5679,39 @@ impl LibraryStore {
         payload_hash: &str,
         changes: Vec<AgentStateChange>,
     ) -> StoreResult<AgentStateUpdateReceipt> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let result = Self::apply_agent_state_update_on(
+            &tx,
+            project_id,
+            base_revision,
+            caller,
+            run_id,
+            request_id,
+            payload_hash,
+            changes,
+        )?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(result)
+    }
+
+    /// Execute the operation inside the caller's transaction.
+    fn apply_agent_state_update_on(
+        tx: &Connection,
+        project_id: &str,
+        base_revision: i64,
+        caller: &str,
+        run_id: Option<&str>,
+        request_id: &str,
+        payload_hash: &str,
+        changes: Vec<AgentStateChange>,
+    ) -> StoreResult<AgentStateUpdateReceipt> {
         const TOOL: &str = "state_update";
         if changes.is_empty() || changes.len() > 20 {
             return Err("State update must contain between 1 and 20 changes".to_string());
         }
-        let mut conn = self.open_connection()?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|error| error.to_string())?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
         let existing: Option<(String, String)> = tx
             .query_row(
                 "select payload_hash, result_json from mcp_mutation_receipts
@@ -5603,7 +5738,11 @@ impl LibraryStore {
                 if operation_key.trim().is_empty() || created_ids.contains_key(operation_key) {
                     return Err("Create operation keys must be non-empty and unique".to_string());
                 }
-                created_ids.insert(operation_key.clone(), timestamped_id("research_entry")?);
+                // Batch allocation can outpace the platform clock resolution.
+                created_ids.insert(
+                    operation_key.clone(),
+                    format!("research_entry_{}", uuid::Uuid::new_v4().simple()),
+                );
             }
         }
         let pending_entry_ids: HashSet<String> = created_ids.values().cloned().collect();
@@ -5827,7 +5966,6 @@ impl LibraryStore {
                 )?;
             }
         }
-        tx.commit().map_err(|error| error.to_string())?;
         Ok(receipt)
     }
 
@@ -6661,6 +6799,30 @@ impl LibraryStore {
               primary key (run_id, paper_id),
               foreign key (run_id) references harness_runs(id) on delete cascade,
               foreign key (paper_id) references papers(id) on delete cascade
+            );
+
+            create table if not exists research_synthesis_attempts (
+              run_id text not null references harness_runs(id) on delete cascade,
+              attempt integer not null,
+              schema_version integer not null default 147,
+              model_id text,
+              thread_id text,
+              turn_id text,
+              proposal text not null,
+              evidence_json text not null,
+              vault_revision integer not null,
+              issues text,
+              committed integer not null default 0,
+              created_at text not null default (datetime('now')),
+              primary key (run_id, attempt)
+            );
+            create table if not exists agent_passage_anchors (
+              run_id text not null,
+              passage_ref text not null,
+              anchor_json text not null,
+              source_version text not null,
+              primary key (run_id, passage_ref),
+              foreign key (run_id, passage_ref) references agent_reader_passages(run_id, passage_ref) on delete cascade
             );
 
             create table if not exists agent_reader_passages (
@@ -7590,6 +7752,9 @@ impl LibraryStore {
             "text not null default 'legacy_search'",
         )?;
         add_column_if_missing(conn, "harness_runs", "runtime_model", "text")?;
+        for column in ["model_id", "thread_id", "turn_id"] {
+            add_column_if_missing(conn, "research_synthesis_attempts", column, "text")?;
+        }
         add_column_if_missing(conn, "harness_runs", "runtime_thread_id", "text")?;
         add_column_if_missing(conn, "harness_runs", "runtime_turn_id", "text")?;
         add_column_if_missing(conn, "harness_runs", "agent_limits_json", "text")?;
@@ -14495,8 +14660,8 @@ fn validate_research_run_outcome_shape(outcome: &ResearchRunOutcome) -> StoreRes
         .map_err(|error| error.to_string())?
         .chars()
         .count();
-    if serialized_chars > 12_000 {
-        return Err("Research outcome exceeds 12000 characters".to_string());
+    if serialized_chars > crate::services::research::synthesis::MAX_PROPOSAL_BYTES * 2 {
+        return Err("Research outcome exceeds storage limit".to_string());
     }
     Ok(())
 }
@@ -14505,55 +14670,7 @@ fn validate_research_state_synthesis_shape(
     synthesis: &ResearchStateSynthesis,
     next_direction: Option<&str>,
 ) -> StoreResult<()> {
-    if synthesis.changes.len() > 20
-        || synthesis.unresolved_entry_ids.len() > 20
-        || synthesis.next_direction_entry_ids.len() > 20
-    {
-        return Err("Research State synthesis exceeds its item limits".to_string());
-    }
-    if synthesis.changes.is_empty() != synthesis.no_change_reason.is_some() {
-        return Err(
-            "State synthesis requires a no-change reason exactly when it has no changes"
-                .to_string(),
-        );
-    }
-    if next_direction.is_none() && !synthesis.next_direction_entry_ids.is_empty() {
-        return Err("Next direction entry IDs require a next direction".to_string());
-    }
-    if let Some(reason) = &synthesis.no_change_reason {
-        validate_outcome_text("no-change reason", reason, 1_000)?;
-    }
-    for change in &synthesis.changes {
-        match change {
-            ResearchSynthesisChange::Create {
-                handle,
-                statement,
-                reason,
-                ..
-            } => {
-                validate_outcome_text("create handle", handle, 100)?;
-                validate_outcome_text("synthesis statement", statement, 4_000)?;
-                validate_outcome_text("synthesis reason", reason, 1_000)?;
-            }
-            ResearchSynthesisChange::Revise {
-                entry_id,
-                statement,
-                reason,
-                ..
-            } => {
-                validate_outcome_text("entry id", entry_id, 500)?;
-                validate_outcome_text("synthesis statement", statement, 4_000)?;
-                validate_outcome_text("synthesis reason", reason, 1_000)?;
-            }
-            ResearchSynthesisChange::SetLifecycle {
-                entry_id, reason, ..
-            } => {
-                validate_outcome_text("entry id", entry_id, 500)?;
-                validate_outcome_text("synthesis reason", reason, 1_000)?;
-            }
-        }
-    }
-    Ok(())
+    crate::services::research::synthesis::validate_shape(synthesis, next_direction)
 }
 
 fn validate_outcome_text(label: &str, value: &str, maximum_chars: usize) -> StoreResult<()> {
@@ -20975,6 +21092,580 @@ mod tests {
         }
     }
 
+    /// Build model JSON and a genuinely delivered PDF passage for finalization tests.
+    fn synthesis_fixture() -> StoreResult<(
+        TestDb,
+        HarnessRun,
+        serde_json::Value,
+        HashMap<String, crate::services::mcp::PassageAnchor>,
+    )> {
+        let db = test_db()?;
+        let extraction = extracted_paper(
+            &db,
+            "vaswani2017",
+            &[("paragraph", "The effect was evaluated on two benchmarks.")],
+        )?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        let reference = "passage:delivered".to_string();
+        db.store.record_agent_reader_delivery(
+            &run.id,
+            &run.project_id,
+            "vaswani2017",
+            chunk.text.chars().count() as u64,
+            &[reference.clone()],
+        )?;
+        let anchors = HashMap::from([(
+            reference.clone(),
+            crate::services::mcp::PassageAnchor {
+                paper_id: chunk.paper_id,
+                source_id: chunk.source_id,
+                extraction_id: Some(chunk.extraction_id),
+                chunk_id: Some(chunk.id),
+                page_start: Some(1),
+                page_end: Some(1),
+                source_start: chunk.source_start,
+                source_end: chunk.source_end,
+                quote: chunk.text,
+            },
+        )]);
+        db.store.persist_delivered_anchors(&run.id, &anchors)?;
+        let mut proposal = serde_json::to_value(research_outcome(
+            "A bounded finding and a follow-up question",
+        ))
+        .map_err(|e| e.to_string())?;
+        proposal["stateSynthesis"] = serde_json::json!({
+            "changes":[
+                {"operation":"create","handle":"f","kind":"finding","epistemicStatus":"source_supported","statement":"The effect was evaluated on two benchmarks.","evidence":[{"passageRef":reference,"relationship":"supports","explanation":"The source states its evaluation scope"}],"relations":[],"reason":"New evidence"},
+                {"operation":"create","handle":"g","kind":"gap","epistemicStatus":"agent_synthesis","statement":"Beyond these two benchmarks, generalization remains untested in this corpus.","evidence":[],"relations":[{"target":"f","kind":"derived_from"}],"reason":"Bounded synthesis"}
+            ],"unresolvedEntryIds":["g"],"nextDirectionEntryIds":["g"],"noChangeReason":null
+        });
+        proposal["nextDirection"] = serde_json::json!("Investigate other benchmarks");
+        proposal["taskOutcomes"] = serde_json::json!([{"searchRunIds":[],"motivatingEntryIds":["g"],"learnedPoints":["The evidence has bounded coverage"],"citedPassageRefs":[reference]}]);
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        Ok((db, run, proposal, anchors))
+    }
+
+    #[test]
+    fn synthesis_finalization_preflights_commits_and_replays_once() -> StoreResult<()> {
+        let (db, run, proposal, anchors) = synthesis_fixture()?;
+        db.store
+            .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+        db.store.preflight_synthesis(&run.id, 0)?;
+        assert_eq!(
+            db.store.get_research_state(&run.project_id, None)?.revision,
+            0
+        );
+        assert_eq!(db.store.get_harness_run(&run.id)?.status, "reconciling");
+        let complete = db.store.finalize_synthesis(&run.id, 0, true)?;
+        assert_eq!(complete.status, "ready");
+        assert_eq!(complete.resulting_state_revision, Some(1));
+        assert_eq!(
+            db.store.finalize_synthesis(&run.id, 0, true)?.id,
+            complete.id
+        );
+        let history = db
+            .store
+            .list_recent_agent_run_outcomes(&run.project_id, 3, 12000)?;
+        assert_eq!(history.len(), 1);
+        assert_ne!(
+            history[0].outcome.task_outcomes[0].motivating_entry_ids[0],
+            "g"
+        );
+        assert_eq!(
+            db.store
+                .get_research_state(&run.project_id, None)?
+                .entries
+                .len(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_rejects_realistic_invalid_proposals_before_any_commit() -> StoreResult<()> {
+        for case in [
+            "direct_evidence_on_gap",
+            "missing_evidence",
+            "missing_premise",
+            "unknown_ref",
+            "cycle",
+            "duplicate_handle",
+            "duplicate_statement",
+            "orphan_direction",
+            "unread_passage",
+            "duplicate_chunk",
+            "oversize_text",
+            "whitespace",
+            "invented_disposition",
+            "backend_facts",
+            "unknown_enum",
+            "self_reference",
+            "conflicting_operations",
+            "context_only",
+        ] {
+            let (db, run, mut proposal, anchors) = synthesis_fixture()?;
+            match case {
+                "direct_evidence_on_gap" => {
+                    proposal["stateSynthesis"]["changes"][1]["evidence"] =
+                        proposal["stateSynthesis"]["changes"][0]["evidence"].clone()
+                }
+                "missing_evidence" => {
+                    proposal["stateSynthesis"]["changes"][0]["evidence"] = serde_json::json!([])
+                }
+                "missing_premise" => {
+                    proposal["stateSynthesis"]["changes"][1]["relations"] = serde_json::json!([])
+                }
+                "unknown_ref" => {
+                    proposal["stateSynthesis"]["nextDirectionEntryIds"] =
+                        serde_json::json!(["invented"])
+                }
+                "cycle" => {
+                    proposal["stateSynthesis"]["changes"][0]["relations"] =
+                        serde_json::json!([{"target":"g","kind":"derived_from"}])
+                }
+                "duplicate_handle" => {
+                    proposal["stateSynthesis"]["changes"][1]["handle"] = serde_json::json!("f")
+                }
+                "duplicate_statement" => {
+                    proposal["stateSynthesis"]["changes"][1]["statement"] =
+                        proposal["stateSynthesis"]["changes"][0]["statement"].clone()
+                }
+                "orphan_direction" => proposal["nextDirection"] = serde_json::Value::Null,
+                "unread_passage" => {
+                    proposal["stateSynthesis"]["changes"][0]["evidence"][0]["passageRef"] =
+                        serde_json::json!("invented")
+                }
+                "duplicate_chunk" => {
+                    let e = proposal["stateSynthesis"]["changes"][0]["evidence"][0].clone();
+                    proposal["stateSynthesis"]["changes"][0]["evidence"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(e);
+                }
+                "oversize_text" => proposal["nextDirection"] = serde_json::json!("x".repeat(1001)),
+                "whitespace" => proposal["summary"] = serde_json::json!("  "),
+                "invented_disposition" => {
+                    proposal["paperDispositions"] = serde_json::json!([{"paperId":"invented","disposition":"background","reason":"Example"}])
+                }
+                "backend_facts" => {
+                    proposal["stateSynthesis"]["resultingRevision"] = serde_json::json!(42)
+                }
+                "unknown_enum" => {
+                    proposal["stateSynthesis"]["changes"][0]["epistemicStatus"] =
+                        serde_json::json!("proven")
+                }
+                "self_reference" => {
+                    proposal["stateSynthesis"]["changes"][1]["relations"] =
+                        serde_json::json!([{"target":"g","kind":"derived_from"}])
+                }
+                "conflicting_operations" => {
+                    proposal["stateSynthesis"]["changes"] = serde_json::json!([
+                        {"operation":"set_lifecycle","entryId":"same","lifecycle":"contested","reason":"First"},
+                        {"operation":"set_lifecycle","entryId":"same","lifecycle":"superseded","reason":"Second"}
+                    ])
+                }
+                "context_only" => {}
+                _ => unreachable!(),
+            }
+            let mut anchors = anchors;
+            if case == "context_only" {
+                anchors.values_mut().next().unwrap().chunk_id = None;
+            }
+            db.store
+                .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+            assert!(
+                db.store.preflight_synthesis(&run.id, 0).is_err(),
+                "{case} must fail"
+            );
+            assert_eq!(
+                db.store.get_research_state(&run.project_id, None)?.revision,
+                0,
+                "{case}"
+            );
+            assert_eq!(db.store.get_harness_run(&run.id)?.status, "reconciling");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_transaction_rolls_back_at_every_write_stage() -> StoreResult<()> {
+        for (table, operation) in [
+            ("research_state_revisions", "insert"),
+            ("research_entries", "insert"),
+            ("research_entry_revisions", "insert"),
+            ("research_evidence_links", "insert"),
+            ("research_entry_relations", "insert"),
+            ("harness_reflections", "insert"),
+            ("harness_runs", "update"),
+            ("research_synthesis_attempts", "update"),
+        ] {
+            let (db, run, proposal, anchors) = synthesis_fixture()?;
+            db.store
+                .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+            db.store.preflight_synthesis(&run.id, 0)?;
+            db.store.open_connection()?.execute_batch(&format!("create trigger fail_finalization before {operation} on {table} begin select raise(abort,'injected failure'); end;")).map_err(|e|e.to_string())?;
+            assert!(
+                db.store.finalize_synthesis(&run.id, 0, true).is_err(),
+                "{table}"
+            );
+            assert_eq!(
+                db.store.get_research_state(&run.project_id, None)?.revision,
+                0,
+                "{table}"
+            );
+            assert_eq!(db.store.get_harness_run(&run.id)?.status, "reconciling");
+            let reflections: i64 = db
+                .store
+                .open_connection()?
+                .query_row(
+                    "select count(*) from harness_reflections where run_id=?1",
+                    [&run.id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(reflections, 0, "{table}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_restart_recovers_only_preflighted_proposals() -> StoreResult<()> {
+        let (db, run, proposal, anchors) = synthesis_fixture()?;
+        db.store
+            .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+        db.store.preflight_synthesis(&run.id, 0)?;
+        db.store.recover_interrupted_harness_runs()?;
+        assert_eq!(db.store.get_harness_run(&run.id)?.status, "ready");
+        db.store.recover_interrupted_harness_runs()?;
+        assert_eq!(
+            db.store.get_research_state(&run.project_id, None)?.revision,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_cancelled_after_preflight_cannot_commit() -> StoreResult<()> {
+        let (db, run, proposal, anchors) = synthesis_fixture()?;
+        db.store
+            .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+        db.store.preflight_synthesis(&run.id, 0)?;
+        db.store
+            .request_codex_harness_cancellation(&run.project_id, "cancelled_by_user")?;
+        assert!(db.store.finalize_synthesis(&run.id, 0, true).is_err());
+        assert_eq!(
+            db.store.get_research_state(&run.project_id, None)?.revision,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_rechecks_source_and_vault_versions_before_commit() -> StoreResult<()> {
+        for conflict in ["extraction", "source", "vault", "state"] {
+            let (db, run, proposal, anchors) = synthesis_fixture()?;
+            db.store
+                .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+            db.store.preflight_synthesis(&run.id, 0)?;
+            let conn = db.store.open_connection()?;
+            let anchor = anchors.values().next().unwrap();
+            match conflict {
+                "extraction" => {
+                    conn.execute(
+                        "update document_extractions set updated_at='changed' where id=?1",
+                        [anchor.extraction_id.as_ref().unwrap()],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                "source" => {
+                    conn.execute(
+                        "update document_sources set status='failed' where id=?1",
+                        [&anchor.source_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                "vault" => {
+                    conn.execute("update vaults set membership_revision=membership_revision+1 where project_id=?1",[&run.project_id]).map_err(|e|e.to_string())?;
+                }
+                "state" => {
+                    db.store.create_research_entry(
+                        &run.project_id,
+                        0,
+                        &ResearchEntryDraft {
+                            kind: ResearchEntryKind::Question,
+                            epistemic_status: EpistemicStatus::ResearcherContext,
+                            text: "A new user question".into(),
+                            evidence: vec![],
+                            relations: vec![],
+                            context: vec![],
+                            reason: None,
+                        },
+                    )?;
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                db.store.finalize_synthesis(&run.id, 0, true).is_err(),
+                "{conflict}"
+            );
+            assert_eq!(
+                db.store.get_research_state(&run.project_id, None)?.revision,
+                if conflict == "state" { 1 } else { 0 }
+            );
+            assert_eq!(
+                db.store.synthesis_attempt_reports(&run.id)?[0]["committed"],
+                false
+            );
+            if conflict == "vault" {
+                db.store
+                    .save_synthesis_attempt(&run.id, 1, &proposal.to_string(), &anchors)?;
+                assert!(db
+                    .store
+                    .preflight_synthesis(&run.id, 1)
+                    .unwrap_err()
+                    .contains("Vault changed"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_large_valid_artifact_keeps_a_small_continuation() -> StoreResult<()> {
+        let (db, run, mut proposal, anchors) = synthesis_fixture()?;
+        for index in 0..12 {
+            proposal["stateSynthesis"]["changes"].as_array_mut().unwrap().push(serde_json::json!({
+                "operation":"create","handle":format!("q{index}"),"kind":"question","epistemicStatus":"speculative",
+                "statement":format!("Question {index}: {}", "bounded context ".repeat(200)),"evidence":[],"relations":[],"reason":"Explicit unresolved question"
+            }));
+        }
+        let raw = proposal.to_string();
+        assert!(
+            raw.len() > 12000
+                && raw.len() < crate::services::research::synthesis::MAX_PROPOSAL_BYTES
+        );
+        db.store
+            .save_synthesis_attempt(&run.id, 0, &raw, &anchors)?;
+        db.store.preflight_synthesis(&run.id, 0)?;
+        db.store.finalize_synthesis(&run.id, 0, true)?;
+        let history = db
+            .store
+            .list_recent_agent_run_outcomes(&run.project_id, 3, 12000)?;
+        assert_eq!(history.len(), 1);
+        assert!(history[0].outcome.state_synthesis.is_none());
+        assert_eq!(
+            db.store
+                .get_research_state(&run.project_id, None)?
+                .entries
+                .len(),
+            14
+        );
+        assert!(db
+            .store
+            .get_research_checkpoint(&run.id)?
+            .outcome
+            .unwrap()
+            .state_synthesis
+            .is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_no_change_and_interrupted_unvalidated_proposals_are_explicit() -> StoreResult<()> {
+        for prepared in [false, true] {
+            let db = test_db()?;
+            let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+            db.store.begin_codex_harness_finalization(&run.id)?;
+            let proposal =
+                serde_json::to_string(&research_outcome("Evidence was insufficient")).unwrap();
+            db.store
+                .save_synthesis_attempt(&run.id, 0, &proposal, &HashMap::new())?;
+            if prepared {
+                db.store.preflight_synthesis(&run.id, 0)?;
+            }
+            db.store.recover_interrupted_harness_runs()?;
+            assert_eq!(
+                db.store.get_harness_run(&run.id)?.status,
+                if prepared { "ready" } else { "failed" }
+            );
+            assert_eq!(
+                db.store.get_research_state(&run.project_id, None)?.revision,
+                0
+            );
+            assert_eq!(
+                db.store.get_research_checkpoint(&run.id)?.outcome.is_some(),
+                prepared
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_retention_rolls_back_with_report_failure_and_replays_once() -> StoreResult<()> {
+        for (table, operation) in [
+            ("vault_papers", "delete"),
+            ("vaults", "update"),
+            ("agent_paper_dispositions", "insert"),
+            ("harness_reflections", "insert"),
+        ] {
+            let db = test_db()?;
+            let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+            let paper =
+                paper_draft_with_pdf("temporary-addition", "https://example.test/paper.pdf");
+            db.store.add_agent_search_candidate_to_vault(
+                &run.project_id,
+                "attention",
+                "codex-test",
+                Some(&run.id),
+                "addition",
+                "payload",
+                &paper,
+            )?;
+            db.store
+                .record_agent_reader_delivery(&run.id, &run.project_id, &paper.id, 0, &[])?;
+            db.store.begin_codex_harness_finalization(&run.id)?;
+            let mut proposal = research_outcome("The candidate was not relevant");
+            proposal.paper_dispositions.push(ResearchPaperDisposition {
+                paper_id: paper.id.clone(),
+                disposition: PaperDispositionKind::Irrelevant,
+                reason: "Outside scope".into(),
+            });
+            db.store.save_synthesis_attempt(
+                &run.id,
+                0,
+                &serde_json::to_string(&proposal).unwrap(),
+                &HashMap::new(),
+            )?;
+            db.store.preflight_synthesis(&run.id, 0)?;
+            let conn = db.store.open_connection()?;
+            conn.execute_batch(&format!("create trigger fail_retention before {operation} on {table} begin select raise(abort,'injected retention failure'); end;")).map_err(|e|e.to_string())?;
+            assert!(
+                db.store.finalize_synthesis(&run.id, 0, true).is_err(),
+                "{table}"
+            );
+            assert!(db
+                .store
+                .get_library()?
+                .vault_papers
+                .iter()
+                .any(|p| p.paper_id == paper.id && p.vault_id == "attention"));
+            let disposition_count: i64 = conn
+                .query_row(
+                    "select count(*) from agent_paper_dispositions where run_id=?1",
+                    [&run.id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(disposition_count, 0, "{table}");
+            conn.execute_batch("drop trigger fail_retention")
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                db.store.finalize_synthesis(&run.id, 0, true)?.status,
+                "ready"
+            );
+            assert_eq!(
+                db.store.finalize_synthesis(&run.id, 0, true)?.status,
+                "ready"
+            );
+            assert!(!db
+                .store
+                .get_library()?
+                .vault_papers
+                .iter()
+                .any(|p| p.paper_id == paper.id && p.vault_id == "attention"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn synthesis_revision_checks_existing_kind_and_duplicate_statement() -> StoreResult<()> {
+        for wrong_kind in [false, true] {
+            let db = test_db()?;
+            let mut entry_ids = Vec::new();
+            for index in 0..2 {
+                let created = db.store.create_research_entry(
+                    "project:attention",
+                    index,
+                    &ResearchEntryDraft {
+                        kind: ResearchEntryKind::Question,
+                        epistemic_status: EpistemicStatus::ResearcherContext,
+                        text: format!("Question {index}"),
+                        evidence: vec![],
+                        relations: vec![],
+                        context: vec![],
+                        reason: None,
+                    },
+                )?;
+                entry_ids.push(created.entry.entry.id);
+            }
+            let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+            db.store.begin_codex_harness_finalization(&run.id)?;
+            let mut proposal = serde_json::to_value(research_outcome("Revised question")).unwrap();
+            proposal["stateSynthesis"]["noChangeReason"] = serde_json::Value::Null;
+            proposal["stateSynthesis"]["changes"] = serde_json::json!([{
+                "operation":"revise","entryId":entry_ids[0],"epistemicStatus":if wrong_kind {"source_supported"} else {"speculative"},
+                "statement":"Question 1","evidence":if wrong_kind {serde_json::json!([{"passageRef":"unused","relationship":"supports","explanation":"Example"}])} else {serde_json::json!([])},"relations":[],"reason":"Revision"
+            }]);
+            db.store
+                .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &HashMap::new())?;
+            let error = db.store.preflight_synthesis(&run.id, 0).unwrap_err();
+            assert!(
+                error.contains(if wrong_kind {
+                    "Only a Finding"
+                } else {
+                    "Equivalent active"
+                }),
+                "{error}"
+            );
+            assert_eq!(
+                db.store.get_research_state(&run.project_id, None)?.revision,
+                2
+            );
+        }
+        Ok(())
+    }
+
+    /// A contest link is not a premise for a revised hypothesis.
+    #[test]
+    fn synthesis_revision_requires_a_real_premise() -> StoreResult<()> {
+        let db = test_db()?;
+        let created = db.store.create_research_entry(
+            "project:attention",
+            0,
+            &ResearchEntryDraft {
+                kind: ResearchEntryKind::Hypothesis,
+                epistemic_status: EpistemicStatus::Speculative,
+                text: "Initial researcher hypothesis".into(),
+                evidence: vec![],
+                relations: vec![],
+                context: vec![],
+                reason: None,
+            },
+        )?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        db.store.begin_codex_harness_finalization(&run.id)?;
+        let mut proposal = serde_json::to_value(research_outcome("Revised hypothesis")).unwrap();
+        proposal["stateSynthesis"]["noChangeReason"] = serde_json::Value::Null;
+        proposal["stateSynthesis"]["changes"] = serde_json::json!([{
+            "operation":"revise", "entryId":created.entry.entry.id,
+            "epistemicStatus":"speculative", "statement":"Refined hypothesis",
+            "evidence":[], "relations":[{"kind":"contests", "target":created.entry.entry.id}],
+            "reason":"Consider a competing interpretation"
+        }]);
+        db.store
+            .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &HashMap::new())?;
+        assert!(db
+            .store
+            .preflight_synthesis(&run.id, 0)
+            .unwrap_err()
+            .contains("requires premise"));
+        assert_eq!(
+            db.store.get_research_state(&run.project_id, None)?.revision,
+            1
+        );
+        Ok(())
+    }
+
     #[test]
     fn stored_synthesis_allows_an_unlinked_next_direction() {
         let synthesis = research_outcome("Completed investigation")
@@ -20997,7 +21688,7 @@ mod tests {
 
         let error = validate_research_state_synthesis_shape(&synthesis, None)
             .expect_err("entry links without direction text must fail");
-        assert_eq!(error, "Next direction entry IDs require a next direction");
+        assert!(error.contains("Next direction entry IDs require a next direction"));
     }
 
     #[test]
@@ -21134,6 +21825,8 @@ mod tests {
         db.store.begin_codex_harness_finalization(&run.id)?;
         db.store
             .record_agent_state_unchanged(&run.id, "No evidence was gathered")?;
+        db.store
+            .persist_agent_run_outcome(&run.id, &research_outcome("No evidence was gathered"))?;
         db.store
             .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
 
@@ -21346,6 +22039,10 @@ mod tests {
         )?;
         db.store
             .record_agent_state_unchanged(&run.id, "No State change was warranted")?;
+        db.store.persist_agent_run_outcome(
+            &run.id,
+            &research_outcome("Retained assessed background"),
+        )?;
         db.store
             .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
 
@@ -21614,8 +22311,13 @@ mod tests {
             .contains("did not read"));
         db.store
             .record_agent_state_unchanged(&run.id, "Outcome validation failed")?;
+        assert!(db
+            .store
+            .finish_codex_harness_run(&run.id, "ready", "agent_completed")
+            .unwrap_err()
+            .contains("no persisted outcome"));
         db.store
-            .finish_codex_harness_run(&run.id, "ready", "agent_completed")?;
+            .finish_codex_harness_run(&run.id, "failed", "invalid_outcome")?;
         assert!(db
             .store
             .list_recent_agent_run_outcomes("project:attention", 3, 12_000)?
@@ -21627,19 +22329,10 @@ mod tests {
     fn missing_synthesis_prevents_a_ready_run() -> StoreResult<()> {
         let db = test_db()?;
         let run = managed_harness_run(&db, &AgentRunLimits::default())?;
-        db.store.apply_agent_state_update(
-            "project:attention",
-            0,
-            "codex-test",
-            Some(&run.id),
-            "state-before-summary-failure",
-            "state-before-summary-failure-payload",
-            vec![agent_question(
-                "summary-gap",
-                "Which conditions remain unexplained?",
-            )],
-        )?;
         db.store.begin_codex_harness_finalization(&run.id)?;
+        db.store
+            .save_synthesis_attempt(&run.id, 0, "invalid JSON", &HashMap::new())?;
+        assert!(db.store.preflight_synthesis(&run.id, 0).is_err());
         db.store.record_harness_activity(
             &run.id,
             "summary_failed",
@@ -21658,8 +22351,8 @@ mod tests {
             db.store
                 .get_research_state("project:attention", None)?
                 .current_revision,
-            1,
-            "summary failure must not roll back validated State writes"
+            0,
+            "invalid final proposals must not create partial State writes"
         );
         assert!(db
             .store

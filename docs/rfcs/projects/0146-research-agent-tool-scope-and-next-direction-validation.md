@@ -83,6 +83,11 @@ RFC 0143's stronger wording is superseded by this rule.
 
 ## Verification
 
+These original checks inspected configuration, not the live model's tool
+catalog. RFC 0147 adds runtime catalog inspection and disables inherited MCP
+servers in each thread, including the tool-free correction thread. See its
+verification record for live acceptance outcomes.
+
 - Codex thread configuration exposes exactly the 14 managed research tools and
   omits `state_update`.
 - Focused controller and storage tests cover unlinked next directions and the

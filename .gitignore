@@ -13,6 +13,9 @@ vite.config.ts.timestamp-*
 .cocoindex_code/
 .pnpm-store/
 
+# Generated research evaluation reports; keep test code and corpus fixtures tracked.
+/artifacts/research-eval/
+
 # Native app resources installed locally by setup scripts.
 src-tauri/resources/pdfium/libpdfium.dylib
 src-tauri/resources/obscura/obscura
