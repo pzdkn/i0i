@@ -72,29 +72,32 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Save exact anchors only after Reader has charged and recorded delivery.
-    pub(crate) fn persist_delivered_anchors(
-        &self,
+    /// Save anchors inside the same transaction as successful passage delivery.
+    pub(super) fn persist_delivered_anchors_on(
+        tx: &Connection,
         run_id: &str,
         anchors: &HashMap<String, PassageAnchor>,
     ) -> StoreResult<()> {
-        let mut conn = self.open_connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| e.to_string())?;
+        let run = read_harness_run(tx, run_id)?;
+        if !matches!(
+            run.status.as_str(),
+            "planning" | "searching" | "assessing" | "ranking"
+        ) {
+            return Err("Managed Research Run is no longer active".into());
+        }
         for (reference, anchor) in anchors {
             tx.execute("insert into agent_passage_anchors (run_id,passage_ref,anchor_json,source_version) values (?1,?2,?3,?4) on conflict do nothing",
                 params![run_id,reference,serde_json::to_string(anchor).map_err(|e|e.to_string())?,source_version(&tx,anchor)?]).map_err(|e|e.to_string())?;
         }
         let total: i64 = tx.query_row("select coalesce(sum(length(json_extract(anchor_json,'$.quote'))),0) from agent_passage_anchors where run_id=?1",[run_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-        let limit = read_harness_run(&tx, run_id)?
+        let limit = run
             .agent_limits
             .ok_or("Missing Run limits")?
             .maximum_returned_text_chars;
         if total > limit as i64 {
             return Err("Evidence snapshot exceeds Run read budget".into());
         }
-        tx.commit().map_err(|e| e.to_string())
+        Ok(())
     }
 
     /// Reload the evidence required for synthesis without relying on MCP memory.

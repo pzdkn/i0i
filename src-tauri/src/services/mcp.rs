@@ -443,25 +443,24 @@ impl I0iMcpHandler {
                 ))
             })
             .collect::<Result<Vec<_>, rmcp::ErrorData>>()?;
+        let anchors = self
+            .collect_delivery_anchors(
+                &citations
+                    .into_iter()
+                    .map(|(_, reference)| reference)
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
         self.store
-            .record_agent_question_citations(run_id, &grant.project_id, &citations)
-            .map_err(search_write_failure)?;
-        self.capture_delivered_anchors(
-            run_id,
-            &citations
-                .into_iter()
-                .map(|(_, reference)| reference)
-                .collect::<Vec<_>>(),
-        )
-        .await
+            .record_agent_question_citations(run_id, &grant.project_id, &anchors)
+            .map_err(internal_failure)
     }
 
-    /// Persist the original passages before exposing their references to the agent.
-    async fn capture_delivered_anchors(
+    /// Resolve session references before storage atomically records their delivery.
+    async fn collect_delivery_anchors(
         &self,
-        run_id: &str,
         references: &[String],
-    ) -> Result<(), rmcp::ErrorData> {
+    ) -> Result<HashMap<String, PassageAnchor>, rmcp::ErrorData> {
         let registered = self.passage_anchors.read().await;
         let mut anchors = HashMap::new();
         for reference in references {
@@ -470,9 +469,7 @@ impl I0iMcpHandler {
                 .ok_or_else(|| internal_failure("Delivered passage has no anchor".into()))?;
             anchors.insert(reference.clone(), passage.anchor.clone());
         }
-        self.store
-            .persist_delivered_anchors(run_id, &anchors)
-            .map_err(internal_failure)
+        Ok(anchors)
     }
 
     /// Validate readiness, account work, answer once, and return structured evidence.
@@ -872,17 +869,16 @@ impl I0iMcpHandler {
                 .iter()
                 .map(|passage| passage.passage_ref.clone())
                 .collect();
+            let anchors = self.collect_delivery_anchors(&passage_refs).await?;
             self.store
                 .record_agent_reader_delivery(
                     run_id,
                     &grant.project_id,
                     &input.paper_id,
                     returned_text_chars,
-                    &passage_refs,
+                    &anchors,
                 )
                 .map_err(search_write_failure)?;
-            self.capture_delivered_anchors(run_id, &passage_refs)
-                .await?;
         }
         trace_tool(
             &grant,
@@ -5894,6 +5890,13 @@ mod tests {
                 std::env::temp_dir().join(format!("i0i-synthesis-{}", Uuid::new_v4().simple()));
             fs::create_dir_all(&root).unwrap();
             let store = LibraryStore::at_path(root.join("library.sqlite"));
+            store.init().unwrap();
+            // Reproduce the installed schema, then exercise its normal upgrade
+            // through a managed run using real HTTP MCP and a local fake model.
+            rusqlite::Connection::open(root.join("library.sqlite"))
+                .unwrap()
+                .execute_batch("alter table agent_passage_anchors drop column source_version;")
+                .unwrap();
             store.init().unwrap();
             let vault = empty_project_vault(&store, correction);
             let paper = paper_draft("fixture:html", None);

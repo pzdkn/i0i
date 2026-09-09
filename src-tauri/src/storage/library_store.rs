@@ -3865,14 +3865,13 @@ impl LibraryStore {
         )
     }
 
-    /// Charge exact text returned by Reader to the owning managed Run.
-    pub fn record_agent_reader_delivery(
+    /// Charge attempted Reader work even if persisting its response later fails.
+    fn record_agent_reader_attempt(
         &self,
         run_id: &str,
         project_id: &str,
         paper_id: &str,
         returned_text_chars: u64,
-        passage_refs: &[String],
     ) -> StoreResult<()> {
         let mut conn = self.open_connection()?;
         conn.busy_timeout(Duration::from_secs(5))
@@ -3949,7 +3948,28 @@ impl LibraryStore {
             params![run_id, paper_id, returned_text_chars],
         )
         .map_err(|error| error.to_string())?;
-        for passage_ref in passage_refs {
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// Persist successful Reader delivery and exact anchors in one transaction.
+    pub fn record_agent_reader_delivery(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        paper_id: &str,
+        returned_text_chars: u64,
+        anchors: &HashMap<String, crate::services::mcp::PassageAnchor>,
+    ) -> StoreResult<()> {
+        self.record_agent_reader_attempt(run_id, project_id, paper_id, returned_text_chars)?;
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let passage_refs: Vec<String> = anchors.keys().cloned().collect();
+        for passage_ref in &passage_refs {
+            if anchors[passage_ref].paper_id != paper_id {
+                return Err("Reader anchor belongs to a different paper".into());
+            }
             tx.execute(
                 "insert into agent_reader_passages
                    (run_id, passage_ref, paper_id, delivered_at)
@@ -3959,6 +3979,7 @@ impl LibraryStore {
             )
             .map_err(|error| error.to_string())?;
         }
+        Self::persist_delivered_anchors_on(&tx, run_id, anchors)?;
         append_structured_harness_event(
             &tx,
             run_id,
@@ -4118,13 +4139,19 @@ impl LibraryStore {
         &self,
         run_id: &str,
         project_id: &str,
-        citations: &[(String, String)],
+        anchors: &HashMap<String, crate::services::mcp::PassageAnchor>,
     ) -> StoreResult<()> {
+        let citations: Vec<(String, String)> = anchors
+            .iter()
+            .map(|(reference, anchor)| (anchor.paper_id.clone(), reference.clone()))
+            .collect();
         if citations.is_empty() {
             return Ok(());
         }
         let mut conn = self.open_connection()?;
-        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
         let active: bool = tx
             .query_row(
                 "select exists(select 1 from harness_runs
@@ -4137,8 +4164,8 @@ impl LibraryStore {
         if !active {
             return Err("Managed Research Run is no longer active".to_string());
         }
-        for (paper_id, passage_ref) in citations {
-            let was_delivered: bool = tx
+        for (paper_id, passage_ref) in &citations {
+            let was_admitted: bool = tx
                 .query_row(
                     "select exists(select 1 from agent_reader_usage
                      where run_id = ?1 and paper_id = ?2)",
@@ -4146,7 +4173,7 @@ impl LibraryStore {
                     |row| row.get(0),
                 )
                 .map_err(|error| error.to_string())?;
-            if !was_delivered {
+            if !was_admitted {
                 return Err("Question citation refers to unread evidence".to_string());
             }
             tx.execute(
@@ -4158,6 +4185,7 @@ impl LibraryStore {
             )
             .map_err(|error| error.to_string())?;
         }
+        Self::persist_delivered_anchors_on(&tx, run_id, anchors)?;
         append_structured_harness_event(
             &tx,
             run_id,
@@ -4368,14 +4396,7 @@ impl LibraryStore {
             )
             .map_err(|error| error.to_string())?;
         }
-        let (attempted, read): (i64, i64) = tx
-            .query_row(
-                "select count(*), coalesce(sum(returned_text_chars > 0), 0)
-                 from agent_reader_usage where run_id = ?1",
-                params![run_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|error| error.to_string())?;
+        let (attempted, read) = read_agent_delivery_counts(tx, run_id)?;
         let retained = additions.len() as i64 - removed;
         append_structured_harness_event(
             &tx,
@@ -4541,7 +4562,7 @@ impl LibraryStore {
             )
             .map_err(|error| error.to_string())?;
         let summary = format!(
-            "Read {papers_read} papers ({returned_chars} characters), retained {retained_papers} papers, and committed {state_iterations} State revisions"
+            "Attempted evidence access for {papers_read} papers ({returned_chars} characters charged), retained {retained_papers} papers, and committed {state_iterations} State revisions"
         );
         tx.execute(
             "update harness_runs
@@ -7752,6 +7773,14 @@ impl LibraryStore {
             "text not null default 'legacy_search'",
         )?;
         add_column_if_missing(conn, "harness_runs", "runtime_model", "text")?;
+        // Earlier installations created anchors before source versions existed.
+        // Empty versions stay explicitly unknown; only a new read supplies one.
+        add_column_if_missing(
+            conn,
+            "agent_passage_anchors",
+            "source_version",
+            "text not null default ''",
+        )?;
         for column in ["model_id", "thread_id", "turn_id"] {
             add_column_if_missing(conn, "research_synthesis_attempts", column, "text")?;
         }
@@ -8483,6 +8512,21 @@ fn read_harness_run(conn: &Connection, run_id: &str) -> StoreResult<HarnessRun> 
     .map_err(|error| error.to_string())
 }
 
+/// Count attempted papers separately from papers with durably delivered text.
+fn read_agent_delivery_counts(conn: &Connection, run_id: &str) -> StoreResult<(i64, i64)> {
+    conn.query_row(
+        "select count(*), coalesce(sum(exists(
+            select 1 from agent_reader_passages p join agent_passage_anchors a
+              on a.run_id=p.run_id and a.passage_ref=p.passage_ref
+            where p.run_id=u.run_id and p.paper_id=u.paper_id
+              and a.source_version <> '' and length(json_extract(a.anchor_json, '$.quote')) > 0
+         )), 0) from agent_reader_usage u where run_id = ?1",
+        [run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<ResearchCheckpoint> {
     let run = read_harness_run(conn, run_id)?;
     let change_set = conn
@@ -8558,14 +8602,7 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
     } else {
         legacy_accepted_candidate_count
     };
-    let (attempted_paper_count, read_paper_count): (i64, i64) = conn
-        .query_row(
-            "select count(*), coalesce(sum(returned_text_chars > 0), 0)
-             from agent_reader_usage where run_id = ?1",
-            params![run_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|error| error.to_string())?;
+    let (attempted_paper_count, read_paper_count) = read_agent_delivery_counts(conn, run_id)?;
     let (unavailable_paper_count, removed_paper_count, mut retained_paper_count): (i64, i64, i64) =
         conn.query_row(
             "select coalesce(sum(disposition = 'unavailable'), 0),
@@ -21092,6 +21129,151 @@ mod tests {
         }
     }
 
+    /// Return an exact extracted source anchor for delivery contract tests.
+    fn passage_anchor_fixture(
+        db: &TestDb,
+        paper_id: &str,
+        reference: &str,
+    ) -> StoreResult<HashMap<String, crate::services::mcp::PassageAnchor>> {
+        let extraction = extracted_paper(db, paper_id, &[("paragraph", "Exact source text.")])?;
+        let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
+        Ok(HashMap::from([(
+            reference.into(),
+            crate::services::mcp::PassageAnchor {
+                paper_id: chunk.paper_id,
+                source_id: chunk.source_id,
+                extraction_id: Some(chunk.extraction_id),
+                chunk_id: Some(chunk.id),
+                page_start: Some(1),
+                page_end: Some(1),
+                source_start: chunk.source_start,
+                source_end: chunk.source_end,
+                quote: chunk.text,
+            },
+        )]))
+    }
+
+    /// Upgrade an already populated anchor table, not only a fresh database.
+    #[test]
+    fn passage_delivery_migrates_legacy_anchor_versions() -> StoreResult<()> {
+        let (db, run, proposal, anchors) = synthesis_fixture()?;
+        db.store
+            .open_connection()?
+            .execute_batch("alter table agent_passage_anchors drop column source_version;")
+            .map_err(|e| e.to_string())?;
+        db.store.init()?;
+        db.store.init()?;
+        let conn = db.store.open_connection()?;
+        let version: String = conn
+            .query_row(
+                "select source_version from agent_passage_anchors where run_id=?1",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert_eq!(version, "", "Do not invent provenance for existing anchors");
+        db.store
+            .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+        assert!(db
+            .store
+            .preflight_synthesis(&run.id, 0)
+            .unwrap_err()
+            .contains("Source/project conflict"));
+        Ok(())
+    }
+
+    /// Anchor failures roll back successes, while attempted work remains charged.
+    #[test]
+    fn passage_delivery_rolls_back_reader_and_question_successes() -> StoreResult<()> {
+        for question in [false, true] {
+            let db = test_db()?;
+            let anchors = passage_anchor_fixture(&db, "vaswani2017", "passage:atomic")?;
+            let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+            let conn = db.store.open_connection()?;
+            conn.execute_batch(
+                "create trigger reject_anchor before insert on agent_passage_anchors
+                begin select raise(abort, 'injected anchor failure'); end;",
+            )
+            .map_err(|e| e.to_string())?;
+            let chars = anchors["passage:atomic"].quote.chars().count() as u64;
+            let result = if question {
+                db.store.admit_agent_evidence_question(
+                    &run.id,
+                    &run.project_id,
+                    &[AgentQuestionDelivery {
+                        paper_id: "vaswani2017".into(),
+                        returned_text_chars: chars,
+                    }],
+                )?;
+                db.store
+                    .record_agent_question_citations(&run.id, &run.project_id, &anchors)
+            } else {
+                db.store.record_agent_reader_delivery(
+                    &run.id,
+                    &run.project_id,
+                    "vaswani2017",
+                    chars,
+                    &anchors,
+                )
+            };
+            assert!(result.unwrap_err().contains("injected anchor failure"));
+            assert_eq!(read_agent_delivery_counts(&conn, &run.id)?, (1, 0));
+            let checkpoint = db.store.get_research_checkpoint(&run.id)?;
+            assert_eq!(checkpoint.read_paper_count, 0);
+            for table in ["agent_reader_passages", "agent_passage_anchors"] {
+                let count: i64 = conn
+                    .query_row(
+                        &format!("select count(*) from {table} where run_id=?1"),
+                        [&run.id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(count, 0, "{table} leaked a successful delivery");
+            }
+            let events = db.store.get_harness_snapshot(&run.project_id)?.events;
+            assert!(!events.iter().any(|e| matches!(
+                e.kind.as_str(),
+                "agent_passages_delivered" | "agent_evidence_question_answered"
+            )));
+            let charged: i64 = conn
+                .query_row(
+                    "select returned_text_chars from agent_reader_usage where run_id=?1",
+                    [&run.id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(charged, chars as i64);
+            assert_eq!(
+                db.store.get_harness_run(&run.id)?.llm_call_count,
+                u32::from(question)
+            );
+
+            conn.execute_batch("drop trigger reject_anchor;")
+                .map_err(|e| e.to_string())?;
+            if question {
+                db.store
+                    .record_agent_question_citations(&run.id, &run.project_id, &anchors)?;
+            } else {
+                db.store.record_agent_reader_delivery(
+                    &run.id,
+                    &run.project_id,
+                    "vaswani2017",
+                    chars,
+                    &anchors,
+                )?;
+            }
+            assert_eq!(read_agent_delivery_counts(&conn, &run.id)?, (1, 1));
+            assert_eq!(
+                db.store.captured_run_evidence(&run.id)?["passage:atomic"].quote,
+                anchors["passage:atomic"].quote
+            );
+            db.store.begin_codex_harness_finalization(&run.id)?;
+            let retention = db.store.finalize_agent_paper_retention(&run.id, &[])?;
+            assert_eq!((retention.attempted, retention.read), (1, 1));
+        }
+        Ok(())
+    }
+
     /// Build model JSON and a genuinely delivered PDF passage for finalization tests.
     fn synthesis_fixture() -> StoreResult<(
         TestDb,
@@ -21108,13 +21290,6 @@ mod tests {
         let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
         let run = managed_harness_run(&db, &AgentRunLimits::default())?;
         let reference = "passage:delivered".to_string();
-        db.store.record_agent_reader_delivery(
-            &run.id,
-            &run.project_id,
-            "vaswani2017",
-            chunk.text.chars().count() as u64,
-            &[reference.clone()],
-        )?;
         let anchors = HashMap::from([(
             reference.clone(),
             crate::services::mcp::PassageAnchor {
@@ -21129,7 +21304,13 @@ mod tests {
                 quote: chunk.text,
             },
         )]);
-        db.store.persist_delivered_anchors(&run.id, &anchors)?;
+        db.store.record_agent_reader_delivery(
+            &run.id,
+            &run.project_id,
+            "vaswani2017",
+            anchors[&reference].quote.chars().count() as u64,
+            &anchors,
+        )?;
         let mut proposal = serde_json::to_value(research_outcome(
             "A bounded finding and a follow-up question",
         ))
@@ -21521,8 +21702,13 @@ mod tests {
                 "payload",
                 &paper,
             )?;
-            db.store
-                .record_agent_reader_delivery(&run.id, &run.project_id, &paper.id, 0, &[])?;
+            db.store.record_agent_reader_delivery(
+                &run.id,
+                &run.project_id,
+                &paper.id,
+                0,
+                &HashMap::new(),
+            )?;
             db.store.begin_codex_harness_finalization(&run.id)?;
             let mut proposal = research_outcome("The candidate was not relevant");
             proposal.paper_dispositions.push(ResearchPaperDisposition {
@@ -21893,23 +22079,35 @@ mod tests {
             "project:attention",
             "vaswani2017",
             6,
-            &[],
+            &HashMap::new(),
         )?;
         db.store.record_agent_reader_delivery(
             &run.id,
             "project:attention",
             "vaswani2017",
             4,
-            &[],
+            &HashMap::new(),
         )?;
         assert!(db
             .store
-            .record_agent_reader_delivery(&run.id, "project:attention", "vaswani2017", 1, &[])
+            .record_agent_reader_delivery(
+                &run.id,
+                "project:attention",
+                "vaswani2017",
+                1,
+                &HashMap::new()
+            )
             .expect_err("repeat reads still consume returned-text budget")
             .contains("returned-text"));
         assert!(db
             .store
-            .record_agent_reader_delivery(&run.id, "project:attention", "caron2021", 1, &[])
+            .record_agent_reader_delivery(
+                &run.id,
+                "project:attention",
+                "caron2021",
+                1,
+                &HashMap::new()
+            )
             .expect_err("new papers consume the distinct-paper budget")
             .contains("paper-read"));
         Ok(())
@@ -21930,7 +22128,7 @@ mod tests {
         db.store.record_agent_question_citations(
             &run.id,
             "project:attention",
-            &[("vaswani2017".to_string(), "passage:question".to_string())],
+            &passage_anchor_fixture(&db, "vaswani2017", "passage:question")?,
         )?;
         db.store.begin_codex_harness_finalization(&run.id)?;
         db.store
@@ -22026,8 +22224,13 @@ mod tests {
             "vault-payload-1",
             &paper,
         )?;
-        db.store
-            .record_agent_reader_delivery(&run.id, "project:attention", &paper.id, 20, &[])?;
+        db.store.record_agent_reader_delivery(
+            &run.id,
+            "project:attention",
+            &paper.id,
+            20,
+            &passage_anchor_fixture(&db, &paper.id, "passage:background")?,
+        )?;
         db.store.begin_codex_harness_finalization(&run.id)?;
         db.store.finalize_agent_paper_retention(
             &run.id,
@@ -22230,12 +22433,17 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         for (paper_id, _, returned_chars) in &cases {
+            let anchors = if *returned_chars > 0 {
+                passage_anchor_fixture(&db, paper_id, &format!("passage:{paper_id}"))?
+            } else {
+                HashMap::new()
+            };
             db.store.record_agent_reader_delivery(
                 &run.id,
                 "project:attention",
                 paper_id,
                 *returned_chars,
-                &[],
+                &anchors,
             )?;
         }
         db.store.begin_codex_harness_finalization(&run.id)?;
@@ -22275,7 +22483,7 @@ mod tests {
             "project:attention",
             "vaswani2017",
             20,
-            &["passage:observed".to_string()],
+            &passage_anchor_fixture(&db, "vaswani2017", "passage:observed")?,
         )?;
         db.store.begin_codex_harness_finalization(&run.id)?;
         let mut outcome = research_outcome("The paper supports the bounded observation.");
@@ -22418,7 +22626,7 @@ mod tests {
             "project:attention",
             "vaswani2017",
             20,
-            &["passage:observed".to_string()],
+            &passage_anchor_fixture(&db, "vaswani2017", "passage:observed")?,
         )?;
         db.store.apply_agent_state_update(
             "project:attention",
