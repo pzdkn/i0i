@@ -1,6 +1,6 @@
 # Today's RFC List
 
-Updated: 2026-09-02
+Updated: 2026-09-09
 
 This is the working index for active RFCs and older documents reviewed on
 2026-08-24.
@@ -39,7 +39,11 @@ This is the working index for active RFCs and older documents reviewed on
 Implementation is landed for these RFCs. Any remaining manual or live
 verification is noted below and remains reflected in each RFC's formal status.
 
-1. [RFC 0124: Simple incremental Project Research](rfcs/projects/0124-simple-incremental-project-research.md)
+1. [RFC 0153: Agent-neutral resilient scholarly search](rfcs/projects/0153-agent-neutral-resilient-scholarly-search.md)
+   — Quick Find and Project Research rotate DuckDuckGo, Ecosia, and Brave,
+   retain partial results, expose provider outcomes, and fail honestly when all
+   free browser providers are unavailable.
+2. [RFC 0124: Simple incremental Project Research](rfcs/projects/0124-simple-incremental-project-research.md)
    — one instruction and one bounded Run now enrich the Project automatically;
    older Runs, settings, and technical Activity are progressively disclosed.
 2. [RFC 0123: Reliable Harness planner responses and Run smoke test](rfcs/projects/0123-reliable-harness-planner-responses-and-run-smoke-test.md)

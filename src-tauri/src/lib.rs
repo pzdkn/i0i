@@ -176,12 +176,13 @@ pub fn run() {
             )
             .start()
             .map_err(std::io::Error::other)?;
-            let chat_browser_discovery = commands::discovery::browser::BrowserDiscoverySource::new(
-                source_acquisition.clone(),
-                discovery_providers.openalex.clone(),
-                discovery_providers.arxiv.clone(),
-                commands::discovery::browser::BrowserDiscoveryConfig::load(&app.handle()),
-            );
+            let chat_browser_discovery =
+                commands::discovery::browser::BrowserDiscoverySource::new_shared(
+                    source_acquisition.clone(),
+                    discovery_providers.openalex.clone(),
+                    discovery_providers.arxiv.clone(),
+                    commands::discovery::browser::BrowserDiscoveryConfig::load(&app.handle()),
+                );
             let chat_research = services::chat::AppResearchToolbox::new(
                 store.clone(),
                 search_manager.clone(),

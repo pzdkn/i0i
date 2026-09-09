@@ -183,7 +183,13 @@ export type DiscoverySearchResponse = {
 
 export type DiscoveryProgress = {
   query: string;
-  stage: "searching" | "provisional" | "resolving" | "resolved" | "ranking";
+  stage:
+    | "searching"
+    | "provider_attempt"
+    | "provisional"
+    | "resolving"
+    | "resolved"
+    | "ranking";
   message: string;
   candidates: DiscoverySearchResponse["candidates"];
 };

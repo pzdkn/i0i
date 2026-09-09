@@ -362,6 +362,11 @@ impl SearchManager {
                 activity_event(&progress);
             let activity_error = match &progress {
                 Progress::SearchFailed { error, .. } => Some(error.as_str()),
+                Progress::ProviderAttempt { status, reason, .. }
+                    if !matches!(status.as_str(), "succeeded" | "empty") =>
+                {
+                    reason.as_deref()
+                }
                 _ => None,
             };
             let _ = progress_store.append_agent_search_activity(
@@ -681,6 +686,40 @@ fn activity_event(
             None,
             None,
         ),
+        Progress::ProviderAttempt {
+            query,
+            provider,
+            status,
+            count,
+            elapsed_ms,
+            reason,
+        } => {
+            let event_kind = match status.as_str() {
+                "succeeded" => "browser_provider_succeeded",
+                "empty" => "browser_provider_empty",
+                _ => "browser_provider_failed",
+            };
+            let elapsed_ms = u64::try_from(*elapsed_ms).unwrap_or(u64::MAX);
+            let summary = match reason {
+                Some(reason) => format!("{provider} {status}: {reason}"),
+                None => format!("{provider} returned {count} candidates"),
+            };
+            (
+                event_kind,
+                summary,
+                Some(serde_json::json!({
+                    "provider": provider,
+                    "query": query.chars().take(500).collect::<String>(),
+                    "status": status,
+                    "candidateCount": count,
+                    "elapsedMs": elapsed_ms,
+                    "reason": reason,
+                })),
+                "searching",
+                Some(*count as i64),
+                None,
+            )
+        }
         Progress::Deduped { unique } => (
             "candidates_deduplicated",
             format!("Retained {unique} unique candidates"),
@@ -770,6 +809,20 @@ fn describe(progress: &Progress) -> (SearchRunStatus, String, (u32, u32, u32)) {
             SearchRunStatus::Searching,
             format!("{provider} failed: {error}"),
             (0, 0, 0),
+        ),
+        Progress::ProviderAttempt {
+            provider,
+            status,
+            count,
+            reason,
+            ..
+        } => (
+            SearchRunStatus::Searching,
+            match reason {
+                Some(reason) => format!("{provider} {status}: {reason}"),
+                None => format!("{provider} returned {count}"),
+            },
+            (*count as u32, 0, 0),
         ),
         Progress::Deduped { unique } => (
             SearchRunStatus::Searching,

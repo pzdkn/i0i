@@ -14591,6 +14591,14 @@ fn validate_harness_event_detail(
         "provider_query_started" => &[("provider", "string"), ("query", "string")],
         "provider_query_completed" => &[("provider", "string"), ("candidateCount", "integer")],
         "provider_query_failed" => &[("provider", "string")],
+        "browser_provider_succeeded" | "browser_provider_empty" | "browser_provider_failed" => &[
+            ("provider", "string"),
+            ("query", "string"),
+            ("status", "string"),
+            ("candidateCount", "integer"),
+            ("elapsedMs", "integer"),
+            ("reason", "nullable_string"),
+        ],
         "candidates_deduplicated" => &[("uniqueCandidates", "integer")],
         "candidates_inspected" | "candidate_metadata_resolving" | "candidates_ranking" => {
             &[("candidateCount", "integer")]
@@ -22991,5 +22999,19 @@ mod tests {
             "validated writes survive a later agent failure"
         );
         Ok(())
+    }
+
+    #[test]
+    fn validates_structured_browser_provider_activity() {
+        let detail = serde_json::json!({
+            "provider": "duckduckgo",
+            "query": "causal transformer circuits",
+            "status": "challenged",
+            "candidateCount": 0,
+            "elapsedMs": 412,
+            "reason": "bot challenge returned",
+        });
+
+        assert!(validate_harness_event_detail("browser_provider_failed", Some(&detail)).is_ok());
     }
 }

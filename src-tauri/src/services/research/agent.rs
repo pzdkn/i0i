@@ -87,15 +87,42 @@ pub struct RoundTrace {
 /// Progress signals emitted as the loop runs (mapped to events by the manager).
 #[derive(Debug, Clone)]
 pub enum Progress {
-    Planning { iteration: u32 },
-    Searching { provider: String, text: String },
-    SearchResult { provider: String, count: usize },
-    SearchFailed { provider: String, error: String },
-    Deduped { unique: usize },
-    CandidatePreview { candidates: Vec<PaperCandidate> },
-    Resolving { count: usize },
+    Planning {
+        iteration: u32,
+    },
+    Searching {
+        provider: String,
+        text: String,
+    },
+    SearchResult {
+        provider: String,
+        count: usize,
+    },
+    SearchFailed {
+        provider: String,
+        error: String,
+    },
+    ProviderAttempt {
+        query: String,
+        provider: String,
+        status: String,
+        count: usize,
+        elapsed_ms: u128,
+        reason: Option<String>,
+    },
+    Deduped {
+        unique: usize,
+    },
+    CandidatePreview {
+        candidates: Vec<PaperCandidate>,
+    },
+    Resolving {
+        count: usize,
+    },
     Assessing,
-    Ranking { count: usize },
+    Ranking {
+        count: usize,
+    },
 }
 
 /// Run the bounded agent loop. `on` receives progress signals; `cancelled` is
@@ -151,6 +178,7 @@ where
         let allowance = query_budget_for_round(iteration, BASE_QUERIES_PER_ROUND) as usize;
         let mut queries_issued = 0u32;
         let mut queries_skipped_retired = 0u32;
+        let mut query_errors = Vec::new();
         let before_round = pool.len();
         let known_before_round = pool.iter().map(candidate_dedup_key).collect::<HashSet<_>>();
         // Per-provider deltas for this round, folded into the tallies after it.
@@ -192,6 +220,24 @@ where
                         .search_with_progress(&query, &query_constraints, &|source_progress| {
                             match source_progress {
                                 SourceProgress::SearchingWeb => {}
+                                SourceProgress::SearchingProvider(provider) => emit_progress(
+                                    progress_sink,
+                                    Progress::Searching {
+                                        provider,
+                                        text: query.text.clone(),
+                                    },
+                                ),
+                                SourceProgress::ProviderAttempt(attempt) => emit_progress(
+                                    progress_sink,
+                                    Progress::ProviderAttempt {
+                                        query: query.text.clone(),
+                                        provider: attempt.provider,
+                                        status: attempt.status.as_str().to_string(),
+                                        count: attempt.candidate_count,
+                                        elapsed_ms: attempt.elapsed_ms,
+                                        reason: attempt.reason,
+                                    },
+                                ),
                                 SourceProgress::Provisional(candidates) => emit_progress(
                                     progress_sink,
                                     Progress::CandidatePreview { candidates },
@@ -230,13 +276,11 @@ where
                         tally.2.extend(found.iter().map(candidate_dedup_key));
                         pool.append(&mut found);
                     }
-                    Err(error) => emit_progress(
-                        &on,
-                        Progress::SearchFailed {
-                            provider,
-                            error: error.to_string(),
-                        },
-                    ),
+                    Err(error) => emit_progress(&on, {
+                        let error = error.to_string();
+                        query_errors.push(error.clone());
+                        Progress::SearchFailed { provider, error }
+                    }),
                 }
             }
         }
@@ -282,6 +326,24 @@ where
             match source
                 .search_with_progress(&query, &query_constraints, &|progress| match progress {
                     SourceProgress::SearchingWeb => {}
+                    SourceProgress::SearchingProvider(provider) => emit_progress(
+                        &on,
+                        Progress::Searching {
+                            provider,
+                            text: query.text.clone(),
+                        },
+                    ),
+                    SourceProgress::ProviderAttempt(attempt) => emit_progress(
+                        &on,
+                        Progress::ProviderAttempt {
+                            query: query.text.clone(),
+                            provider: attempt.provider,
+                            status: attempt.status.as_str().to_string(),
+                            count: attempt.candidate_count,
+                            elapsed_ms: attempt.elapsed_ms,
+                            reason: attempt.reason,
+                        },
+                    ),
                     SourceProgress::Provisional(candidates) => {
                         emit_progress(&on, Progress::CandidatePreview { candidates })
                     }
@@ -316,11 +378,13 @@ where
                     pool.append(&mut found);
                 }
                 Err(error) => {
+                    let error = error.to_string();
+                    query_errors.push(error.clone());
                     emit_progress(
                         &on,
                         Progress::SearchFailed {
                             provider: provider.clone(),
-                            error: error.to_string(),
+                            error,
                         },
                     );
                 }
@@ -341,6 +405,12 @@ where
             );
         }
         usage.candidate_count = new_count(&pool, &inputs.existing_keys);
+        if queries_issued > 0 && pool.is_empty() && query_errors.len() == queries_issued as usize {
+            return Err(ResearchError::new(format!(
+                "Every focused query exhausted its search providers: {}",
+                query_errors.join("; ")
+            )));
+        }
 
         // What the round actually added, after dedup — the number R1.4 needs.
         let round_gain = pool.len().saturating_sub(before_round) as u32;
@@ -744,6 +814,26 @@ mod tests {
         max_active: AtomicU32,
     }
 
+    struct FailingBrowserSource;
+
+    #[async_trait]
+    impl CandidateSource for FailingBrowserSource {
+        fn transport_name(&self) -> Option<&'static str> {
+            Some("web")
+        }
+
+        async fn search(
+            &self,
+            query: &Query,
+            _constraints: &SearchConstraints,
+        ) -> Result<Vec<PaperCandidate>, ResearchError> {
+            Err(ResearchError::new(format!(
+                "{} exhausted: brave=challenged; ecosia=unavailable",
+                query.text
+            )))
+        }
+    }
+
     #[async_trait]
     impl CandidateSource for ConcurrentBrowserSource {
         fn transport_name(&self) -> Option<&'static str> {
@@ -860,6 +950,38 @@ mod tests {
 
         assert_eq!(outcome.ranked.len(), 3);
         assert!(source.max_active.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn every_failed_browser_query_fails_the_search_honestly() {
+        let planner = FakePlanner::new(0).with_query_count(3);
+        let search_constraints = constraints(20);
+        let strategy = Depth::Standard.budget();
+        let inputs = RunInputs {
+            goal: "goal",
+            constraints: &search_constraints,
+            strategy: &strategy,
+            existing_keys: HashSet::new(),
+        };
+
+        let result = run(
+            &planner,
+            &FailingBrowserSource,
+            &EmbeddingReranker::disabled(),
+            inputs,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("provider exhaustion must not become an empty successful search"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("Every focused query exhausted its search providers"));
+        assert_eq!(planner.plan_calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

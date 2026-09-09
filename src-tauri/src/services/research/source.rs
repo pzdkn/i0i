@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::commands::discovery::browser::{BrowserDiscoveryProgress, BrowserDiscoverySource};
+use crate::commands::discovery::browser::{
+    BrowserDiscoveryProgress, BrowserDiscoverySource, BrowserProviderAttempt,
+};
 use crate::commands::discovery::orchestrator::DiscoveryOrchestrator;
 use crate::commands::discovery::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
@@ -56,6 +58,8 @@ pub trait CandidateSource: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum SourceProgress {
     SearchingWeb,
+    SearchingProvider(String),
+    ProviderAttempt(BrowserProviderAttempt),
     Provisional(Vec<PaperCandidate>),
     ResolvingMetadata(usize),
     Resolved(usize),
@@ -78,7 +82,7 @@ impl BrowserCandidateSource {
         openalex: OpenAlexProvider,
         arxiv: ArxivProvider,
     ) -> Self {
-        Self::new(BrowserDiscoverySource::new(
+        Self::new(BrowserDiscoverySource::new_shared(
             browser,
             openalex,
             arxiv,
@@ -98,6 +102,12 @@ impl BrowserCandidateSource {
             .discover_with_resolvers(&query.text, limit, &constraints.providers, &|progress| {
                 let progress = match progress {
                     BrowserDiscoveryProgress::SearchingWeb => SourceProgress::SearchingWeb,
+                    BrowserDiscoveryProgress::SearchingProvider { provider } => {
+                        SourceProgress::SearchingProvider(provider)
+                    }
+                    BrowserDiscoveryProgress::ProviderAttempt(attempt) => {
+                        SourceProgress::ProviderAttempt(attempt)
+                    }
                     BrowserDiscoveryProgress::Provisional(candidates) => {
                         SourceProgress::Provisional(candidates)
                     }

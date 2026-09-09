@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0153 - Search rotates free browser providers, preserves partial results, and reports exhausted providers honestly without depending on model-native web search.
 - [x] RFC 0151 - Vault papers recover remote HTML into durable Reader snapshots and promote it over metadata-only sources.
 - [x] RFC 0150 - Research reports show readable citations that open and temporarily highlight their exact source passages.
 - [x] RFC 0148 - Existing databases upgrade passage anchors safely, and failed evidence delivery no longer counts as a successful read.

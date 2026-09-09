@@ -7,25 +7,30 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::{stream, StreamExt};
 use regex::Regex;
+#[cfg(test)]
 use scraper::{Html, Selector};
 use sha2::{Digest, Sha256};
 use tauri::Manager;
+use tokio::sync::{Mutex, MutexGuard};
 use url::Url;
 
+use super::browser_engine::{BrowserResult, BrowserSearchEngine};
 use super::error::DiscoveryError;
 use super::provider::{DiscoveryProvider, DiscoveryProviderId, ProviderSearchResult};
 use super::providers::{arxiv::ArxivProvider, openalex::OpenAlexProvider};
 use crate::domain::discovery::{
-    CandidateMatch, DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort, PaperCandidate,
+    paper_candidate_dedup_key, CandidateMatch, DiscoveryProviderChoice, DiscoverySearchRequest,
+    DiscoverySort, PaperCandidate,
 };
 use crate::services::source_acquisition::types::PageInspection;
 use crate::services::source_acquisition::SourceAcquisitionService;
 
-const DEFAULT_SEARCH_URL: &str = "https://search.brave.com/search?q={query}&source=web";
 const RESOLUTION_CONCURRENCY: usize = 4;
 // Diagnostic payloads stay short enough for routine development logs.
 const LOG_TITLE_LIMIT: usize = 160;
@@ -34,17 +39,33 @@ const LOG_LINK_HOST_LIMIT: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct BrowserDiscoveryConfig {
-    /// URL template for the browser search entry point.
-    pub search_url_template: String,
+    /// Browser engines attempted for each broad query.
+    pub engines: Vec<BrowserSearchEngine>,
+    /// Optional legacy URL template, represented as the `Custom` engine.
+    pub custom_search_url_template: Option<String>,
     /// Number of result pages read for one query.
     pub pages_per_query: usize,
+    /// Enough merged candidates to stop trying additional engines.
+    pub candidate_target: usize,
+    /// Minimum delay between starts against one engine.
+    pub minimum_interval: Duration,
+    /// Time an engine rests after a challenge or explicit rate limit.
+    pub challenge_cooldown: Duration,
 }
 
 impl Default for BrowserDiscoveryConfig {
     fn default() -> Self {
         Self {
-            search_url_template: DEFAULT_SEARCH_URL.to_string(),
+            engines: vec![
+                BrowserSearchEngine::DuckDuckGo,
+                BrowserSearchEngine::Ecosia,
+                BrowserSearchEngine::Brave,
+            ],
+            custom_search_url_template: None,
             pages_per_query: 1,
+            candidate_target: 10,
+            minimum_interval: Duration::from_millis(1_000),
+            challenge_cooldown: Duration::from_secs(300),
         }
     }
 }
@@ -61,24 +82,55 @@ impl BrowserDiscoveryConfig {
         config
     }
 
-    fn search_url(&self, query: &str, page: usize) -> Result<String, DiscoveryError> {
-        if !self.search_url_template.contains("{query}") {
-            return Err(DiscoveryError::new(
-                "[discovery].browser_search_url must contain {query}",
-            ));
-        }
-        let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-        Ok(self
-            .search_url_template
-            .replace("{query}", &encoded)
-            .replace("{page}", &page.to_string())
-            .replace("{offset}", &(page * 10).to_string()))
+    fn search_url(
+        &self,
+        engine: BrowserSearchEngine,
+        query: &str,
+        page: usize,
+    ) -> Result<String, DiscoveryError> {
+        engine
+            .search_url(query, page, self.custom_search_url_template.as_deref())
+            .map_err(DiscoveryError::new)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserAttemptStatus {
+    Succeeded,
+    Empty,
+    Challenged,
+    RateLimited,
+    Unavailable,
+    ParseFailed,
+}
+
+impl BrowserAttemptStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Empty => "empty",
+            Self::Challenged => "challenged",
+            Self::RateLimited => "rate_limited",
+            Self::Unavailable => "unavailable",
+            Self::ParseFailed => "parse_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BrowserProviderAttempt {
+    pub provider: String,
+    pub status: BrowserAttemptStatus,
+    pub candidate_count: usize,
+    pub elapsed_ms: u128,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum BrowserDiscoveryProgress {
     SearchingWeb,
+    SearchingProvider { provider: String },
+    ProviderAttempt(BrowserProviderAttempt),
     Provisional(Vec<PaperCandidate>),
     ResolvingMetadata { count: usize },
     Resolved { count: usize },
@@ -90,9 +142,56 @@ pub struct BrowserDiscoverySource {
     openalex: OpenAlexProvider,
     arxiv: ArxivProvider,
     config: BrowserDiscoveryConfig,
+    health: BrowserSearchHealth,
+}
+
+#[derive(Clone, Default)]
+struct BrowserSearchHealth {
+    rotation: Arc<AtomicUsize>,
+    duckduckgo: Arc<Mutex<EngineHealth>>,
+    ecosia: Arc<Mutex<EngineHealth>>,
+    brave: Arc<Mutex<EngineHealth>>,
+    custom: Arc<Mutex<EngineHealth>>,
+}
+
+#[derive(Default)]
+struct EngineHealth {
+    last_started: Option<Instant>,
+    cooldown_until: Option<Instant>,
+}
+
+impl BrowserSearchHealth {
+    fn ordered_engines(&self, configured: &[BrowserSearchEngine]) -> Vec<BrowserSearchEngine> {
+        if configured.is_empty() {
+            return Vec::new();
+        }
+        let start = self.rotation.fetch_add(1, Ordering::Relaxed) % configured.len();
+        configured
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(configured.len())
+            .copied()
+            .collect()
+    }
+
+    async fn lock(&self, engine: BrowserSearchEngine) -> MutexGuard<'_, EngineHealth> {
+        match engine {
+            BrowserSearchEngine::DuckDuckGo => self.duckduckgo.lock().await,
+            BrowserSearchEngine::Ecosia => self.ecosia.lock().await,
+            BrowserSearchEngine::Brave => self.brave.lock().await,
+            BrowserSearchEngine::Custom => self.custom.lock().await,
+        }
+    }
+}
+
+fn shared_browser_health() -> BrowserSearchHealth {
+    static HEALTH: OnceLock<BrowserSearchHealth> = OnceLock::new();
+    HEALTH.get_or_init(BrowserSearchHealth::default).clone()
 }
 
 impl BrowserDiscoverySource {
+    #[cfg(test)]
     pub fn new(
         browser: SourceAcquisitionService,
         openalex: OpenAlexProvider,
@@ -104,6 +203,23 @@ impl BrowserDiscoverySource {
             openalex,
             arxiv,
             config,
+            health: BrowserSearchHealth::default(),
+        }
+    }
+
+    /// Construct a source that shares provider health across app search paths.
+    pub fn new_shared(
+        browser: SourceAcquisitionService,
+        openalex: OpenAlexProvider,
+        arxiv: ArxivProvider,
+        config: BrowserDiscoveryConfig,
+    ) -> Self {
+        Self {
+            browser,
+            openalex,
+            arxiv,
+            config,
+            health: shared_browser_health(),
         }
     }
 
@@ -131,54 +247,25 @@ impl BrowserDiscoverySource {
     ) -> Result<Vec<PaperCandidate>, DiscoveryError> {
         on_progress(BrowserDiscoveryProgress::SearchingWeb);
         let mut provisional = Vec::new();
-        let mut page_errors = Vec::new();
-        let mut inspected_pages = 0;
-        let mut challenged_pages = 0;
+        let mut attempts = Vec::new();
 
-        for page in 0..self.config.pages_per_query {
-            let url = self.config.search_url(query, page)?;
-            let started = Instant::now();
-            match self.browser.inspect_browser_page(&url).await {
-                Ok(inspection) => {
-                    let html = inspection.snapshot.html.as_deref().unwrap_or_default();
-                    let candidates = parse_search_results(html, query, limit);
-                    let challenged = is_search_challenge(
-                        &inspection.snapshot.final_url,
-                        inspection.snapshot.text.as_deref().unwrap_or_default(),
-                    );
-                    inspected_pages += 1;
-                    if challenged {
-                        challenged_pages += 1;
-                    }
-                    log_page_inspection(
-                        page,
-                        self.config.pages_per_query,
-                        &url,
-                        &inspection,
-                        candidates.len(),
-                        challenged,
-                        started.elapsed(),
-                    );
-                    provisional.extend(candidates);
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    log_page_failure(
-                        page,
-                        self.config.pages_per_query,
-                        &url,
-                        &message,
-                        started.elapsed(),
-                    );
-                    page_errors.push(message);
-                }
+        for engine in self.health.ordered_engines(&self.config.engines) {
+            on_progress(BrowserDiscoveryProgress::SearchingProvider {
+                provider: engine.as_str().to_string(),
+            });
+            let (candidates, attempt) = self.search_engine(engine, query, limit).await;
+            on_progress(BrowserDiscoveryProgress::ProviderAttempt(attempt.clone()));
+            attempts.push(attempt);
+            merge_browser_candidates(&mut provisional, candidates);
+            rank_browser_candidates(&mut provisional, query);
+            if !provisional.is_empty() {
+                on_progress(BrowserDiscoveryProgress::Provisional(provisional.clone()));
             }
-            if provisional.len() >= limit {
+            if provisional.len() >= limit.min(self.config.candidate_target) {
                 break;
             }
         }
 
-        provisional = crate::services::research::dedup::dedup(provisional);
         provisional.truncate(limit);
         if provisional.is_empty() {
             let fallback = self.resolve_exact_query(query, limit, resolvers).await;
@@ -189,11 +276,7 @@ impl BrowserDiscoverySource {
                 });
                 return Ok(fallback);
             }
-            return Err(empty_search_error(
-                inspected_pages,
-                challenged_pages,
-                &page_errors,
-            ));
+            return Err(empty_search_error(&attempts));
         }
 
         on_progress(BrowserDiscoveryProgress::Provisional(provisional.clone()));
@@ -208,11 +291,146 @@ impl BrowserDiscoverySource {
             .buffer_unordered(RESOLUTION_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
-        let resolved = crate::services::research::dedup::dedup(resolved);
+        let mut resolved = crate::services::research::dedup::dedup(resolved);
+        rank_browser_candidates(&mut resolved, query);
+        resolved.truncate(limit);
         on_progress(BrowserDiscoveryProgress::Resolved {
             count: resolved.len(),
         });
         Ok(resolved)
+    }
+
+    /// Search one engine while enforcing its process-local interval and cooldown.
+    async fn search_engine(
+        &self,
+        engine: BrowserSearchEngine,
+        query: &str,
+        limit: usize,
+    ) -> (Vec<PaperCandidate>, BrowserProviderAttempt) {
+        let started = Instant::now();
+        let mut health = self.health.lock(engine).await;
+        let now = Instant::now();
+        if health.cooldown_until.is_some_and(|until| until > now) {
+            return (
+                Vec::new(),
+                BrowserProviderAttempt {
+                    provider: engine.as_str().to_string(),
+                    status: BrowserAttemptStatus::Unavailable,
+                    candidate_count: 0,
+                    elapsed_ms: started.elapsed().as_millis(),
+                    reason: Some("provider cooldown is active".to_string()),
+                },
+            );
+        }
+        if let Some(last_started) = health.last_started {
+            let elapsed = last_started.elapsed();
+            if elapsed < self.config.minimum_interval {
+                tokio::time::sleep(self.config.minimum_interval - elapsed).await;
+            }
+        }
+        health.last_started = Some(Instant::now());
+
+        let mut candidates = Vec::new();
+        let mut errors = Vec::new();
+        let mut status = BrowserAttemptStatus::Empty;
+        for page in 0..self.config.pages_per_query {
+            let url = match self.config.search_url(engine, query, page) {
+                Ok(url) => url,
+                Err(error) => {
+                    errors.push(error.to_string());
+                    status = BrowserAttemptStatus::ParseFailed;
+                    break;
+                }
+            };
+            let page_started = Instant::now();
+            match self.browser.inspect_browser_page(&url).await {
+                Ok(inspection) => {
+                    let html = inspection.snapshot.html.as_deref().unwrap_or_default();
+                    let text = inspection.snapshot.text.as_deref().unwrap_or_default();
+                    let challenged =
+                        engine.is_challenge(&inspection.snapshot.final_url, text, html);
+                    let rate_limited = engine.is_rate_limited(text);
+                    let parsed = engine.parse_results(html, limit.saturating_sub(candidates.len()));
+                    let parsed = parsed
+                        .into_iter()
+                        .filter_map(|result| {
+                            provisional_candidate_for_engine(
+                                result,
+                                query,
+                                candidates.len(),
+                                engine,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    log_page_inspection(
+                        engine,
+                        page,
+                        self.config.pages_per_query,
+                        &url,
+                        &inspection,
+                        parsed.len(),
+                        challenged,
+                        page_started.elapsed(),
+                    );
+                    if challenged || rate_limited {
+                        status = if rate_limited {
+                            BrowserAttemptStatus::RateLimited
+                        } else {
+                            BrowserAttemptStatus::Challenged
+                        };
+                        health.cooldown_until =
+                            Some(Instant::now() + self.config.challenge_cooldown);
+                        break;
+                    }
+                    if parsed.is_empty() && inspection.links.len() >= 5 {
+                        status = BrowserAttemptStatus::ParseFailed;
+                        errors.push(format!(
+                            "result page exposed {} links but no recognized result rows",
+                            inspection.links.len()
+                        ));
+                    }
+                    candidates.extend(parsed);
+                    if candidates.len() >= limit {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    log_page_failure(
+                        engine,
+                        page,
+                        self.config.pages_per_query,
+                        &url,
+                        &message,
+                        page_started.elapsed(),
+                    );
+                    errors.push(message);
+                    status = BrowserAttemptStatus::Unavailable;
+                }
+            }
+        }
+        if !candidates.is_empty() {
+            status = BrowserAttemptStatus::Succeeded;
+        }
+        let reason = match status {
+            BrowserAttemptStatus::Challenged => Some("bot challenge returned".to_string()),
+            BrowserAttemptStatus::RateLimited => Some("rate limit returned".to_string()),
+            BrowserAttemptStatus::Empty => Some("no usable result links".to_string()),
+            BrowserAttemptStatus::Unavailable | BrowserAttemptStatus::ParseFailed => {
+                Some(errors.join("; "))
+            }
+            BrowserAttemptStatus::Succeeded => None,
+        };
+        (
+            candidates.clone(),
+            BrowserProviderAttempt {
+                provider: engine.as_str().to_string(),
+                status,
+                candidate_count: candidates.len(),
+                elapsed_ms: started.elapsed().as_millis(),
+                reason,
+            },
+        )
     }
 
     /// Resolve an explicit DOI, arXiv id, or quoted title when browser rows vanish.
@@ -350,6 +568,7 @@ fn exact_request(query: &str, quote: bool) -> DiscoverySearchRequest {
 }
 
 /// Parses provisional scholarly candidates from one rendered result page.
+#[cfg(test)]
 fn parse_search_results(html: &str, query: &str, limit: usize) -> Vec<PaperCandidate> {
     let document = Html::parse_document(html);
     let scholar_result = Selector::parse(".gs_ri").expect("valid selector");
@@ -403,6 +622,7 @@ fn parse_search_results(html: &str, query: &str, limit: usize) -> Vec<PaperCandi
 }
 
 /// Parses Brave's server-rendered web-result rows without including page chrome.
+#[cfg(test)]
 fn parse_brave_results(document: &Html, query: &str, limit: usize) -> Vec<PaperCandidate> {
     let rows = Selector::parse("div.snippet[data-type=\"web\"]").expect("valid selector");
     let anchors = Selector::parse("a[href]").expect("valid selector");
@@ -437,6 +657,7 @@ fn parse_brave_results(document: &Html, query: &str, limit: usize) -> Vec<PaperC
 }
 
 /// Returns whether Google replaced the requested result page with a challenge.
+#[cfg(test)]
 fn is_search_challenge(final_url: &str, visible_text: &str) -> bool {
     let challenge_url = Url::parse(final_url).is_ok_and(|url| {
         is_google_owned_host(url.host_str().unwrap_or_default())
@@ -448,26 +669,32 @@ fn is_search_challenge(final_url: &str, visible_text: &str) -> bool {
     challenge_url || challenge_text
 }
 
-/// Selects an honest error after every inspected page produced no candidate.
-fn empty_search_error(
-    inspected_pages: usize,
-    challenged_pages: usize,
-    page_errors: &[String],
-) -> DiscoveryError {
-    if inspected_pages > 0 && inspected_pages == challenged_pages {
-        return DiscoveryError::new(
-            "Browser search was challenged by Google Scholar; retry later or use another configured search entry point.",
-        );
+/// Summarize provider exhaustion without presenting infrastructure failure as
+/// evidence that no relevant scholarship exists.
+fn empty_search_error(attempts: &[BrowserProviderAttempt]) -> DiscoveryError {
+    if attempts.is_empty() {
+        return DiscoveryError::new("Browser search has no configured providers");
     }
-    if page_errors.is_empty() {
-        DiscoveryError::new("Browser search returned no scholarly links")
-    } else {
-        DiscoveryError::new(format!("Browser search failed: {}", page_errors.join("; ")))
-    }
+    let summary = attempts
+        .iter()
+        .map(|attempt| {
+            let reason = attempt.reason.as_deref().unwrap_or("no detail");
+            format!(
+                "{}={} ({reason})",
+                attempt.provider,
+                attempt.status.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    DiscoveryError::new(format!(
+        "Browser search exhausted its providers without usable candidates: {summary}"
+    ))
 }
 
 /// Logs bounded summary and debug evidence for one successful inspection.
 fn log_page_inspection(
+    engine: BrowserSearchEngine,
     page: usize,
     total_pages: usize,
     requested_url: &str,
@@ -489,7 +716,8 @@ fn log_page_inspection(
     crate::shared::log::info(
         "browser-discovery",
         format!(
-            "page={}/{} requested_host={} final_host={} final_path={} classification={} title={:?} html_bytes={} text_bytes={} raw_links={} assets={} network_urls={} candidates={} elapsed_ms={}",
+            "provider={} page={}/{} requested_host={} final_host={} final_path={} classification={} title={:?} html_bytes={} text_bytes={} raw_links={} assets={} network_urls={} candidates={} elapsed_ms={}",
+            engine.as_str(),
             page + 1,
             total_pages,
             sanitized_host(requested_url),
@@ -529,6 +757,7 @@ fn log_page_inspection(
 
 /// Logs a sanitized warning when Obscura cannot inspect a result page.
 fn log_page_failure(
+    engine: BrowserSearchEngine,
     page: usize,
     total_pages: usize,
     requested_url: &str,
@@ -538,7 +767,8 @@ fn log_page_failure(
     crate::shared::log::warn(
         "browser-discovery",
         format!(
-            "page={}/{} requested_host={} classification={} error={:?} elapsed_ms={}",
+            "provider={} page={}/{} requested_host={} classification={} error={:?} elapsed_ms={}",
+            engine.as_str(),
             page + 1,
             total_pages,
             sanitized_host(requested_url),
@@ -626,6 +856,7 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     format!("{}...", value.chars().take(limit - 3).collect::<String>())
 }
 
+#[cfg(test)]
 fn provisional_candidate(
     title: String,
     url: String,
@@ -633,6 +864,29 @@ fn provisional_candidate(
     query: &str,
     position: usize,
 ) -> Option<PaperCandidate> {
+    provisional_candidate_for_engine(
+        BrowserResult {
+            title,
+            url,
+            snippet,
+        },
+        query,
+        position,
+        BrowserSearchEngine::Custom,
+    )
+}
+
+fn provisional_candidate_for_engine(
+    result: BrowserResult,
+    query: &str,
+    position: usize,
+    engine: BrowserSearchEngine,
+) -> Option<PaperCandidate> {
+    let BrowserResult {
+        title,
+        url,
+        snippet,
+    } = result;
     if title.len() < 12 || !looks_like_external_result(&url) {
         return None;
     }
@@ -659,7 +913,7 @@ fn provisional_candidate(
         open_access: None,
         match_summary: CandidateMatch {
             score: Some((1.0 - position as f64 * 0.03).max(0.1)),
-            reasons: vec!["discovered:web".to_string()],
+            reasons: vec![format!("discovered:web:{}", engine.as_str())],
             matched_keywords: query.split_whitespace().map(str::to_string).collect(),
             from_seed_paper_ids: Vec::new(),
         },
@@ -680,15 +934,150 @@ fn merge_resolved_candidate(
     if resolved.pdf_url.is_none() {
         resolved.pdf_url = provisional.pdf_url;
     }
+    let discovery_reasons = provisional
+        .match_summary
+        .reasons
+        .into_iter()
+        .filter(|reason| reason.starts_with("discovered:web"))
+        .collect::<Vec<_>>();
     resolved
         .match_summary
         .reasons
         .retain(|reason| !reason.starts_with("provider:"));
-    resolved.match_summary.reasons.extend([
-        "discovered:web".to_string(),
-        format!("resolved:{}", resolved.source_provider),
-    ]);
+    for reason in discovery_reasons {
+        if !resolved.match_summary.reasons.contains(&reason) {
+            resolved.match_summary.reasons.push(reason);
+        }
+    }
     resolved
+        .match_summary
+        .reasons
+        .push(format!("resolved:{}", resolved.source_provider));
+    resolved
+}
+
+/// Merge repeated browser hits while preserving every engine provenance reason.
+fn merge_browser_candidates(target: &mut Vec<PaperCandidate>, incoming: Vec<PaperCandidate>) {
+    for candidate in incoming {
+        let key = browser_candidate_key(&candidate);
+        let Some(existing) = target
+            .iter_mut()
+            .find(|existing| browser_candidate_key(existing) == key)
+        else {
+            target.push(candidate);
+            continue;
+        };
+        for reason in candidate.match_summary.reasons {
+            if !existing.match_summary.reasons.contains(&reason) {
+                existing.match_summary.reasons.push(reason);
+            }
+        }
+        for keyword in candidate.match_summary.matched_keywords {
+            if !existing.match_summary.matched_keywords.contains(&keyword) {
+                existing.match_summary.matched_keywords.push(keyword);
+            }
+        }
+        if existing.abstract_text.is_none() {
+            existing.abstract_text = candidate.abstract_text;
+        }
+        existing.pdf_url = existing.pdf_url.clone().or(candidate.pdf_url);
+    }
+}
+
+/// Prefer scholarly identity, then canonical result URL, then title and year.
+fn browser_candidate_key(candidate: &PaperCandidate) -> String {
+    if candidate.doi.is_some() || candidate.arxiv_id.is_some() || candidate.openalex_id.is_some() {
+        return paper_candidate_dedup_key(candidate);
+    }
+    if let Some(external_url) = candidate.external_url.as_deref() {
+        let canonical = Url::parse(external_url.trim())
+            .map(|mut url| {
+                url.set_fragment(None);
+                url.to_string()
+            })
+            .unwrap_or_else(|_| external_url.trim().to_string());
+        return format!("url:{}", canonical.to_ascii_lowercase());
+    }
+    format!(
+        "{}:{}",
+        paper_candidate_dedup_key(candidate),
+        candidate
+            .year
+            .map_or_else(|| "unknown".to_string(), |year| year.to_string())
+    )
+}
+
+/// Produce a deterministic browser shortlist without a model or embedding call.
+fn rank_browser_candidates(candidates: &mut [PaperCandidate], query: &str) {
+    let query_terms = normalized_terms(query);
+    for candidate in candidates.iter_mut() {
+        let searchable = format!(
+            "{} {}",
+            candidate.title,
+            candidate.abstract_text.as_deref().unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        let matched = query_terms
+            .iter()
+            .filter(|term| searchable.contains(term.as_str()))
+            .count();
+        let lexical = if query_terms.is_empty() {
+            0.0
+        } else {
+            matched as f64 / query_terms.len() as f64
+        };
+        let engine_support = candidate
+            .match_summary
+            .reasons
+            .iter()
+            .filter(|reason| reason.starts_with("discovered:web:"))
+            .count()
+            .min(3) as f64
+            / 3.0;
+        let source = f64::from(candidate.external_url.is_some() || candidate.pdf_url.is_some());
+        let identity = f64::from(
+            candidate.doi.is_some()
+                || candidate.arxiv_id.is_some()
+                || candidate.openalex_id.is_some(),
+        );
+        let metadata = [
+            !candidate.authors.is_empty(),
+            candidate.year.is_some(),
+            candidate.venue.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count() as f64
+            / 3.0;
+        let novelty = f64::from(!candidate.already_in_library);
+        candidate.match_summary.score = Some(
+            0.50 * lexical
+                + 0.15 * engine_support
+                + 0.15 * source
+                + 0.10 * identity
+                + 0.05 * metadata
+                + 0.05 * novelty,
+        );
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .match_summary
+            .score
+            .partial_cmp(&left.match_summary.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.title.cmp(&right.title))
+    });
+}
+
+fn normalized_terms(value: &str) -> Vec<String> {
+    let mut terms = value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.len() > 2)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
 }
 
 fn identity_matches(provisional: &PaperCandidate, resolved: &PaperCandidate) -> bool {
@@ -724,6 +1113,7 @@ fn normalized_identifier(identifier: &str) -> String {
         .to_lowercase()
 }
 
+#[cfg(test)]
 fn normalize_result_url(raw: &str) -> Option<String> {
     let absolute = Url::parse(raw).ok()?;
     if let Some(target) = absolute
@@ -792,6 +1182,7 @@ fn exact_query_hint(query: &str) -> Option<ExactQueryHint> {
 }
 
 /// Returns whether a host is Google itself or one of its subdomains.
+#[cfg(test)]
 fn is_google_owned_host(host: &str) -> bool {
     host == "google.com" || host.ends_with(".google.com")
 }
@@ -865,10 +1256,39 @@ fn apply_config(config: &mut BrowserDiscoveryConfig, contents: &str) {
         };
         let value = value.trim().trim_matches('"');
         match key.trim() {
-            "browser_search_url" => config.search_url_template = value.to_string(),
+            "browser_search_url" => {
+                config.custom_search_url_template = Some(value.to_string());
+                config.engines = vec![BrowserSearchEngine::Custom];
+            }
+            "browser_search_engines" => {
+                let engines = value
+                    .trim_matches(['[', ']'])
+                    .split(',')
+                    .filter_map(BrowserSearchEngine::parse)
+                    .collect::<Vec<_>>();
+                if !engines.is_empty() {
+                    config.engines = engines;
+                    config.custom_search_url_template = None;
+                }
+            }
             "browser_pages_per_query" => {
                 if let Ok(pages) = value.parse::<usize>() {
                     config.pages_per_query = pages.clamp(1, 2);
+                }
+            }
+            "browser_candidate_target" => {
+                if let Ok(target) = value.parse::<usize>() {
+                    config.candidate_target = target.clamp(1, 100);
+                }
+            }
+            "browser_minimum_interval_ms" => {
+                if let Ok(milliseconds) = value.parse::<u64>() {
+                    config.minimum_interval = Duration::from_millis(milliseconds.min(60_000));
+                }
+            }
+            "browser_challenge_cooldown_seconds" => {
+                if let Ok(seconds) = value.parse::<u64>() {
+                    config.challenge_cooldown = Duration::from_secs(seconds.min(86_400));
                 }
             }
             _ => {}
@@ -882,10 +1302,12 @@ mod tests {
     use async_trait::async_trait;
     use serde::Deserialize;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
+    use crate::services::source_acquisition::obscura::{ObscuraBrowserRuntime, ObscuraManager};
     use crate::services::source_acquisition::types::{
         AcquisitionMethod, AcquisitionResult, BrowserEndpoint, BrowserPageSnapshot, BrowserRuntime,
-        FetchResponse, HttpFetcher, SourceAcquisitionConfig, SourceAcquisitionError,
+        FetchResponse, HttpFetcher, ObscuraConfig, SourceAcquisitionConfig, SourceAcquisitionError,
     };
 
     #[derive(Deserialize)]
@@ -910,6 +1332,10 @@ mod tests {
         inspection: PageInspection,
     }
 
+    struct FallbackBrowser {
+        calls: Arc<StdMutex<Vec<String>>>,
+    }
+
     #[async_trait]
     impl BrowserRuntime for ChallengeBrowser {
         async fn ensure_ready(&self) -> AcquisitionResult<BrowserEndpoint> {
@@ -929,6 +1355,76 @@ mod tests {
         async fn inspect_page(&self, _url: &str) -> AcquisitionResult<PageInspection> {
             Ok(self.inspection.clone())
         }
+    }
+
+    #[async_trait]
+    impl BrowserRuntime for FallbackBrowser {
+        async fn ensure_ready(&self) -> AcquisitionResult<BrowserEndpoint> {
+            Ok(BrowserEndpoint {
+                port: 9222,
+                url: "http://127.0.0.1:9222".to_string(),
+                websocket_url: None,
+            })
+        }
+
+        async fn fetch_original(&self, _url: &str) -> AcquisitionResult<FetchResponse> {
+            Err(SourceAcquisitionError::Browser(
+                "original fetch is not used by browser discovery".to_string(),
+            ))
+        }
+
+        async fn inspect_page(&self, url: &str) -> AcquisitionResult<PageInspection> {
+            self.calls.lock().unwrap().push(url.to_string());
+            let (title, html, text) = if url.contains("search.brave.com") {
+                (
+                    "Brave Search",
+                    "<html><script>challengeSet = {}</script></html>",
+                    "Verifying you're not a bot",
+                )
+            } else {
+                (
+                    "Ecosia Search",
+                    r#"<article class="result"><a class="result-title" href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a><p class="result-snippet">Transformer architecture.</p></article>"#,
+                    "Attention Is All You Need",
+                )
+            };
+            Ok(PageInspection {
+                snapshot: BrowserPageSnapshot {
+                    url: url.to_string(),
+                    final_url: url.to_string(),
+                    title: Some(title.to_string()),
+                    content_type: Some("text/html".to_string()),
+                    html: Some(html.to_string()),
+                    text: Some(text.to_string()),
+                },
+                links: Vec::new(),
+                assets: Vec::new(),
+                network_urls: Vec::new(),
+            })
+        }
+    }
+
+    fn browser_source(
+        runtime: Arc<dyn BrowserRuntime>,
+        engines: Vec<BrowserSearchEngine>,
+    ) -> BrowserDiscoverySource {
+        let service = SourceAcquisitionService::new(
+            SourceAcquisitionConfig::default(),
+            Arc::new(UnusedHttp),
+            runtime,
+            AcquisitionMethod::ObscuraBrowserStealth,
+        );
+        BrowserDiscoverySource::new(
+            service,
+            OpenAlexProvider::from_app_config().expect("OpenAlex test config"),
+            ArxivProvider::from_app_config().expect("arXiv test config"),
+            BrowserDiscoveryConfig {
+                engines,
+                minimum_interval: Duration::ZERO,
+                challenge_cooldown: Duration::from_secs(60),
+                ..BrowserDiscoveryConfig::default()
+            },
+        )
     }
 
     #[test]
@@ -1011,12 +1507,129 @@ mod tests {
     }
 
     #[test]
-    fn config_builds_default_brave_search_urls() {
+    fn config_builds_default_duckduckgo_search_urls() {
         let config = BrowserDiscoveryConfig::default();
-        let url = config.search_url("graph neural networks", 1).unwrap();
+        let url = config
+            .search_url(BrowserSearchEngine::DuckDuckGo, "graph neural networks", 1)
+            .unwrap();
         assert_eq!(
             url,
-            "https://search.brave.com/search?q=graph+neural+networks&source=web"
+            "https://html.duckduckgo.com/html/?q=graph+neural+networks&s=10"
+        );
+    }
+
+    #[test]
+    fn config_loads_engine_order_and_operational_limits() {
+        let mut config = BrowserDiscoveryConfig::default();
+        apply_config(
+            &mut config,
+            r#"
+                [discovery]
+                browser_search_engines = ["ecosia", "brave"]
+                browser_pages_per_query = 2
+                browser_candidate_target = 14
+                browser_minimum_interval_ms = 2500
+                browser_challenge_cooldown_seconds = 90
+            "#,
+        );
+
+        assert_eq!(
+            config.engines,
+            vec![BrowserSearchEngine::Ecosia, BrowserSearchEngine::Brave]
+        );
+        assert_eq!(config.pages_per_query, 2);
+        assert_eq!(config.candidate_target, 14);
+        assert_eq!(config.minimum_interval, Duration::from_millis(2_500));
+        assert_eq!(config.challenge_cooldown, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn browser_merge_preserves_engine_provenance() {
+        let url = "https://example.org/papers/causal-circuits".to_string();
+        let brave = provisional_candidate_for_engine(
+            BrowserResult {
+                title: "Causal Circuit Discovery in Transformers".to_string(),
+                url: url.clone(),
+                snippet: None,
+            },
+            "causal circuit discovery",
+            0,
+            BrowserSearchEngine::Brave,
+        )
+        .unwrap();
+        let ecosia = provisional_candidate_for_engine(
+            BrowserResult {
+                title: "Causal Circuit Discovery in Transformers".to_string(),
+                url,
+                snippet: Some("An empirical circuit comparison.".to_string()),
+            },
+            "causal circuit discovery",
+            0,
+            BrowserSearchEngine::Ecosia,
+        )
+        .unwrap();
+        let mut candidates = vec![brave];
+
+        merge_browser_candidates(&mut candidates, vec![ecosia]);
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0]
+            .match_summary
+            .reasons
+            .contains(&"discovered:web:brave".to_string()));
+        assert!(candidates[0]
+            .match_summary
+            .reasons
+            .contains(&"discovered:web:ecosia".to_string()));
+        assert_eq!(
+            candidates[0].abstract_text.as_deref(),
+            Some("An empirical circuit comparison.")
+        );
+    }
+
+    #[test]
+    fn local_browser_ranking_is_stable_and_query_sensitive() {
+        let relevant = provisional_candidate_for_engine(
+            BrowserResult {
+                title: "Causal Circuit Discovery in Language Models".to_string(),
+                url: "https://example.org/relevant".to_string(),
+                snippet: Some("A causal intervention benchmark.".to_string()),
+            },
+            "causal circuit intervention",
+            1,
+            BrowserSearchEngine::DuckDuckGo,
+        )
+        .unwrap();
+        let unrelated = provisional_candidate_for_engine(
+            BrowserResult {
+                title: "General Survey of Machine Learning".to_string(),
+                url: "https://example.org/unrelated".to_string(),
+                snippet: None,
+            },
+            "causal circuit intervention",
+            0,
+            BrowserSearchEngine::Ecosia,
+        )
+        .unwrap();
+        let mut first = vec![unrelated.clone(), relevant.clone()];
+        let mut second = vec![unrelated, relevant];
+
+        rank_browser_candidates(&mut first, "causal circuit intervention");
+        rank_browser_candidates(&mut second, "causal circuit intervention");
+
+        assert_eq!(
+            first[0].title,
+            "Causal Circuit Discovery in Language Models"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|candidate| &candidate.id)
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|candidate| &candidate.id)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1076,7 +1689,14 @@ mod tests {
             service,
             OpenAlexProvider::from_app_config().expect("OpenAlex test config"),
             ArxivProvider::from_app_config().expect("arXiv test config"),
-            BrowserDiscoveryConfig::default(),
+            BrowserDiscoveryConfig {
+                engines: vec![BrowserSearchEngine::Custom],
+                custom_search_url_template: Some(
+                    "https://scholar.google.com/scholar?q={query}".to_string(),
+                ),
+                minimum_interval: Duration::ZERO,
+                ..BrowserDiscoveryConfig::default()
+            },
         );
 
         let error = source
@@ -1086,8 +1706,114 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Browser search was challenged by Google Scholar; retry later or use another configured search entry point."
+            "Browser search exhausted its providers without usable candidates: custom=challenged (bot challenge returned)"
         );
+    }
+
+    #[tokio::test]
+    async fn challenged_engine_falls_through_to_the_next_engine() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let source = browser_source(
+            Arc::new(FallbackBrowser {
+                calls: calls.clone(),
+            }),
+            vec![BrowserSearchEngine::Brave, BrowserSearchEngine::Ecosia],
+        );
+        let progress = StdMutex::new(Vec::new());
+
+        let candidates = source
+            .discover_with_resolvers(
+                "transformer architecture",
+                1,
+                &[DiscoveryProviderChoice::EuropePmc],
+                &|event| {
+                    if let BrowserDiscoveryProgress::ProviderAttempt(attempt) = event {
+                        progress.lock().unwrap().push(attempt.status);
+                    }
+                },
+            )
+            .await
+            .expect("Ecosia result should survive a Brave challenge");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].arxiv_id.as_deref(), Some("1706.03762"));
+        assert_eq!(
+            progress.into_inner().unwrap(),
+            vec![
+                BrowserAttemptStatus::Challenged,
+                BrowserAttemptStatus::Succeeded
+            ]
+        );
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn challenged_engine_is_skipped_while_its_cooldown_is_active() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let source = browser_source(
+            Arc::new(FallbackBrowser {
+                calls: calls.clone(),
+            }),
+            vec![BrowserSearchEngine::Brave],
+        );
+
+        let first = source.discover("broad research query", 1, &|_| {}).await;
+        let second = source.discover("another broad query", 1, &|_| {}).await;
+
+        assert!(first.unwrap_err().to_string().contains("brave=challenged"));
+        assert!(second
+            .unwrap_err()
+            .to_string()
+            .contains("brave=unavailable"));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "live Obscura browser-search smoke test"]
+    async fn live_obscura_search_returns_candidates_or_an_honest_provider_failure() {
+        let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/obscura/obscura");
+        assert!(
+            binary.exists(),
+            "install the Obscura sidecar at {}",
+            binary.display()
+        );
+        let runtime = ObscuraBrowserRuntime::new(ObscuraManager::new(ObscuraConfig {
+            path: Some(binary),
+            ..ObscuraConfig::default()
+        }));
+        let source = browser_source(Arc::new(runtime), vec![BrowserSearchEngine::DuckDuckGo]);
+
+        match source
+            .discover_with_resolvers(
+                "mechanistic interpretability transformer circuits",
+                3,
+                &[DiscoveryProviderChoice::EuropePmc],
+                &|_| {},
+            )
+            .await
+        {
+            Ok(candidates) => assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| candidate.external_url.is_some()),
+                "every browser candidate needs an actionable URL"
+            ),
+            Err(error) => {
+                let error = error.to_string();
+                assert!(
+                    [
+                        "empty",
+                        "challenged",
+                        "rate_limited",
+                        "unavailable",
+                        "parse_failed"
+                    ]
+                    .iter()
+                    .any(|status| error.contains(status)),
+                    "provider failure was not classified: {error}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1125,17 +1851,36 @@ mod tests {
 
     #[test]
     fn selects_distinct_empty_search_errors() {
+        let attempt = |status, reason: &str| BrowserProviderAttempt {
+            provider: "brave".to_string(),
+            status,
+            candidate_count: 0,
+            elapsed_ms: 5,
+            reason: Some(reason.to_string()),
+        };
         assert_eq!(
-            empty_search_error(1, 1, &[]).to_string(),
-            "Browser search was challenged by Google Scholar; retry later or use another configured search entry point."
+            empty_search_error(&[attempt(
+                BrowserAttemptStatus::Challenged,
+                "bot challenge returned"
+            )])
+            .to_string(),
+            "Browser search exhausted its providers without usable candidates: brave=challenged (bot challenge returned)"
         );
         assert_eq!(
-            empty_search_error(1, 0, &[]).to_string(),
-            "Browser search returned no scholarly links"
+            empty_search_error(&[attempt(
+                BrowserAttemptStatus::Empty,
+                "no usable result links"
+            )])
+            .to_string(),
+            "Browser search exhausted its providers without usable candidates: brave=empty (no usable result links)"
         );
         assert_eq!(
-            empty_search_error(0, 0, &["CDP connection closed".to_string()]).to_string(),
-            "Browser search failed: CDP connection closed"
+            empty_search_error(&[attempt(
+                BrowserAttemptStatus::Unavailable,
+                "CDP connection closed"
+            )])
+            .to_string(),
+            "Browser search exhausted its providers without usable candidates: brave=unavailable (CDP connection closed)"
         );
     }
 

@@ -93,6 +93,7 @@ impl DiscoveryOrchestrator {
     /// Attach the RFC 0053 expansion providers (Europe PMC + CORE) for the
     /// quick-search path. CORE is only queried when it reports itself
     /// configured (API key present).
+    #[allow(dead_code)]
     pub fn with_expansion_providers(
         mut self,
         europe_pmc: EuropePmcProvider,
@@ -105,6 +106,7 @@ impl DiscoveryOrchestrator {
 
     /// Attach the embedding reranker (RFC 0054). When the reranker is not ready
     /// (feature off / model missing), ranking transparently uses legacy weights.
+    #[allow(dead_code)]
     pub fn with_reranker(mut self, reranker: EmbeddingReranker) -> Self {
         self.reranker = reranker;
         self
