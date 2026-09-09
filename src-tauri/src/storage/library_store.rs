@@ -14157,23 +14157,22 @@ fn append_structured_harness_event(
         return Err("Activity detail must contain at most 4000 characters".to_string());
     }
     validate_harness_event_detail(kind, detail.as_ref())?;
-    let sequence: i64 = conn
-        .query_row(
-            "select coalesce(max(sequence), 0) + 1 from harness_events where run_id = ?1",
-            params![run_id],
-            |row| row.get(0),
-        )
+    conn.busy_timeout(Duration::from_secs(5))
         .map_err(|error| error.to_string())?;
-    let id = format!("{run_id}:event:{sequence}");
     conn.execute(
-        "insert into harness_events (
+        "with next_event(sequence) as (
+           select coalesce(max(sequence), 0) + 1
+           from harness_events where run_id = ?1
+         )
+         insert into harness_events (
            id, run_id, sequence, kind, summary, detail_json, phase,
            progress_current, progress_total, actor, occurred_at
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))",
+         )
+         select ?1 || ':event:' || sequence, ?1, sequence, ?2, ?3, ?4,
+                ?5, ?6, ?7, ?8, datetime('now')
+         from next_event",
         params![
-            id,
             run_id,
-            sequence,
             kind,
             summary,
             detail_json,
@@ -15145,6 +15144,7 @@ fn default_memberships() -> Vec<(&'static str, &'static str)> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -16481,6 +16481,54 @@ mod tests {
             .events
             .iter()
             .any(|event| event.kind == "harness_reflection_recorded"));
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_harness_activity_receives_unique_ordered_sequences() -> StoreResult<()> {
+        const WRITERS: usize = 24;
+
+        let db = test_db()?;
+        let run = managed_harness_run(&db, &AgentRunLimits::default())?;
+        let initial_count = db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .events
+            .into_iter()
+            .filter(|event| event.run_id == run.id)
+            .count();
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let handles = (0..WRITERS)
+            .map(|index| {
+                let store = db.store.clone();
+                let run_id = run.id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.record_harness_activity(
+                        &run_id,
+                        "concurrent_test",
+                        &format!("Concurrent event {index}"),
+                        Some("test"),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().expect("activity writer panicked")?;
+        }
+        let mut sequences = db
+            .store
+            .get_harness_snapshot("project:attention")?
+            .events
+            .into_iter()
+            .filter(|event| event.run_id == run.id)
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(sequences.len(), initial_count + WRITERS);
+        sequences.sort_unstable();
+        assert!(sequences.windows(2).all(|pair| pair[1] == pair[0] + 1));
         Ok(())
     }
 

@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0145 - Concurrent Research Activity writers receive unique, ordered event sequences without failing healthy Runs.
 - [x] RFC 0144 - Research Runs use a provider-compatible synthesis schema and retain actionable failed-turn errors.
 - [x] RFC 0142 - Managed research reads and assesses every new paper, retains actionable source links, and removes irrelevant additions before completion.
 - [x] RFC 0141 - Research outcomes are structured and evidence opens at its exact Reader passage when geometry is available.
