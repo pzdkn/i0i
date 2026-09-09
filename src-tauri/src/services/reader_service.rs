@@ -435,7 +435,10 @@ impl ReaderService {
             ReaderTarget::SavedPaper {
                 paper_id,
                 extraction_id,
-            } => self.get_saved_reader_document(paper_id, extraction_id),
+            } => {
+                self.get_saved_reader_document(paper_id, extraction_id)
+                    .await
+            }
             ReaderTarget::DiscoveryCandidate(candidate) => {
                 self.get_discovery_candidate_reader_document(candidate)
                     .await
@@ -444,7 +447,7 @@ impl ReaderService {
     }
 
     /// Build a Reader document from durable library state.
-    fn get_saved_reader_document(
+    async fn get_saved_reader_document(
         &self,
         paper_id: &str,
         extraction_id: Option<&str>,
@@ -457,22 +460,43 @@ impl ReaderService {
             .find(|p| p.id == paper_id)
             .ok_or_else(|| format!("Paper not found: {paper_id}"))?;
 
-        let source = snapshot
+        let sources = snapshot
             .document_sources
-            .into_iter()
-            .find(|s| {
-                paper.active_source_id.as_deref() == Some(&s.id)
-                    || (paper.active_source_id.is_none() && s.paper_id == paper_id)
-            })
-            .filter(|s| s.status == "cached" || s.status == "remote_available");
+            .iter()
+            .filter(|source| source.paper_id == paper_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut source = select_saved_source(&paper, &sources);
 
-        // A web page saved into the vault (RFC 0065) is served as an HTML reader
-        // document from its durable snapshot — not through the PDF/extraction
-        // path below.
-        if let Some(ref s) = source {
-            if s.source_kind == "html" {
-                return self.saved_html_reader_document(&paper, s);
+        // A remote HTML record only identifies a page. Acquire its durable
+        // snapshot before returning a document that `get_reader_html` can serve.
+        if let Some(html_source) = source.as_ref().filter(|item| item.source_kind == "html") {
+            if !cached_html_exists(html_source) {
+                if let Some(url) = html_source
+                    .source_url
+                    .as_deref()
+                    .or(html_source.landing_url.as_deref())
+                {
+                    if let Ok(stored) = self
+                        .acquire_and_store_html(paper_id, &html_source.id, url)
+                        .await
+                    {
+                        source = Some(self.store.set_document_source_cached_with_acquisition(
+                            &html_source.id,
+                            &stored.local_path,
+                            Some(&stored.acquired.final_url),
+                            None,
+                        )?);
+                    }
+                }
             }
+
+            // Even when acquisition fails, return the HTML surface with its
+            // source URL so Reader can explain the failure and offer View original.
+            return self.saved_html_reader_document(
+                &paper,
+                source.as_ref().expect("selected HTML source"),
+            );
         }
 
         let active_extraction = if let Some(id) = extraction_id {
@@ -1033,6 +1057,48 @@ fn validate_cached_pdf(path: &Path) -> bool {
     bytes.starts_with(b"%PDF-")
 }
 
+/// Select the best saved source independently of insertion order.
+fn select_saved_source(paper: &Paper, sources: &[DocumentSource]) -> Option<DocumentSource> {
+    sources
+        .iter()
+        .filter_map(|source| {
+            saved_source_rank(source).map(|rank| {
+                let active_rank =
+                    usize::from(paper.active_source_id.as_deref() != Some(&source.id));
+                ((rank, active_rank), source)
+            })
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, source)| source.clone())
+}
+
+/// Rank sources by the quality of content Reader can obtain from them.
+fn saved_source_rank(source: &DocumentSource) -> Option<usize> {
+    match (source.source_kind.as_str(), source.status.as_str()) {
+        ("pdf", "cached")
+            if source
+                .local_path
+                .as_deref()
+                .is_some_and(|path| validate_cached_pdf(Path::new(path))) =>
+        {
+            Some(0)
+        }
+        ("html", "cached") if cached_html_exists(source) => Some(1),
+        ("pdf", "remote_available") => Some(2),
+        ("html", "remote_available" | "cached") if source.source_url.is_some() => Some(3),
+        ("metadata_abstract", "cached") => Some(4),
+        _ => None,
+    }
+}
+
+/// Whether a cached HTML source has a snapshot Reader can serve.
+fn cached_html_exists(source: &DocumentSource) -> bool {
+    source
+        .local_path
+        .as_deref()
+        .is_some_and(|path| Path::new(path).is_file())
+}
+
 /// Replace filesystem-hostile characters in generated cache path components.
 fn sanitize_path_component(input: &str) -> String {
     input
@@ -1045,4 +1111,63 @@ fn sanitize_path_component(input: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paper(active_source_id: &str) -> Paper {
+        Paper {
+            id: "paper:circuits".to_string(),
+            title: "Circuit paper".to_string(),
+            authors: Vec::new(),
+            venue: String::new(),
+            year: 2026,
+            citations: 0,
+            tags: Vec::new(),
+            highlight_count: 0,
+            annotation_count: 0,
+            status: "UNREAD".to_string(),
+            abstract_text: Some("Abstract".to_string()),
+            active_source_id: Some(active_source_id.to_string()),
+            active_extraction_id: None,
+        }
+    }
+
+    fn source(id: &str, kind: &str, status: &str, url: Option<&str>) -> DocumentSource {
+        DocumentSource {
+            id: id.to_string(),
+            paper_id: "paper:circuits".to_string(),
+            source_kind: kind.to_string(),
+            source_url: url.map(str::to_string),
+            landing_url: None,
+            final_url: None,
+            acquisition_method: None,
+            local_path: None,
+            status: status.to_string(),
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn remote_html_outranks_active_metadata_abstract() {
+        let metadata_id = "metadata_abstract:paper:circuits:abc";
+        let sources = vec![
+            source(metadata_id, "metadata_abstract", "cached", None),
+            source(
+                "html:paper:circuits:def",
+                "html",
+                "remote_available",
+                Some("https://example.test/article"),
+            ),
+        ];
+
+        let selected = select_saved_source(&paper(metadata_id), &sources)
+            .expect("remote HTML should be selected");
+
+        assert_eq!(selected.id, "html:paper:circuits:def");
+    }
 }

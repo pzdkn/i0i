@@ -352,7 +352,23 @@ impl LibraryStore {
         tx.execute(
             "
             update papers
-            set active_source_id = coalesce(active_source_id, ?1),
+            set active_source_id = case
+                  when active_source_id is null then ?1
+                  when exists (
+                    select 1 from document_sources active
+                    where active.id = papers.active_source_id
+                      and active.source_kind = 'metadata_abstract'
+                  ) then ?1
+                  else active_source_id
+                end,
+                active_extraction_id = case
+                  when exists (
+                    select 1 from document_sources active
+                    where active.id = papers.active_source_id
+                      and active.source_kind = 'metadata_abstract'
+                  ) then null
+                  else active_extraction_id
+                end,
                 updated_at = datetime('now')
             where id = (
               select paper_id from document_sources where id = ?1
@@ -18514,6 +18530,49 @@ mod tests {
             source.acquisition_method.as_deref(),
             Some("obscura_browser_stealth")
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn cached_html_replaces_metadata_abstract_as_active_source() -> StoreResult<()> {
+        let db = test_db()?;
+        let mut draft = paper_draft("html-recovery-paper");
+        draft.sources = vec![PaperSourceDraft {
+            source_kind: "html".to_string(),
+            source_url: "https://example.test/article".to_string(),
+            landing_url: None,
+        }];
+        db.store
+            .add_paper_to_vaults(&draft, &["attention".to_string()])?;
+        db.store.materialize_paper_abstract(&draft.id)?;
+
+        let before = db.store.get_library()?;
+        assert!(paper(&before, &draft.id)
+            .active_source_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("metadata_abstract:")));
+
+        let html_source = db
+            .store
+            .get_document_sources(&draft.id)?
+            .into_iter()
+            .find(|source| source.source_kind == "html")
+            .expect("remote HTML source should exist");
+        db.store.set_document_source_cached_with_acquisition(
+            &html_source.id,
+            "/tmp/i0i/recovered.html",
+            Some("https://example.test/article"),
+            Some("direct_http"),
+        )?;
+
+        let after = db.store.get_library()?;
+        let paper = paper(&after, &draft.id);
+        assert_eq!(
+            paper.active_source_id.as_deref(),
+            Some(html_source.id.as_str())
+        );
+        assert!(paper.active_extraction_id.is_none());
 
         Ok(())
     }

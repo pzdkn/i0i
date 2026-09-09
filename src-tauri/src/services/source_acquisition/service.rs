@@ -338,19 +338,39 @@ impl SourceAcquisitionService {
         self.browser.inspect_page(url).await
     }
 
-    /// Fetch a page over direct HTTP and ingest it into clean, annotatable
-    /// article HTML (RFC 0056). Most article HTML needs no browser, so this
-    /// uses the direct fetcher; the reader falls back to "View original" if a
-    /// page turns out to need JS. Remote images are inlined as `data:` URIs so
-    /// the article renders offline under the app's strict CSP.
+    /// Fetch a page and ingest it into clean, annotatable article HTML.
+    ///
+    /// Direct HTTP remains the fast path. When it fails and the configured
+    /// browser fallback is enabled, the rendered browser snapshot supplies the
+    /// HTML instead. Remote images are inlined as `data:` URIs so the cached
+    /// article renders offline under the app's strict CSP.
     pub async fn acquire_html_page(&self, url: &str) -> AcquisitionResult<AcquiredHtml> {
-        let response = self.http.fetch(url).await?;
-        let raw = String::from_utf8_lossy(&response.bytes);
-        let ingested = crate::html_ingestion::ingest_html(&raw, Some(&response.final_url));
+        let (raw, final_url, browser_title) = match self.http.fetch(url).await {
+            Ok(response) => (
+                String::from_utf8_lossy(&response.bytes).into_owned(),
+                response.final_url,
+                None,
+            ),
+            Err(direct_error)
+                if self.config.browser_fallback == "obscura"
+                    && self.config.prefer_browser_for_blocked_sources =>
+            {
+                let snapshot = self.acquire_web_page(url).await?;
+                let raw = snapshot.html.ok_or_else(|| {
+                    SourceAcquisitionError::Browser(format!(
+                        "Rendered page returned no HTML after direct fetch failed: {direct_error}"
+                    ))
+                })?;
+                (raw, snapshot.final_url, snapshot.title)
+            }
+            Err(error) => return Err(error),
+        };
+
+        let ingested = crate::html_ingestion::ingest_html(&raw, Some(&final_url));
         let clean_html = self.inline_images(ingested.clean_html).await;
         Ok(AcquiredHtml {
-            final_url: response.final_url,
-            title: ingested.title,
+            final_url,
+            title: ingested.title.or(browser_title),
             clean_html,
             source_text: ingested.source_text,
         })
@@ -706,6 +726,47 @@ mod tests {
         assert!(!acquired.clean_html.contains("<script"));
         assert!(acquired.source_text.contains("diffusion models"));
         assert_eq!(acquired.final_url, url);
+    }
+
+    #[tokio::test]
+    async fn acquire_html_page_uses_browser_when_direct_fetch_fails() {
+        let url = "https://example.org/browser-only";
+        let browser_html = r#"<html><body><article><h1>Browser article</h1>
+            <p>This sufficiently long rendered paragraph proves that browser-only
+            pages can still become clean Reader snapshots after direct HTTP fails.</p>
+            </article></body></html>"#;
+        let snapshot = BrowserPageSnapshot {
+            url: url.to_string(),
+            final_url: "https://example.org/browser-only/final".to_string(),
+            title: Some("Browser title".to_string()),
+            content_type: Some("text/html".to_string()),
+            html: Some(browser_html.to_string()),
+            text: Some("Browser article".to_string()),
+        };
+        let inspection = PageInspection {
+            snapshot,
+            links: Vec::new(),
+            assets: Vec::new(),
+            network_urls: Vec::new(),
+        };
+        let (service, browser) = service(
+            FakeHttp::new(vec![(
+                url,
+                Err(SourceAcquisitionError::DirectHttpForbidden(
+                    "blocked".to_string(),
+                )),
+            )]),
+            FakeBrowser::new(vec![], vec![(url, Ok(inspection))]),
+        );
+
+        let acquired = service
+            .acquire_html_page(url)
+            .await
+            .expect("browser HTML acquired");
+
+        assert!(acquired.source_text.contains("browser-only pages"));
+        assert_eq!(acquired.final_url, "https://example.org/browser-only/final");
+        assert_eq!(*browser.ready_calls.lock().expect("ready lock"), 1);
     }
 
     fn page_snapshot(url: &str, title: &str) -> BrowserPageSnapshot {
