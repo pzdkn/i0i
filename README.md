@@ -82,6 +82,7 @@ The frontend should call Rust through small bridge functions, not by scattering 
 
 ## Changelog
 
+- [x] RFC 0150 - Research reports show readable citations that open and temporarily highlight their exact source passages.
 - [x] RFC 0148 - Existing databases upgrade passage anchors safely, and failed evidence delivery no longer counts as a successful read.
 - [x] RFC 0146 - Research agents see only granted tools, and an optional missing State link no longer discards a completed Run.
 - [x] RFC 0145 - Concurrent Research Activity writers receive unique, ordered event sequences without failing healthy Runs.

@@ -51,6 +51,17 @@ pub fn validate(outcome: &ResearchRunOutcome) -> Result<(), String> {
             "text",
             "Use 1-1000 characters",
         );
+        check(
+            item.cited_passage_refs.len() <= 20
+                && item.cited_passage_refs.iter().all(|value| text(value, 500))
+                && item
+                    .state_entry_ref
+                    .as_deref()
+                    .is_none_or(|value| text(value, 500)),
+            format!("displayItems[{i}].references"),
+            "reference",
+            "Use at most 20 passage references and one optional State entry reference",
+        );
     }
     for (i, item) in outcome.paper_dispositions.iter().enumerate() {
         check(
@@ -74,6 +85,35 @@ pub fn validate(outcome: &ResearchRunOutcome) -> Result<(), String> {
             "nextDirection".into(),
             "text",
             "Use 1-1000 characters or null",
+        );
+    }
+    for (path, prose) in std::iter::once(("summary".to_string(), outcome.summary.as_str()))
+        .chain(
+            outcome
+                .display_items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (format!("displayItems[{index}].text"), item.text.as_str())),
+        )
+        .chain(
+            outcome
+                .unanswered_questions
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (format!("unansweredQuestions[{index}]"), value.as_str())),
+        )
+        .chain(
+            outcome
+                .next_direction
+                .as_deref()
+                .map(|value| ("nextDirection".to_string(), value)),
+        )
+    {
+        check(
+            !contains_internal_reference(prose),
+            path,
+            "internal_reference",
+            "Put internal references only in structured reference fields",
         );
     }
     for (i, task) in outcome.task_outcomes.iter().enumerate() {
@@ -121,6 +161,12 @@ pub fn validate(outcome: &ResearchRunOutcome) -> Result<(), String> {
                 "stateSynthesis.noChangeReason".into(),
                 "text",
                 "Use 1-1000 characters",
+            );
+            check(
+                !contains_internal_reference(reason),
+                "stateSynthesis.noChangeReason".into(),
+                "internal_reference",
+                "Put internal references only in structured reference fields",
             );
         }
         check(
@@ -306,6 +352,11 @@ pub fn resolve_handles(outcome: &mut ResearchRunOutcome, ids: &HashMap<String, S
             }
         }
     }
+    for item in &mut outcome.display_items {
+        if let Some(reference) = &mut item.state_entry_ref {
+            resolve(reference);
+        }
+    }
     for task in &mut outcome.task_outcomes {
         for id in &mut task.motivating_entry_ids {
             resolve(id);
@@ -317,16 +368,20 @@ pub fn resolve_handles(outcome: &mut ResearchRunOutcome, ids: &HashMap<String, S
 pub fn continuation(mut outcome: ResearchRunOutcome) -> ResearchRunOutcome {
     outcome.state_synthesis = None;
     outcome.paper_dispositions.clear();
-    outcome.summary = outcome.summary.chars().take(1000).collect();
+    outcome.summary = display_safe_prose(&outcome.summary)
+        .chars()
+        .take(1000)
+        .collect();
     outcome.display_items.truncate(2);
     for item in &mut outcome.display_items {
-        item.text = item.text.chars().take(500).collect();
+        item.text = display_safe_prose(&item.text).chars().take(500).collect();
+        item.cited_passage_refs.truncate(2);
     }
     outcome.task_outcomes.truncate(1);
     for task in &mut outcome.task_outcomes {
         task.learned_points.truncate(2);
         for point in &mut task.learned_points {
-            *point = point.chars().take(500).collect();
+            *point = display_safe_prose(point).chars().take(500).collect();
         }
         task.cited_passage_refs.truncate(2);
         task.search_run_ids.truncate(2);
@@ -334,9 +389,40 @@ pub fn continuation(mut outcome: ResearchRunOutcome) -> ResearchRunOutcome {
     }
     outcome.unanswered_questions.truncate(2);
     for question in &mut outcome.unanswered_questions {
-        *question = question.chars().take(500).collect();
+        *question = display_safe_prose(question).chars().take(500).collect();
+    }
+    if let Some(direction) = &mut outcome.next_direction {
+        *direction = display_safe_prose(direction).chars().take(500).collect();
     }
     outcome
+}
+
+/// Remove i0i storage identifiers from historical human-facing prose.
+pub(crate) fn display_safe_prose(text: &str) -> String {
+    let parenthesized = regex::Regex::new(
+        r"\(\s*(?:passage_[0-9a-fA-F]{32}|research_entry_[0-9a-fA-F]{32}|(?:search|run)_[0-9]{10,})\s*\)",
+    )
+    .expect("parenthesized reference pattern is valid");
+    let internal = internal_reference_pattern();
+    let without_parentheses = parenthesized.replace_all(text, "");
+    let without_ids = internal.replace_all(&without_parentheses, "");
+    let whitespace = regex::Regex::new(r"[ \t]{2,}").expect("whitespace pattern is valid");
+    let punctuation = regex::Regex::new(r"\s+([.,;:!?])").expect("punctuation pattern is valid");
+    let cleaned = whitespace.replace_all(without_ids.trim(), " ");
+    punctuation.replace_all(&cleaned, "$1").trim().to_string()
+}
+
+/// Return whether human-facing prose contains one of i0i's storage identifiers.
+fn contains_internal_reference(text: &str) -> bool {
+    internal_reference_pattern().is_match(text)
+}
+
+/// Compile the exact storage-key forms that must never become prose.
+fn internal_reference_pattern() -> regex::Regex {
+    regex::Regex::new(
+        r"\b(?:passage_[0-9a-fA-F]{32}|research_entry_[0-9a-fA-F]{32}|(?:search|run)_[0-9]{10,})\b",
+    )
+    .expect("internal reference pattern is valid")
 }
 
 /// Validate synthesis alone for callers that do not own a complete report.
@@ -353,4 +439,48 @@ pub fn validate_shape(
         unanswered_questions: vec![],
         next_direction: direction.map(str::to_owned),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome_with_item(text: &str) -> ResearchRunOutcome {
+        serde_json::from_value(serde_json::json!({
+            "summary": "Readable summary",
+            "displayItems": [{
+                "kind": "finding",
+                "text": text,
+                "citedPassageRefs": [],
+                "stateEntryRef": null
+            }],
+            "paperDispositions": [],
+            "stateSynthesis": {
+                "changes": [],
+                "unresolvedEntryIds": [],
+                "nextDirectionEntryIds": [],
+                "noChangeReason": "No change"
+            },
+            "taskOutcomes": [],
+            "unansweredQuestions": [],
+            "nextDirection": null
+        }))
+        .expect("valid outcome fixture")
+    }
+
+    #[test]
+    fn new_outcome_rejects_internal_ids_in_prose() {
+        let outcome =
+            outcome_with_item("Bounded finding (passage_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa).");
+        let error = validate(&outcome).expect_err("opaque prose reference must fail");
+        assert!(error.contains("internal_reference"));
+    }
+
+    #[test]
+    fn continuation_cleans_historical_internal_ids() {
+        let outcome =
+            outcome_with_item("Bounded finding (passage_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa).");
+        let continuation = continuation(outcome);
+        assert_eq!(continuation.display_items[0].text, "Bounded finding.");
+    }
 }

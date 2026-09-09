@@ -439,6 +439,12 @@ fn validate_graph(
                 .iter()
                 .flat_map(|t| &t.motivating_entry_ids),
         )
+        .chain(
+            outcome
+                .display_items
+                .iter()
+                .filter_map(|item| item.state_entry_ref.as_ref()),
+        )
     {
         if !kinds.contains_key(id) {
             return Err(format!("Unknown State entry reference: {id}"));

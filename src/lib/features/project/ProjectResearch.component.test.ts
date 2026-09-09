@@ -179,3 +179,66 @@ test("a lifecycle edit keeps the updated detail while discarding the old-revisio
   element<HTMLButtonElement>('button[aria-label="Back"]').click();
   await vi.waitFor(() => expect(target.querySelector(".detail-text")).toBeNull());
 });
+
+test("report citations open and highlight their exact Reader passage without showing ids", async () => {
+  await unmount(app);
+  target.innerHTML = "";
+  const openPaper = vi.fn();
+  const citation = {
+    label: "A readable paper · p. 4",
+    paperId: "paper-1",
+    sourceId: "source-1",
+    extractionId: "extraction-1",
+    chunkId: "chunk-1",
+    sourceStart: 120,
+    sourceEnd: 180,
+    pageStart: 3,
+    pageEnd: 3,
+    excerpt: "Exact cited passage.",
+  };
+  ipc.invoke.mockImplementation(async (command: string, args: { projectId?: string }) => {
+    if (command === "get_research_state") return state(2, args.projectId);
+    if (command === "get_research_harness") return {
+      runs: [{ id: "run_1234567890123", status: "ready", startedAt: "now", finishedAt: "now" }],
+      events: [],
+      harness: {
+        status: "idle",
+        configuration: { researchInstructions: "Study evidence", paperBudget: 10,
+          goal: "", scope: "", exclusions: "", preferredConcepts: [], excludedConcepts: [],
+          schedule: { enabled: false, cadence: "daily", localTime: "09:00", timezone: "UTC" } },
+      },
+    };
+    if (command === "list_research_checkpoints") return [{
+      runId: "run_1234567890123",
+      outcome: { summary: "Unsafe passage_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", displayItems: [],
+        paperDispositions: [], taskOutcomes: [], unansweredQuestions: [] },
+      report: { summary: "Readable summary", displayItems: [{ kind: "finding",
+        text: "A bounded result.", citations: [citation], stateEntryId: null, stateEntryLabel: null }],
+        unansweredQuestions: [], nextDirection: null },
+      retainedPaperCount: 1, readPaperCount: 1, attemptedPaperCount: 1,
+      unavailablePaperCount: 0, removedPaperCount: 0, acceptedCandidateCount: 1,
+      rejectedCandidateCount: 0, usage: { providerQueries: 1, llmCalls: 1 },
+      startingStateRevision: 1, resultingStateRevision: 2, restoreAvailable: false,
+    }];
+    if (command.startsWith("list_")) return [];
+    throw new Error(`Unexpected test IPC: ${command}`);
+  });
+  app = mount(ProjectResearch, { target, props: {
+    projectId: "project", projectTitle: "Fixture", onOpenPaper: openPaper,
+  } });
+
+  await vi.waitFor(() => expect(target.textContent).toContain("A bounded result."));
+  expect(target.textContent).not.toContain("passage_");
+  element<HTMLButtonElement>(".citation-marker").click();
+  expect(openPaper).toHaveBeenCalledWith("paper-1", {
+    paperId: "paper-1",
+    sourceId: "source-1",
+    extractionId: "extraction-1",
+    chunkId: "chunk-1",
+    sourceStart: 120,
+    sourceEnd: 180,
+    pageStart: 3,
+    pageEnd: 3,
+    excerpt: "Exact cited passage.",
+  });
+});

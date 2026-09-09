@@ -273,6 +273,8 @@ export interface ResearchRunOutcome {
   displayItems: Array<{
     kind: "finding" | "question" | "gap" | "hypothesis" | "experiment_idea";
     text: string;
+    citedPassageRefs: string[];
+    stateEntryRef?: string | null;
   }>;
   paperDispositions: Array<{
     paperId: string;
@@ -281,6 +283,35 @@ export interface ResearchRunOutcome {
   }>;
   stateSynthesis?: ResearchStateSynthesis | null;
   taskOutcomes: ResearchTaskOutcome[];
+  unansweredQuestions: string[];
+  nextDirection?: string | null;
+}
+
+export interface ResearchReportCitation {
+  label: string;
+  paperId: string;
+  sourceId: string;
+  extractionId: string;
+  chunkId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  pageStart: number;
+  pageEnd: number;
+  excerpt: string;
+}
+
+export interface ResearchReportItem {
+  kind: "finding" | "question" | "gap" | "hypothesis" | "experiment_idea";
+  text: string;
+  citations: ResearchReportCitation[];
+  stateEntryId?: string | null;
+  stateEntryLabel?: string | null;
+}
+
+export interface ResearchRunReport {
+  summary: string;
+  displayItems: ResearchReportItem[];
+  stateSynthesisNote?: string | null;
   unansweredQuestions: string[];
   nextDirection?: string | null;
 }
@@ -429,6 +460,7 @@ export interface ResearchCheckpoint {
   reflectionId?: string;
   nextDirection?: string;
   outcome?: ResearchRunOutcome;
+  report?: ResearchRunReport;
   startedAt: string;
   finishedAt?: string;
   restoreAvailable: boolean;

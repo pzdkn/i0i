@@ -20,9 +20,9 @@ use crate::domain::harness::{
     EffectiveInstructionStack, EffectiveRunContext, HarnessAutonomy, HarnessConfiguration,
     HarnessConfigurationVersion, HarnessEvent, HarnessRun, HarnessRunTrigger, HarnessSnapshot,
     HarnessUsage, PaperDispositionKind, PriorResearchRunOutcome, ResearchCheckpoint,
-    ResearchHarness, ResearchPaperDisposition, ResearchRunOutcome, ResearchStateSynthesis,
-    ResearchSynthesisChange, RunContextEntry, RunContextObservation, HARNESS_POLICY_SUMMARY,
-    HARNESS_POLICY_VERSION,
+    ResearchHarness, ResearchPaperDisposition, ResearchReportCitation, ResearchReportItem,
+    ResearchRunOutcome, ResearchRunReport, ResearchStateSynthesis, ResearchSynthesisChange,
+    RunContextEntry, RunContextObservation, HARNESS_POLICY_SUMMARY, HARNESS_POLICY_VERSION,
 };
 use crate::domain::harness_improvement::{
     HarnessImprovement, HarnessImprovementStatus, HarnessImprovementTarget,
@@ -4697,13 +4697,43 @@ impl LibraryStore {
         };
         let allowed_passage_refs: HashSet<String> = {
             let mut statement = conn
-                .prepare("select passage_ref from agent_reader_passages where run_id = ?1")
+                .prepare(
+                    "select passage.passage_ref from agent_reader_passages passage
+                     join agent_passage_anchors anchor
+                       on anchor.run_id = passage.run_id
+                      and anchor.passage_ref = passage.passage_ref
+                     where passage.run_id = ?1
+                       and anchor.source_version <> ''
+                       and json_extract(anchor.anchor_json, '$.chunk_id') is not null
+                       and json_extract(anchor.anchor_json, '$.extraction_id') is not null
+                       and exists (
+                       select 1 from vaults vault
+                       join vault_papers membership on membership.vault_id = vault.id
+                       where vault.project_id = ?2 and membership.paper_id = passage.paper_id
+                     )",
+                )
                 .map_err(|error| error.to_string())?;
             let rows = statement
-                .query_map(params![run_id], |row| row.get(0))
+                .query_map(params![run_id, project_id], |row| row.get(0))
                 .map_err(|error| error.to_string())?;
             collect_rows(rows)?.into_iter().collect()
         };
+        for item in &outcome.display_items {
+            if item
+                .cited_passage_refs
+                .iter()
+                .any(|id| !allowed_passage_refs.contains(id))
+            {
+                return Err("Research report references a passage the Run did not read".to_string());
+            }
+            if item
+                .state_entry_ref
+                .as_ref()
+                .is_some_and(|id| !allowed_entry_ids.contains(id))
+            {
+                return Err("Research report references an unknown State entry".to_string());
+            }
+        }
         for task in &outcome.task_outcomes {
             if task
                 .search_run_ids
@@ -8646,13 +8676,17 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
         .as_ref()
         .and_then(|(_, next_direction, _)| next_direction.clone())
         .or_else(|| plan.map(|plan| plan.next_direction.clone()));
-    let outcome = reflection
+    let outcome: Option<ResearchRunOutcome> = reflection
         .as_ref()
         .and_then(|(_, _, metrics_json)| {
             serde_json::from_str::<serde_json::Value>(metrics_json).ok()
         })
         .and_then(|metrics| metrics.get("agentOutcome").cloned())
         .and_then(|value| serde_json::from_value(value).ok());
+    let report = outcome
+        .as_ref()
+        .map(|outcome| build_research_run_report(conn, &run, outcome, next_direction.as_deref()))
+        .transpose()?;
     Ok(ResearchCheckpoint {
         run_id: run.id,
         project_id: run.project_id,
@@ -8685,10 +8719,150 @@ fn read_research_checkpoint(conn: &Connection, run_id: &str) -> StoreResult<Rese
         reflection_id,
         next_direction,
         outcome,
+        report,
         started_at: run.started_at,
         finished_at: run.finished_at,
         restore_available: terminal && run.resulting_state_revision.is_some(),
     })
+}
+
+/// Build the human-facing Run report from canonical outcome references.
+fn build_research_run_report(
+    conn: &Connection,
+    run: &HarnessRun,
+    outcome: &ResearchRunOutcome,
+    next_direction: Option<&str>,
+) -> StoreResult<ResearchRunReport> {
+    let revision = run
+        .resulting_state_revision
+        .unwrap_or(run.starting_state_revision);
+    let mut display_items = Vec::with_capacity(outcome.display_items.len());
+    for item in &outcome.display_items {
+        let (text, historical_passages, historical_entries) = display_safe_report_text(&item.text);
+        let mut passage_refs = item.cited_passage_refs.clone();
+        passage_refs.extend(historical_passages);
+        let mut seen_passages = HashSet::new();
+        passage_refs.retain(|reference| seen_passages.insert(reference.clone()));
+        let citations = passage_refs
+            .iter()
+            .filter_map(|reference| resolve_report_citation(conn, run, reference).transpose())
+            .collect::<StoreResult<Vec<_>>>()?;
+
+        let state_entry_ref = item
+            .state_entry_ref
+            .as_ref()
+            .or_else(|| historical_entries.first());
+        let state_entry = state_entry_ref
+            .and_then(|entry_id| read_research_entry_summary_at(conn, entry_id, revision).ok())
+            .filter(|entry| entry.project_id == run.project_id);
+        display_items.push(ResearchReportItem {
+            kind: item.kind,
+            text,
+            citations,
+            state_entry_id: state_entry.as_ref().map(|entry| entry.id.clone()),
+            state_entry_label: state_entry
+                .map(|entry| crate::services::research::synthesis::display_safe_prose(&entry.text)),
+        });
+    }
+
+    Ok(ResearchRunReport {
+        summary: display_safe_report_text(&outcome.summary).0,
+        display_items,
+        state_synthesis_note: outcome
+            .state_synthesis
+            .as_ref()
+            .and_then(|synthesis| synthesis.no_change_reason.as_deref())
+            .map(|text| display_safe_report_text(text).0),
+        unanswered_questions: outcome
+            .unanswered_questions
+            .iter()
+            .map(|text| display_safe_report_text(text).0)
+            .collect(),
+        next_direction: next_direction.map(|text| display_safe_report_text(text).0),
+    })
+}
+
+/// Resolve one opaque passage reference to a scoped Reader navigation target.
+fn resolve_report_citation(
+    conn: &Connection,
+    run: &HarnessRun,
+    passage_ref: &str,
+) -> StoreResult<Option<ResearchReportCitation>> {
+    let row = conn
+        .query_row(
+            "select anchor.anchor_json, paper.title
+             from agent_passage_anchors anchor
+             join agent_reader_passages passage
+               on passage.run_id = anchor.run_id and passage.passage_ref = anchor.passage_ref
+             join papers paper on paper.id = passage.paper_id
+             where anchor.run_id = ?1 and anchor.passage_ref = ?2
+               and anchor.source_version <> ''
+               and exists (
+                 select 1 from vaults vault
+                 join vault_papers membership on membership.vault_id = vault.id
+                 where vault.project_id = ?3 and membership.paper_id = paper.id
+               )",
+            params![run.id, passage_ref, run.project_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((anchor_json, paper_title)) = row else {
+        return Ok(None);
+    };
+    let anchor: crate::services::mcp::PassageAnchor =
+        serde_json::from_str(&anchor_json).map_err(|error| error.to_string())?;
+    let (Some(extraction_id), Some(chunk_id)) = (anchor.extraction_id, anchor.chunk_id) else {
+        return Ok(None);
+    };
+    let page_label = match (anchor.page_start, anchor.page_end) {
+        (Some(start), Some(end)) if start == end => format!(" · p. {start}"),
+        (Some(start), Some(end)) => format!(" · pp. {start}-{end}"),
+        _ => String::new(),
+    };
+    // Agent passage pages are one-based for model readability; Reader is zero-based.
+    let page_start = anchor.page_start.unwrap_or(1).saturating_sub(1);
+    let page_end = anchor.page_end.unwrap_or(1).saturating_sub(1);
+    Ok(Some(ResearchReportCitation {
+        label: format!("{paper_title}{page_label}"),
+        paper_id: anchor.paper_id,
+        source_id: anchor.source_id,
+        extraction_id,
+        chunk_id,
+        source_start: anchor.source_start,
+        source_end: anchor.source_end,
+        page_start,
+        page_end,
+        excerpt: anchor.quote,
+    }))
+}
+
+/// Remove storage identifiers from prose and retain resolvable historical refs.
+fn display_safe_report_text(text: &str) -> (String, Vec<String>, Vec<String>) {
+    let internal = regex::Regex::new(
+        r"\b(?:passage_[0-9a-fA-F]{32}|research_entry_[0-9a-fA-F]{32}|(?:search|run)_[0-9]{10,})\b",
+    )
+    .expect("internal reference pattern is valid");
+    let mut passages = Vec::new();
+    let mut entries = Vec::new();
+    for matched in internal.find_iter(text) {
+        let reference = matched.as_str().to_string();
+        if reference.starts_with("passage_") {
+            passages.push(reference);
+        } else if reference.starts_with("research_entry_") {
+            entries.push(reference);
+        }
+    }
+    let mut seen_passages = HashSet::new();
+    passages.retain(|reference| seen_passages.insert(reference.clone()));
+    let mut seen_entries = HashSet::new();
+    entries.retain(|reference| seen_entries.insert(reference.clone()));
+
+    (
+        crate::services::research::synthesis::display_safe_prose(text),
+        passages,
+        entries,
+    )
 }
 
 const HARNESS_CHANGE_SET_COLUMNS: &str =
@@ -14661,6 +14835,15 @@ fn validate_research_run_outcome_shape(outcome: &ResearchRunOutcome) -> StoreRes
     }
     for item in &outcome.display_items {
         validate_outcome_text("display item", &item.text, 1_000)?;
+        if item.cited_passage_refs.len() > 20 {
+            return Err("Research display item exceeds its citation limit".to_string());
+        }
+        for reference in &item.cited_passage_refs {
+            validate_outcome_text("display item passage reference", reference, 500)?;
+        }
+        if let Some(reference) = &item.state_entry_ref {
+            validate_outcome_text("display item State entry reference", reference, 500)?;
+        }
     }
     for decision in &outcome.paper_dispositions {
         validate_outcome_text("paper id", &decision.paper_id, 500)?;
@@ -21289,7 +21472,7 @@ mod tests {
         )?;
         let chunk = db.store.chunks_for_extraction(&extraction.id)?.remove(0);
         let run = managed_harness_run(&db, &AgentRunLimits::default())?;
-        let reference = "passage:delivered".to_string();
+        let reference = "passage_11111111111111111111111111111111".to_string();
         let anchors = HashMap::from([(
             reference.clone(),
             crate::services::mcp::PassageAnchor {
@@ -21360,6 +21543,62 @@ mod tests {
                 .len(),
             2
         );
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_report_resolves_citations_and_created_state_entries() -> StoreResult<()> {
+        let (db, run, mut proposal, anchors) = synthesis_fixture()?;
+        let passage_ref = anchors.keys().next().expect("fixture passage");
+        proposal["displayItems"] = serde_json::json!([{
+            "kind": "finding",
+            "text": "The evaluation used two benchmarks.",
+            "citedPassageRefs": [passage_ref],
+            "stateEntryRef": "f"
+        }]);
+        db.store
+            .save_synthesis_attempt(&run.id, 0, &proposal.to_string(), &anchors)?;
+        db.store.finalize_synthesis(&run.id, 0, true)?;
+
+        let checkpoint = db.store.get_research_checkpoint(&run.id)?;
+        let item = &checkpoint.report.expect("display report").display_items[0];
+        assert_eq!(item.text, "The evaluation used two benchmarks.");
+        assert_ne!(item.state_entry_id.as_deref(), Some("f"));
+        assert_eq!(item.citations.len(), 1);
+        assert!(item.citations[0].label.contains("p. 1"));
+        assert_eq!(item.citations[0].excerpt, anchors[passage_ref].quote);
+        assert_eq!(item.citations[0].page_start, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn historical_report_hides_ids_and_links_only_durable_passages() -> StoreResult<()> {
+        let (db, run, mut proposal, anchors) = synthesis_fixture()?;
+        let passage_ref = anchors.keys().next().expect("fixture passage");
+        let missing_ref = "passage_22222222222222222222222222222222";
+        proposal["summary"] = serde_json::json!(format!("Summary ({missing_ref})."));
+        proposal["displayItems"] = serde_json::json!([{
+            "kind": "finding",
+            "text": format!("A bounded result ({passage_ref}). Also unknown ({missing_ref}).")
+        }]);
+        let outcome: ResearchRunOutcome =
+            serde_json::from_value(proposal).map_err(|error| error.to_string())?;
+        let conn = db.store.open_connection()?;
+        let report = build_research_run_report(&conn, &run, &outcome, None)?;
+
+        assert_eq!(report.summary, "Summary.");
+        assert_eq!(
+            report.display_items[0].text,
+            "A bounded result. Also unknown."
+        );
+        assert_eq!(report.display_items[0].citations.len(), 1);
+        assert_eq!(
+            report.display_items[0].citations[0].excerpt,
+            anchors[passage_ref].quote
+        );
+        assert!(!serde_json::to_string(&report)
+            .map_err(|error| error.to_string())?
+            .contains("passage_"));
         Ok(())
     }
 

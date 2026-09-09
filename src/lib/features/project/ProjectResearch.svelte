@@ -51,6 +51,7 @@
     HarnessSnapshot,
     RunReconciliationPlan,
     ResearchCheckpoint,
+    ResearchReportCitation,
     ResearchStateSynthesis,
   } from "$lib/domain/research";
   import type {
@@ -476,6 +477,21 @@
     return [...counts.entries()]
       .map(([label, count]) => `+ ${count} ${label}${count === 1 ? "" : "s"}`)
       .join(" · ");
+  }
+
+  /** Open a report citation at its exact, temporarily highlighted passage. */
+  function openReportCitation(citation: ResearchReportCitation): void {
+    onOpenPaper?.(citation.paperId, {
+      paperId: citation.paperId,
+      sourceId: citation.sourceId,
+      extractionId: citation.extractionId,
+      chunkId: citation.chunkId,
+      sourceStart: citation.sourceStart,
+      sourceEnd: citation.sourceEnd,
+      pageStart: citation.pageStart,
+      pageEnd: citation.pageEnd,
+      excerpt: citation.excerpt,
+    });
   }
 
   async function saveEntry() {
@@ -1058,11 +1074,46 @@
               <p class="error-text">{actionableResearchError(featuredFailure.summary)}</p>
             {:else if checkpoints[run.id]?.outcome}
               {@const outcome = checkpoints[run.id].outcome}
-              <SafeMarkdown text={outcome?.summary ?? ""} />
-              {#if outcome?.displayItems?.length}
+              {@const report = checkpoints[run.id].report}
+              <SafeMarkdown text={report?.summary ?? outcome?.summary ?? ""} />
+              {#if report?.displayItems?.length}
                 <section class="outcome-section">
                   <strong>What changed</strong>
-                  <ul>{#each outcome.displayItems as item}<li><span>{item.kind.replaceAll("_", " ")}</span>{item.text}</li>{/each}</ul>
+                  <ul class="report-items">
+                    {#each report.displayItems as item}
+                      <li class="report-item">
+                        <div class="report-statement">
+                          <span class="report-kind">{item.kind.replaceAll("_", " ")}</span>{item.text}
+                          {#each item.citations as citation, index}
+                            <button
+                              class="citation-marker"
+                              type="button"
+                              aria-label={`Open source ${index + 1}: ${citation.label}`}
+                              title={citation.label}
+                              onclick={() => openReportCitation(citation)}
+                            >[{index + 1}]</button>
+                          {/each}
+                        </div>
+                        {#if item.citations.length}
+                          <div class="report-sources">
+                            {#each item.citations as citation, index}
+                              <button type="button" onclick={() => openReportCitation(citation)}>
+                                <span>[{index + 1}]</span>{citation.label}<ExternalLink size={11} aria-hidden="true" />
+                              </button>
+                            {/each}
+                          </div>
+                        {/if}
+                        {#if item.stateEntryId && item.stateEntryLabel}
+                          <button
+                            class="state-entry-link"
+                            type="button"
+                            title={item.stateEntryLabel}
+                            onclick={() => void openEntry(item.stateEntryId ?? "")}
+                          >View State entry</button>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
                 </section>
               {/if}
             {:else}
@@ -1076,13 +1127,13 @@
                 {@const synthesis = checkpoint.outcome.stateSynthesis}
                 <section class="outcome-section synthesis">
                   <strong>{synthesis.resultingRevision ? `State synthesis · revision ${synthesis.resultingRevision}` : "State unchanged"}</strong>
-                  {#if synthesis.changes.length}<p>{synthesisSummary(synthesis)}</p>{:else if synthesis.noChangeReason}<p>{synthesis.noChangeReason}</p>{/if}
+                  {#if synthesis.changes.length}<p>{synthesisSummary(synthesis)}</p>{:else if checkpoint.report?.stateSynthesisNote}<p>{checkpoint.report.stateSynthesisNote}</p>{/if}
                 </section>
               {/if}
-              {#if checkpoint.outcome?.unansweredQuestions.length}
-                <section class="outcome-section"><strong>Still open</strong><ul>{#each checkpoint.outcome.unansweredQuestions as question}<li>{question}</li>{/each}</ul></section>
+              {#if checkpoint.report?.unansweredQuestions.length}
+                <section class="outcome-section"><strong>Still open</strong><ul>{#each checkpoint.report.unansweredQuestions as question}<li>{question}</li>{/each}</ul></section>
               {/if}
-              {#if checkpoint.nextDirection}<section class="outcome-section"><strong>Next</strong><SafeMarkdown text={checkpoint.nextDirection} /></section>{/if}
+              {#if checkpoint.report?.nextDirection}<section class="outcome-section"><strong>Next</strong><SafeMarkdown text={checkpoint.report.nextDirection} /></section>{/if}
               <details class="checkpoint">
                 <summary>Technical activity</summary>
                 <p>{checkpoint.acceptedCandidateCount} accepted · {checkpoint.rejectedCandidateCount} rejected · {checkpoint.usage.providerQueries} queries · {checkpoint.usage.llmCalls} model calls</p>
@@ -1505,9 +1556,67 @@
     padding-left: 18px;
   }
 
-  .outcome-section li span {
+  .report-kind {
     margin-right: 7px;
     color: var(--amber);
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+
+  .report-items {
+    list-style: none;
+    padding-left: 0 !important;
+  }
+
+  .report-item {
+    display: grid;
+    gap: 4px;
+  }
+
+  .report-statement {
+    line-height: 1.45;
+  }
+
+  .citation-marker,
+  .state-entry-link,
+  .report-sources button {
+    border: 0;
+    color: var(--amber);
+    background: transparent;
+  }
+
+  .citation-marker {
+    padding: 0 2px;
+    font: inherit;
+  }
+
+  .report-sources {
+    display: grid;
+    gap: 2px;
+    padding-left: 12px;
+  }
+
+  .report-sources button {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    justify-self: start;
+    gap: 5px;
+    padding: 1px 0;
+    color: var(--fg-3);
+    text-align: left;
+    line-height: 1.35;
+    white-space: normal;
+  }
+
+  .report-sources button span {
+    flex: 0 0 auto;
+    color: var(--amber);
+  }
+
+  .state-entry-link {
+    justify-self: start;
+    padding: 1px 0;
     font-size: 10px;
     text-transform: uppercase;
   }

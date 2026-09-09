@@ -315,6 +315,8 @@ pub struct ResearchCheckpoint {
     pub next_direction: Option<String>,
     /// Validated managed-agent interpretation, when the Run produced one.
     pub outcome: Option<ResearchRunOutcome>,
+    /// Display-safe report with resolved source and State navigation.
+    pub report: Option<ResearchRunReport>,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub restore_available: bool,
@@ -365,6 +367,50 @@ pub struct ResearchTaskOutcome {
 pub struct ResearchOutcomeItem {
     pub kind: ResearchEntryKind,
     pub text: String,
+    /// Exact passages supporting this displayed statement.
+    #[serde(default)]
+    pub cited_passage_refs: Vec<String>,
+    /// Durable State entry represented by this displayed statement.
+    #[serde(default)]
+    pub state_entry_ref: Option<String>,
+}
+
+/// One human-readable citation resolved from a Run's durable passage anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchReportCitation {
+    pub label: String,
+    pub paper_id: String,
+    pub source_id: String,
+    pub extraction_id: String,
+    pub chunk_id: String,
+    pub source_start: i64,
+    pub source_end: i64,
+    pub page_start: i32,
+    pub page_end: i32,
+    pub excerpt: String,
+}
+
+/// One report row after internal references have been resolved for presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchReportItem {
+    pub kind: ResearchEntryKind,
+    pub text: String,
+    pub citations: Vec<ResearchReportCitation>,
+    pub state_entry_id: Option<String>,
+    pub state_entry_label: Option<String>,
+}
+
+/// Human-facing projection of a completed managed Research Run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchRunReport {
+    pub summary: String,
+    pub display_items: Vec<ResearchReportItem>,
+    pub state_synthesis_note: Option<String>,
+    pub unanswered_questions: Vec<String>,
+    pub next_direction: Option<String>,
 }
 
 /// Why a newly investigated paper should or should not remain in the Vault.

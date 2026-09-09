@@ -715,7 +715,7 @@ fn render_research_prompt(
     }))
     .map_err(|error| error.to_string())?;
     Ok(format!(
-        "Run this project's literature research procedure. Treat the snapshot as orientation, then verify current data with i0i tools before writing. Current evidence and the user's instructions outrank recommendations from prior Runs. Do not repeat an earlier search unless changed evidence, broader coverage, or an external failure justifies it. A search with no results does not prove that no such research exists. In the final structured response, report only IDs and passage references returned by this Run's tools.\n\n{snapshot}"
+        "Run this project's literature research procedure. Treat the snapshot as orientation, then verify current data with i0i tools before writing. Current evidence and the user's instructions outrank recommendations from prior Runs. Do not repeat an earlier search unless changed evidence, broader coverage, or an external failure justifies it. A search with no results does not prove that no such research exists. In the final structured response, put IDs and passage references only in their designated structured fields. Keep all prose human-readable: never write passage refs, State-entry ids, Search Run ids, or local create handles into prose.\n\n{snapshot}"
     ))
 }
 
@@ -933,10 +933,12 @@ fn research_outcome_schema() -> Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["kind", "text"],
+                    "required": ["kind", "text", "citedPassageRefs", "stateEntryRef"],
                     "properties": {
                         "kind": {"type": "string", "enum": ["finding", "question", "gap", "hypothesis", "experiment_idea"]},
-                        "text": {"type": "string", "minLength": 1, "maxLength": 1000}
+                        "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+                        "citedPassageRefs": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1, "maxLength": 500}},
+                        "stateEntryRef": {"type": ["string", "null"], "minLength": 1, "maxLength": 500}
                     }
                 }
             },
@@ -1073,7 +1075,12 @@ mod tests {
     fn outcome_json() -> String {
         serde_json::json!({
             "summary": "The evidence narrows the question.",
-            "displayItems": [{"kind": "gap", "text": "Generalization remains untested."}],
+            "displayItems": [{
+                "kind": "gap",
+                "text": "Generalization remains untested.",
+                "citedPassageRefs": [],
+                "stateEntryRef": null
+            }],
             "paperDispositions": [],
             "stateSynthesis": {
                 "changes": [],
