@@ -1,109 +1,240 @@
-# i0i
+<div align="center">
+  <img src="assets/logo_transparent.png" alt="i0i logo" width="132" />
+  <h1>i0i</h1>
+  <p><strong>A local-first knowledge IDE for research that builds on what it learns.</strong></p>
+  <p>
+    Read papers, keep evidence-linked notes, discover relevant work, and let an
+    autonomous research loop grow a durable understanding of your project.
+  </p>
 
-i0i is a macOS-first Tauri desktop app for knowledge curation.
+  <p>
+    <a href="#project-status"><img src="https://img.shields.io/badge/status-alpha-D99B2B" alt="Status: Alpha" /></a>
+    <a href="#installation"><img src="https://img.shields.io/badge/macOS-Apple%20Silicon-111111?logo=apple" alt="Platform: Apple Silicon macOS" /></a>
+    <a href="https://v2.tauri.app/"><img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white" alt="Tauri 2" /></a>
+    <a href="https://svelte.dev/"><img src="https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&amp;logoColor=white" alt="Svelte 5" /></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/backend-Rust-000000?logo=rust&amp;logoColor=white" alt="Rust backend" /></a>
+  </p>
+  <p>
+    <a href="#why-i0i">Why i0i</a> ·
+    <a href="#what-works-today">Features</a> ·
+    <a href="#installation">Install</a> ·
+    <a href="#development">Develop</a> ·
+    <a href="#architecture">Architecture</a>
+  </p>
+</div>
 
-The app is currently an active construction site. It has a Svelte frontend, a Rust/Tauri backend, and a local SQLite-backed library store for vaults, papers, and reader notes.
+> [!IMPORTANT]
+> i0i is experimental alpha software under active development. The first
+> supported target is Apple Silicon macOS 11 or newer. Keep backups of research
+> you cannot afford to lose.
 
-## Prerequisites
+## Why i0i
 
-- Node.js
-- pnpm
-- Rust
-- Tauri v2 system prerequisites
+Research tools are good at storing papers and AI tools are good at answering a
+question once. i0i joins those two loops. Your papers, annotations, questions,
+findings, gaps, and hypotheses live together in a native workspace. Each
+research run can inspect what the project already knows, gather and read new
+evidence, update Research State with traceable citations, and use that improved
+state to guide the next run.
 
-For Tauri setup details, use the official guide:
-
-https://tauri.app/start/prerequisites/
-
-## Install
-
-```bash
-pnpm install
+```mermaid
+flowchart LR
+    A[Research instruction] --> B[Focused searches]
+    S[(Research State)] -->|questions and gaps| B
+    B --> C[Read relevant papers]
+    C -->|passage evidence| S
+    S -->|next direction| B
 ```
 
-## Run The Desktop App
+The long-term idea is a knowledge IDE that understands the edge of your current
+knowledge and helps you decide what to learn next. Academic research is the
+first serious use case.
+
+## What Works Today
+
+### Read and annotate
+
+- Import local PDFs or save papers from Discover into a Vault.
+- Read cached PDFs and recovered HTML without leaving the app.
+- Select passages, highlight them, attach notes, and return to the exact source.
+- Chat with a paper using bounded, cited document context.
+
+### Find useful work
+
+- Search across scholarly providers and browser-based discovery.
+- Run quick searches, deeper query expansion, or Vault-based similar-paper searches.
+- Review candidates before retaining them and fall back to the source website when automatic acquisition fails.
+
+### Build a research project
+
+- Keep papers, Markdown documents, and a typed Research State in one Project.
+- Track findings, questions, gaps, hypotheses, evidence, and relationships across runs.
+- Launch a bounded autonomous research run that searches, reads, cites, and proposes validated State updates.
+- Inspect progress, retained papers, evidence links, and the next research direction.
+
+### Stay local-first
+
+- Store Vaults, papers, notes, projects, and run history in local SQLite and app data.
+- Cache acquired documents locally.
+- Keep API credentials on the machine; values saved in Settings override environment variables.
+
+## Installation
+
+### macOS app
+
+A signed and notarized public DMG is not published yet. The release pipeline is
+implemented, but the current alpha should be run from source. When a public
+build is available, installation will be the usual macOS flow: open the DMG and
+drag `i0i.app` into `Applications`.
+
+### Run from source
+
+You need:
+
+- Apple Silicon Mac running macOS 11 or newer
+- [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/installation)
+- [Rust](https://www.rust-lang.org/tools/install)
+- Apple's Xcode Command Line Tools
+- The remaining [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/)
 
 ```bash
+git clone https://github.com/pzdkn/i0i.git
+cd i0i
+pnpm install
+pnpm runtime:prepare
+pnpm runtime:verify
 pnpm tauri dev
 ```
 
-This starts the Svelte frontend through Vite and opens it inside the Tauri desktop shell.
+`runtime:prepare` downloads the pinned Apple Silicon builds of Pdfium and
+Obscura declared in `src-tauri/runtime-dependencies.toml`. These binaries are
+required for PDF text extraction and browser-backed source acquisition. The
+downloads are checksum-verified and remain untracked build resources.
 
-## Useful Commands
+## AI Setup
+
+The Reader and local library work without autonomous Project Research. Configure
+only the integrations for the capabilities you intend to use:
+
+| Integration | Unlocks | Setup |
+| --- | --- | --- |
+| OpenRouter | Paper chat, deep research, and query expansion | Add an OpenRouter key in **Settings / API Keys**, or set `OPENROUTER_API_KEY` in `.env`. |
+| OpenAlex | Scholarly discovery | Add a key in **Settings / API Keys**, or set `OPENALEX_API_KEY` in `.env`. |
+| CORE | Additional open-access discovery | Optionally add `CORE_API_KEY` in **Settings / API Keys**. |
+| Unpaywall | Better open-access source resolution | Optionally add a contact email in **Settings / API Keys**. |
+| Codex CLI | Autonomous Project Research | Install Codex, sign in once, then verify it under **Settings / System**. |
+
+Install the Codex CLI using the current command from the
+[official Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli):
 
 ```bash
-pnpm dev
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+codex
 ```
 
-Runs the frontend only in the browser. This is useful for layout work, but Rust commands and desktop behavior are only fully tested through Tauri.
+The first `codex` invocation opens its sign-in flow. i0i requires Codex CLI
+`0.153.4` or newer for autonomous research. If `codex` is not on `PATH`, set its
+executable path under **Settings / Models**.
+
+For environment-based development setup, create an untracked `.env` at the
+repository root:
+
+```dotenv
+OPENROUTER_API_KEY=your_openrouter_key
+OPENALEX_API_KEY=your_openalex_key
+CORE_API_KEY=your_optional_core_key
+```
+
+Never commit `.env`; it is ignored by Git.
+
+## Development
 
 ```bash
-pnpm check
+pnpm tauri dev       # full desktop app: Svelte + Rust + SQLite
+pnpm dev             # frontend only; Tauri commands are unavailable
+pnpm check           # Svelte and TypeScript checks
+pnpm test:ui         # deterministic frontend tests
+pnpm test:runtime    # runtime preparation tests
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
 ```
 
-Runs Svelte and TypeScript checks.
+The frontend-only server is useful for isolated layout work. Reader, storage,
+native dialogs, source acquisition, and research runs must be exercised through
+Tauri.
 
-```bash
-pnpm build
-```
-
-Builds the frontend.
+### Build the app
 
 ```bash
 pnpm tauri build
 ```
 
-Builds the desktop app.
+The build prepares the pinned runtime resources automatically and emits a macOS
+application bundle and DMG under `src-tauri/target/release/bundle/`.
 
-```bash
-pnpm runtime:prepare
-pnpm runtime:verify
-```
-
-Downloads or verifies the pinned ARM64 Pdfium and Obscura runtimes declared in
-`src-tauri/runtime-dependencies.toml`. Normal Tauri release builds prepare these
-resources automatically.
-
-For a signed and notarized macOS release, configure `I0I_SIGNING_IDENTITY` and
-an `I0I_NOTARY_PROFILE` created with Apple's `notarytool`, then run:
+For a signed and notarized release, configure `I0I_SIGNING_IDENTITY` and an
+`I0I_NOTARY_PROFILE` created with Apple's `notarytool`, then run:
 
 ```bash
 bash scripts/release_macos.sh
 ```
 
-The same release path is available through the protected `Release macOS ARM64`
-GitHub Actions workflow.
+The protected **Release macOS ARM64** GitHub Actions workflow uses the same
+release path.
 
-Application icons are generated from the canonical `assets/logo.png` source:
+## Architecture
 
-```bash
-pnpm icons:generate
+i0i is a Tauri v2 desktop application: Svelte owns the interface, Rust owns the
+domain operations and native integrations, and SQLite owns durable local state.
+
+```mermaid
+flowchart LR
+    UI[Svelte 5 interface] -->|typed bridge invoke| CMD[Tauri commands]
+    CMD --> SVC[Rust services]
+    SVC --> DB[(SQLite and local files)]
+    SVC --> EXT[Scholarly and web sources]
+    AGENT[Managed Codex process] <-->|authenticated local MCP| SVC
+    SVC -->|progress events| UI
 ```
-
-## Project Shape
 
 ```text
 src/
   lib/
-    bridge/       Svelte-to-Tauri command wrappers
-    domain/       frontend domain types
-    features/     UI features such as Vault, Discover, Reader
-    state/        frontend state/cache modules
+    bridge/       Typed Svelte-to-Tauri command wrappers
+    domain/       Frontend domain types
+    features/     Vault, Discover, Reader, Projects, and Settings
+    state/        Frontend state and cache modules
 
 src-tauri/
   src/
-    commands/     Tauri command handlers callable from Svelte
+    commands/     Tauri command boundary
     domain/       Rust domain models
-    storage/      SQLite store and persistence logic
+    services/     Reader, discovery, research, MCP, and runtime services
+    storage/      SQLite persistence
 ```
 
-Mental model:
+UI components should call Rust through the small bridge functions in
+`src/lib/bridge/`, rather than scattering raw `invoke(...)` calls across the
+frontend.
 
-```text
-Svelte UI -> bridge invoke(...) -> Tauri command -> Rust store -> SQLite
-```
+## Project Status
 
-The frontend should call Rust through small bridge functions, not by scattering raw `invoke(...)` calls through UI components.
+i0i is a working research prototype, not a stable release. Milestone 00, the
+evidence-linked literature research loop, is implemented. Packaging for an
+Apple Silicon macOS release is implemented and locally verified; Developer ID
+signing, notarization, and clean-machine acceptance remain before public distribution.
+
+The design history is intentionally public:
+
+- [Milestone 00: Research That Builds on What It Learns](milestones/milestone_00.md)
+- [Product pitch](docs/pitch.md)
+- [RFC index](docs/rfcs/)
+- [Current work list](docs/todays-list.md)
+
+## Contributing
+
+The repository uses an RFC-first workflow. New research features begin as a
+focused RFC under `docs/rfcs/`; implementation starts only after that RFC is
+approved. Please read [AGENTS.md](AGENTS.md) before making a substantial change.
 
 ## Changelog
 
