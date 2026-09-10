@@ -20,7 +20,7 @@
     "spike:extractors:setup": "bash scripts/extractor_spike/setup_tools.sh",
     "tauri": "tauri"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "@lucide/svelte": "^1.27.0",
     "@tauri-apps/api": "^2",

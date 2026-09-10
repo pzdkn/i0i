@@ -13,6 +13,7 @@
     <a href="https://v2.tauri.app/"><img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white" alt="Tauri 2" /></a>
     <a href="https://svelte.dev/"><img src="https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&amp;logoColor=white" alt="Svelte 5" /></a>
     <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/backend-Rust-000000?logo=rust&amp;logoColor=white" alt="Rust backend" /></a>
+    <a href="#license"><img src="https://img.shields.io/badge/license-GPL--3.0--only-663399" alt="License: GPL-3.0-only" /></a>
   </p>
   <p>
     <a href="#why-i0i">Why i0i</a> ·
@@ -235,6 +236,17 @@ The design history is intentionally public:
 The repository uses an RFC-first workflow. New research features begin as a
 focused RFC under `docs/rfcs/`; implementation starts only after that RFC is
 approved. Please read [AGENTS.md](AGENTS.md) before making a substantial change.
+
+## License
+
+Copyright (C) 2026 Pengfei Zhao.
+
+i0i is free software licensed under the
+[GNU General Public License version 3 only](LICENSE). You may use, study,
+modify, and distribute it, including commercially. If you distribute i0i or a
+derivative work, you must preserve the copyright and license notices, provide
+the corresponding source under GPL-3.0-only, and grant recipients the same
+freedoms.
 
 ## Changelog
 
