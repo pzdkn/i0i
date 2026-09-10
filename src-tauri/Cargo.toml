@@ -55,6 +55,7 @@ axum = "0.8"
 schemars = { version = "1", features = ["derive"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
+toml = "0.9.12"
 
 [dev-dependencies]
 jsonschema = { version = "0.55.1", default-features = false }

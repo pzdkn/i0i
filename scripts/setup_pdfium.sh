@@ -43,28 +43,4 @@ if [[ "${I0I_PDFIUM_SOURCE:-}" != "" ]]; then
   exit 0
 fi
 
-for candidate in \
-  "$ROOT_DIR/scripts/extractor_spike/.venvs/docling/lib/python3.12/site-packages/pypdfium2_raw/libpdfium.dylib" \
-  "$ROOT_DIR/scripts/extractor_spike/.venvs/mineru/lib/python3.12/site-packages/pypdfium2_raw/libpdfium.dylib" \
-  "$ROOT_DIR/scripts/extractor_spike/.venvs/marker/lib/python3.12/site-packages/pypdfium2_raw/libpdfium.dylib"
-do
-  if copy_from "$candidate"; then
-    echo "Note: copied from extractor-spike tooling as a developer convenience."
-    echo "For a clean install, pass an explicit Pdfium dylib path to this script."
-    exit 0
-  fi
-done
-
-cat >&2 <<EOF
-Could not find libpdfium.dylib.
-
-Usage:
-  bash scripts/setup_pdfium.sh /absolute/path/to/libpdfium.dylib
-
-or:
-  I0I_PDFIUM_SOURCE=/absolute/path/to/libpdfium.dylib bash scripts/setup_pdfium.sh
-
-Expected output:
-  src-tauri/resources/pdfium/libpdfium.dylib
-EOF
-exit 1
+exec node "$ROOT_DIR/scripts/prepare_runtime.mjs" --component pdfium

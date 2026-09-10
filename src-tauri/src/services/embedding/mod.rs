@@ -34,30 +34,25 @@ pub const MODEL_VERSION: &str = "1";
 /// useful for sizing buffers.
 pub const MODEL_DIMENSIONS: usize = 384;
 
-/// Load the local model once at startup, for every consumer that needs it.
+/// Create the shared local-model handle used by every embedding consumer.
 ///
-/// Returns `None` when the `embeddings` feature is off or the model fails to
-/// load. Callers decide what that means for them: the reranker degrades to
-/// legacy weights, while chunk embedding reports zero coverage (RFC 0075 R5).
+/// Model download and initialization happen lazily on the first embedding call,
+/// never while Tauri is opening the main window. Returns `None` only when the
+/// `embeddings` feature is not part of this build.
 pub fn load_embedder(cache_dir: std::path::PathBuf) -> Option<Arc<dyn TextEmbedder>> {
     // Borrowed so the parameter is "used" even when the feature is off.
     let _ = &cache_dir;
     #[cfg(feature = "embeddings")]
-    match fastembed_backend::FastEmbedder::load(cache_dir) {
-        Ok(embedder) => {
-            eprintln!("[embedding] local model ready");
-            return Some(Arc::new(embedder));
-        }
-        Err(error) => {
-            eprintln!("[embedding] model load failed: {error}");
-        }
-    }
+    return Some(Arc::new(fastembed_backend::LazyFastEmbedder::new(
+        cache_dir,
+    )));
+    #[cfg(not(feature = "embeddings"))]
     None
 }
 
-/// Build the reranker around an already-loaded embedder.
+/// Build the reranker around a shared embedder handle.
 ///
-/// Separate from `load_embedder` so the ~130 MB model is loaded once and shared
+/// Separate from `load_embedder` so the ~130 MB model is initialized once and shared
 /// with the chunk-embedding worker rather than loaded twice.
 pub fn build_reranker(embedder: Option<Arc<dyn TextEmbedder>>) -> EmbeddingReranker {
     match embedder {

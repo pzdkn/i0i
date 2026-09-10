@@ -23,12 +23,34 @@ export type SettingsView = {
 
 export type RerankerStatus = { featureBuilt: boolean; ready: boolean };
 
+export type RuntimeCapabilityState = "ready" | "starting" | "setup_required" | "unavailable";
+
+export type RuntimeCapability = {
+  id: string;
+  label: string;
+  state: RuntimeCapabilityState;
+  message: string;
+  action?: string;
+  setupUrl?: string;
+  version?: string;
+};
+
 export async function getSettings(): Promise<SettingsView> {
   return invoke<SettingsView>("get_settings");
 }
 
 export async function getRerankerStatus(): Promise<RerankerStatus> {
   return invoke<RerankerStatus>("get_reranker_status");
+}
+
+/** Return the current readiness of packaged, configured, and external runtimes. */
+export async function getRuntimeCapabilities(): Promise<RuntimeCapability[]> {
+  return invoke<RuntimeCapability[]>("get_runtime_capabilities");
+}
+
+/** Retry one bounded runtime check and return the refreshed capability list. */
+export async function retryRuntimeCapability(capabilityId: string): Promise<RuntimeCapability[]> {
+  return invoke<RuntimeCapability[]>("retry_runtime_capability", { capabilityId });
 }
 
 /// Write one setting. An empty value clears it (falls back to env/.env/default).

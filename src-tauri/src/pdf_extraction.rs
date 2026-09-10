@@ -174,6 +174,16 @@ impl PdfExtractionManager {
         }
     }
 
+    /// Verify that the configured Pdfium runtime can be loaded.
+    ///
+    /// Pdfium bindings are process-global, so a successful readiness check is
+    /// reused by later extraction jobs rather than loading a second copy.
+    pub fn verify_runtime(&self) -> Result<(), String> {
+        PdfiumBasicAdapter::new(self.app.clone(), self.config.clone())
+            .bind_pdfium()
+            .map(drop)
+    }
+
     /// Construct an extractor without native-window events for explicit backend evaluation.
     #[cfg(test)]
     pub(crate) fn for_evaluation(store: LibraryStore, config: PdfExtractionConfig) -> Self {
@@ -547,6 +557,11 @@ impl PdfiumBasicAdapter {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 candidates.push(resource_dir.join("libpdfium.dylib"));
                 candidates.push(resource_dir.join("pdfium").join("libpdfium.dylib"));
+                candidates.push(
+                    resource_dir
+                        .join("resources/pdfium")
+                        .join("libpdfium.dylib"),
+                );
             }
         }
 

@@ -101,9 +101,9 @@ pub fn run() {
             // before SearchManager so deep research can rank semantically too
             // (RFC 0057).
             //
-            // Loaded once and shared: the reranker and the chunk-embedding
-            // worker (RFC 0075) use the same ~130 MB model, and loading it
-            // twice would cost that twice for nothing.
+            // One lazy handle is shared: the first semantic operation downloads
+            // and initializes the ~130 MB model off the Tauri setup thread.
+            // The reranker and chunk worker then reuse the same instance.
             let embedder = {
                 let cache_dir = app
                     .path()
@@ -236,6 +236,11 @@ pub fn run() {
             // Query expansion (RFC 0054). Disabled without an OpenRouter key.
             let query_expander = services::query_expansion::QueryExpander::from_app_config();
             eprintln!("[query_expansion] ready={}", query_expander.is_ready());
+            let runtime_readiness = services::runtime_readiness::RuntimeReadinessService::new(
+                pdf_extractions.clone(),
+                source_acquisition.clone(),
+                embedding_reranker.clone(),
+            );
             app.manage(store);
             app.manage(mcp_server);
             app.manage(highlight_service);
@@ -255,6 +260,7 @@ pub fn run() {
             app.manage(context_manager);
             app.manage(query_expander);
             app.manage(settings_store);
+            app.manage(runtime_readiness);
             // RFC 0100: pay browser startup latency while the rest of the app
             // initializes. Browser-backed commands still call ensure_ready(),
             // so they join this same single-flight attempt if it is in flight.
@@ -272,6 +278,8 @@ pub fn run() {
             commands::settings::clear_setting,
             commands::settings::test_provider_key,
             commands::settings::get_reranker_status,
+            commands::settings::get_runtime_capabilities,
+            commands::settings::retry_runtime_capability,
             commands::library::get_library,
             commands::search::search_chunks,
             commands::search::chunk_embedding_coverage,

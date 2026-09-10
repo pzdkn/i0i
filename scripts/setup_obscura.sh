@@ -51,24 +51,4 @@ if [[ "${1:-}" != "" ]]; then
   exit 0
 fi
 
-case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64) archive="obscura-aarch64-macos-stealth.tar.gz" ;;
-  Darwin-x86_64) archive="obscura-x86_64-macos-stealth.tar.gz" ;;
-  Linux-aarch64) archive="obscura-aarch64-linux-stealth.tar.gz" ;;
-  Linux-x86_64) archive="obscura-x86_64-linux-stealth.tar.gz" ;;
-  *)
-    echo "Unsupported platform: $(uname -s)-$(uname -m)" >&2
-    echo "Pass an extracted Obscura directory explicitly:" >&2
-    echo "  bash scripts/setup_obscura.sh /path/to/extracted/obscura" >&2
-    exit 1
-    ;;
-esac
-
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
-
-url="https://github.com/h4ckf0r0day/obscura/releases/latest/download/$archive"
-echo "Downloading $url"
-curl -L --silent "$url" -o "$tmp_dir/$archive"
-tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
-install_from_dir "$tmp_dir"
+exec node "$ROOT_DIR/scripts/prepare_runtime.mjs" --component obscura

@@ -62,6 +62,7 @@
     ResearchStateSnapshot,
   } from "$lib/domain/research-state";
   import type { EvidenceNavigationTarget } from "$lib/domain/reader";
+  import { getRuntimeCapabilities, type RuntimeCapability } from "$lib/bridge/settings";
   import {
     allowedEpistemicStatuses,
     actionableResearchError,
@@ -155,6 +156,7 @@
   let openingEntry = $state(false);
   let entryRequest = 0;
   let relationButtons = $state<Record<number, HTMLButtonElement>>({});
+  let researchCapability = $state<RuntimeCapability | null>(null);
 
   const activeRun = $derived(
     snapshot?.runs.find(isActiveResearchRun),
@@ -187,6 +189,9 @@
       researchState?.currentRevision ?? 0,
     ),
   );
+  const researchSetupRequired = $derived(
+    researchCapability?.state === "setup_required" || researchCapability?.state === "unavailable",
+  );
 
   $effect(() => {
     const key = `${projectId}:${initialRevision ?? "current"}`;
@@ -205,6 +210,11 @@
 
   onMount(() => {
     const unlisteners: Array<() => void> = [];
+    void getRuntimeCapabilities()
+      .then((capabilities) => {
+        researchCapability = capabilities.find((capability) => capability.id === "autonomous_research") ?? null;
+      })
+      .catch(() => (researchCapability = null));
     let disposed = false;
     const register = (listener: Promise<() => void>): void => {
       void listener
@@ -971,12 +981,15 @@
             {activeRun.status === "canceling" ? "Stopping" : "Cancel"}
           </button>
         {:else}
-          <button class="primary command-button" type="button" disabled={working || !researchInstructions.trim()} onclick={() => void runNow()}>
+          <button class="primary command-button" type="button" disabled={working || !researchInstructions.trim() || researchSetupRequired} onclick={() => void runNow()}>
             {#if startingRun}<span class="spin"><LoaderCircle size={14} aria-hidden="true" /></span>{:else}<Play size={14} aria-hidden="true" />{/if}
             {startingRun ? "Starting" : "Run research"}
           </button>
         {/if}
       </div>
+      {#if researchSetupRequired}
+        <small class="runtime-setup">Research agent setup required in Settings / System.</small>
+      {/if}
       {#if activeRun}
         <small class="live-progress" aria-live="polite">
           <span class="spin"><LoaderCircle size={13} aria-hidden="true" /></span>

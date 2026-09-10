@@ -6,6 +6,7 @@
 //! on, so the rest of the reranker builds without the native ONNX dependency.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
@@ -28,6 +29,40 @@ impl FastEmbedder {
         )
         .map_err(|error| format!("fastembed init failed: {error}"))?;
         Ok(Self { model })
+    }
+}
+
+/// Defers model download and initialization until semantic ranking first uses it.
+///
+/// Tauri constructs this lightweight handle during startup. The first call to
+/// `embed()` initializes the model on the caller's blocking worker thread, so a
+/// missing model never delays creation of the main application window.
+pub struct LazyFastEmbedder {
+    cache_dir: PathBuf,
+    model: OnceLock<Result<FastEmbedder, String>>,
+}
+
+impl LazyFastEmbedder {
+    /// Create an uninitialized model handle for the application cache.
+    pub fn new(cache_dir: PathBuf) -> Self {
+        Self {
+            cache_dir,
+            model: OnceLock::new(),
+        }
+    }
+}
+
+impl TextEmbedder for LazyFastEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        let model = self
+            .model
+            .get_or_init(|| {
+                eprintln!("[embedding] loading local model on first use");
+                FastEmbedder::load(self.cache_dir.clone())
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        model.embed(texts)
     }
 }
 

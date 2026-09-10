@@ -1,0 +1,62 @@
+name: Release macOS ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/i0i-signing.keychain-db"
+          echo "$CERTIFICATE_BASE64" | base64 -D > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p actions "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KEYCHAIN"
+      - name: Configure Apple notarization
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          printf '%s' "$APPLE_API_KEY" > "$RUNNER_TEMP/AuthKey.p8"
+          xcrun notarytool store-credentials i0i-ci \
+            --key "$RUNNER_TEMP/AuthKey.p8" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER"
+      - name: Build, sign, and notarize
+        env:
+          I0I_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          I0I_NOTARY_PROFILE: i0i-ci
+        run: bash scripts/release_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: i0i-macos-arm64
+          path: package/i0i-*-aarch64.dmg
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" package/i0i-*-aarch64.dmg --clobber

@@ -92,23 +92,14 @@ if FAKE_OS=Linux FAKE_ARCH=x86_64 FAKE_OBSCURA_FAIL=1 CODESIGN_LOG="$CODESIGN_LO
   exit 1
 fi
 
-FAKE_ARCHIVE="$TEST_DIR/obscura-fixture.tar.gz"
-CURL_LOG="$TEST_DIR/curl.log"
-tar -czf "$FAKE_ARCHIVE" -C "$SOURCE_DIR" obscura obscura-worker
-
-while read -r os arch archive; do
-  : > "$CURL_LOG"
-  FAKE_OS="$os" FAKE_ARCH="$arch" FAKE_ARCHIVE="$FAKE_ARCHIVE" \
-    CURL_LOG="$CURL_LOG" CODESIGN_LOG="$CODESIGN_LOG" PATH="$FAKE_BIN:$PATH" \
-    bash "$FIXTURE_ROOT/scripts/setup_obscura.sh" > "$TEST_DIR/auto-output.log"
-  grep -Fqx -- \
-    "https://github.com/h4ckf0r0day/obscura/releases/latest/download/$archive" \
-    "$CURL_LOG"
-done <<'EOF'
-Darwin arm64 obscura-aarch64-macos-stealth.tar.gz
-Darwin x86_64 obscura-x86_64-macos-stealth.tar.gz
-Linux aarch64 obscura-aarch64-linux-stealth.tar.gz
-Linux x86_64 obscura-x86_64-linux-stealth.tar.gz
+NODE_LOG="$TEST_DIR/node.log"
+cat > "$FAKE_BIN/node" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${NODE_LOG:?}"
 EOF
+chmod 0755 "$FAKE_BIN/node"
+NODE_LOG="$NODE_LOG" PATH="$FAKE_BIN:$PATH" \
+  bash "$FIXTURE_ROOT/scripts/setup_obscura.sh"
+grep -Fqx -- "$FIXTURE_ROOT/scripts/prepare_runtime.mjs --component obscura" "$NODE_LOG"
 
 echo "setup_obscura checks passed"

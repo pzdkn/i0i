@@ -55,6 +55,31 @@ pnpm tauri build
 
 Builds the desktop app.
 
+```bash
+pnpm runtime:prepare
+pnpm runtime:verify
+```
+
+Downloads or verifies the pinned ARM64 Pdfium and Obscura runtimes declared in
+`src-tauri/runtime-dependencies.toml`. Normal Tauri release builds prepare these
+resources automatically.
+
+For a signed and notarized macOS release, configure `I0I_SIGNING_IDENTITY` and
+an `I0I_NOTARY_PROFILE` created with Apple's `notarytool`, then run:
+
+```bash
+bash scripts/release_macos.sh
+```
+
+The same release path is available through the protected `Release macOS ARM64`
+GitHub Actions workflow.
+
+Application icons are generated from the canonical `assets/logo.png` source:
+
+```bash
+pnpm icons:generate
+```
+
 ## Project Shape
 
 ```text

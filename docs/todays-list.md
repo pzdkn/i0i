@@ -1,6 +1,6 @@
 # Today's RFC List
 
-Updated: 2026-09-09
+Updated: 2026-09-10
 
 This is the working index for active RFCs and older documents reviewed on
 2026-08-24.
@@ -14,12 +14,15 @@ This is the working index for active RFCs and older documents reviewed on
 
 ## Open
 
-1. [RFC 0107: Relevant research history for paper chats](rfcs/chat/0107-relevant-research-history-for-paper-chats.md)
+1. [RFC 0154: macOS ARM64 release packaging and runtime readiness](rfcs/projects/0154-macos-arm64-release-packaging.md)
+   — implementation and unsigned package verification are complete; signed,
+   notarized, clean-account release acceptance remains.
+2. [RFC 0107: Relevant research history for paper chats](rfcs/chat/0107-relevant-research-history-for-paper-chats.md)
    — search same-paper notes and earlier conversations into each chat's bounded,
    inspectable context.
-2. [RFC 0087: Dead paths in vault surfaces](rfcs/frontend-and-mocking/0087-dead-paths-in-the-vault-surfaces.md)
+3. [RFC 0087: Dead paths in vault surfaces](rfcs/frontend-and-mocking/0087-dead-paths-in-the-vault-surfaces.md)
    — implement **Ask this vault**; the other sections have landed.
-3. [RFC 0088: Deep Research harness](rfcs/discovery/0088-deep-research-harness.md)
+4. [RFC 0088: Deep Research harness](rfcs/discovery/0088-deep-research-harness.md)
    — finish evaluation fixtures and decide which remaining harness tasks still
    justify implementation; browser candidate generation moves to RFC 0098.
 

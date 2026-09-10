@@ -10,6 +10,7 @@ use tauri::State;
 use crate::commands::discovery::provider::DiscoveryProvider;
 use crate::commands::discovery::DiscoveryProviders;
 use crate::domain::discovery::{DiscoveryProviderChoice, DiscoverySearchRequest, DiscoverySort};
+use crate::services::runtime_readiness::{RuntimeCapability, RuntimeReadinessService};
 use crate::services::settings::{resolve_secret_with_source, SettingSource, SettingsStore};
 
 /// One configurable credential/contact: its logical name, the setting key it's
@@ -221,6 +222,23 @@ pub fn get_reranker_status(
         feature_built: cfg!(feature = "embeddings"),
         ready: reranker.is_ready(),
     }
+}
+
+/// Return current packaged, configured, and external runtime capabilities.
+#[tauri::command]
+pub async fn get_runtime_capabilities(
+    readiness: State<'_, RuntimeReadinessService>,
+) -> Result<Vec<RuntimeCapability>, String> {
+    Ok(readiness.snapshot().await)
+}
+
+/// Retry one bounded runtime readiness check and return the refreshed snapshot.
+#[tauri::command]
+pub async fn retry_runtime_capability(
+    readiness: State<'_, RuntimeReadinessService>,
+    capability_id: String,
+) -> Result<Vec<RuntimeCapability>, String> {
+    readiness.retry(&capability_id).await
 }
 
 /// Only allow writes to the known setting namespaces.

@@ -4,6 +4,7 @@
   import ApiKeysTab from "./ApiKeysTab.svelte";
   import ModelsTab from "./ModelsTab.svelte";
   import SearchDefaultsTab from "./SearchDefaultsTab.svelte";
+  import SystemTab from "./SystemTab.svelte";
 
   let {
     open = false,
@@ -17,6 +18,7 @@
     { id: "keys", label: "API Keys" },
     { id: "models", label: "Models & cost" },
     { id: "search", label: "Search" },
+    { id: "system", label: "System" },
   ];
   let activeTab = $state("keys");
 
@@ -65,6 +67,8 @@
         <ModelsTab prefs={settings.prefs} onChanged={load} />
       {:else if activeTab === "search"}
         <SearchDefaultsTab prefs={settings.prefs} onChanged={load} />
+      {:else if activeTab === "system"}
+        <SystemTab onNavigate={(tab) => (activeTab = tab)} />
       {/if}
     </div>
   </div>

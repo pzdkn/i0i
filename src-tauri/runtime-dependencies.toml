@@ -1,0 +1,41 @@
+target = "aarch64-apple-darwin"
+
+[components.pdfium]
+version = "7825 (pypdfium2 5.8.0)"
+url = "https://files.pythonhosted.org/packages/86/1f/04b5627f6dba312d3e707e5b019c9f24d8b03b5aa366866a9e02ec00f8d4/pypdfium2-5.8.0-py3-none-macosx_11_0_arm64.whl"
+archive_sha256 = "085e633dcc89b65ff4035a4787e98ce7ae636836eb39c83dd0db26113d9774bc"
+archive_kind = "zip"
+project_url = "https://github.com/pypdfium2-team/pypdfium2"
+license = "BSD-3-Clause AND Apache-2.0"
+
+[[components.pdfium.files]]
+source = "pypdfium2_raw/libpdfium.dylib"
+destination = "resources/pdfium/libpdfium.dylib"
+sha256 = "3aed5632c54a689ade84a811b93943ea8afa8c3ccae6b3e7e9e58de87bea42af"
+mode = "0644"
+required_symbols = ["FPDF_StructElement_GetExpansion"]
+
+[components.obscura]
+version = "0.2.1"
+url = "https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.1/obscura-aarch64-macos-stealth.tar.gz"
+archive_sha256 = "c20008431f96879ab5d73f3d5e0cc5c45bdb85add523ccd34ac9df75bb6703f8"
+archive_kind = "tar.gz"
+project_url = "https://github.com/h4ckf0r0day/obscura"
+license = "Apache-2.0"
+
+[[components.obscura.files]]
+source = "obscura"
+destination = "resources/obscura/obscura"
+sha256 = "64727c4df52752687f7cc2aa2edfe0ee21ff779eae423378e46d7d6bccbc5ed9"
+mode = "0755"
+
+[[components.obscura.files]]
+source = "obscura-worker"
+destination = "resources/obscura/obscura-worker"
+sha256 = "824a3a2ee32735eaa7d01211c26b602a738da8f2f43b7efb868691a64f8ce120"
+mode = "0755"
+
+[external.codex]
+minimum_version = "0.153.4"
+install_url = "https://developers.openai.com/codex/cli/"
+capability = "autonomous_research"

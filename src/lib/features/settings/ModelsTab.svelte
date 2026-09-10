@@ -96,6 +96,14 @@
     restartNote
     onSaved={onChanged}
   />
+  <TextPref
+    settingKey="research.codex_executable"
+    label="Codex executable"
+    hint="Optional path used by autonomous Project Research. Leave empty to use codex from PATH."
+    value={prefs["research.codex_executable"] ?? ""}
+    placeholder="codex"
+    onSaved={onChanged}
+  />
 </div>
 
 <style>
