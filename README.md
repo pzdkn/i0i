@@ -1,10 +1,10 @@
 <div align="center">
   <img src="assets/logo_transparent.png" alt="i0i logo" width="132" />
   <h1>i0i</h1>
-  <p><strong>A local-first knowledge IDE for research that builds on what it learns.</strong></p>
+  <p><strong>Find the right papers. Read them deeply. Automate what comes next.</strong></p>
   <p>
-    Read papers, keep evidence-linked notes, discover relevant work, and let an
-    autonomous research loop grow a durable understanding of your project.
+    A local-first knowledge IDE that turns a paper library into an evolving,
+    evidence-linked research state.
   </p>
 
   <p>
@@ -31,49 +31,51 @@
 
 ## Why i0i
 
-Research tools are good at storing papers and AI tools are good at answering a
-question once. i0i joins those two loops. Your papers, annotations, questions,
-findings, gaps, and hypotheses live together in a native workspace. Each
-research run can inspect what the project already knows, gather and read new
-evidence, update Research State with traceable citations, and use that improved
-state to guide the next run.
+Research usually grows through three stages. First you find relevant work. Then
+you build a trusted library by reading, annotating, and questioning it. Finally,
+you connect evidence across papers and decide what deserves investigation next.
+i0i supports that whole progression in one native workspace.
 
 ```mermaid
 flowchart LR
-    A[Research instruction] --> B[Focused searches]
-    S[(Research State)] -->|questions and gaps| B
-    B --> C[Read relevant papers]
-    C -->|passage evidence| S
-    S -->|next direction| B
+    F["1 · Discover<br/>Quick and deep search"]
+    R["2 · Read<br/>Collect, annotate, ask"]
+    A["3 · Research<br/>Insights, gaps, experiments"]
+    F -->|relevant papers| R
+    R -->|verified evidence| A
+    A -->|new questions| F
 ```
 
-The long-term idea is a knowledge IDE that understands the edge of your current
-knowledge and helps you decide what to learn next. Academic research is the
-first serious use case.
+Unlike a one-shot AI answer, the resulting Research State persists. It records
+what the project currently knows, the passages supporting it, the questions
+that remain unresolved, and the next directions those questions suggest.
 
 ## What Works Today
 
-### Read and annotate
-
-- Import local PDFs or save papers from Discover into a Vault.
-- Read cached PDFs and recovered HTML without leaving the app.
-- Select passages, highlight them, attach notes, and return to the exact source.
-- Chat with a paper using bounded, cited document context.
-
-### Find useful work
+### 1. Find relevant papers
 
 - Search across scholarly providers and browser-based discovery.
-- Run quick searches, deeper query expansion, or Vault-based similar-paper searches.
-- Review candidates before retaining them and fall back to the source website when automatic acquisition fails.
+- Launch quick searches or deeper multi-query searches for broader coverage.
+- Find papers related to an existing Vault and review candidates before retaining them.
+- Open results inside i0i, with a source-site fallback when automatic acquisition fails.
 
-### Build a research project
+### 2. Collect, read, and annotate
 
-- Keep papers, Markdown documents, and a typed Research State in one Project.
-- Track findings, questions, gaps, hypotheses, evidence, and relationships across runs.
-- Launch a bounded autonomous research run that searches, reads, cites, and proposes validated State updates.
-- Inspect progress, retained papers, evidence links, and the next research direction.
+- Organize local PDFs and discovered papers into Zotero-like Vaults.
+- Read cached PDFs and recovered HTML without leaving the app.
+- Select passages, highlight them, attach notes, and return to the exact source.
+- Ask AI about a paper using bounded document context and passage citations.
 
-### Stay local-first
+### 3. Automate research
+
+- Launch bounded research runs that find, assess, and read relevant papers.
+- Extract verified insights linked back to exact source passages.
+- Build an incremental Research State of findings, questions, gaps, hypotheses,
+  and experiment ideas.
+- Let each run use the existing library and Research State to choose better next searches.
+- Inspect what changed, which evidence supports it, and where the research should go next.
+
+### Local by design
 
 - Store Vaults, papers, notes, projects, and run history in local SQLite and app data.
 - Cache acquired documents locally.
@@ -223,6 +225,7 @@ i0i is a working research prototype, not a stable release. Milestone 00, the
 evidence-linked literature research loop, is implemented. Packaging for an
 Apple Silicon macOS release is implemented and locally verified; Developer ID
 signing, notarization, and clean-machine acceptance remain before public distribution.
+Earlier Study-mode concepts are deferred and are not part of the current product scope.
 
 The design history is intentionally public:
 
