@@ -29,6 +29,10 @@
 > supported target is Apple Silicon macOS 11 or newer. Keep backups of research
 > you cannot afford to lose.
 
+[![i0i research workflow: gathering findings, opening source papers, chatting with a paper, and reviewing derived gaps](assets/screen_capture/i0i-research-workflow-poster.png)](assets/screen_capture/i0i-research-workflow.mp4)
+
+<p align="center"><sub>Gather findings, follow them to source papers, chat with a paper, and inspect evidence-derived gaps. Click to play the 56-second demo.</sub></p>
+
 ## Why i0i
 
 Research usually grows through three stages. First you find relevant work. Then
